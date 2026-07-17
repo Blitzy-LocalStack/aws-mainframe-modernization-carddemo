@@ -1,0 +1,25 @@
+{
+  "_comment": "LocalStack S3 seeding manifest for the AWS CardDemo dataset-staging tests. This file is consumed by scripts/setup_localstack.sh (bash/jq) and tests/helpers/localstack_setup.py, and mirrors the AWS Mainframe Modernization dataset-staging path where flat mainframe datasets are staged as S3 objects before a batch run. WHY (Assumption): JSON has no comment syntax, so all provenance/rationale lives in these leading underscore-prefixed keys, which the jq queries in setup_localstack.sh intentionally ignore (they read only .buckets and .objects). WHY (Determinism): buckets, keys, and inline content are fixed and reproducible so every CI run seeds byte-identical resources.",
+  "_schema": "BINDING CONTRACT (do not change shape): .buckets[] is EITHER a plain string OR an object with a .name key; .objects[] is an object with .bucket (string, required), .key (string, required), and .content (string, optional - defaults to empty). setup_localstack.sh evaluates: jq -r '(.buckets // [])[] | if type==\"object\" then .name else . end' and jq -r '(.objects // [])[] | [.bucket, .key, (.content // \"\")] | @tsv'.",
+  "_provenance": "Bucket names and dataset keys derived from the CardDemo data layout under app/data/ (ASCII and EBCDIC dataset trees). Two bucket declaration forms are intentionally used (one plain string, one {name} object) to exercise BOTH accepted schema variants of the setup script. One object intentionally omits .content to exercise the empty-object default path. Content values are single-line (no embedded newline) so jq @tsv + printf '%s' stage them byte-faithfully.",
+  "buckets": [
+    "carddemo-dataset-staging",
+    { "name": "carddemo-dataset-staging-ebcdic" }
+  ],
+  "objects": [
+    {
+      "bucket": "carddemo-dataset-staging",
+      "key": "carddemo/datasets/ascii/DISCGRP.PS",
+      "content": "A00000000001000100150{0000000000000000000000000000"
+    },
+    {
+      "bucket": "carddemo-dataset-staging",
+      "key": "carddemo/datasets/ascii/_MANIFEST.txt",
+      "content": "CardDemo dataset-staging manifest marker (deterministic fixture)."
+    },
+    {
+      "bucket": "carddemo-dataset-staging-ebcdic",
+      "key": "carddemo/datasets/ebcdic/ACCTDATA.PS"
+    }
+  ]
+}
