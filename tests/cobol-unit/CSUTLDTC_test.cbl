@@ -61,14 +61,24 @@
        01 LS-DATE            PIC X(10).
        01 LS-DATE-FORMAT     PIC X(10).
        01 LS-RESULT          PIC X(80).
-      * Observed vs expected severity.  Both are PIC S9(4) DISPLAY so a
-      * single byte-wise assert-equals is a valid value comparison: two
-      * identical-PICTURE items hold identical bytes for equal values.
-       01 WS-OBS-SEV         PIC S9(4).
-       01 WS-EXP-SEV         PIC S9(4).
-      * Unsigned edited copy of the observed severity, used only for a
-      * clean numeric trace line (a signed DISPLAY item prints a sign).
-       01 WS-SEV-DISP        PIC 9(4).
+      * Observed vs expected severity.  Both are PIC S9(9) COMP so a
+      * single byte-wise assert-equals is a valid value comparison
+      * (identical PICTURE => identical bytes for equal values).
+      * WHY - MA-19 (truncation elimination): CSUTLDTC returns severity
+      * in the RETURN-CODE special register, which GnuCOBOL defines as
+      * USAGE BINARY-LONG.  Capturing it into a narrower S9(4) field
+      * raised -Wpossible-truncate; S9(9) COMP matches BINARY-LONG's
+      * width, so the capture is loss-free and warning-free.  The value
+      * domain (CEEDAYS severity 0-4095) fits either width; this change
+      * removes the false-positive truncation without altering any
+      * asserted value.
+       01 WS-OBS-SEV         PIC S9(9) COMP.
+       01 WS-EXP-SEV         PIC S9(9) COMP.
+      * Unsigned copy of the observed severity for a clean numeric trace
+      * line.  WHY: 9(9) matches WS-OBS-SEV's 9-digit width so the trace
+      * MOVE is truncation-free too; an edited copy also avoids printing
+      * the sign glyph a signed DISPLAY would emit.
+       01 WS-SEV-DISP        PIC 9(9).
       * Observed vs expected verdict text.  X(15) matches WS-RESULT in
       * CSUTLDTC; both sides space-pad deterministically to 15 bytes.
        01 WS-OBS-MSG         PIC X(15).
@@ -82,6 +92,7 @@
       * EXTERNAL storage is zero-initialised by GnuCOBOL, so this is
       * belt-and-suspenders that also documents the test lifecycle.
            CALL "gcblunit-init"
+           END-CALL
       * The mask is invariant across every scenario, so it is set once.
            MOVE "YYYY-MM-DD"      TO LS-DATE-FORMAT
 
@@ -154,7 +165,9 @@
       * Emit a readable tally, publish the failure count, and turn it
       * into the process exit code (the sole CI pass/fail signal).
            CALL "gcblunit-summary"
+           END-CALL
            CALL "gcblunit-result" USING WS-FAILS
+           END-CALL
            MOVE WS-FAILS          TO RETURN-CODE
            STOP RUN.
 
@@ -170,6 +183,7 @@
       * Returns : none (records pass/fail into the GCBLUnit counters).
            MOVE SPACES TO LS-RESULT
            CALL "CSUTLDTC" USING LS-DATE LS-DATE-FORMAT LS-RESULT
+           END-CALL
       * WHY: capture RETURN-CODE right after CSUTLDTC returns,
       * before any other CALL. RETURN-CODE is a shared special
       * register the assert CALLs would otherwise overwrite.
@@ -181,8 +195,10 @@
            DISPLAY "  case " LS-DATE " sev=" WS-SEV-DISP
                " verdict=<" WS-OBS-MSG ">"
            CALL "assert-equals" USING WS-EXP-SEV WS-OBS-SEV
+           END-CALL
            CALL "assert-equals" USING WS-EXP-MSG WS-OBS-MSG
-           .
+
+           END-CALL.
        END PROGRAM CSUTLDTC-test.
 
       ******************************************************************
@@ -302,10 +318,13 @@
       * (div by 4) AND (not div by 100 OR div by 400).
                        DIVIDE WS-YR BY 4
                            GIVING WS-Q REMAINDER WS-R4
+                       END-DIVIDE
                        DIVIDE WS-YR BY 100
                            GIVING WS-Q REMAINDER WS-R100
+                       END-DIVIDE
                        DIVIDE WS-YR BY 400
                            GIVING WS-Q REMAINDER WS-R400
+                       END-DIVIDE
                        IF WS-R4 = 0
                           AND (WS-R100 NOT = 0 OR WS-R400 = 0)
                            MOVE 29 TO WS-DIM

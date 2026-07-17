@@ -11,8 +11,12 @@ on it:
 * ``tests/helpers/vsam_loader.py`` reads :func:`reclen_of` / :func:`keylen_of`
   to size and key the GnuCOBOL indexed files it loads.
 * ``tests/helpers/golden_compare.py`` reuses :func:`normalize_timestamps` so the
-  non-deterministic ``ORIG-TS`` / ``PROC-TS`` offsets are defined in exactly one
-  place rather than duplicated across the suite.
+  single *runtime-generated* timestamp field (``PROC-TS``) is masked from exactly
+  one place rather than duplicated across the suite. Note the deliberate asymmetry:
+  ``ORIG-TS`` is **not** masked because it carries the deterministic originating
+  timestamp copied from the input transaction (verified in the seeds, e.g.
+  ``2022-06-10 19:27:53.000000``), whereas ``PROC-TS`` is stamped with the wall-clock
+  posting time and is therefore the only non-deterministic offset.
 * The ``tests/integration`` and ``tests/e2e`` modules decode program output through
   the :data:`LAYOUTS` registry and assert on the decoded fields.
 
@@ -29,10 +33,26 @@ Design decisions (WHY)
   so using it would silently corrupt monetary totals. This is a financial-enterprise
   correctness requirement, not a stylistic preference; :func:`encode_zoned`
   therefore rejects ``float`` inputs outright.
-* **Single-sourced layouts.** The three record layouts are transcribed field-for-field
-  from the copybooks (``CVACT01Y``, ``CVTRA06Y``, ``CVTRA02Y``). Each :class:`Field`
+* **Single-sourced layouts.** The eight record layouts are transcribed field-for-field
+  from the copybooks (``CVACT01Y``, ``CVTRA06Y``, ``CVTRA02Y``, ``CVACT03Y``,
+  ``CVTRA01Y``, ``CVACT02Y``, ``CVCUS01Y``, ``CVTRA05Y``). Each :class:`Field`
   carries a comment citing its copybook name and PIC clause. Layouts are *never*
-  re-declared independently elsewhere; downstream code imports them from here.
+  re-declared independently elsewhere; downstream code imports them from here. The
+  XREF layout additionally models its *alternate* index (the account-id key that
+  ``CBACT04C`` reads by), because CardDemo's indexed files are not all keyed on their
+  leading bytes -- see :class:`AlternateKey`.
+* **Strict physical-record validation (no silent repair).** A physical row that is
+  not exactly ``reclen`` characters (after stripping a single trailing newline) is
+  *rejected* -- never padded, truncated, or dropped. A financial record of the wrong
+  width is corrupt input, and silently repairing it could post a misaligned money
+  value. The only valid "empty" input is a genuinely zero-byte dataset (zero rows);
+  that is expressed by an empty file yielding no rows to decode, not by tolerating a
+  blank or short row. See :func:`_validated_record`.
+* **Field-aware masking for diagnostics.** PAN / SSN / name / DOB / government-id
+  fields are flagged :attr:`Field.sensitive`; :func:`mask_record` and
+  :func:`mask_field` produce redacted renderings so that assertion failures and
+  golden diffs can show *where* two records differ without ever emitting a complete
+  cardholder identity or payment number.
 * **Standard library only.** The module imports nothing outside the Python standard
   library so that even a bare checkout (before any test dependency is installed)
   can import and use it.
@@ -70,6 +90,7 @@ Doctest known-answer vectors (taken from the real ``app/data/ASCII`` seeds)::
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field as dc_field
 from decimal import Decimal, InvalidOperation, localcontext
@@ -77,17 +98,28 @@ from typing import Any
 
 __all__ = [
     "ZonedDecimalError",
+    "RecordLengthError",
     "decode_zoned",
     "encode_zoned",
+    "AlternateKey",
     "Field",
     "RecordLayout",
     "ACCOUNT_LAYOUT",
     "DALYTRAN_LAYOUT",
     "DISGROUP_LAYOUT",
+    "XREF_LAYOUT",
+    "TCATBAL_LAYOUT",
+    "CARD_LAYOUT",
+    "CUSTOMER_LAYOUT",
+    "TRAN_LAYOUT",
+    "TRNX_LAYOUT",
     "LAYOUTS",
     "reclen_of",
     "keylen_of",
+    "alternate_keys_of",
     "normalize_timestamps",
+    "mask_field",
+    "mask_record",
 ]
 
 # ---------------------------------------------------------------------------
@@ -143,6 +175,37 @@ class ZonedDecimalError(ValueError):
     """
 
 
+class RecordLengthError(ValueError):
+    """Error raised when a physical record row does not match its declared width.
+
+    Purpose
+    -------
+    Signal that a raw line presented for decoding, keying, timestamp-normalisation, or
+    masking is not exactly the layout's ``reclen`` characters after a single trailing
+    newline is removed. This is the enforcement point for the strict "no silent repair"
+    contract (CR-03): a wrong-width financial record is corrupt input and must be
+    rejected rather than padded, truncated, or dropped.
+
+    It subclasses :class:`ValueError` (WHY: Assumption) so callers that already guard
+    fixture parsing with ``except ValueError`` keep catching it, while callers that want
+    the specific signal can catch :class:`RecordLengthError` directly.
+
+    Parameters
+    ----------
+    args : tuple
+        Standard :class:`ValueError` positional arguments (typically one message string).
+
+    Returns
+    -------
+    RecordLengthError
+        A new exception instance.
+
+    Raises
+    ------
+    None
+    """
+
+
 def decode_zoned(raw: str, int_digits: int, dec_digits: int, signed: bool) -> Decimal:
     """Decode one fixed-width zoned-decimal field into an exact :class:`Decimal`.
 
@@ -180,7 +243,12 @@ def decode_zoned(raw: str, int_digits: int, dec_digits: int, signed: bool) -> De
     ZonedDecimalError
         If ``raw`` is not ``int_digits + dec_digits`` characters long, if the digit
         body contains a non-digit character, or if the trailing byte of a signed field
-        is not a recognised overpunch / plain digit.
+        is not a recognised trailing-sign overpunch byte. WHY (Refactoring Rationale):
+        a *plain* digit in the final position of a signed field is now rejected rather
+        than tolerated as positive -- the CardDemo ASCII seeds always overpunch the sign
+        (verified: every signed field in the fixture corpus ends in ``{``-``I`` or
+        ``}``-``R``), so a bare digit indicates a mis-encoded record whose sign is
+        genuinely unknown, and guessing "positive" could flip the sign of a money value.
     """
     width = int_digits + dec_digits
     if len(raw) != width:
@@ -208,16 +276,17 @@ def decode_zoned(raw: str, int_digits: int, dec_digits: int, signed: bool) -> De
         elif last in _NEG_OVERPUNCH:
             negative = True
             last_digit = str(_NEG_OVERPUNCH.index(last))
-        elif last.isdigit():
-            # WHY (Assumption / robustness): a signed field whose final byte is a plain
-            # digit (no overpunch applied) is treated as positive. Some upstream
-            # encoders emit an un-overpunched positive value; tolerating it lets the
-            # harness decode such records without masking a truly corrupt byte, which
-            # would instead land in the ``else`` branch below.
-            negative = False
-            last_digit = last
         else:
-            raise ZonedDecimalError(f"unrecognised overpunch sign byte {last!r} in {raw!r}")
+            # WHY (Refactoring Rationale): the earlier build tolerated a plain trailing
+            # digit as "positive, un-overpunched". That masked the exact class of defect
+            # a financial codec must surface -- a signed field whose sign byte was lost
+            # in transcription. The CardDemo seeds are uniformly overpunched, so any
+            # non-overpunch final byte is corrupt; require documented overpunch and fail
+            # loudly rather than inventing a sign.
+            raise ZonedDecimalError(
+                f"signed zoned field must end in a trailing-sign overpunch byte "
+                f"({{-I positive, }}-R negative); got {last!r} in {raw!r}"
+            )
         digits = body + last_digit
 
     # Build the Decimal from an explicit numeric string rather than via arithmetic.
@@ -382,9 +451,17 @@ class Field:
         For ``"zoned"`` fields, whether the PIC carries a leading ``S`` (trailing
         overpunch sign). Defaults to ``False``.
     normalize_ts : bool
-        ``True`` for the non-deterministic timestamp fields (``DALYTRAN-ORIG-TS`` /
-        ``DALYTRAN-PROC-TS``) that must be blanked before golden comparison. Defaults
-        to ``False``.
+        ``True`` only for the *runtime-generated* processing timestamp
+        (``PROC-TS``) that must be blanked before golden comparison. Defaults to
+        ``False``. WHY (Refactoring Rationale): ``ORIG-TS`` is deliberately left
+        ``False`` -- it holds the deterministic originating timestamp copied from the
+        input transaction, so masking it would discard business data the comparison
+        must verify.
+    sensitive : bool
+        ``True`` for fields that carry cardholder identity or payment data (PAN, SSN,
+        embossed name, date of birth, government id). Such fields are redacted by
+        :func:`mask_record` / :func:`mask_field` before appearing in any assertion
+        message or golden diff. Defaults to ``False``.
 
     Returns
     -------
@@ -404,6 +481,7 @@ class Field:
     dec_digits: int = 0
     signed: bool = False
     normalize_ts: bool = False
+    sensitive: bool = False
 
     @property
     def end(self) -> int:
@@ -430,49 +508,112 @@ class Field:
         return self.start + self.length
 
 
-def _normalize_length(raw: str, reclen: int) -> str:
-    """Coerce a raw line to exactly ``reclen`` characters for slicing.
+def _validated_record(raw: str, reclen: int, *, context: str = "record") -> str:
+    """Strip a single trailing newline and require the row to be exactly ``reclen``.
 
     Purpose
     -------
-    Seed and fixture lines are frequently shorter than the declared record length --
-    for example ``cardxref`` lines are 36 bytes though the layout is 50 bytes with the
-    trailing ``FILLER`` omitted -- and may carry a trailing newline. This helper strips
-    a single trailing CR/LF and then pads (or truncates) the line to exactly ``reclen``
-    characters so every field offset is valid.
+    Enforce the strict physical-record contract (CR-03): after removing at most one
+    trailing line terminator, the row **must** be exactly ``reclen`` characters. A
+    shorter, longer, or empty row is *rejected* -- never padded, truncated, or dropped.
+    Every field offset in this codec is fixed, so a wrong-width row means the input or
+    the layout is corrupt, and a financial harness must fail loudly rather than decode a
+    misaligned money value.
 
-    WHY (Assumption / Trade-off): omitted trailing ``FILLER`` is assumed to be spaces,
-    matching the copybook contract in which ``FILLER PIC X(n)`` initialises to blanks.
-    We pad with spaces rather than rejecting short lines because doing so lets the
-    harness consume real-world seed files that legitimately drop trailing filler, at
-    the cost of masking a genuinely truncated record -- an acceptable trade for test
-    fixtures whose field values live well before the filler.
+    WHY (Refactoring Rationale): the previous helper silently padded short rows and
+    truncated long ones "to keep every offset valid". That is precisely the behaviour a
+    data-integrity review flagged as unsafe -- it could accept a truncated account
+    record and post a garbage balance. The whole-corpus check performed during
+    remediation confirmed every CardDemo fixture row is already full-width, so strict
+    validation rejects only genuinely malformed input and breaks no legitimate fixture.
+
+    WHY (Assumption): a *genuinely empty* dataset (a zero-byte file) is represented by
+    the caller iterating zero rows, so it never reaches this function. An empty string
+    passed here is therefore a malformed/blank row, not "empty input", and is rejected.
 
     Parameters
     ----------
     raw : str
-        The raw record text, possibly shorter or longer than ``reclen`` and possibly
-        ending in ``\\r`` and/or ``\\n``.
+        The raw record text, possibly ending in ``\\r``, ``\\n``, or ``\\r\\n``.
     reclen : int
-        The exact target record length in characters.
+        The exact required record length in characters.
+    context : str
+        A short label (e.g. the layout name) woven into the error message so a rejection
+        pinpoints which record type failed. Defaults to ``"record"``.
 
     Returns
     -------
     str
-        A string of length exactly ``reclen``: the input with one trailing newline
-        removed, right-padded with spaces if short, truncated if long.
+        The row with one trailing newline removed, guaranteed to be exactly ``reclen``
+        characters.
+
+    Raises
+    ------
+    RecordLengthError
+        If the row (after newline stripping) is not exactly ``reclen`` characters.
+    """
+    # Strip at most one trailing line terminator (``\r\n``, ``\n`` or ``\r``);
+    # inner characters are never touched so embedded data is preserved.
+    if raw.endswith("\r\n"):
+        stripped = raw[:-2]
+    elif raw.endswith("\n") or raw.endswith("\r"):
+        stripped = raw[:-1]
+    else:
+        stripped = raw
+    if len(stripped) != reclen:
+        raise RecordLengthError(
+            f"{context}: expected exactly {reclen} characters but got {len(stripped)} "
+            f"-- nonconforming physical rows are rejected (no pad/truncate); "
+            f"row={stripped[:64]!r}{'...' if len(stripped) > 64 else ''}"
+        )
+    return stripped
+
+
+@dataclass(frozen=True)
+class AlternateKey:
+    """Descriptor for an alternate index defined on a record layout.
+
+    Purpose
+    -------
+    Model a VSAM ``ALTERNATE RECORD KEY`` so the flat-to-indexed loader can build the
+    same secondary index the production program reads by. CardDemo's cross-reference
+    file (``CVACT03Y``) is keyed primarily on the 16-byte card number but is *also* read
+    by the 11-byte account id -- ``CBACT04C`` performs ``READ ... KEY IS FD-XREF-ACCT-ID``
+    -- so that account-id index must be reproduced or the interest program cannot look up
+    its cards. Modelling alternate keys explicitly (rather than assuming all keys sit at
+    offset zero) is the core of finding CR-02.
+
+    Parameters
+    ----------
+    name : str
+        The COBOL field name backing the alternate key (e.g. ``"XREF-ACCT-ID"``).
+    offset : int
+        Zero-based character offset of the alternate key within the record.
+    length : int
+        Alternate-key length in characters.
+    duplicates : bool
+        ``True`` when several records may share the same alternate-key value, requiring
+        ``WITH DUPLICATES`` on the emitted ``ALTERNATE RECORD KEY``. For the XREF
+        account-id index this is ``True`` because one account can own several cards.
+        Defaults to ``True`` (WHY: Trade-off -- allowing duplicates is the safe default;
+        a unique alternate index that receives a duplicate would fail the load, whereas a
+        duplicate-tolerant index still supports the point-and-sequential reads the tests
+        need).
+
+    Returns
+    -------
+    AlternateKey
+        A new immutable alternate-key descriptor.
 
     Raises
     ------
     None
     """
-    # Strip at most one trailing line terminator (``\r\n``, ``\n`` or ``\r``);
-    # inner characters are never touched so embedded data is preserved.
-    if raw.endswith("\r\n"):
-        raw = raw[:-2]
-    elif raw.endswith("\n") or raw.endswith("\r"):
-        raw = raw[:-1]
-    return raw.ljust(reclen)[:reclen]
+
+    name: str
+    offset: int
+    length: int
+    duplicates: bool = True
 
 
 @dataclass(frozen=True)
@@ -497,8 +638,16 @@ class RecordLayout:
     fields : tuple[Field, ...]
         The ordered field descriptors covering the whole record.
     key_offset : int
-        Zero-based offset of the key within the record. Defaults to 0 (CardDemo's
-        indexed files are all keyed on their leading bytes).
+        Zero-based offset of the primary key within the record. Defaults to 0. WHY
+        (Refactoring Rationale): most CardDemo indexed files are keyed on their leading
+        bytes, but this is now an explicit per-layout value rather than a global
+        assumption, because the XREF file's primary key is the leading card number while
+        its *alternate* key (see ``alternate_keys``) sits at offset 25.
+    alternate_keys : tuple[AlternateKey, ...]
+        Zero or more :class:`AlternateKey` descriptors modelling the record's secondary
+        indexes. Empty for records with only a primary key. The XREF layout carries one
+        entry for its account-id index so the loader can emit ``ALTERNATE RECORD KEY``
+        and the tests can read XREF by account id exactly as ``CBACT04C`` does.
 
     Returns
     -------
@@ -515,6 +664,7 @@ class RecordLayout:
     key_length: int
     fields: tuple[Field, ...] = dc_field(default_factory=tuple)
     key_offset: int = 0
+    alternate_keys: tuple[AlternateKey, ...] = dc_field(default_factory=tuple)
 
     def field(self, name: str) -> Field:
         """Return the :class:`Field` descriptor with the given name.
@@ -566,10 +716,47 @@ class RecordLayout:
 
         Raises
         ------
-        None
+        RecordLengthError
+            If ``raw`` is not exactly ``reclen`` characters (after one trailing newline
+            is removed). WHY: keying a wrong-width row would slice a misaligned key and
+            silently mis-order the indexed file, so the strict width check applies here
+            too.
         """
-        padded = _normalize_length(raw, self.reclen)
-        return padded[self.key_offset:self.key_offset + self.key_length]
+        validated = _validated_record(raw, self.reclen, context=f"{self.name} key_of")
+        return validated[self.key_offset:self.key_offset + self.key_length]
+
+    def alt_key_of(self, raw: str, alt: "AlternateKey") -> str:
+        """Return the ``alt.length`` alternate-key bytes at ``alt.offset``.
+
+        Purpose
+        -------
+        Extract a secondary-index key from a raw record so the loader and alternate-key
+        read tests can order/look up records by an alternate key (e.g. XREF by account
+        id) exactly as the production indexed file does.
+
+        Parameters
+        ----------
+        raw : str
+            The raw record line (validated to ``reclen`` first).
+        alt : AlternateKey
+            The alternate-key descriptor whose ``offset``/``length`` are sliced out.
+
+        Returns
+        -------
+        str
+            The ``alt.length`` alternate-key characters, verbatim.
+
+        Raises
+        ------
+        RecordLengthError
+            If ``raw`` is not exactly ``reclen`` characters.
+        KeyError
+            If ``alt`` is not one of this layout's :attr:`alternate_keys`.
+        """
+        if alt not in self.alternate_keys:
+            raise KeyError(f"{self.name} has no alternate key {alt.name!r}")
+        validated = _validated_record(raw, self.reclen, context=f"{self.name} alt_key_of")
+        return validated[alt.offset:alt.offset + alt.length]
 
     def decode(self, raw: str) -> dict[str, Any]:
         """Decode a raw record into a mapping of field name -> typed value.
@@ -585,9 +772,9 @@ class RecordLayout:
         Parameters
         ----------
         raw : str
-            The raw record line; normalised to exactly ``reclen`` characters first
-            (see :func:`_normalize_length`), so short/long/newline-terminated input is
-            accepted.
+            The raw record line. A single trailing newline is removed, after which the
+            row **must** be exactly ``reclen`` characters (see :func:`_validated_record`)
+            -- short/long rows are rejected, not repaired.
 
         Returns
         -------
@@ -598,12 +785,14 @@ class RecordLayout:
 
         Raises
         ------
+        RecordLengthError
+            If ``raw`` is not exactly ``reclen`` characters after newline stripping.
         ZonedDecimalError
             Propagated from :func:`decode_zoned` if a zoned field is malformed.
         ValueError
             If a ``"uint"`` field contains characters that are neither digits nor blank.
         """
-        padded = _normalize_length(raw, self.reclen)
+        padded = _validated_record(raw, self.reclen, context=f"{self.name} decode")
         out: dict[str, Any] = {}
         for fld in self.fields:
             chunk = padded[fld.start:fld.end]
@@ -885,13 +1074,14 @@ DALYTRAN_LAYOUT = RecordLayout(
         Field("DALYTRAN-MERCHANT-NAME", 152, 50, "text"),                # CVTRA06Y PIC X(50)
         Field("DALYTRAN-MERCHANT-CITY", 202, 50, "text"),                # CVTRA06Y PIC X(50)
         Field("DALYTRAN-MERCHANT-ZIP", 252, 10, "text"),                 # CVTRA06Y PIC X(10)
-        Field("DALYTRAN-CARD-NUM", 262, 16, "text"),                     # CVTRA06Y PIC X(16)
-        # ORIG-TS / PROC-TS are wall-clock timestamps and are therefore
-        # non-deterministic across runs; flagged normalize_ts so golden comparison can
-        # blank them (WHY: Trade-off -- normalising two known offsets is simpler and
-        # safer than teaching every golden file to ignore timestamps).
-        Field("DALYTRAN-ORIG-TS", 278, 26, "text", normalize_ts=True),   # CVTRA06Y PIC X(26)
-        Field("DALYTRAN-PROC-TS", 304, 26, "text", normalize_ts=True),   # CVTRA06Y PIC X(26)
+        Field("DALYTRAN-CARD-NUM", 262, 16, "text", sensitive=True),     # CVTRA06Y PIC X(16) PAN
+        # ORIG-TS is the deterministic originating timestamp (copied from the source
+        # transaction); it is preserved so golden comparison verifies it. Only PROC-TS
+        # is the runtime wall-clock stamp, so ONLY it is flagged normalize_ts (WHY:
+        # Refactoring Rationale -- blanking ORIG-TS too, as an earlier build did,
+        # discarded business data and shortened the effective compared record).
+        Field("DALYTRAN-ORIG-TS", 278, 26, "text"),                      # CVTRA06Y PIC X(26)
+        Field("DALYTRAN-PROC-TS", 304, 26, "text", normalize_ts=True),   # CVTRA06Y PIC X(26) runtime
         Field("FILLER", 330, 20, "text"),                                # CVTRA06Y PIC X(20)
     ),
 )
@@ -914,13 +1104,169 @@ DISGROUP_LAYOUT = RecordLayout(
     ),
 )
 
+# CARD-XREF-RECORD -- app/cpy/CVACT03Y.cpy, RECLN 50.
+# Primary key = XREF-CARD-NUM(16) @ 0; ALTERNATE key = XREF-ACCT-ID(11) @ 25.
+# WHY (Contract Fidelity, CR-02): CBACT04C reads this file by account id
+# (``READ ... KEY IS FD-XREF-ACCT-ID``), so the alternate index at offset 25 is a hard
+# requirement, not an optimisation. One account may own several cards, hence the
+# alternate key is declared WITH DUPLICATES (duplicates=True default on AlternateKey).
+XREF_LAYOUT = RecordLayout(
+    name="XREF",
+    reclen=50,
+    key_length=16,
+    key_offset=0,
+    alternate_keys=(AlternateKey("XREF-ACCT-ID", 25, 11, duplicates=True),),
+    fields=(
+        Field("XREF-CARD-NUM", 0, 16, "text", sensitive=True),           # CVACT03Y PIC X(16) PAN
+        Field("XREF-CUST-ID", 16, 9, "uint"),                            # CVACT03Y PIC 9(09)
+        Field("XREF-ACCT-ID", 25, 11, "uint"),                           # CVACT03Y PIC 9(11) alt key
+        Field("FILLER", 36, 14, "text"),                                 # CVACT03Y PIC X(14)
+    ),
+)
+
+# TRAN-CAT-BAL-RECORD -- app/cpy/CVTRA01Y.cpy, RECLN 50.
+# key = TRAN-CAT-KEY(17) @ 0 = TRANCAT-ACCT-ID(11) + TRANCAT-TYPE-CD(2) + TRANCAT-CD(4).
+# WHY: the copybook groups the first three fields under the composite key; they are
+# modelled as three leaf fields and the 17-byte composite is exposed via key_length,
+# keeping both the parts and the whole addressable (mirrors the DISGROUP approach).
+TCATBAL_LAYOUT = RecordLayout(
+    name="TCATBAL",
+    reclen=50,
+    key_length=17,
+    key_offset=0,
+    fields=(
+        Field("TRANCAT-ACCT-ID", 0, 11, "uint"),                         # CVTRA01Y PIC 9(11)
+        Field("TRANCAT-TYPE-CD", 11, 2, "text"),                         # CVTRA01Y PIC X(02)
+        Field("TRANCAT-CD", 13, 4, "uint"),                              # CVTRA01Y PIC 9(04)
+        Field("TRAN-CAT-BAL", 17, 11, "zoned", 9, 2, True),              # CVTRA01Y PIC S9(09)V99
+        Field("FILLER", 28, 22, "text"),                                 # CVTRA01Y PIC X(22)
+    ),
+)
+
+# CARD-RECORD -- app/cpy/CVACT02Y.cpy, RECLN 150, key = CARD-NUM(16) @ 0.
+# WHY (Privacy, MA-13): the card number, CVV, and embossed name are cardholder
+# payment/identity data and are flagged sensitive so diagnostics redact them.
+CARD_LAYOUT = RecordLayout(
+    name="CARD",
+    reclen=150,
+    key_length=16,
+    key_offset=0,
+    fields=(
+        Field("CARD-NUM", 0, 16, "text", sensitive=True),                # CVACT02Y PIC X(16) PAN
+        Field("CARD-ACCT-ID", 16, 11, "uint"),                           # CVACT02Y PIC 9(11)
+        Field("CARD-CVV-CD", 27, 3, "uint", sensitive=True),             # CVACT02Y PIC 9(03) CVV
+        Field("CARD-EMBOSSED-NAME", 30, 50, "text", sensitive=True),     # CVACT02Y PIC X(50) name
+        Field("CARD-EXPIRAION-DATE", 80, 10, "text"),                    # CVACT02Y PIC X(10) [sic]
+        Field("CARD-ACTIVE-STATUS", 90, 1, "text"),                      # CVACT02Y PIC X(01)
+        Field("FILLER", 91, 59, "text"),                                 # CVACT02Y PIC X(59)
+    ),
+)
+
+# CUSTOMER-RECORD -- app/cpy/CVCUS01Y.cpy, RECLN 500, key = CUST-ID(9) @ 0.
+# WHY (Privacy, MA-13): names, address, phones, SSN, government id, and date of birth
+# are personally identifying and flagged sensitive so no complete customer identity
+# can appear in an assertion message or golden diff.
+CUSTOMER_LAYOUT = RecordLayout(
+    name="CUSTOMER",
+    reclen=500,
+    key_length=9,
+    key_offset=0,
+    fields=(
+        Field("CUST-ID", 0, 9, "uint"),                                  # CVCUS01Y PIC 9(09)
+        Field("CUST-FIRST-NAME", 9, 25, "text", sensitive=True),         # CVCUS01Y PIC X(25)
+        Field("CUST-MIDDLE-NAME", 34, 25, "text", sensitive=True),       # CVCUS01Y PIC X(25)
+        Field("CUST-LAST-NAME", 59, 25, "text", sensitive=True),         # CVCUS01Y PIC X(25)
+        Field("CUST-ADDR-LINE-1", 84, 50, "text", sensitive=True),       # CVCUS01Y PIC X(50)
+        Field("CUST-ADDR-LINE-2", 134, 50, "text", sensitive=True),      # CVCUS01Y PIC X(50)
+        Field("CUST-ADDR-LINE-3", 184, 50, "text", sensitive=True),      # CVCUS01Y PIC X(50)
+        Field("CUST-ADDR-STATE-CD", 234, 2, "text"),                     # CVCUS01Y PIC X(02)
+        Field("CUST-ADDR-COUNTRY-CD", 236, 3, "text"),                   # CVCUS01Y PIC X(03)
+        Field("CUST-ADDR-ZIP", 239, 10, "text"),                         # CVCUS01Y PIC X(10)
+        Field("CUST-PHONE-NUM-1", 249, 15, "text", sensitive=True),      # CVCUS01Y PIC X(15)
+        Field("CUST-PHONE-NUM-2", 264, 15, "text", sensitive=True),      # CVCUS01Y PIC X(15)
+        Field("CUST-SSN", 279, 9, "uint", sensitive=True),               # CVCUS01Y PIC 9(09) SSN
+        Field("CUST-GOVT-ISSUED-ID", 288, 20, "text", sensitive=True),   # CVCUS01Y PIC X(20)
+        Field("CUST-DOB-YYYY-MM-DD", 308, 10, "text", sensitive=True),   # CVCUS01Y PIC X(10) DOB
+        Field("CUST-EFT-ACCOUNT-ID", 318, 10, "text", sensitive=True),   # CVCUS01Y PIC X(10)
+        Field("CUST-PRI-CARD-HOLDER-IND", 328, 1, "text"),               # CVCUS01Y PIC X(01)
+        Field("CUST-FICO-CREDIT-SCORE", 329, 3, "uint"),                 # CVCUS01Y PIC 9(03)
+        Field("FILLER", 332, 168, "text"),                               # CVCUS01Y PIC X(168)
+    ),
+)
+
+# TRAN-RECORD -- app/cpy/CVTRA05Y.cpy, RECLN 350, key = TRAN-ID(16) @ 0.
+# This is the persisted TRANSACT (a.k.a. "TRNX") record the posting/statement programs
+# read and write. Its geometry matches DALYTRAN but with distinct field names.
+# WHY (CR-04): ORIG-TS is the deterministic originating timestamp (preserved); only the
+# runtime PROC-TS is flagged normalize_ts. TRAN-CARD-NUM is a PAN (sensitive).
+TRAN_LAYOUT = RecordLayout(
+    name="TRAN",
+    reclen=350,
+    key_length=16,
+    key_offset=0,
+    fields=(
+        Field("TRAN-ID", 0, 16, "text"),                                 # CVTRA05Y PIC X(16)
+        Field("TRAN-TYPE-CD", 16, 2, "text"),                            # CVTRA05Y PIC X(02)
+        Field("TRAN-CAT-CD", 18, 4, "uint"),                             # CVTRA05Y PIC 9(04)
+        Field("TRAN-SOURCE", 22, 10, "text"),                            # CVTRA05Y PIC X(10)
+        Field("TRAN-DESC", 32, 100, "text"),                             # CVTRA05Y PIC X(100)
+        Field("TRAN-AMT", 132, 11, "zoned", 9, 2, True),                 # CVTRA05Y PIC S9(09)V99
+        Field("TRAN-MERCHANT-ID", 143, 9, "uint"),                       # CVTRA05Y PIC 9(09)
+        Field("TRAN-MERCHANT-NAME", 152, 50, "text"),                    # CVTRA05Y PIC X(50)
+        Field("TRAN-MERCHANT-CITY", 202, 50, "text"),                    # CVTRA05Y PIC X(50)
+        Field("TRAN-MERCHANT-ZIP", 252, 10, "text"),                     # CVTRA05Y PIC X(10)
+        Field("TRAN-CARD-NUM", 262, 16, "text", sensitive=True),         # CVTRA05Y PIC X(16) PAN
+        Field("TRAN-ORIG-TS", 278, 26, "text"),                          # CVTRA05Y PIC X(26) deterministic
+        Field("TRAN-PROC-TS", 304, 26, "text", normalize_ts=True),       # CVTRA05Y PIC X(26) runtime
+        Field("FILLER", 330, 20, "text"),                                # CVTRA05Y PIC X(20)
+    ),
+)
+
+# TRNX-RECORD -- app/cpy/COSTM01.CPY, RECLN 350, key = TRNX-KEY(32) @ 0.
+# WHY (Contract Fidelity, MA-11): the *statement* program (CBSTM03A via the CBSTM03B
+# I/O subprogram) reads the transaction file through this copybook, which is a DISTINCT
+# layout from CVTRA05Y/TRAN -- it leads with a 32-byte composite key (TRNX-CARD-NUM +
+# TRNX-ID) and therefore places TRNX-AMT at offset 148, not 132. The statement fixtures
+# (``trnxfile.txt``) are encoded in this layout, so "TRNX" must be its own record type,
+# NOT an alias of TRAN (an earlier build's alias mis-decoded every statement amount).
+TRNX_LAYOUT = RecordLayout(
+    name="TRNX",
+    reclen=350,
+    key_length=32,   # TRNX-KEY = TRNX-CARD-NUM(16) + TRNX-ID(16)
+    key_offset=0,
+    fields=(
+        Field("TRNX-CARD-NUM", 0, 16, "text", sensitive=True),           # COSTM01 PIC X(16) PAN
+        Field("TRNX-ID", 16, 16, "text"),                                # COSTM01 PIC X(16)
+        Field("TRNX-TYPE-CD", 32, 2, "text"),                            # COSTM01 PIC X(02)
+        Field("TRNX-CAT-CD", 34, 4, "uint"),                             # COSTM01 PIC 9(04)
+        Field("TRNX-SOURCE", 38, 10, "text"),                            # COSTM01 PIC X(10)
+        Field("TRNX-DESC", 48, 100, "text"),                             # COSTM01 PIC X(100)
+        Field("TRNX-AMT", 148, 11, "zoned", 9, 2, True),                 # COSTM01 PIC S9(09)V99
+        Field("TRNX-MERCHANT-ID", 159, 9, "uint"),                       # COSTM01 PIC 9(09)
+        Field("TRNX-MERCHANT-NAME", 168, 50, "text"),                    # COSTM01 PIC X(50)
+        Field("TRNX-MERCHANT-CITY", 218, 50, "text"),                    # COSTM01 PIC X(50)
+        Field("TRNX-MERCHANT-ZIP", 268, 10, "text"),                     # COSTM01 PIC X(10)
+        Field("TRNX-ORIG-TS", 278, 26, "text"),                          # COSTM01 PIC X(26) deterministic
+        Field("TRNX-PROC-TS", 304, 26, "text", normalize_ts=True),       # COSTM01 PIC X(26) runtime
+        Field("FILLER", 330, 20, "text"),                                # COSTM01 PIC X(20)
+    ),
+)
+
 # Registry keyed by logical record name. WHY: a single dict lets helpers such as
 # vsam_loader resolve reclen/keylen by name (e.g. reclen_of("ACCOUNT")) instead of
-# importing each layout constant individually.
+# importing each layout constant individually. TRAN (CVTRA05Y, posting output) and TRNX
+# (COSTM01, statement input) are deliberately SEPARATE record types with different
+# geometry, not aliases.
 LAYOUTS: dict[str, RecordLayout] = {
     "ACCOUNT": ACCOUNT_LAYOUT,
     "DALYTRAN": DALYTRAN_LAYOUT,
     "DISGROUP": DISGROUP_LAYOUT,
+    "XREF": XREF_LAYOUT,
+    "TCATBAL": TCATBAL_LAYOUT,
+    "CARD": CARD_LAYOUT,
+    "CUSTOMER": CUSTOMER_LAYOUT,
+    "TRAN": TRAN_LAYOUT,
+    "TRNX": TRNX_LAYOUT,
 }
 
 
@@ -982,17 +1328,54 @@ def keylen_of(name: str) -> int:
         raise KeyError(f"unknown record layout {name!r}; known: {sorted(LAYOUTS)}") from None
 
 
+def alternate_keys_of(name: str) -> tuple[AlternateKey, ...]:
+    """Return the alternate-key descriptors for a registered logical record name.
+
+    Purpose
+    -------
+    Give the VSAM loader a name-based way to discover a layout's secondary indexes so it
+    can emit ``ALTERNATE RECORD KEY`` clauses (notably the XREF account-id index that
+    ``CBACT04C`` reads by) without importing the layout constant directly.
+
+    Parameters
+    ----------
+    name : str
+        A key of :data:`LAYOUTS` (e.g. ``"XREF"``).
+
+    Returns
+    -------
+    tuple[AlternateKey, ...]
+        The layout's alternate keys, empty for records that have only a primary key.
+
+    Raises
+    ------
+    KeyError
+        If ``name`` is not a registered layout.
+    """
+    try:
+        return LAYOUTS[name].alternate_keys
+    except KeyError:
+        raise KeyError(f"unknown record layout {name!r}; known: {sorted(LAYOUTS)}") from None
+
+
 def normalize_timestamps(raw: str, layout: RecordLayout, sentinel: str = " ") -> str:
     """Blank the non-deterministic timestamp fields of a record for golden comparison.
 
     Purpose
     -------
-    Replace every field flagged :attr:`Field.normalize_ts` (the ``DALYTRAN-ORIG-TS`` /
-    ``DALYTRAN-PROC-TS`` wall-clock stamps) with a fixed sentinel so that two runs that
-    differ only in processing time compare byte-identical. It lives here, beside the
-    layout that defines those offsets, so ``golden_compare.py`` reuses the same offsets
-    rather than duplicating them (WHY: Trade-off -- single-sourcing the offsets beats a
-    marginally more convenient home in the comparator).
+    Replace every field flagged :attr:`Field.normalize_ts` -- exactly the single
+    runtime-generated processing timestamp (``PROC-TS``) -- with a fixed sentinel so
+    that two runs that differ only in posting time compare byte-identical. It lives
+    here, beside the layout that defines those offsets, so ``golden_compare.py`` reuses
+    the same offsets rather than duplicating them (WHY: Trade-off -- single-sourcing the
+    offsets beats a marginally more convenient home in the comparator).
+
+    WHY (Refactoring Rationale): the originating timestamp ``ORIG-TS`` is deliberately
+    **not** flagged and therefore **not** blanked. It is deterministic business data
+    copied from the input transaction; masking it (as an earlier build did) discarded a
+    field the golden comparison must verify and was the root of the "350 bytes collapse
+    to 278" defect. Only the truly non-deterministic ``PROC-TS`` is masked, and it is
+    overwritten *in place* so the record keeps its exact width.
 
     Parameters
     ----------
@@ -1016,13 +1399,116 @@ def normalize_timestamps(raw: str, layout: RecordLayout, sentinel: str = " ") ->
     ValueError
         If ``sentinel`` is not exactly one character (a multi-char sentinel would change
         the record length and desynchronise every downstream offset).
+    RecordLengthError
+        If ``raw`` is not exactly ``layout.reclen`` characters after newline stripping.
     """
     if len(sentinel) != 1:
         raise ValueError(f"sentinel must be exactly one character, got {sentinel!r}")
-    chars = list(_normalize_length(raw, layout.reclen))
+    chars = list(_validated_record(raw, layout.reclen, context=f"{layout.name} normalize_timestamps"))
     for fld in layout.fields:
         if fld.normalize_ts:
             chars[fld.start:fld.end] = sentinel * fld.length
+    return "".join(chars)
+
+
+# Sensitive fields for which revealing the final four characters is the accepted
+# industry practice (PAN "last four", SSN "last four") -- it aids identification in a
+# diagnostic without disclosing the full number. WHY (Trade-off): everything else
+# (CVV, names, DOB, government id, address, phone) is masked in full, because there is
+# no defensible partial-disclosure convention for those and full masking is the safer
+# default for a financial harness.
+_LAST4_REVEAL = frozenset({
+    "CARD-NUM", "XREF-CARD-NUM", "TRAN-CARD-NUM", "DALYTRAN-CARD-NUM", "CUST-SSN",
+})
+
+
+def mask_field(field: "Field", chunk: str) -> str:
+    """Return a redacted, same-width rendering of one field's bytes for diagnostics.
+
+    Purpose
+    -------
+    Produce a privacy-safe stand-in for a single field so assertion messages and golden
+    diffs can show a record's shape and *where* two records differ without ever emitting
+    a complete PAN, SSN, name, date of birth, or government id (finding MA-13).
+    Non-sensitive fields are returned unchanged.
+
+    The mask is *deterministic*: equal input bytes always yield equal masked bytes
+    (WHY: Trade-off -- a stable per-value hash lets a masked diff still reveal which
+    field changed and whether two masked records are equal, which a random mask would
+    destroy, while a plaintext value would over-disclose).
+
+    Parameters
+    ----------
+    field : Field
+        The field descriptor. Its :attr:`Field.sensitive` flag decides whether masking
+        applies, its :attr:`Field.name` selects the last-four-reveal convention, and its
+        :attr:`Field.length` fixes the returned width.
+    chunk : str
+        The exact field bytes sliced from the record.
+
+    Returns
+    -------
+    str
+        Exactly ``field.length`` characters: ``chunk`` verbatim when the field is not
+        sensitive; otherwise a redaction that reveals at most the trailing four
+        characters (for PAN/SSN) and hides the remainder.
+
+    Raises
+    ------
+    ValueError
+        If ``chunk`` is not ``field.length`` characters (a slice/width bug).
+    """
+    if len(chunk) != field.length:
+        raise ValueError(
+            f"mask_field: {field.name!r} chunk is {len(chunk)} chars, expected {field.length}"
+        )
+    if not field.sensitive:
+        return chunk
+    stripped = chunk.rstrip()
+    if field.name in _LAST4_REVEAL and len(stripped) >= 4:
+        revealed = stripped[-4:]
+        masked = "*" * (len(stripped) - 4) + revealed
+    else:
+        # Deterministic short digest keeps equal values equal without disclosure.
+        digest = hashlib.sha256(chunk.encode("utf-8", "replace")).hexdigest()[:8]
+        masked = f"<redacted:{digest}>"
+    # Preserve the exact field width so a masked record stays byte-aligned; truncate an
+    # over-long redaction tag and pad a short one with spaces.
+    return masked[: field.length].ljust(field.length)
+
+
+def mask_record(raw: str, layout: RecordLayout) -> str:
+    """Return a full-width copy of ``raw`` with every sensitive field redacted.
+
+    Purpose
+    -------
+    Build a privacy-safe rendering of a whole record for logs, assertion failures, and
+    golden diffs. Non-sensitive fields (ids, amounts, dates, status flags, filler) are
+    preserved so the record remains diagnostically useful, while PAN/SSN/name/DOB/
+    government-id fields are replaced by :func:`mask_field` (finding MA-13).
+
+    Parameters
+    ----------
+    raw : str
+        The raw record line (validated to ``layout.reclen`` first).
+    layout : RecordLayout
+        The layout describing ``raw``; its :attr:`Field.sensitive` flags drive masking.
+
+    Returns
+    -------
+    str
+        A record of length ``layout.reclen`` with sensitive fields redacted in place.
+
+    Raises
+    ------
+    RecordLengthError
+        If ``raw`` is not exactly ``layout.reclen`` characters after newline stripping.
+    """
+    validated = _validated_record(raw, layout.reclen, context=f"{layout.name} mask_record")
+    chars = list(validated)
+    for fld in layout.fields:
+        if fld.sensitive:
+            chars[fld.start:fld.end] = mask_field(fld, validated[fld.start:fld.end])
     return "".join(chars)
 
 
@@ -1032,11 +1518,11 @@ def _validate_layouts() -> None:
     Purpose
     -------
     Prove, at import time, that each layout's fields are contiguous from offset 0, that
-    their lengths sum to the declared ``reclen``, and that the three known layouts carry
-    their expected reclen/key-length constants (300/350/50 and 11/16/16). This turns a
-    silent transcription error in the tables above into an immediate, loud import
-    failure -- the codec is the single source of truth, so a wrong offset must never
-    reach the tests that depend on it.
+    their lengths sum to the declared ``reclen``, that every primary and alternate key
+    lies within the record, and that each known layout carries its expected
+    reclen/key-length constants. This turns a silent transcription error in the tables
+    above into an immediate, loud import failure -- the codec is the single source of
+    truth, so a wrong offset must never reach the tests that depend on it.
 
     Parameters
     ----------
@@ -1055,7 +1541,15 @@ def _validate_layouts() -> None:
         Refactoring Rationale) so the check still fires under ``python -O``, which strips
         ``assert`` statements.
     """
-    expected = {"ACCOUNT": (300, 11), "DALYTRAN": (350, 16), "DISGROUP": (50, 16)}
+    # Expected (reclen, key_length) per copybook. WHY: hard-coding the published
+    # constants makes a mistyped offset in the tables above fail loudly at import rather
+    # than surfacing as a subtly wrong decode deep inside a test. "TRNX" is the TRAN
+    # alias used by the statement fixtures and shares TRAN's geometry.
+    expected = {
+        "ACCOUNT": (300, 11), "DALYTRAN": (350, 16), "DISGROUP": (50, 16),
+        "XREF": (50, 16), "TCATBAL": (50, 17), "CARD": (150, 16),
+        "CUSTOMER": (500, 9), "TRAN": (350, 16), "TRNX": (350, 32),
+    }
     for name, layout in LAYOUTS.items():
         cursor = 0
         for fld in layout.fields:
@@ -1074,6 +1568,14 @@ def _validate_layouts() -> None:
                 f"{name}: key (offset {layout.key_offset}, len {layout.key_length}) "
                 f"exceeds reclen {layout.reclen}"
             )
+        for alt in layout.alternate_keys:
+            # WHY: an alternate key that runs off the end of the record would build a
+            # malformed indexed file; verify containment at import just like the primary.
+            if alt.offset + alt.length > layout.reclen:
+                raise RuntimeError(
+                    f"{name}: alternate key {alt.name!r} (offset {alt.offset}, "
+                    f"len {alt.length}) exceeds reclen {layout.reclen}"
+                )
         if name in expected:
             exp_reclen, exp_keylen = expected[name]
             if (layout.reclen, layout.key_length) != (exp_reclen, exp_keylen):

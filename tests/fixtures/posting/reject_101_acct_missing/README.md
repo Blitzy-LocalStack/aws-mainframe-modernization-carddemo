@@ -74,3 +74,20 @@ master**, so the transaction is rejected as `ACCOUNT RECORD NOT FOUND`.
   `app/cpy/{CVTRA06Y,CVACT03Y,CVACT01Y,CVTRA01Y}.cpy`.
 - **Seeds and production sources are REFERENCE-only and are never edited**
   (AAP §0.8.2). Fixtures are derived copies/subsets reshaped for this scenario.
+
+## 6. Data governance / synthetic provenance (MA-24)
+
+The card number (`4859452612877065`), account ids, and any customer identity
+bytes in these fixtures are **synthetic, seed-derived** test data representing
+**no real person or account** — copied from the published AWS CardDemo sample
+datasets `app/data/ASCII/{dailytran,cardxref,acctdata,tcatbal}.txt`, which ship
+with the upstream open-source project as fabricated demonstration data. No value
+here was generated from, or corresponds to, a real payment instrument or
+individual. See master [`tests/fixtures/README.md`](../../README.md) §10 for the
+full attestation and derivation-of-record.
+
+> **WHY this is recorded (Assumption / compliance).** A PAN that passes the Luhn
+> check is indistinguishable, by inspection, from a live card number; a financial
+> test suite must therefore *attest* provenance rather than leave a reviewer to
+> assume it. The attestation makes the "seed-derived, non-person" origin explicit
+> and auditable.

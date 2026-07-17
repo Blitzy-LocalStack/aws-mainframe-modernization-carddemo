@@ -34,31 +34,39 @@ directly in Python was rejected as brittle and backend-specific; the same file
 produced on a differently-built ``cobc`` would silently fail to open. Round-tripping
 through the project ``cobc`` sidesteps the entire compatibility question.
 
-How a load proceeds (mirrors the JCL, step for step)
------------------------------------------------------
-1. **DELETE analog** -- any pre-existing target indexed file (and its GnuCOBOL
-   companion/index sidecar files) is removed first, exactly as JCL ``STEP05`` issues
-   ``DELETE ... CLUSTER`` and tolerates an absent target.
-2. **Normalise the fixture** -- the flat fixture is read in Python, each line is
-   stripped of a trailing ``\\r``/``\\n`` and forced to exactly ``reclen`` characters
-   (short records are space-padded; the codebase's omitted trailing FILLER is spaces),
-   then concatenated into a *headerless fixed-width blob* (``reclen * N`` bytes, no
-   record separators). See :func:`_normalize_to_blob` for the WHY.
-3. **DEFINE + REPRO analog** -- a generated COBOL program (see
+How a load proceeds (mirrors the JCL, but validate-first)
+---------------------------------------------------------
+1. **Validate the fixture (no silent repair)** -- the flat fixture is read in Python and
+   each physical line is stripped of a single trailing ``\\r``/``\\n`` and then required
+   to be *exactly* ``reclen`` characters. A short, long, or blank row is **rejected**
+   (never padded, truncated, or dropped); a genuinely zero-byte file legitimately yields
+   zero records (an empty index). The validated rows are concatenated into a *headerless
+   fixed-width blob* (``reclen * N`` bytes, no record separators). This mirrors the
+   strict contract of :mod:`tests.helpers.record_codec`. See :func:`_validated_blob`.
+2. **DEFINE + REPRO analog (into a private workspace)** -- a generated COBOL program (see
    :func:`_generate_loader_source`) reads the blob as a fixed-length record-sequential
-   file and WRITEs each record into an ``ORGANIZATION IS INDEXED`` file whose
-   ``RECORD KEY`` is the leading ``key_length`` bytes. This is JCL ``STEP10``'s
-   ``DEFINE CLUSTER ... KEYS(<len> 0) RECORDSIZE(<reclen> <reclen>) INDEXED`` and
-   ``STEP15``'s ``REPRO`` collapsed into one deterministic pass.
+   file and WRITEs each record into an ``ORGANIZATION IS INDEXED`` file -- with the
+   appropriate ``RECORD KEY`` and any ``ALTERNATE RECORD KEY`` clauses -- built inside a
+   fresh per-run workspace directory, not directly at the target path. This is JCL
+   ``STEP10``'s ``DEFINE CLUSTER ... INDEXED`` and ``STEP15``'s ``REPRO`` collapsed into
+   one deterministic pass.
+3. **DELETE + publish analog (validate-first)** -- only after the loader has succeeded
+   and produced a file is any pre-existing target (and its GnuCOBOL companion/index
+   sidecar files) removed -- exactly as JCL ``STEP05`` issues ``DELETE ... CLUSTER`` and
+   tolerates an absent target -- and the freshly built primary + companions are then
+   atomically moved into place. WHY the DELETE is deferred to the end (not run first): a
+   failed or timed-out load must never destroy a previously good indexed file or leave a
+   half-written one at the target path (MA-10). See :func:`_publish_indexed`.
 
-Key geometry invariant (WHY key_offset must be 0)
--------------------------------------------------
-Every primary ``RECORD KEY`` in the CardDemo VSAM files is at **offset 0** (the key is
-the leading field of the record). The generated loader hard-codes that assumption by
-splitting each record into ``IDX-KEY`` (the first ``key_length`` bytes) followed by
-``IDX-REST``. Passing a non-zero ``key_offset`` would therefore silently mis-key the
-file, so :func:`load_indexed` rejects it loudly rather than producing a subtly wrong
-file.
+Key geometry (primary AND alternate indexes)
+--------------------------------------------
+Most CardDemo primary ``RECORD KEY``s are at offset 0, but **this is no longer assumed**:
+the loader models the primary key by ``(key_offset, key_length)`` and accepts zero or
+more :class:`~tests.helpers.record_codec.AlternateKey` descriptors. The generated record
+is carved into named subfields at the exact key positions, and one ``ALTERNATE RECORD
+KEY ... WITH DUPLICATES`` clause is emitted per alternate key. This is required because
+``CBACT04C`` reads the cross-reference file by its **alternate** account-id key
+(offset 25), which the earlier offset-0-only loader could not build.
 
 Explainability
 --------------
@@ -71,6 +79,7 @@ Alternatives Considered, Assumptions, or Trade-offs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -94,7 +103,17 @@ __all__ = [
     "VsamLoadError",
     "load_indexed",
     "geometry_for",
+    "alternate_keys_for",
 ]
+
+# Default wall-clock ceilings (seconds) for the two child subprocesses this module
+# spawns. WHY (MA-10 / Reliability): an un-bounded ``cobc`` compile or loader run could
+# hang a CI job indefinitely (e.g. a wedged compiler, a pathological fixture). Bounding
+# both with a generous-but-finite timeout turns a hang into a clear, catchable failure.
+# The values are deliberately generous (a normal compile/run is well under a second) so
+# they never trip on a slow shared runner, yet still cap a genuine hang.
+_COMPILE_TIMEOUT_S = 120
+_RUN_TIMEOUT_S = 120
 
 # ---------------------------------------------------------------------------
 # Environment-variable "DD name" bindings for the generated loader.
@@ -113,6 +132,13 @@ _DD_INDEX_OUT = "IDXOUT"  # generated ``SELECT IDX-FILE  ASSIGN TO IDXOUT``
 # (reclen, key_length, std) combination is compiled to its own standalone executable;
 # the program-id is irrelevant to a ``-x`` built binary and never collides on disk.
 _LOADER_PROGRAM_ID = "VSAMLDR"
+
+# Version marker for the generated loader source. WHY (MA-10 cache identity): this is
+# folded into the compiler fingerprint so that whenever the generator's emitted source
+# format changes (e.g. the segmented alternate-key layout added for CR-02), previously
+# cached binaries are invalidated even if the cobc banner and --std are unchanged. Bump
+# this string on any change to _generate_loader_source's output.
+_LOADER_SOURCE_VERSION = "2-segmented-altkeys"
 
 # Return codes the generated loader emits, surfaced verbatim in error messages.
 # WHY (Refactoring Rationale): naming them once keeps the COBOL generator, the runner's
@@ -216,16 +242,102 @@ def _resolve_cobc(cobc: str) -> str:
     return found
 
 
-def _generate_loader_source(reclen: int, key_length: int) -> str:
-    """Return the COBOL source text of a loader for one ``(reclen, key_length)`` pair.
+def _record_segments(
+    reclen: int,
+    key_offset: int,
+    key_length: int,
+    alternate_keys: "tuple[tuple[int, int, bool], ...]",
+) -> "tuple[list[tuple[str | None, int]], str, list[str]]":
+    """Carve a record into contiguous named subfields for the primary and alternate keys.
+
+    Purpose
+    -------
+    Produce the ordered field breakdown of the generated ``01 IDX-REC`` so that every
+    key (primary and each alternate) is a distinct, named ``PIC X(n)`` subfield that a
+    ``RECORD KEY`` / ``ALTERNATE RECORD KEY`` clause can reference, with the gaps between
+    keys represented as unnamed ``FILLER``. COBOL keys must name a data item, so a
+    contiguous named layout is the cleanest way to place a key at an arbitrary offset
+    without reference modification (which is not allowed in a KEY clause).
+
+    Parameters
+    ----------
+    reclen : int
+        Total record length in characters.
+    key_offset : int
+        Zero-based offset of the primary key.
+    key_length : int
+        Length of the primary key.
+    alternate_keys : tuple[tuple[int, int, bool], ...]
+        Each alternate key as ``(offset, length, with_duplicates)``.
+
+    Returns
+    -------
+    tuple[list[tuple[str | None, int]], str, list[str]]
+        ``(segments, primary_name, alt_names)`` where ``segments`` is the ordered list
+        of ``(field_name_or_None_for_filler, length)`` covering ``[0, reclen)``,
+        ``primary_name`` is the primary-key field name, and ``alt_names`` are the
+        alternate-key field names in declaration order.
+
+    Raises
+    ------
+    VsamLoadError
+        If any key span is out of range or two key spans overlap (which would make a
+        clean contiguous named layout impossible; CardDemo's keys never overlap).
+    """
+    primary_name = "IDX-KEY"
+    # (name, offset, length) for every key; alternate names are IDX-ALT-1, IDX-ALT-2 ...
+    spans: list[tuple[str, int, int]] = [(primary_name, key_offset, key_length)]
+    alt_names: list[str] = []
+    for i, (off, ln, _dup) in enumerate(alternate_keys, start=1):
+        if ln <= 0 or off < 0 or off + ln > reclen:
+            raise VsamLoadError(
+                f"alternate key #{i} (offset={off}, length={ln}) is out of range for "
+                f"reclen={reclen}"
+            )
+        name = f"IDX-ALT-{i}"
+        spans.append((name, off, ln))
+        alt_names.append(name)
+
+    # Sort by offset and verify the key spans do not overlap. WHY (Assumption): the
+    # CardDemo indexed files never overlap their keys, so a clean contiguous group is
+    # sufficient; overlapping keys would require a REDEFINES scheme we deliberately do
+    # not add until a real layout needs it (YAGNI trade-off, surfaced loudly if violated).
+    spans_sorted = sorted(spans, key=lambda s: s[1])
+    for a, b in zip(spans_sorted, spans_sorted[1:]):
+        if a[1] + a[2] > b[1]:
+            raise VsamLoadError(
+                f"key fields {a[0]} and {b[0]} overlap in the record "
+                f"({a[0]} @ {a[1]}+{a[2]}, {b[0]} @ {b[1]}+{b[2]}); overlapping keys "
+                "are not supported by the generated contiguous layout"
+            )
+
+    segments: list[tuple[str | None, int]] = []
+    cursor = 0
+    for name, off, ln in spans_sorted:
+        if off > cursor:
+            segments.append((None, off - cursor))  # FILLER gap before this key
+        segments.append((name, ln))
+        cursor = off + ln
+    if cursor < reclen:
+        segments.append((None, reclen - cursor))  # trailing FILLER
+    return segments, primary_name, alt_names
+
+
+def _generate_loader_source(
+    reclen: int,
+    key_length: int,
+    key_offset: int = 0,
+    alternate_keys: "tuple[tuple[int, int, bool], ...]" = (),
+) -> str:
+    """Return the COBOL source text of a loader for one record geometry.
 
     Purpose
     -------
     Produce a minimal, dialect-agnostic, free-format COBOL program that copies a
     headerless fixed-width record-sequential blob into a native GnuCOBOL
-    ``ORGANIZATION IS INDEXED`` file, keyed on the leading ``key_length`` bytes. This
-    is the compiled engine behind :func:`load_indexed` -- the automated equivalent of
-    JCL ``DEFINE CLUSTER ... INDEXED`` + ``IDCAMS REPRO``.
+    ``ORGANIZATION IS INDEXED`` file with the given primary key and any alternate keys.
+    This is the compiled engine behind :func:`load_indexed` -- the automated equivalent
+    of JCL ``DEFINE CLUSTER ... INDEXED`` + ``IDCAMS REPRO``.
 
     The generated program:
 
@@ -233,7 +345,8 @@ def _generate_loader_source(reclen: int, key_length: int) -> str:
       fixed ``reclen``-character records -- i.e. it consumes exactly ``reclen`` bytes
       per record from the blob with no delimiter handling;
     * writes ``IDX-FILE`` (``ASSIGN TO IDXOUT``) as ``ORGANIZATION IS INDEXED``,
-      ``ACCESS MODE IS DYNAMIC``, ``RECORD KEY IS IDX-KEY``, opened ``OUTPUT``;
+      ``ACCESS MODE IS DYNAMIC``, ``RECORD KEY IS IDX-KEY`` plus one
+      ``ALTERNATE RECORD KEY`` clause per alternate key, opened ``OUTPUT``;
     * checks ``FILE STATUS`` after every OPEN and WRITE, emitting a
       ``FILE STATUS IS: NNNN`` diagnostic and a non-zero ``RETURN-CODE`` on any error
       (mirroring the fail-fast convention of the production batch programs).
@@ -243,8 +356,11 @@ def _generate_loader_source(reclen: int, key_length: int) -> str:
     reclen : int
         Fixed record length in characters. Must be a positive integer.
     key_length : int
-        Length in characters of the leading primary key. Must satisfy
-        ``0 < key_length <= reclen``.
+        Length in characters of the primary key. Must satisfy ``0 < key_length``.
+    key_offset : int
+        Zero-based offset of the primary key within the record. Defaults to 0.
+    alternate_keys : tuple[tuple[int, int, bool], ...]
+        Zero or more ``(offset, length, with_duplicates)`` alternate-key descriptors.
 
     Returns
     -------
@@ -255,35 +371,45 @@ def _generate_loader_source(reclen: int, key_length: int) -> str:
     Raises
     ------
     VsamLoadError
-        If ``reclen`` or ``key_length`` violate the ``0 < key_length <= reclen`` /
-        positive-``reclen`` contract. (Validated here as well as in
-        :func:`load_indexed` so the generator is safe to call directly from tests.)
+        If ``reclen``/``key_length``/``key_offset`` violate the positive-``reclen`` /
+        ``0 < key_length`` / ``0 <= key_offset`` / ``key_offset+key_length <= reclen``
+        contract, or if any key span is out of range or overlaps another. (Validated
+        here as well as in :func:`load_indexed` so the generator is safe to call
+        directly from tests.)
     """
     if reclen <= 0:
         raise VsamLoadError(f"reclen must be a positive integer, got {reclen!r}")
-    if not (0 < key_length <= reclen):
+    if key_length <= 0 or key_offset < 0 or key_offset + key_length > reclen:
         raise VsamLoadError(
-            f"key_length must satisfy 0 < key_length <= reclen "
-            f"(reclen={reclen}, key_length={key_length})"
+            f"primary key must satisfy 0 < key_length and 0 <= key_offset and "
+            f"key_offset+key_length <= reclen "
+            f"(reclen={reclen}, key_offset={key_offset}, key_length={key_length})"
         )
 
-    rest_len = reclen - key_length
+    segments, _primary_name, alt_names = _record_segments(
+        reclen, key_offset, key_length, alternate_keys
+    )
 
-    # WHY (Assumptions): PIC X(0) is illegal in COBOL, so when the key spans the whole
-    # record we must NOT emit an IDX-REST subfield. Building the ``01 IDX-REC`` layout
-    # conditionally keeps the generator correct at the reclen == key_length boundary
-    # (a degenerate but valid layout where the entire record is the key).
-    if rest_len > 0:
-        idx_rec_layout = (
-            "       01 IDX-REC.\n"
-            f"          05 IDX-KEY   PIC X({key_length}).\n"
-            f"          05 IDX-REST  PIC X({rest_len}).\n"
+    # Build the ``01 IDX-REC`` field lines from the carved segments. Named key fields get
+    # their name; gaps become FILLER. WHY: a group move (MOVE FLAT-REC TO IDX-REC) copies
+    # the bytes straight through regardless of the subfield breakdown, so the named keys
+    # are purely to satisfy the RECORD KEY / ALTERNATE RECORD KEY clauses.
+    field_lines = ["       01 IDX-REC."]
+    for name, ln in segments:
+        field_name = name if name is not None else "FILLER"
+        field_lines.append(f"          05 {field_name:<10} PIC X({ln}).")
+    idx_rec_layout = "\n".join(field_lines) + "\n"
+
+    # Build the ALTERNATE RECORD KEY clauses (one per alternate key), preserving the
+    # WITH DUPLICATES flag. WHY (CR-02): CBACT04C reads XREF by its account-id alternate
+    # key; without these clauses the file has no secondary index and the read fails.
+    alt_clause_lines = []
+    for name, (_off, _ln, dup) in zip(alt_names, alternate_keys):
+        dup_clause = " WITH DUPLICATES" if dup else ""
+        alt_clause_lines.append(
+            f"               ALTERNATE RECORD KEY IS {name}{dup_clause}"
         )
-    else:
-        idx_rec_layout = (
-            "       01 IDX-REC.\n"
-            f"          05 IDX-KEY   PIC X({key_length}).\n"
-        )
+    alt_key_clauses = ("\n".join(alt_clause_lines) + "\n") if alt_clause_lines else ""
 
     # WHY (Trade-off): the source is assembled from an f-string template rather than a
     # COBOL COPY/REPLACING scheme because there is exactly one small, self-contained
@@ -330,7 +456,7 @@ def _generate_loader_source(reclen: int, key_length: int) -> str:
                ORGANIZATION IS INDEXED
                ACCESS MODE IS DYNAMIC
                RECORD KEY IS IDX-KEY
-               FILE STATUS IS WS-IDX-STATUS.
+{alt_key_clauses}               FILE STATUS IS WS-IDX-STATUS.
        DATA DIVISION.
        FILE SECTION.
        FD FLAT-FILE
@@ -389,43 +515,14 @@ def _generate_loader_source(reclen: int, key_length: int) -> str:
     return source
 
 
-
-def _std_token(std: str) -> str:
-    """Return a filesystem-safe token derived from a compiler dialect name.
-
-    Purpose
-    -------
-    Turn a ``--std`` value such as ``"ibm-strict"`` into a token usable inside a cache
-    filename, so the compiled loader binary can be keyed by dialect without worrying
-    about characters that are awkward in filenames.
-
-    Parameters
-    ----------
-    std : str
-        The compiler dialect name (the value passed to ``cobc --std=``).
-
-    Returns
-    -------
-    str
-        ``std`` with every non-alphanumeric character replaced by ``_``.
-
-    Raises
-    ------
-    None
-    """
-    # WHY (Trade-off): a character-class replacement is simpler and more predictable
-    # than hashing -- the resulting cache filename stays human-readable (e.g.
-    # ``vsamldr_r300_k11_ibm_strict``) which aids debugging of the loaders cache.
-    return "".join(ch if ch.isalnum() else "_" for ch in std)
-
-
 def _default_cache_dir() -> Path:
     """Return the directory where compiled loader binaries are cached.
 
     Purpose
     -------
-    Provide a stable, reusable location for the compiled loader executables so that
-    repeated loads within a test session do not recompile the same loader.
+    Provide a stable, reusable, *per-user private* location for the compiled loader
+    executables so that repeated loads within a test session do not recompile the same
+    loader, while never sharing a world-writable path with other users.
 
     Parameters
     ----------
@@ -435,8 +532,8 @@ def _default_cache_dir() -> Path:
     -------
     pathlib.Path
         ``$CARDDEMO_BUILD_DIR/loaders`` when the ``CARDDEMO_BUILD_DIR`` environment
-        variable is set (so the suite's build artifacts stay together), otherwise
-        ``<system-temp>/carddemo_vsam_loaders``.
+        variable is set (so the suite's build artifacts stay together), otherwise a
+        per-uid directory ``<system-temp>/carddemo_vsam_loaders-<uid>``.
 
     Raises
     ------
@@ -445,37 +542,222 @@ def _default_cache_dir() -> Path:
     # WHY (Trade-off): a *stable* directory (not a fresh mkdtemp per call) is essential
     # -- the compile-once cache only pays off if the binary persists across load_indexed
     # calls within the same session. Honouring CARDDEMO_BUILD_DIR first lets the runner
-    # scripts co-locate loaders with the rest of the build output; the temp fallback
-    # keeps the helper usable standalone with zero configuration.
+    # scripts co-locate loaders with the rest of the build output.
     build_dir = os.environ.get("CARDDEMO_BUILD_DIR")
     if build_dir:
         return Path(build_dir) / "loaders"
-    return Path(tempfile.gettempdir()) / "carddemo_vsam_loaders"
+    # WHY (MA-10 security): the temp fallback is namespaced by uid so two users on the
+    # same host never share (and cannot hijack) each other's cache directory in a
+    # world-writable /tmp. _secure_dir additionally enforces 0700 + ownership.
+    uid = getattr(os, "getuid", lambda: "nouid")()
+    return Path(tempfile.gettempdir()) / f"carddemo_vsam_loaders-{uid}"
+
+
+def _secure_dir(path: Path) -> Path:
+    """Create (if needed) and validate a private directory owned by the current user.
+
+    Purpose
+    -------
+    Guarantee that a directory the loader will write executables or workspaces into is a
+    real directory (not a symlink), is owned by the current user, and is not group/other
+    accessible (mode ``0700``). This closes the MA-10 class of attacks where a predictable
+    path in a shared temp area is pre-created as a symlink or with loose permissions so a
+    second user can read/replace a compiled binary before it is executed.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        The directory to create and secure.
+
+    Returns
+    -------
+    pathlib.Path
+        The same ``path``, now guaranteed to exist as a private directory.
+
+    Raises
+    ------
+    VsamLoadError
+        If ``path`` exists as a symlink or non-directory, is owned by another user, or
+        cannot be created/secured.
+    """
+    try:
+        # mode=0o700 on mkdir is subject to umask; we re-assert with chmod below so the
+        # final mode is exactly 0700 regardless of the caller's umask.
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise VsamLoadError(f"cannot create cache/workspace directory {path!r}: {exc}") from exc
+
+    # WHY (Assumption): os.lstat (not stat) so a symlink is detected rather than followed
+    # -- a symlinked cache dir is exactly the hijack vector we must refuse.
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise VsamLoadError(f"cannot stat directory {path!r}: {exc}") from exc
+    import stat as _stat
+
+    if _stat.S_ISLNK(st.st_mode):
+        raise VsamLoadError(
+            f"refusing to use {path!r}: it is a symbolic link (possible hijack vector)"
+        )
+    if not _stat.S_ISDIR(st.st_mode):
+        raise VsamLoadError(f"refusing to use {path!r}: not a directory")
+    # Ownership check only where getuid exists (POSIX). On such systems a directory owned
+    # by another user is refused outright.
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and st.st_uid != getuid():
+        raise VsamLoadError(
+            f"refusing to use {path!r}: owned by uid {st.st_uid}, not the current user"
+        )
+    # Re-assert exact private permissions (POSIX only; chmod is a no-op-ish on Windows).
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            raise VsamLoadError(f"cannot secure permissions on {path!r}: {exc}") from exc
+    return path
+
+
+# WHY (MA-10 minimal child environment): the child loader is a tiny COBOL program that
+# needs only (a) a way to find shared libraries and the GnuCOBOL runtime, (b) the DD
+# environment variables that bind its ASSIGN names, and (c) locale so byte<->char
+# handling is stable. Passing the *entire* parent environment to a spawned process is an
+# unnecessary exposure (secrets, tokens) and a determinism risk; we forward only a
+# vetted allow-list plus every COB_* runtime-config variable GnuCOBOL honours.
+_CHILD_ENV_ALLOW = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+)
+
+
+def _minimal_child_env(extra: "dict[str, str]") -> "dict[str, str]":
+    """Build a minimal, vetted environment for a spawned loader/compiler process.
+
+    Purpose
+    -------
+    Return a fresh environment mapping containing only the variables a GnuCOBOL child
+    genuinely needs, plus the caller-supplied ``extra`` bindings (the DD ``ASSIGN``-name
+    variables). This bounds what a subprocess can observe and keeps runs deterministic.
+
+    Parameters
+    ----------
+    extra : dict[str, str]
+        Additional bindings to inject (e.g. ``{FLATIN: ..., IDXOUT: ...}``). These take
+        precedence over inherited values of the same name.
+
+    Returns
+    -------
+    dict[str, str]
+        The child environment: allow-listed inherited variables + all ``COB_*`` runtime
+        variables + ``extra``.
+
+    Raises
+    ------
+    None
+    """
+    env: "dict[str, str]" = {}
+    for name in _CHILD_ENV_ALLOW:
+        val = os.environ.get(name)
+        if val is not None:
+            env[name] = val
+    # Forward GnuCOBOL runtime configuration (COB_LIBRARY_PATH, COB_FILE_PATH, etc.) so
+    # the child resolves the same runtime/config as the parent without inheriting
+    # unrelated variables.
+    for name, val in os.environ.items():
+        if name.startswith("COB_"):
+            env[name] = val
+    env.update(extra)
+    return env
+
+
+def _compiler_fingerprint(cobc_path: str, std: str) -> str:
+    """Return a short digest identifying the compiler build + dialect + generator.
+
+    Purpose
+    -------
+    Produce a stable fingerprint that changes whenever anything affecting the compiled
+    loader's bytes changes -- the ``cobc`` version banner, the ``--std`` dialect, and this
+    module's own source version marker. Folding it into the cache filename (MA-10)
+    guarantees a binary compiled by one toolchain is never silently reused after the
+    compiler is upgraded, which could otherwise emit an incompatible indexed-file format.
+
+    Parameters
+    ----------
+    cobc_path : str
+        Resolved path/command of the ``cobc`` compiler.
+    std : str
+        The ``--std`` dialect value.
+
+    Returns
+    -------
+    str
+        A 16-hex-character SHA-256 prefix over ``(cobc --version banner, std, marker)``.
+
+    Raises
+    ------
+    None
+        A failure to obtain the version banner degrades to a fixed placeholder rather
+        than raising; the compile step will still fail loudly later if cobc is unusable.
+    """
+    try:
+        # bounded: never let a hung `cobc --version` stall the suite.
+        proc = subprocess.run(
+            [cobc_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_minimal_child_env({}),
+        )
+        banner = proc.stdout or proc.stderr or ""
+    except (OSError, subprocess.SubprocessError):
+        banner = "unknown-cobc"
+    h = hashlib.sha256()
+    # _LOADER_SOURCE_VERSION bumps whenever the generator's output format changes, so an
+    # old cached binary is invalidated even if the compiler banner is unchanged.
+    h.update(_LOADER_SOURCE_VERSION.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(banner.encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update(std.encode("utf-8"))
+    return h.hexdigest()[:16]
 
 
 def _compiled_loader(
     reclen: int,
     key_length: int,
     *,
+    key_offset: int = 0,
+    alternate_keys: "tuple[tuple[int, int, bool], ...]" = (),
     std: str,
     cobc: str,
     cache_dir: "str | os.PathLike[str] | None",
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
 ) -> str:
-    """Compile (or reuse a cached) loader binary for one ``(reclen, key_length, std)``.
+    """Compile (or reuse a cached) loader binary for one full record geometry.
 
     Purpose
     -------
-    Return the path to an executable loader built for exactly this record geometry and
-    dialect, compiling it with the project ``cobc`` on the first request and reusing the
-    cached binary on every subsequent request. Caching keyed on the full tuple
-    guarantees a loader built for one layout can never be reused for a different one.
+    Return the path to an executable loader built for exactly this record geometry
+    (primary key + alternate keys), dialect, and compiler build, compiling it with the
+    project ``cobc`` on the first request and reusing the cached binary on every
+    subsequent request. The cache filename embeds a content-addressed digest of the
+    generated source AND a compiler fingerprint, so a loader built for one layout or one
+    toolchain can never be silently reused for a different one (MA-10).
 
     Parameters
     ----------
     reclen : int
         Fixed record length in characters.
     key_length : int
-        Leading primary-key length in characters (``0 < key_length <= reclen``).
+        Primary-key length in characters (``0 < key_length``).
+    key_offset : int
+        Zero-based offset of the primary key (keyword-only). Defaults to 0.
+    alternate_keys : tuple[tuple[int, int, bool], ...]
+        Alternate-key descriptors ``(offset, length, with_duplicates)`` (keyword-only).
     std : str
         Compiler dialect passed to ``cobc --std=`` (keyword-only).
     cobc : str
@@ -484,6 +766,8 @@ def _compiled_loader(
     cache_dir : str | os.PathLike | None
         Directory for cached binaries (keyword-only). ``None`` selects
         :func:`_default_cache_dir`.
+    compile_timeout : float
+        Wall-clock ceiling (seconds) for the ``cobc`` invocation (keyword-only).
 
     Returns
     -------
@@ -493,22 +777,32 @@ def _compiled_loader(
     Raises
     ------
     VsamLoadError
-        If ``cobc`` cannot be resolved, or if compilation of the generated loader fails.
+        If ``cobc`` cannot be resolved, the cache directory cannot be secured, the
+        compile exceeds ``compile_timeout``, or compilation of the generated loader
+        fails.
     """
     cobc_path = _resolve_cobc(cobc)
     cache = Path(os.fspath(cache_dir)) if cache_dir is not None else _default_cache_dir()
-    cache.mkdir(parents=True, exist_ok=True)
+    # WHY (MA-10): the cache dir holds executables we will run, so it MUST be private and
+    # owned by us -- _secure_dir enforces 0700 + ownership and refuses a symlinked path.
+    _secure_dir(cache)
+
+    # Content-address the binary: the digest covers the exact generated source, so any
+    # change in geometry (reclen, key_length, key_offset, alternate keys) yields a
+    # different source and therefore a different cache file. The compiler fingerprint is
+    # appended so a toolchain/dialect change also invalidates the cache.
+    source = _generate_loader_source(reclen, key_length, key_offset, alternate_keys)
+    src_digest = hashlib.sha256(source.encode("ascii")).hexdigest()[:16]
+    fp = _compiler_fingerprint(cobc_path, std)
 
     exe_ext = ".exe" if os.name == "nt" else ""
-    final_bin = cache / f"vsamldr_r{reclen}_k{key_length}_{_std_token(std)}{exe_ext}"
+    final_bin = cache / f"vsamldr_{src_digest}_{fp}{exe_ext}"
 
     # Cache hit: reuse the already-built binary. WHY: recompiling the same tiny program
-    # on every fixture load would dominate the runtime of a large suite; the geometry is
-    # fully captured by the filename so a hit is guaranteed correct.
+    # on every fixture load would dominate the runtime of a large suite; the digest fully
+    # captures the source+toolchain so a hit is guaranteed correct.
     if final_bin.is_file() and os.access(final_bin, os.X_OK):
         return str(final_bin)
-
-    source = _generate_loader_source(reclen, key_length)
 
     # Compile inside a private temp directory *within the cache dir*, then atomically
     # publish the finished binary with os.replace.
@@ -519,14 +813,35 @@ def _compiled_loader(
     # half-written file. Multiple winners simply overwrite an identical binary.
     with tempfile.TemporaryDirectory(dir=str(cache), prefix=".build-") as tmpd:
         tmp = Path(tmpd)
-        src_path = tmp / f"{final_bin.stem}.cbl"
+        # WHY (short source base name): GnuCOBOL validates the SOURCE file's base name as
+        # a candidate program word and rejects names longer than a COBOL word (31 chars).
+        # The content-addressed cache name (vsamldr_<digest>_<fp>) is far longer, so we
+        # compile from a short fixed name inside this already-unique temp dir and only the
+        # *cached* binary carries the long digest name (a plain filename, length-safe).
+        src_path = tmp / "vsamldr.cbl"
         # The generated source is pure ASCII by construction; encode strictly so any
         # accidental non-ASCII would surface immediately rather than reach the compiler.
         src_path.write_text(source, encoding="ascii")
-        tmp_bin = tmp / final_bin.name
+        tmp_bin = tmp / ("vsamldr.exe" if os.name == "nt" else "vsamldr")
 
         cmd = [cobc_path, "-x", f"--std={std}", "-free", "-o", str(tmp_bin), str(src_path)]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            # Bounded + minimal-env compile (MA-10): a wedged compiler becomes a clean
+            # TimeoutExpired rather than an indefinite hang, and the child sees only a
+            # vetted environment.
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=compile_timeout,
+                env=_minimal_child_env({}),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VsamLoadError(
+                "timed out compiling the GnuCOBOL indexed-file loader after "
+                f"{compile_timeout}s (reclen={reclen}, key_length={key_length}, "
+                f"std={std!r})."
+            ) from exc
 
         # WHY (Assumptions): success is judged by the process return code AND the binary
         # existing -- NOT by empty stderr. The gcc backend emits a benign
@@ -535,7 +850,8 @@ def _compiled_loader(
         if proc.returncode != 0 or not tmp_bin.is_file():
             raise VsamLoadError(
                 "failed to compile the GnuCOBOL indexed-file loader "
-                f"(reclen={reclen}, key_length={key_length}, std={std!r}); "
+                f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
+                f"alternate_keys={alternate_keys!r}, std={std!r}); "
                 f"cobc exit code {proc.returncode}.\n"
                 f"--- cobc stdout ---\n{proc.stdout}\n"
                 f"--- cobc stderr ---\n{proc.stderr}\n"
@@ -547,58 +863,72 @@ def _compiled_loader(
     return str(final_bin)
 
 
-def _normalize_to_blob(flat_path: "str | os.PathLike[str]", reclen: int) -> bytes:
-    """Read a flat fixture and return a headerless fixed-width blob of its records.
+def _validated_blob(flat_path: "str | os.PathLike[str]", reclen: int) -> bytes:
+    """Read a flat fixture and return a headerless fixed-width blob, rejecting bad rows.
 
     Purpose
     -------
-    Convert a human-authored flat fixture -- whose lines may carry stray ``\\r``, may be
-    shorter than ``reclen`` (omitted trailing FILLER), or may be terminated by any line
-    ending -- into a deterministic byte blob of exactly ``reclen`` bytes per record with
-    no separators, which the generated loader consumes as a fixed record-sequential
-    file.
+    Convert a flat fixture into a deterministic byte blob of exactly ``reclen`` bytes per
+    record with no separators, which the generated loader consumes as a fixed
+    record-sequential file. Unlike the earlier lenient behaviour (which silently
+    space-padded short rows and truncated long ones), this validator REJECTS any physical
+    row whose width is not exactly ``reclen`` (CR-03): silently repairing a malformed
+    fixture could mask a genuine encoding defect and load records that mis-key or shift
+    every downstream field. A genuinely empty file (zero bytes, or only a trailing
+    newline) is the one legitimate "zero records" case and yields an empty blob.
 
     Parameters
     ----------
     flat_path : str | os.PathLike
         Path to the flat fixture to read.
     reclen : int
-        The fixed record length every output record is forced to.
+        The exact width every record must have.
 
     Returns
     -------
     bytes
-        ``reclen * N`` bytes where ``N`` is the number of non-empty input lines, encoded
-        Latin-1.
+        ``reclen * N`` bytes where ``N`` is the number of conforming records (possibly
+        zero), encoded Latin-1.
 
     Raises
     ------
     VsamLoadError
-        If the fixture cannot be opened or read.
+        If the fixture cannot be read, or if any physical row's width (after stripping a
+        single trailing line terminator) is not exactly ``reclen``.
     """
-    parts: list[str] = []
     try:
-        # WHY (Trade-off / Alternatives Considered): normalising in Python -- read with
-        # universal newlines, strip a trailing CR/LF, then ljust/truncate to reclen --
-        # is simpler and more portable than relying on GnuCOBOL LINE SEQUENTIAL
-        # auto-padding plus stray-CR handling (the documented alternative). It also lets
-        # the generated COBOL read a dead-simple fixed record-sequential file with zero
-        # delimiter logic, which removes the single biggest source of load ambiguity.
         # WHY encoding="latin-1": it is the identity byte<->codepoint map for 0..255, so
-        # every byte in the fixture round-trips exactly; the space pad byte is 0x20.
-        with open(os.fspath(flat_path), "r", encoding="latin-1", newline=None) as fh:
-            for raw_line in fh:
-                line = raw_line.rstrip("\r\n")
-                # WHY (Assumptions): a completely blank line is not a record. Including
-                # it would inject a spurious all-spaces key into the indexed file (and a
-                # trailing newline at EOF must not create a phantom record). CardDemo
-                # keys are account ids / card numbers / group keys and are never blank,
-                # so skipping empties is safe and keeps the load deterministic.
-                if line == "":
-                    continue
-                parts.append(line.ljust(reclen)[:reclen])
+        # every byte in the fixture round-trips exactly; the space pad byte is 0x20. We
+        # read the whole file and split ourselves (rather than iterate lines) so a
+        # trailing newline at EOF is handled explicitly and cannot create a phantom row.
+        raw = Path(os.fspath(flat_path)).read_text(encoding="latin-1")
     except OSError as exc:
         raise VsamLoadError(f"cannot read flat fixture {os.fspath(flat_path)!r}: {exc}") from exc
+
+    # Genuinely empty file -> zero records. WHY: the empty_input scenarios provision an
+    # empty (or newline-only) fixture and expect an empty indexed file, which the loader
+    # then opens and reads to EOF immediately.
+    if raw == "" or raw == "\n" or raw == "\r\n":
+        return b""
+
+    # Split on LF, then strip a single trailing CR per line (CRLF fixtures). A single
+    # trailing newline at EOF produces a final empty element which we drop; a blank line
+    # anywhere else is a genuine (zero-width) row and is therefore rejected below.
+    lines = raw.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # drop the empty element produced by a trailing EOF newline only
+
+    parts: list[str] = []
+    for idx, line in enumerate(lines, start=1):
+        if line.endswith("\r"):
+            line = line[:-1]  # normalise a CRLF terminator to just the data bytes
+        if len(line) != reclen:
+            raise VsamLoadError(
+                f"fixture {os.fspath(flat_path)!r} row {idx} is {len(line)} bytes but "
+                f"the layout requires exactly {reclen}; refusing to silently "
+                "pad/truncate a nonconforming record (CR-03). Fix the fixture width."
+            )
+        parts.append(line)
 
     return "".join(parts).encode("latin-1")
 
@@ -654,6 +984,118 @@ def _remove_indexed(indexed_path: "str | os.PathLike[str]") -> None:
                 pass
 
 
+def _normalize_alternate_keys(
+    alternate_keys: "object", reclen: int
+) -> "tuple[tuple[int, int, bool], ...]":
+    """Coerce an alternate-key specification into validated ``(offset, length, dup)`` tuples.
+
+    Purpose
+    -------
+    Accept alternate keys in either of two shapes -- :class:`record_codec.AlternateKey`
+    objects (with ``.offset``/``.length``/``.duplicates``) or plain
+    ``(offset, length, with_duplicates)`` tuples -- and return a normalised, validated
+    tuple form the generator and cache identity consume. Accepting both shapes lets
+    callers pass ``record_codec`` layout metadata directly without a manual conversion.
+
+    Parameters
+    ----------
+    alternate_keys : object
+        An iterable of ``AlternateKey``-like objects or 3-tuples, or ``None``/empty.
+    reclen : int
+        The record length, used to bounds-check each key span.
+
+    Returns
+    -------
+    tuple[tuple[int, int, bool], ...]
+        The normalised alternate keys in declaration order.
+
+    Raises
+    ------
+    VsamLoadError
+        If an entry has the wrong shape or a span outside ``[0, reclen)``.
+    """
+    if not alternate_keys:
+        return ()
+    out: list[tuple[int, int, bool]] = []
+    for i, ak in enumerate(alternate_keys, start=1):
+        # Duck-type an AlternateKey object first; fall back to a positional 3-tuple.
+        if hasattr(ak, "offset") and hasattr(ak, "length"):
+            off = int(ak.offset)
+            ln = int(ak.length)
+            dup = bool(getattr(ak, "duplicates", True))
+        else:
+            try:
+                off, ln, dup = int(ak[0]), int(ak[1]), bool(ak[2])
+            except (TypeError, IndexError, ValueError) as exc:
+                raise VsamLoadError(
+                    f"alternate key #{i} must be an AlternateKey or a "
+                    f"(offset, length, with_duplicates) tuple, got {ak!r}"
+                ) from exc
+        if ln <= 0 or off < 0 or off + ln > reclen:
+            raise VsamLoadError(
+                f"alternate key #{i} (offset={off}, length={ln}) is out of range for "
+                f"reclen={reclen}"
+            )
+        out.append((off, ln, dup))
+    return tuple(out)
+
+
+def _publish_indexed(workdir: Path, base_name: str, target: Path) -> None:
+    """Atomically move a freshly built indexed file (and its companions) into place.
+
+    Purpose
+    -------
+    Implement the validate-first publish step (MA-10): the loader writes the new indexed
+    file into a private workspace; only after it has succeeded do we remove any old
+    target and move the new primary + companion index files to their final names. This
+    guarantees a failed load never destroys a previously good indexed file and never
+    leaves a half-written one at the target path.
+
+    Parameters
+    ----------
+    workdir : pathlib.Path
+        The private workspace directory containing the freshly built files.
+    base_name : str
+        The file name (no directory) shared by the primary and its companions.
+    target : pathlib.Path
+        The final destination path for the primary indexed file.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    VsamLoadError
+        If a produced file cannot be moved into place.
+    """
+    # Remove the previous target + companions only now that the new build has validated.
+    _remove_indexed(target)
+    parent = target.parent
+    # Enumerate produced files: the primary (== base_name) and any companion
+    # ``base_name.idx`` / ``base_name.<digits>`` (VBISAM / BDB alternate-index sidecars).
+    # WHY: alternate keys (CR-02) cause the ISAM backend to emit sidecar index files that
+    # must travel with the primary or the secondary index is lost.
+    prefix = base_name + "."
+    for produced in sorted(workdir.iterdir()):
+        name = produced.name
+        is_primary = name == base_name
+        is_companion = name.startswith(prefix) and (
+            name[len(prefix):] in _INDEX_COMPANION_LITERAL_SUFFIXES
+            or name[len(prefix):].isdigit()
+        )
+        if not (is_primary or is_companion):
+            continue  # skip the transient blob and anything unrelated
+        try:
+            # os.replace is atomic within one filesystem; workdir lives under parent, so
+            # the move never crosses a filesystem boundary.
+            os.replace(str(produced), str(parent / name))
+        except OSError as exc:
+            raise VsamLoadError(
+                f"failed to publish built indexed file {name!r} to {parent!r}: {exc}"
+            ) from exc
+
+
 def load_indexed(
     flat_path: "str | os.PathLike[str]",
     indexed_path: "str | os.PathLike[str]",
@@ -661,9 +1103,12 @@ def load_indexed(
     key_length: int,
     key_offset: int = 0,
     *,
+    alternate_keys: "object" = (),
     cobc: str = "cobc",
     std: str = "ibm-strict",
     cache_dir: "str | os.PathLike[str] | None" = None,
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
+    run_timeout: float = _RUN_TIMEOUT_S,
 ) -> str:
     """Load a flat fixed-width fixture into a GnuCOBOL native indexed (ISAM) file.
 
@@ -672,25 +1117,37 @@ def load_indexed(
     The single public entry point of this module and the automated analog of the
     mainframe ``IDCAMS DELETE -> DEFINE -> REPRO`` file-load pattern. Given a flat
     fixture and a target path, it produces a native GnuCOBOL ``ORGANIZATION IS INDEXED``
-    file -- keyed on the leading ``key_length`` bytes -- that a program under test can
-    open and read.
+    file -- with the given primary key and any alternate keys -- that a program under
+    test can open and read.
+
+    The load is performed **validate-first**: the new file is built in a private
+    workspace and published to the target path only after the loader has succeeded, so a
+    failed load can never corrupt or delete a pre-existing good file (MA-10).
 
     Parameters
     ----------
     flat_path : str | os.PathLike
-        Path to the flat fixed-width fixture (one record per line; short lines are
-        space-padded, long lines truncated, stray CR/LF stripped).
+        Path to the flat fixed-width fixture (one record per line). Every physical row
+        must be exactly ``reclen`` bytes wide (after stripping one trailing line
+        terminator); a nonconforming row is rejected rather than silently repaired
+        (CR-03). A genuinely empty fixture yields an empty indexed file.
     indexed_path : str | os.PathLike
-        Destination path for the indexed file. Any pre-existing file at this path (and
-        its companion index files) is deleted first.
+        Destination path for the indexed file. A pre-existing file at this path (and its
+        companion index files) is deleted only after the new file has been built
+        successfully. Refused if the path itself is a symbolic link.
     reclen : int
         Fixed record length in characters. Must be a positive integer.
     key_length : int
-        Length in characters of the leading primary key. Must satisfy
-        ``0 < key_length <= reclen``.
+        Length in characters of the primary key. Must satisfy ``0 < key_length`` and
+        ``key_offset + key_length <= reclen``.
     key_offset : int, optional
-        Zero-based offset of the key within the record. Only ``0`` is supported -- see
-        Raises. Defaults to ``0``.
+        Zero-based offset of the primary key within the record. Defaults to ``0`` (every
+        current CardDemo primary key is leading), but any valid offset is now supported.
+    alternate_keys : object, optional
+        Alternate keys as :class:`record_codec.AlternateKey` objects or
+        ``(offset, length, with_duplicates)`` tuples (keyword-only). Each becomes an
+        ``ALTERNATE RECORD KEY`` clause so programs that read by a secondary key (e.g.
+        ``CBACT04C`` reading XREF by account id) work. Defaults to none.
     cobc : str, optional
         ``cobc`` command name or explicit path used to build the loader (keyword-only).
         Defaults to ``"cobc"``. **Must be the same compiler that builds the programs
@@ -702,6 +1159,10 @@ def load_indexed(
     cache_dir : str | os.PathLike | None, optional
         Directory in which the compiled loader binary is cached (keyword-only).
         Defaults to :func:`_default_cache_dir`.
+    compile_timeout : float, optional
+        Wall-clock ceiling (seconds) for the loader compile (keyword-only).
+    run_timeout : float, optional
+        Wall-clock ceiling (seconds) for the loader run (keyword-only).
 
     Returns
     -------
@@ -711,86 +1172,104 @@ def load_indexed(
     Raises
     ------
     VsamLoadError
-        If ``key_offset`` is non-zero (this codebase's keys are all at offset 0, and the
-        generated loader hard-codes a leading key -- so a non-zero offset is refused
-        loudly rather than silently mis-keying the file); if ``reclen`` is not positive
-        or ``key_length`` is outside ``0 < key_length <= reclen``; if the fixture cannot
-        be read; if the loader fails to compile; or if the loader run exits non-zero
-        (e.g. a duplicate key or an I/O failure), in which case the loader's
-        ``FILE STATUS IS: NNNN`` diagnostic is included in the message.
+        If ``reclen``/``key_length``/``key_offset`` violate the geometry contract; if an
+        alternate key is malformed or out of range; if the target path is a symlink; if
+        the fixture contains a nonconforming row or cannot be read; if the loader fails
+        to compile or times out; or if the loader run exits non-zero or times out (in
+        which case the loader's ``FILE STATUS IS: NNNN`` diagnostic is included).
     """
     # --- Argument validation (fail loud, fail early) -----------------------------
-    if key_offset != 0:
-        # WHY: the generated FD assumes IDX-KEY is the leading field. Honouring a
-        # non-zero offset would require a different record layout; rather than emit a
-        # file whose key silently points at the wrong bytes, refuse the request.
-        raise VsamLoadError(
-            f"key_offset={key_offset} is not supported: every CardDemo indexed file "
-            "keys on its leading bytes (offset 0), and the generated loader assumes a "
-            "leading key. A non-zero key_offset would produce a mis-keyed file."
-        )
     if not isinstance(reclen, int) or reclen <= 0:
         raise VsamLoadError(f"reclen must be a positive integer, got {reclen!r}")
-    if not isinstance(key_length, int) or not (0 < key_length <= reclen):
+    if not isinstance(key_length, int) or key_length <= 0:
+        raise VsamLoadError(f"key_length must be a positive integer, got {key_length!r}")
+    if not isinstance(key_offset, int) or key_offset < 0 or key_offset + key_length > reclen:
         raise VsamLoadError(
-            f"key_length must satisfy 0 < key_length <= reclen "
-            f"(reclen={reclen}, key_length={key_length!r})"
+            f"primary key must satisfy 0 <= key_offset and key_offset+key_length <= "
+            f"reclen (reclen={reclen}, key_offset={key_offset!r}, key_length={key_length})"
         )
+    alt_keys = _normalize_alternate_keys(alternate_keys, reclen)
 
     flat = os.fspath(flat_path)
     indexed = os.fspath(indexed_path)
+    target = Path(indexed)
 
-    # --- DELETE analog: scrub any pre-existing target + companions ---------------
-    _remove_indexed(indexed)
+    # --- Refuse to write through a symlinked target (MA-04) ----------------------
+    # WHY: if the target path is a pre-planted symlink, publishing through it would write
+    # (or delete) a file outside the intended workspace. We refuse rather than follow it.
+    if target.is_symlink():
+        raise VsamLoadError(
+            f"refusing to write indexed file through symbolic link {indexed!r}"
+        )
 
     # The loader's OPEN OUTPUT cannot create missing parent directories, so ensure the
     # destination directory exists before we run it.
-    Path(indexed).parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- Normalise the fixture into a headerless fixed-width blob ----------------
-    blob = _normalize_to_blob(flat, reclen)
+    # --- Validate the fixture into a headerless fixed-width blob (CR-03) ----------
+    blob = _validated_blob(flat, reclen)
 
-    # --- DEFINE + REPRO analog: build (or reuse) the loader and run it -----------
-    loader_bin = _compiled_loader(reclen, key_length, std=std, cobc=cobc, cache_dir=cache_dir)
+    # --- DEFINE + REPRO analog: build (or reuse) the loader -----------------------
+    loader_bin = _compiled_loader(
+        reclen,
+        key_length,
+        key_offset=key_offset,
+        alternate_keys=alt_keys,
+        std=std,
+        cobc=cobc,
+        cache_dir=cache_dir,
+        compile_timeout=compile_timeout,
+    )
 
-    blob_path: "str | None" = None
+    # --- Build into a private workspace under the target's parent, then publish ---
+    # WHY (MA-04 + MA-10 validate-first): the loader writes into an isolated per-run
+    # workspace (0700, created via mkdtemp inside the target's directory so the eventual
+    # os.replace is same-filesystem/atomic). The blob lives inside the same workspace, so
+    # nothing transient escapes into a shared temp area. Only on success do we scrub the
+    # old target and move the new files into place (_publish_indexed).
+    workdir = Path(tempfile.mkdtemp(dir=str(target.parent), prefix=".vsamldr-work-"))
     try:
-        # Materialise the blob in a temp file that the child reads via the FLATIN env
-        # var. WHY a temp file (not a pipe/stdin): GnuCOBOL binds a SELECT to a named
-        # file, and a real file keeps the loader trivially simple and re-runnable.
-        fd, blob_path = tempfile.mkstemp(prefix="vsamldr-blob-", suffix=".dat")
-        with os.fdopen(fd, "wb") as blob_file:
-            blob_file.write(blob)
+        base_name = target.name
+        built = workdir / base_name
+        blob_path = workdir / (base_name + ".flat")
+        blob_path.write_bytes(blob)
 
-        # Bind the generated program's ASSIGN names to the physical paths via the child
-        # environment (GnuCOBOL's env-var filename mapping). Copy the current
-        # environment so the child keeps its normal runtime configuration.
-        child_env = os.environ.copy()
-        child_env[_DD_FLAT_IN] = blob_path
-        child_env[_DD_INDEX_OUT] = indexed
-
-        proc = subprocess.run(
-            [loader_bin],
-            env=child_env,
-            capture_output=True,
-            text=True,
+        child_env = _minimal_child_env(
+            {_DD_FLAT_IN: str(blob_path), _DD_INDEX_OUT: str(built)}
         )
+        try:
+            proc = subprocess.run(
+                [loader_bin],
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=run_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VsamLoadError(
+                f"indexed-file loader timed out after {run_timeout}s for "
+                f"{flat!r} -> {indexed!r} (reclen={reclen}, key_length={key_length})."
+            ) from exc
+
         if proc.returncode != 0:
             raise VsamLoadError(
                 f"indexed-file loader failed for {flat!r} -> {indexed!r} "
-                f"(reclen={reclen}, key_length={key_length}); exit code "
-                f"{proc.returncode}.\n"
+                f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
+                f"alternate_keys={alt_keys!r}); exit code {proc.returncode}.\n"
                 f"--- loader stdout ---\n{proc.stdout}\n"
                 f"--- loader stderr ---\n{proc.stderr}"
             )
+        if not built.is_file():
+            raise VsamLoadError(
+                f"indexed-file loader reported success but produced no file at "
+                f"{built!r} for {flat!r} -> {indexed!r}."
+            )
+
+        # Publish (atomic per-file move of primary + companions).
+        _publish_indexed(workdir, base_name, target)
     finally:
-        # Always remove the transient blob; it has served its purpose once the loader
-        # has run (success or failure). Absence is tolerated.
-        if blob_path is not None:
-            try:
-                os.unlink(blob_path)
-            except FileNotFoundError:
-                pass
+        # Always remove the private workspace (the blob and any leftover build files).
+        shutil.rmtree(workdir, ignore_errors=True)
 
     return indexed
 
@@ -832,6 +1311,40 @@ def geometry_for(layout_name: str) -> "tuple[int, int]":
     from tests.helpers.record_codec import keylen_of, reclen_of
 
     return reclen_of(layout_name), keylen_of(layout_name)
+
+
+def alternate_keys_for(layout_name: str) -> "tuple[tuple[int, int, bool], ...]":
+    """Resolve a named layout's alternate keys as ``(offset, length, dup)`` tuples.
+
+    Purpose
+    -------
+    Convenience mirror of :func:`geometry_for` for alternate keys, so a caller can build
+    an indexed file for a named layout (e.g. ``"XREF"``) with all its secondary indexes
+    without restating the copybook geometry. Defers to the single source of truth,
+    :func:`record_codec.alternate_keys_of`.
+
+    Parameters
+    ----------
+    layout_name : str
+        A logical record name registered in :data:`record_codec.LAYOUTS`.
+
+    Returns
+    -------
+    tuple[tuple[int, int, bool], ...]
+        ``(offset, length, with_duplicates)`` for each alternate key (possibly empty).
+
+    Raises
+    ------
+    KeyError
+        If ``layout_name`` is not registered (propagated from ``alternate_keys_of``).
+    ImportError
+        If :mod:`tests.helpers.record_codec` cannot be imported.
+    """
+    from tests.helpers.record_codec import alternate_keys_of
+
+    return tuple(
+        (ak.offset, ak.length, ak.duplicates) for ak in alternate_keys_of(layout_name)
+    )
 
 
 
@@ -881,9 +1394,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "programs can read it."
         ),
         epilog=(
-            "geometry may be given explicitly (reclen + key_length) or resolved from a "
-            "record_codec layout name via --layout (e.g. --layout DISGROUP). "
-            "Only key_offset 0 is supported (CardDemo keys are all leading)."
+            "geometry may be given explicitly (reclen + key_length [+ key_offset]) or "
+            "resolved from a record_codec layout name via --layout (e.g. --layout XREF), "
+            "which also supplies the layout's alternate keys. Additional alternate keys "
+            "may be given with repeatable --alt-key OFF:LEN[:dup]."
         ),
     )
     parser.add_argument("flat", help="path to the flat fixed-width fixture to load")
@@ -900,12 +1414,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "key_offset", nargs="?", type=int, default=0,
-        help="key offset within the record; only 0 is supported (default: 0)",
+        help="zero-based primary-key offset within the record (default: 0)",
     )
     parser.add_argument(
         "--layout", default=None, metavar="NAME",
-        help="record_codec layout name to derive reclen/key_length (e.g. ACCOUNT, "
-             "DALYTRAN, DISGROUP); mutually exclusive with positional reclen/key_length",
+        help="record_codec layout name to derive reclen/key_length AND alternate keys "
+             "(e.g. XREF, ACCOUNT, DALYTRAN, DISGROUP); mutually exclusive with "
+             "positional reclen/key_length",
+    )
+    parser.add_argument(
+        "--alt-key", action="append", default=[], dest="alt_key", metavar="OFF:LEN[:dup]",
+        help="add an ALTERNATE RECORD KEY at byte OFF, LEN bytes wide; optional third "
+             "field dup=0 disables WITH DUPLICATES (default: duplicates allowed). "
+             "Repeatable. Merged with any keys implied by --layout.",
+    )
+    parser.add_argument(
+        "--compile-timeout", type=float, default=_COMPILE_TIMEOUT_S, dest="compile_timeout",
+        metavar="SECONDS",
+        help=f"wall-clock ceiling for the loader compile (default: {_COMPILE_TIMEOUT_S})",
+    )
+    parser.add_argument(
+        "--run-timeout", type=float, default=_RUN_TIMEOUT_S, dest="run_timeout",
+        metavar="SECONDS",
+        help=f"wall-clock ceiling for the loader run (default: {_RUN_TIMEOUT_S})",
     )
     parser.add_argument(
         "--cobc", default="cobc",
@@ -956,6 +1487,8 @@ def main(argv: "list[str] | None" = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
+    alt_keys: "list[tuple[int, int, bool]]" = []
+
     # Resolve record geometry from exactly one source: --layout OR positional numbers.
     if args.layout is not None:
         # WHY: combining --layout with positional reclen/key_length is ambiguous, so we
@@ -964,6 +1497,9 @@ def main(argv: "list[str] | None" = None) -> int:
             parser.error("--layout cannot be combined with positional reclen/key_length")
         try:
             reclen, key_length = geometry_for(args.layout)
+            # --layout also contributes the layout's registered alternate keys, so a
+            # by-name load of XREF gets its account-id secondary index automatically.
+            alt_keys.extend(alternate_keys_for(args.layout))
         except KeyError as exc:
             print(f"error: unknown --layout {args.layout!r}: {exc}", file=sys.stderr)
             return 2
@@ -981,6 +1517,19 @@ def main(argv: "list[str] | None" = None) -> int:
         reclen, key_length = args.reclen, args.key_length
         key_offset = args.key_offset
 
+    # Parse any explicit --alt-key OFF:LEN[:dup] specs and merge them after layout keys.
+    for spec in args.alt_key:
+        parts = spec.split(":")
+        if len(parts) not in (2, 3):
+            parser.error(f"--alt-key must be OFF:LEN[:dup], got {spec!r}")
+        try:
+            off = int(parts[0])
+            ln = int(parts[1])
+            dup = True if len(parts) == 2 else parts[2] not in ("0", "false", "no")
+        except ValueError:
+            parser.error(f"--alt-key OFF and LEN must be integers, got {spec!r}")
+        alt_keys.append((off, ln, dup))
+
     try:
         result = load_indexed(
             args.flat,
@@ -988,9 +1537,12 @@ def main(argv: "list[str] | None" = None) -> int:
             reclen,
             key_length,
             key_offset,
+            alternate_keys=tuple(alt_keys),
             cobc=args.cobc,
             std=args.std,
             cache_dir=args.cache_dir,
+            compile_timeout=args.compile_timeout,
+            run_timeout=args.run_timeout,
         )
     except VsamLoadError as exc:
         print(f"error: {exc}", file=sys.stderr)

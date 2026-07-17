@@ -1,7 +1,16 @@
       ****************************************************************
       * TEST PROGRAM : CBACT01C_test.cbl                             *
       * SUITE        : AWS CardDemo - COBOL unit layer (GCBLUnit)    *
+      * TYPE         : supplemental SPECIFICATION test (per MA-15)   *
       * TARGET       : app/cbl/CBACT01C.cbl  (REFERENCE only)        *
+      * EXECUTES UUT : NO.  Paragraph 1300-ENCODED below is a faith- *
+      *   ful in-memory RE-ENCODING of production 1300-POPUL-ACCT-   *
+      *   RECORD, NOT a call into CBACT01C (a monolithic file-driven *
+      *   main that needs indexed ACCTFILE + assembler 'COBDATFT').  *
+      *   The real read/print execution and 90%/85% coverage live in *
+      *   the integration layer (tests/integration/test_provisio-    *
+      *   ning.py); this unit is retained as a supplemental spec that *
+      *   pins the pure mapping arithmetic deterministically.        *
       *----------------------------------------------------------------
       * PURPOSE:
       *   Spec-encode the account read/print program's field-
@@ -88,18 +97,48 @@
        01  WS-LEN         PIC 9(04).
        01  WS-EXP-LEN     PIC 9(04).
       *
+      * 01-level ACTUAL mirrors (MA-19 "01/77-compatible assertion
+      * wrappers").  WHY - Refactoring rationale: assert-equals takes its
+      * operands BY REFERENCE as 01-level PIC X ANY LENGTH, so passing a
+      * 05-level sub-item of OUT-ACCT-REC directly trips cobc -Wcall-params
+      * ("not a 01 or 77 level item").  Each OUT field is first MOVEd into
+      * a same-PICTURE/USAGE 01-level mirror below and the mirror is passed
+      * instead -- the MOVE is byte-preserving (identical PIC/USAGE), so the
+      * raw-byte comparison is unchanged while the call contract is clean.
+       01  WS-ACT-DEBIT   PIC S9(10)V99 USAGE IS COMP-3.
+       01  WS-ACT-BAL     PIC S9(10)V99.
+       01  WS-ACT-LIM     PIC S9(10)V99.
+       01  WS-ACT-STAT    PIC X(01).
+       01  WS-ACT-DATE    PIC X(10).
+      *
       * WHY - Assumption: gcblunit-result publishes the failure count
       * into a PIC S9(9) COMP linkage item, so WS-FAILS MUST be that
       * same binary type; a DISPLAY item here would be reinterpreted as
       * binary and corrupt the RETURN-CODE / process exit status.
        01  WS-FAILS       PIC S9(9) COMP.
       *
+      *----------------------------------------------------------------
+      * ROUTINE : MAIN (implicit first paragraph of PROCEDURE DIVISION)
+      * PURPOSE : Initialise the GCBLUnit counters, run scenarios 1-5
+      *           (debit quirk fires / does not fire, money precision on
+      *           the widest S9(10)V99 fields, alphanumeric passthrough,
+      *           and the 300-byte CVACT01Y length guard), publish the
+      *           tally and bridge the failure count to the exit status.
+      * PARAMS  : none (standalone cobc -x main; no LINKAGE / run args).
+      * RETURNS : sets RETURN-CODE = accumulated assertion-failure count.
+      * ERRORS  : none raised; GCBLUnit counts failures, never abends.
+      * WHY - Trade-off: each scenario re-INITIALIZEs ACCOUNT-RECORD so
+      *           the cases are independent and order-free; a shared
+      *           record would let one scenario's residue mask another's
+      *           defect.
+      *----------------------------------------------------------------
        PROCEDURE DIVISION.
       *
       * WHY - Assumption: GnuCOBOL zero-initialises EXTERNAL storage,
       * yet gcblunit-init is called first to be explicit about the
       * starting counter state (belt-and-suspenders for reruns).
            CALL "gcblunit-init"
+           END-CALL
       *
       *----------------------------------------------------------------
       * SCENARIO 1 - QUIRK FIRES: input current-cycle debit = ZERO.
@@ -110,8 +149,9 @@
            MOVE 0 TO ACCT-CURR-CYC-DEBIT
            PERFORM 1300-ENCODED
            MOVE 2525.00 TO WS-EXP-DEBIT
-           CALL "assert-equals" USING WS-EXP-DEBIT
-               OUT-ACCT-CURR-CYC-DEBIT
+           MOVE OUT-ACCT-CURR-CYC-DEBIT TO WS-ACT-DEBIT
+           CALL "assert-equals" USING WS-EXP-DEBIT WS-ACT-DEBIT
+           END-CALL
       *
       *----------------------------------------------------------------
       * SCENARIO 2 - QUIRK DOES NOT FIRE: a non-zero debit passes
@@ -122,8 +162,9 @@
            MOVE 1234.56 TO ACCT-CURR-CYC-DEBIT
            PERFORM 1300-ENCODED
            MOVE 1234.56 TO WS-EXP-DEBIT
-           CALL "assert-equals" USING WS-EXP-DEBIT
-               OUT-ACCT-CURR-CYC-DEBIT
+           MOVE OUT-ACCT-CURR-CYC-DEBIT TO WS-ACT-DEBIT
+           CALL "assert-equals" USING WS-EXP-DEBIT WS-ACT-DEBIT
+           END-CALL
       *
       *----------------------------------------------------------------
       * SCENARIO 3 - MONEY PRECISION at maximum magnitude on the widest
@@ -133,8 +174,9 @@
            MOVE 9999999999.99 TO ACCT-CURR-BAL
            PERFORM 1300-ENCODED
            MOVE 9999999999.99 TO WS-EXP-BAL
-           CALL "assert-equals" USING WS-EXP-BAL
-               OUT-ACCT-CURR-BAL
+           MOVE OUT-ACCT-CURR-BAL TO WS-ACT-BAL
+           CALL "assert-equals" USING WS-EXP-BAL WS-ACT-BAL
+           END-CALL
       *
       *----------------------------------------------------------------
       * SCENARIO 4 - MONEY PRECISION with cents on the credit limit.
@@ -143,8 +185,9 @@
            MOVE 4321.09 TO ACCT-CREDIT-LIMIT
            PERFORM 1300-ENCODED
            MOVE 4321.09 TO WS-EXP-LIM
-           CALL "assert-equals" USING WS-EXP-LIM
-               OUT-ACCT-CREDIT-LIMIT
+           MOVE OUT-ACCT-CREDIT-LIMIT TO WS-ACT-LIM
+           CALL "assert-equals" USING WS-EXP-LIM WS-ACT-LIM
+           END-CALL
       *
       *----------------------------------------------------------------
       * SCENARIO 5 - ALPHANUMERIC PASSTHROUGH + single-source record
@@ -155,24 +198,45 @@
            MOVE "A" TO ACCT-ACTIVE-STATUS
            MOVE "2020-01-15" TO ACCT-OPEN-DATE
            PERFORM 1300-ENCODED
-           CALL "assert-equals" USING "A"
-               OUT-ACCT-ACTIVE-STATUS
-           CALL "assert-equals" USING "2020-01-15"
-               OUT-ACCT-OPEN-DATE
+           MOVE OUT-ACCT-ACTIVE-STATUS TO WS-ACT-STAT
+           CALL "assert-equals" USING "A" WS-ACT-STAT
+           END-CALL
+           MOVE OUT-ACCT-OPEN-DATE TO WS-ACT-DATE
+           CALL "assert-equals" USING "2020-01-15" WS-ACT-DATE
+           END-CALL
            MOVE LENGTH OF ACCOUNT-RECORD TO WS-LEN
            MOVE 300 TO WS-EXP-LEN
            CALL "assert-equals" USING WS-EXP-LEN WS-LEN
+           END-CALL
       *
       * Publish a readable assertion tally for the captured report,
       * then bridge the accumulated failure count to the exit status.
            CALL "gcblunit-summary"
+           END-CALL
            CALL "gcblunit-result" USING WS-FAILS
+           END-CALL
            MOVE WS-FAILS TO RETURN-CODE
            STOP RUN.
       *
       *================================================================
-      * 1300-ENCODED - faithful in-memory re-encoding of production
-      * paragraph 1300-POPUL-ACCT-RECORD (CBACT01C.cbl lines 215-240).
+      * ROUTINE : 1300-ENCODED
+      * PURPOSE : Faithful in-memory re-encoding of production paragraph
+      *           1300-POPUL-ACCT-RECORD (CBACT01C.cbl lines 215-240):
+      *           map ACCOUNT-RECORD (CVACT01Y) field-by-field onto the
+      *           OUT-ACCT-REC print mirror, applying the documented
+      *           zero-debit -> 2525.00 override quirk.
+      * PARAMS  : none.  Reads ACCOUNT-RECORD, writes OUT-ACCT-REC (both
+      *           in WORKING-STORAGE).
+      * RETURNS : none (mutates OUT-ACCT-REC in place).
+      * ERRORS  : none.
+      * WHY - Alternative Considered: calling the real CBACT01C paragraph
+      *           was rejected (it is buried inside a file-driven main
+      *           needing ACCTFILE + 'COBDATFT'); re-encoding ONLY the
+      *           pure mapping isolates the arithmetic with zero I/O.
+      * WHY - Trade-off: the reissue-date 'COBDATFT' conversion is
+      *           deliberately OMITTED (service absent under GnuCOBOL) and
+      *           OUT-ACCT-REISSUE-DATE is left unasserted rather than
+      *           faked, so the test never claims coverage it cannot prove.
       *================================================================
        1300-ENCODED.
            MOVE ACCT-ID TO OUT-ACCT-ID

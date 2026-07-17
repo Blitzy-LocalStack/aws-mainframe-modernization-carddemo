@@ -5,11 +5,18 @@
 # Purpose:
 #   Compile the CardDemo batch programs under test (and, optionally, the
 #   GCBLUnit COBOL test programs) from app/cbl/ into the build/ directory using
-#   the repository's GnuCOBOL convention. Ten programs that own a MAIN entry
-#   point are built as executables (`cobc -x`); the three subprograms that are
-#   dynamically CALL'd (CBACT04C, CSUTLDTC, CBSTM03B) are built as shared
-#   modules (`cobc -m`) so the runtime module loader resolves them by
-#   PROGRAM-ID via COB_LIBRARY_PATH.
+#   the repository's GnuCOBOL convention. The inventory is split into three
+#   HONEST classes (finding CR-01) so the script never promises an output it
+#   cannot produce:
+#     * 8 SUPPORTED MAINS  built as executables (`cobc -x`);
+#     * 3 CALL'd SUBPROGRAMS (CBACT04C, CSUTLDTC, CBSTM03B) built as shared
+#       modules (`cobc -m`) so the runtime loader resolves them by PROGRAM-ID
+#       via COB_LIBRARY_PATH (they declare PROCEDURE DIVISION USING ...);
+#     * 2 KNOWN-UNSUPPORTED (CBEXPORT, CBIMPORT) that carry a verified,
+#       unfixable defect in the immutable baseline -- attempted, expected to
+#       fail, and reported honestly without poisoning the aggregate RC.
+#   A test-only driver (CBACT04D) that supplies CBACT04C's EXTERNAL-PARMS
+#   linkage is also built so the interest calculator is executable (MA-01).
 #
 # Usage:
 #   scripts/build_test_programs.sh [--coverage] [--with-tests] [-h|--help]
@@ -25,10 +32,18 @@
 #   CARDDEMO_COVERAGE=1                      - alternative way to enable coverage.
 #
 # Return / Exit codes (CardDemo RC rubric):
-#   0  all requested programs compiled cleanly.
-#   4  a soft warning (e.g. --with-tests requested but no test programs present).
-#   8  cobc is unavailable, or one or more programs failed to compile.
+#   0  all requested programs (and, if --with-tests, all test programs) compiled
+#      cleanly; any known-unsupported program failed exactly as documented.
+#   8  cobc is unavailable; a promised program failed to compile; a
+#      known-unsupported program did NOT fail as documented (unexpected success
+#      or an unexpected different failure); or --with-tests was requested but the
+#      COBOL unit-test layer is absent/empty (finding MA-03: an explicitly
+#      ENABLED layer that is missing is a hard failure, never a soft warning).
 #   2  operator usage error (unknown flag).
+#
+#   RC=4 is deliberately NOT produced by this build script: per MA-03 the soft
+#   RC=4 rung is reserved for expected BUSINESS rejects at run time, never for
+#   missing build/test infrastructure.
 #
 # Errors / Exceptions:
 #   Missing cobc -> diagnostic to stderr, exit 8. A per-program compile failure
@@ -40,6 +55,21 @@
 #     rather than `-std=cobol85`, because ibm-strict accepts the COMP-3
 #     packed-decimal money fields that cobol85 rejects. This is the single most
 #     important dialect decision for these financial programs.
+#   - Assumption + financial-correctness fix (finding MA-02): `-fsign=EBCDIC` is
+#     supplied. The shipped seed data and the Python record codec encode signed
+#     money as IBM zoned-decimal OVERPUNCH (e.g. trailing `C`=+3, `L`=-3,
+#     `{`=+0, `}`=-0). GnuCOBOL's DEFAULT `-fsign=ASCII` MISREADS those overpunch
+#     bytes (a trailing `L` decodes as +0 instead of -3, silently dropping the
+#     sign and CORRUPTING every negative balance), whereas `-fsign=EBCDIC`
+#     decodes them exactly as the codec/overpunch tables do. Verified empirically
+#     on cobc 3.2.0. local_compile.sh omits this flag safely only because it
+#     never RUNS a program against signed data; this harness does, so it must set
+#     it. NOTE the required syntax is `-fsign=EBCDIC` (with `=`); the bare
+#     `-fsign-ascii`/`-fsign-ebcdic` spellings are silently ignored by this cobc.
+#   - Assumption: CBSTM03A needs `-ftab-width=4` on top of `-fixed` because a
+#     copybook it COPYs (CUSTREC.cpy) indents with hard TABs; without the
+#     override cobc miscounts columns and reports "unbalanced parentheses". This
+#     is applied per-program via carddemo_program_extra_flags, not globally.
 #   - Alternatives Considered: driving the build with `make` was rejected -- the
 #     repository ships no Makefile at app/ or root, so programs are compiled
 #     directly with cobc.
@@ -49,10 +79,11 @@
 #     in app/cpy/ (`-I`), and the two collided-name statement programs are stored
 #     with an UPPERCASE .CBL extension (CBSTM03A.CBL, CBSTM03B.CBL) while all
 #     others are lowercase .cbl -- so each source path is resolved case-aware.
-#   - Refactoring rationale: CBACT04C is compiled as a `-m` module (not `-x`)
-#     because it declares `PROCEDURE DIVISION USING EXTERNAL-PARMS`; GnuCOBOL
-#     refuses to link a USING program as a standalone executable, so the only
-#     way to "produce it cleanly" is as a dynamically-loaded shared module.
+#   - Refactoring rationale: the 3 CALL'd subprograms are compiled as `-m`
+#     modules (not `-x`) because they declare `PROCEDURE DIVISION USING ...`;
+#     GnuCOBOL refuses to link a USING program as a standalone executable, so the
+#     only way to "produce them cleanly" is as dynamically-loaded shared modules
+#     resolved at run time by PROGRAM-ID on COB_LIBRARY_PATH.
 # =============================================================================
 
 set -euo pipefail
@@ -68,17 +99,49 @@ source "$_build_script_dir/test_env.sh"
 
 # ---------------------------------------------------------------------------
 # Program inventory (by PROGRAM NAME; extension resolved at compile time).
-# 10 MAIN executables + 3 dynamically-CALL'd shared modules = 13 sources.
+#
+# The inventory is split into THREE honest classes (finding CR-01) instead of
+# the previous flat 10-main list that falsely PROMISED outputs it could not
+# produce:
+#
+#   * SUPPORTED MAINS (8): compile cleanly as `-x` executables under the
+#     verified per-program recipes. These are the PROMISED outputs -- a failure
+#     here is a real build failure (RC=8).
+#   * MODULES (3): declare `PROCEDURE DIVISION USING ...`, so GnuCOBOL rejects
+#     `-x` ("executable program requested but PROCEDURE/ENTRY has USING clause").
+#     They are compiled as `-m` shared modules resolved at run time by PROGRAM-ID
+#     on COB_LIBRARY_PATH (exported by test_env.sh). Also PROMISED outputs.
+#   * KNOWN-UNSUPPORTED (2): CBEXPORT and CBIMPORT declare
+#     `RECORD KEY IS EXPORT-SEQUENCE-NUM` on their FD, but that field is defined
+#     only in WORKING-STORAGE (via CVEXPORT.cpy), NOT in the FD record. This is a
+#     genuine, verified semantic defect in the IMMUTABLE baseline production
+#     source (CBEXPORT.cbl:68 / CBIMPORT.cbl:40) that NO compiler flag can fix
+#     and that the minimal-change/test-only principle forbids editing. They are
+#     therefore NOT promised outputs: the build ATTEMPTS them, EXPECTS the
+#     documented failure, and reports it honestly -- never a false success -- but
+#     the documented failure does not poison the aggregate RC (see the
+#     known-unsupported loop below).
 # ---------------------------------------------------------------------------
 CARDDEMO_MAIN_PROGRAMS=(CBACT01C CBACT02C CBACT03C CBCUS01C \
-                        CBEXPORT CBIMPORT CBTRN01C CBTRN02C CBTRN03C CBSTM03A)
-# WHY (Assumption): CBACT04C, CSUTLDTC and CBSTM03B each declare
-# `PROCEDURE DIVISION USING ...`, so GnuCOBOL rejects `-x` for them
-# ("executable program requested but PROCEDURE/ENTRY has USING clause"). They
-# are therefore compiled as `-m` shared modules and resolved at run time by
-# PROGRAM-ID on COB_LIBRARY_PATH (exported by test_env.sh -> the build dir),
-# exactly as cobcrun expects for a dynamically-CALL'd subprogram.
+                        CBTRN01C CBTRN02C CBTRN03C CBSTM03A)
 CARDDEMO_MODULE_PROGRAMS=(CBACT04C CSUTLDTC CBSTM03B)
+CARDDEMO_UNSUPPORTED_PROGRAMS=(CBEXPORT CBIMPORT)
+
+# The verified signature of the CBEXPORT/CBIMPORT baseline defect. The build
+# recognises THIS specific compiler diagnostic as the documented, expected
+# failure; any OTHER failure (or an unexpected success) is surfaced distinctly.
+# WHY (Assumption): pinning the exact missing-field name means a future baseline
+# change (e.g. the field being added to the FD) cannot be silently mistaken for
+# the known defect -- it will be reported as an unexpected outcome to reconcile.
+CARDDEMO_UNSUPPORTED_SIGNATURE="EXPORT-SEQUENCE-NUM"
+
+# Test-only CBACT04C driver (finding MA-01): a `-x` main that constructs the
+# EXTERNAL-PARMS linkage CBACT04C requires and CALLs it, so the interest
+# calculator can be executed by the harness. It is a PROMISED output.
+# WHY: it lives under tests/cobol-unit/ (test-only) with a non-`_test.cbl` name
+# so the --with-tests glob does not also try to build it as a GCBLUnit test.
+CARDDEMO_DRIVER_SOURCE="tests/cobol-unit/CBACT04C_driver.cbl"
+CARDDEMO_DRIVER_NAME="CBACT04D"
 
 # Default flags; extended when --coverage is requested.
 CARDDEMO_COVERAGE="${CARDDEMO_COVERAGE:-0}"
@@ -149,13 +212,43 @@ carddemo_cobc_flags() {
     # Errors  : none.
     # WHY (Refactoring rationale): centralising the flags guarantees the mains
     # and the modules are built with identical dialect/copybook settings.
-    printf '%s\n' -fixed --std=ibm-strict -I "$CARDDEMO_REPO_ROOT/app/cpy"
+    # WHY (MA-02 -- reconciled EBCDIC sign setting; financial correctness):
+    # `-fsign=EBCDIC` is REQUIRED. The CardDemo ASCII seeds and the test fixtures
+    # store signed money as trailing IBM overpunch ('{'==+0 .. 'I'==+9,
+    # '}'==-0 .. 'R'==-9), matching tests/helpers/record_codec. GnuCOBOL's
+    # DEFAULT (`-fsign=ASCII`) MISREADS that overpunch -- verified on this runner
+    # that '19}' decodes to +190 (sign lost) under ASCII but correctly to -190
+    # under EBCDIC, and '12L' decodes to +120 (wrong) vs -123 (correct). Omitting
+    # this flag would silently corrupt every negative balance, so it is pinned
+    # here rather than left to an environment-dependent default.
+    printf '%s\n' -fixed -fsign=EBCDIC --std=ibm-strict \
+        -I "$CARDDEMO_REPO_ROOT/app/cpy"
     if [ "$CARDDEMO_COVERAGE" = "1" ]; then
         # WHY (Assumption): GnuCOBOL transpiles to C, so gcov coverage is obtained
         # by passing --coverage through to the C compiler (-A) and linker (-Q),
         # and keeping the generated C (-save-temps) alongside the .gcno files.
         printf '%s\n' -g "-save-temps=$CARDDEMO_BUILD_DIR" -A --coverage -Q --coverage
     fi
+}
+
+carddemo_program_extra_flags() {
+    # Purpose : emit any PER-PROGRAM extra cobc flags a specific source needs, on
+    #           top of the common carddemo_cobc_flags (one token per line).
+    # Parameters:
+    #   $1 (string) - program name (e.g. CBSTM03A).
+    # Returns : always 0; zero or more extra flag tokens on stdout.
+    # Errors  : none.
+    # WHY (MA-02 -- verified per-program recipe): CBSTM03A COPYs CUSTREC.cpy,
+    # whose line 6 is indented with a literal TAB. Under the default fixed-format
+    # tab handling GnuCOBOL mis-columns that line and fails with "unbalanced
+    # parentheses". Compiling CBSTM03A with `-ftab-width=4` expands tabs the way
+    # the copybook was authored and it then compiles cleanly (verified). Only
+    # CBSTM03A needs this, so the override is scoped to it rather than applied
+    # globally (a global tab-width could shift columns in the other sources).
+    case "$1" in
+        CBSTM03A) printf '%s\n' -ftab-width=4 ;;
+        *) : ;;
+    esac
 }
 
 carddemo_compile() {
@@ -168,28 +261,130 @@ carddemo_compile() {
     # WHY (Assumption): modules are emitted with an explicit .so name so the
     # GnuCOBOL runtime loader finds them on COB_LIBRARY_PATH by PROGRAM-ID.
     local name="$1" mode="$2" src out
-    local -a flags
+    local -a flags extra
     mapfile -t flags < <(carddemo_cobc_flags)
+    # Per-program recipe overrides (e.g. CBSTM03A tab-width), appended AFTER the
+    # common flags so a program-specific token wins on any conflict.
+    mapfile -t extra < <(carddemo_program_extra_flags "$name")
     if ! src="$(carddemo_find_source "$name")"; then
         echo "[build]   ERROR: no source (.cbl/.CBL) for '$name' under app/cbl/" >&2
         return "${CARDDEMO_RC_FAIL}"
     fi
     if [ "$mode" = "main" ]; then
         out="$CARDDEMO_BUILD_DIR/$name"
-        cobc -x "${flags[@]}" -o "$out" "$src" || return "${CARDDEMO_RC_FAIL}"
+        cobc -x "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
+            || return "${CARDDEMO_RC_FAIL}"
     else
         out="$CARDDEMO_BUILD_DIR/$name.so"
-        cobc -m "${flags[@]}" -o "$out" "$src" || return "${CARDDEMO_RC_FAIL}"
+        cobc -m "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
+            || return "${CARDDEMO_RC_FAIL}"
     fi
     return 0
+}
+
+carddemo_compile_unsupported() {
+    # Purpose : ATTEMPT a known-unsupported program and classify the outcome
+    #           honestly (finding CR-01) -- never reporting a false success.
+    # Parameters:
+    #   $1 (string) - program name (CBEXPORT / CBIMPORT).
+    # Returns :
+    #   0  the documented baseline defect occurred exactly as expected
+    #      (compile failed with the CARDDEMO_UNSUPPORTED_SIGNATURE diagnostic).
+    #      This is the normal, documented state and does NOT fail the build.
+    #   4  UNEXPECTED SUCCESS -- the source now compiles (the immutable baseline
+    #      may have changed); a WARN so the operator reconciles the inventory,
+    #      but not a hard failure because an extra artifact is not harmful.
+    #   8  UNEXPECTED FAILURE -- it failed for a DIFFERENT reason than the
+    #      documented defect; surfaced as a real failure to investigate.
+    # Errors  : writes the captured compiler diagnostics to stderr.
+    # WHY (Trade-off): attempting the compile (rather than skipping it) means a
+    # baseline that gets fixed upstream is detected immediately, while the
+    # signature check keeps the "expected" path from masking a genuinely new
+    # error. RC=4 is used ONLY for the benign inventory-drift case here; it is
+    # never used to hide a build error.
+    local name="$1" src out log
+    local -a flags
+    mapfile -t flags < <(carddemo_cobc_flags)
+    if ! src="$(carddemo_find_source "$name")"; then
+        echo "[build]   ERROR: no source for known-unsupported '$name'" >&2
+        return "${CARDDEMO_RC_FAIL}"
+    fi
+    out="$CARDDEMO_BUILD_DIR/$name"
+    if log="$(cobc -x "${flags[@]}" -o "$out" "$src" 2>&1)"; then
+        echo "[build]   UNEXPECTED SUCCESS: '$name' compiled." >&2
+        echo "[build]   The immutable baseline may have changed; reconcile" >&2
+        echo "[build]   CARDDEMO_UNSUPPORTED_PROGRAMS in this script." >&2
+        return "${CARDDEMO_RC_WARN}"
+    fi
+    if printf '%s' "$log" | grep -q "$CARDDEMO_UNSUPPORTED_SIGNATURE"; then
+        echo "[build]   KNOWN-UNSUPPORTED: '$name' cannot compile against the"
+        echo "[build]   immutable baseline (missing FD key field"
+        echo "[build]   '$CARDDEMO_UNSUPPORTED_SIGNATURE'); documented, expected."
+        return 0
+    fi
+    echo "[build]   UNEXPECTED FAILURE building '$name' (not the documented" >&2
+    echo "[build]   '$CARDDEMO_UNSUPPORTED_SIGNATURE' defect):" >&2
+    printf '%s\n' "$log" >&2
+    return "${CARDDEMO_RC_FAIL}"
+}
+
+carddemo_test_warn_allowlist() {
+    # Purpose : emit the per-test KNOWN-WARNINGS allowlist as a single grep -E
+    #           pattern (or nothing), used by the --with-tests warnings-fatal
+    #           gate (finding MA-19) to decide which -Wall/-Wextra diagnostics
+    #           are tolerated for a given test program and which are fatal.
+    # Parameters:
+    #   $1 (string) - test program name WITHOUT extension (e.g. CBTRN02C_test).
+    # Returns : always 0; on stdout either an extended-regexp string matching
+    #           the documented, immutable warnings that test is allowed to
+    #           carry, or NOTHING for tests that must be 100% warning-clean.
+    # Errors  : none.
+    #
+    # WHY (Trade-off -- documented allowlist vs. blanket -Wno-*): three tests
+    # legitimately carry warnings we CANNOT remove without editing immutable
+    # files (app/** is out of scope and enforced clean by `git diff --quiet`):
+    #   * CBSTM03B_test / CSUTLDTC_test EXECUTE the real UUT by COPY-ing the
+    #     production source; the warnings are attributed to app/cbl/CBSTM03B.CBL
+    #     (lines 3, 118) and app/cbl/CSUTLDTC.cbl (lines 116, 122) -- i.e. they
+    #     live in the frozen production code, not in the test.
+    #   * CBTRN02C_test faithfully REPLICATES the production COMPUTE at
+    #     app/cbl/CBTRN02C.cbl:403 (identical PIC S9(09)V99 operands), so it
+    #     inherits the same -Warithmetic-osvs the production program emits;
+    #     "fixing" it would make the replica diverge from the code it documents.
+    # Alternatives considered: (a) `-Wno-terminator`/`-Wno-arithmetic-osvs` --
+    # rejected, it would also mask genuinely NEW defects of the same class in
+    # the test's own code; (b) pinning the exact test-file line -- rejected for
+    # the osvs case because that line moves as the test is edited (it shifted
+    # 618->689 when MA-20 contracts were added), so we match the STABLE warning
+    # CLASS tag `[-Warithmetic-osvs]` instead. For the two production-attributed
+    # cases we match "<basename>:<line>:" (no path prefix) so the pattern holds
+    # whether cobc renders the COPY path relative ("app/cbl/CSUTLDTC.cbl:116")
+    # or absolute ("/.../app/cbl/CSUTLDTC.cbl:116") -- both were observed
+    # depending on whether the source resolves via cwd or via the -I repo root.
+    # Assumption: app/** is immutable this session, so the production line
+    # numbers (3/118, 116/122) are stable and safe to pin.
+    case "$1" in
+        CBSTM03B_test) printf '%s\n' 'CBSTM03B\.CBL:(3|118):' ;;
+        CSUTLDTC_test) printf '%s\n' 'CSUTLDTC\.cbl:(116|122):' ;;
+        CBTRN02C_test) printf '%s\n' '\[-Warithmetic-osvs\]' ;;
+        *) : ;;   # every other test must be completely warning-clean
+    esac
 }
 
 # ---------------------------------------------------------------------------
 # Compile everything, aggregating to the worst RC.
 # ---------------------------------------------------------------------------
+# WHY (MA-02 -- controlled cwd): anchor the working directory at the repo root
+# for the whole build so nothing resolves relative to the caller's cwd. Every
+# path the build uses is already absolute (via $CARDDEMO_REPO_ROOT), so this is
+# belt-and-braces, but it makes the build deterministic regardless of where it
+# is invoked from and removes the "compilation depends on current directory"
+# hazard the finding calls out.
+cd "$CARDDEMO_REPO_ROOT" || { echo "[build] ERROR: cannot cd to repo root" >&2; exit "$CARDDEMO_RC_FAIL"; }
+
 overall_rc=0
 echo "[build] ============================================================"
-echo "[build] Compiling CardDemo programs under test (--std=ibm-strict)"
+echo "[build] Compiling CardDemo programs under test (ibm-strict, fsign=EBCDIC)"
 echo "[build]   repo   : $CARDDEMO_REPO_ROOT"
 echo "[build]   output : $CARDDEMO_BUILD_DIR"
 echo "[build]   coverage: $CARDDEMO_COVERAGE"
@@ -216,10 +411,52 @@ for _p in "${CARDDEMO_MODULE_PROGRAMS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Optionally compile the GCBLUnit test programs (soft-skip if absent).
-# WHY (Assumption): the tests/ tree is authored in parallel by other agents, so
-# its absence at build time is a WARN, not a failure -- the master runner stays
-# usable before the COBOL unit tests land.
+# Build the test-only CBACT04C driver (finding MA-01) -- a PROMISED output that
+# makes the USING-linkage interest calculator runnable. It compiles as a `-x`
+# main; the CBACT04C module it CALLs is resolved at run time via
+# COB_LIBRARY_PATH, so the build order above is sufficient.
+# ---------------------------------------------------------------------------
+echo "[build] driver : $CARDDEMO_DRIVER_NAME (for CBACT04C)"
+if [ -f "$CARDDEMO_REPO_ROOT/$CARDDEMO_DRIVER_SOURCE" ]; then
+    _drv_flags=()
+    mapfile -t _drv_flags < <(carddemo_cobc_flags)
+    if cobc -x "${_drv_flags[@]}" \
+            -o "$CARDDEMO_BUILD_DIR/$CARDDEMO_DRIVER_NAME" \
+            "$CARDDEMO_REPO_ROOT/$CARDDEMO_DRIVER_SOURCE"; then
+        echo "[build]   OK -> $CARDDEMO_BUILD_DIR/$CARDDEMO_DRIVER_NAME"
+    else
+        echo "[build]   FAILED: $CARDDEMO_DRIVER_NAME" >&2
+        overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
+    fi
+else
+    # The driver is an in-repo test artifact; its absence is a real build
+    # problem (RC=8), not a soft skip -- it is a promised output (MA-03).
+    echo "[build]   ERROR: driver source missing: $CARDDEMO_DRIVER_SOURCE" >&2
+    overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
+fi
+
+# ---------------------------------------------------------------------------
+# Attempt the KNOWN-UNSUPPORTED programs and report honestly (finding CR-01).
+# The documented baseline defect does not poison the aggregate RC; an
+# unexpected outcome (success, or a different error) is surfaced.
+# ---------------------------------------------------------------------------
+for _p in "${CARDDEMO_UNSUPPORTED_PROGRAMS[@]}"; do
+    echo "[build] unsup  : $_p (known-unsupported; attempting)"
+    carddemo_compile_unsupported "$_p"
+    _unsup_rc=$?
+    # RC 0 (documented defect) contributes nothing; RC 4 (unexpected success)
+    # and RC 8 (unexpected failure) are aggregated so they surface in the total.
+    overall_rc="$(carddemo_rc_worst "$overall_rc" "$_unsup_rc")"
+done
+
+# ---------------------------------------------------------------------------
+# Optionally compile the GCBLUnit test programs.
+# WHY (MA-03 -- an explicitly-enabled layer's absence is a hard failure): when
+# the operator passes --with-tests they are ENABLING the COBOL unit-test layer,
+# so a missing tree or an empty glob is an ABSENT ENABLED LAYER and returns
+# RC=8, NOT the soft RC=4 the previous version used. RC=4 is reserved for
+# expected business rejects, never for missing test infrastructure. (Without
+# --with-tests the layer is simply not requested and nothing happens here.)
 # ---------------------------------------------------------------------------
 if [ "$CARDDEMO_WITH_TESTS" = "1" ]; then
     _tdir="$CARDDEMO_REPO_ROOT/tests/cobol-unit"
@@ -228,27 +465,84 @@ if [ "$CARDDEMO_WITH_TESTS" = "1" ]; then
         _tfiles=("$_tdir"/*_test.cbl "$_tdir"/*_test.CBL)
         shopt -u nullglob
         if [ "${#_tfiles[@]}" -eq 0 ]; then
-            echo "[build] no *_test.cbl in $_tdir (built in parallel) - skipping"
-            overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_WARN")"
+            echo "[build] ERROR: --with-tests requested but no *_test.cbl in $_tdir" >&2
+            overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
         else
             local_flags=()
             mapfile -t local_flags < <(carddemo_cobc_flags)
             for _tf in "${_tfiles[@]}"; do
                 _tname="$(basename "${_tf%.*}")"
                 echo "[build] test   : $_tname"
-                # WHY: test programs COPY the same copybooks (app/cpy) plus any
-                # test-local copybooks, so both include dirs are supplied.
-                if cobc -x "${local_flags[@]}" -I "$_tdir" \
-                        -o "$CARDDEMO_BUILD_DIR/$_tname" "$_tf"; then
-                    echo "[build]   OK -> $CARDDEMO_BUILD_DIR/$_tname"
+                # Test programs may need the same per-program recipe as the UUT
+                # they exercise (e.g. a CBSTM03A-derived test needs the tab-width
+                # override), so their extra flags are resolved by name too.
+                _textra=()
+                mapfile -t _textra < <(carddemo_program_extra_flags "$_tname")
+                # WHY (MA-19 -- warnings-fatal gate): the COBOL unit layer is
+                # held to a ZERO-WARNING standard. We compile every test under
+                # -Wall -Wextra, capture the diagnostics, and FAIL the build on
+                # any warning that is not on the test's documented allowlist
+                # (carddemo_test_warn_allowlist). This is preferred over -Werror
+                # so we can (a) exclude the environmental gcc _FORTIFY_SOURCE
+                # note that has nothing to do with the COBOL source, and (b) give
+                # a precise, auditable per-warning failure message.
+                # WHY (MA-02 -- cwd-independent COPY resolution): tests that
+                # EXECUTE the real UUT COPY it by a repo-root-relative path
+                # ("app/cbl/CSUTLDTC.cbl"); adding -I "$CARDDEMO_REPO_ROOT" lets
+                # that resolve via the include path regardless of the caller's
+                # cwd (verified: builds+runs green from an unrelated directory),
+                # removing the "compilation depends on current directory" hazard.
+                # -I "$_tdir" resolves test-local copybooks; app/cpy comes from
+                # carddemo_cobc_flags.
+                _tlog="$CARDDEMO_BUILD_DIR/$_tname.buildlog"
+                if cobc -x "${local_flags[@]}" "${_textra[@]}" \
+                        -Wall -Wextra \
+                        -I "$CARDDEMO_REPO_ROOT" -I "$_tdir" \
+                        -o "$CARDDEMO_BUILD_DIR/$_tname" "$_tf" 2>"$_tlog"; then
+                    # Compiled without a hard error; now apply the warning gate.
+                    _allow="$(carddemo_test_warn_allowlist "$_tname")"
+                    _resfile="$CARDDEMO_BUILD_DIR/$_tname.warnres"
+                    # WHY (errexit/pipefail-safe): under `set -euo pipefail` a
+                    # grep that matches nothing returns 1 and would abort the
+                    # script, so the filter pipeline is written to a file and
+                    # guarded with `|| true`; emptiness is then tested with -s.
+                    # The environmental `_FORTIFY_SOURCE redefined` note (emitted
+                    # by the gcc back end, not cobc) is always excluded.
+                    if [ -n "$_allow" ]; then
+                        grep 'warning:' "$_tlog" \
+                            | grep -v '_FORTIFY_SOURCE' \
+                            | grep -Ev "$_allow" >"$_resfile" || true
+                    else
+                        grep 'warning:' "$_tlog" \
+                            | grep -v '_FORTIFY_SOURCE' >"$_resfile" || true
+                    fi
+                    if [ -s "$_resfile" ]; then
+                        echo "[build]   FAILED (warnings-fatal): $_tname emitted" >&2
+                        echo "[build]   non-allowlisted warning(s):" >&2
+                        sed 's/^/[build]     /' "$_resfile" >&2
+                        overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
+                    else
+                        echo "[build]   OK -> $CARDDEMO_BUILD_DIR/$_tname"
+                        # Surface allowlisted (documented, immutable) warnings for
+                        # the audit trail without failing the build.
+                        if [ -n "$_allow" ] && grep -Eq "$_allow" "$_tlog"; then
+                            echo "[build]     note: carries documented allowlisted warning(s):"
+                            grep 'warning:' "$_tlog" | grep -Ev '_FORTIFY_SOURCE' \
+                                | grep -E "$_allow" | sed 's/^/[build]       /' || true
+                        fi
+                    fi
+                    rm -f "$_resfile"
                 else
-                    echo "[build]   FAILED: $_tname" >&2
+                    echo "[build]   FAILED: $_tname (compile error)" >&2
+                    sed 's/^/[build]     /' "$_tlog" >&2
                     overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
                 fi
+                rm -f "$_tlog"
             done
         fi
     else
-        echo "[build] tests/cobol-unit not present yet - skipping test-program build"
+        echo "[build] ERROR: --with-tests requested but $_tdir does not exist" >&2
+        overall_rc="$(carddemo_rc_worst "$overall_rc" "$CARDDEMO_RC_FAIL")"
     fi
 fi
 

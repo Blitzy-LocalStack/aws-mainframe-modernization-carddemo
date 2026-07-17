@@ -1,39 +1,180 @@
 # =============================================================================
-# tests/requirements-test.txt
-# -----------------------------------------------------------------------------
-# Purpose:
-#   Pinned, test-only Python dependencies for the AWS CardDemo automated test
-#   suite (integration + e2e pytest layers, coverage measurement, and the
-#   LocalStack-targeted AWS client shims). Install with:
-#       python3 -m pip install -r tests/requirements-test.txt
+# requirements-test.txt  --  AWS CardDemo automated test-suite Python toolchain
+# =============================================================================
 #
-# WHY (pinning rationale):
-#   - Exact '==' pins guarantee deterministic, reproducible CI runs, which is a
-#     financial-enterprise requirement; a floating range could silently change
-#     behavior between runs and break byte-deterministic golden comparisons.
-#   - 'localstack' itself is deliberately NOT listed here: it is a CLI tool
-#     installed/managed separately and driven headless (Docker-less
-#     'localstack ephemeral create'), not a pytest import dependency. Only its
-#     awscli client shims (below) are Python packages.
+# Purpose:
+#   Fully pinned, SHA-256-hash-locked dependency closure for the CardDemo
+#   test harness (pytest orchestration, coverage, and the LocalStack/AWS
+#   dataset-staging layer). Every distribution in the transitive closure is
+#   listed with the exact SHA-256 of the artifact resolved on the reference
+#   platform, so `pip install --require-hashes` reproduces a byte-identical
+#   environment and fails closed on any tampered or substituted artifact --
+#   the supply-chain integrity bar expected of financial-enterprise software.
+#
+# Reference platform (the artifacts hashed below were resolved here):
+#   CPython 3.13 (cp313), Linux x86_64 (manylinux2014 / manylinux_2_17).
+#   WHY platform-specific: several wheels in this closure are compiled and
+#   therefore platform-tagged (coverage, cryptography, cffi, PyYAML, psutil,
+#   ruamel.yaml). Their hashes are valid for the reference platform's wheel.
+#   Trade-off: a single-platform hash lock is exact and verifiable here (the
+#   CI runner IS this platform per the AAP) but must be regenerated to add a
+#   second platform -- see "Regenerating" below. We deliberately do NOT list
+#   hashes we cannot verify on this runner, because a fabricated/partial hash
+#   is worse than an honest single-platform lock.
+#
+# Virtual environment (activate BEFORE installing or running the suite):
+#   The runner ships a repo-root .venv (Python 3.13). Activate it with either:
+#       source .venv/bin/activate          # interactive / CI shell
+#   or invoke tools directly without activation:
+#       .venv/bin/python -m pytest ...     # e.g. from a runner script
+#   WHY: plain `python3 -m venv` fails on this image (the apt pip seed is
+#   removed); if the .venv is missing, recreate it with:
+#       python3 -m venv .venv --without-pip
+#       curl -fsSL https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
+#
+# Installing (hash-verified, deterministic):
+#       source .venv/bin/activate
+#       pip install --require-hashes -r tests/requirements-test.txt
+#   --require-hashes forces every requirement to be pinned AND hashed (this
+#   file satisfies both) and rejects any artifact whose hash does not match.
+#
+# Regenerating (after a deliberate version bump, or to add a platform):
+#       python3 -m pip download -r <direct-deps> --dest <dir>   # full closure
+#       # then, per artifact:  python3 -m pip hash <artifact>
+#   Commit the refreshed pinned+hashed block. Do this on each target platform
+#   and merge the resulting --hash lines under the corresponding package.
+#
+# LocalStack (included here, unlike the prior revision):
+#   `localstack` (and its closure: localstack-client, plux, dnslib, etc.) is
+#   pinned below so the AWS-emulation test layer is reproducible from this one
+#   manifest. WHY changed: the earlier header claimed LocalStack was managed
+#   "separately"; that left the staging layer unlocked and non-reproducible,
+#   which is exactly the gap MA-07 flagged. It is now part of the locked set.
+#
+# awscli version note (drift resolved):
+#   Pinned to awscli==1.45.50. WHY: the AAP 0.6.1 table referenced 1.45.49, but
+#   the artifact actually installed on the runner -- and the one currently
+#   resolvable from PyPI -- is 1.45.50. Pinning the real, installed, hashable
+#   version removes the manifest-vs-environment drift MA-07 called out; pinning
+#   a version we cannot hash on this runner would reintroduce the drift.
+#
+# Direct vs transitive:
+#   The seven AAP 0.6.1 direct dependencies are each preceded by a one-line
+#   `# Direct (AAP 0.6.1): ...` rationale. All other entries are transitive
+#   dependencies included to complete the hash-locked closure.
+#
+# Scope / provenance:
+#   Test-only, additive dependencies -- installing this file does not modify
+#   the production COBOL/JCL application in any way. The GnuCOBOL toolchain and
+#   the GCBLUnit COBOL unit framework are NOT Python packages and are therefore
+#   provisioned outside this file (see tests/cobolget.json and tests/import.json
+#   for the vendored-COBOL provenance).
 # =============================================================================
 
-# Core test runner + JUnit-XML reporting used by every pytest layer.
-pytest==9.1.1
-
-# Parallel execution (`pytest -n auto`) used to PROVE test isolation.
-pytest-xdist==3.8.0
-
-# Python-harness line/branch coverage (COBOL coverage is gcov, measured separately).
-coverage==7.15.2
-
-# LocalStack-targeted AWS clients for the optional S3 dataset-staging layer.
-# WHY: awscli-local provides `awslocal`, a thin wrapper that points awscli at the
-# LocalStack endpoint, so tests never touch a real AWS account.
-awscli-local==0.22.2
-awscli==1.45.49
-
-# Optional golden-file plugin. Pinned to 1.0.1 because older 0.2.x releases
-# pinned pytest<8 and would conflict with pytest 9.x. The suite's PRIMARY golden
-# path uses the custom comparator tests/helpers/golden_compare.py (no pytest
-# version constraint), so this plugin is a convenience only.
-pytest-golden==1.0.1
+asn1crypto==1.5.1 \
+    --hash=sha256:db4e40728b728508912cbb3d44f19ce188f218e9eba635821bb4b68564f8fd67
+# Direct (AAP 0.6.1): S3 dataset staging against LocalStack (aws CLI).
+awscli==1.45.50 \
+    --hash=sha256:f42974e141876a7acfffa6ccf7d9de40d54b08ba014e4cb8ce32e16dfd8277fa
+# Direct (AAP 0.6.1): awslocal wrapper that retargets awscli at the LocalStack endpoint.
+awscli-local==0.22.2 \
+    --hash=sha256:1901ebef343ba8cbde06f9f6406b5415ef53e93296718c2c31c9d49b0b09bd9d
+boto3==1.43.50 \
+    --hash=sha256:779eb5cfa8bd1d615f36051465f8182860219eef78b4ab8ca2c666bb56702325
+botocore==1.43.50 \
+    --hash=sha256:4a57a1e0dd4a8be855c29183fc0e029c18e9ec84cd4ac172869f3e800f972528
+cachetools==7.1.4 \
+    --hash=sha256:323dc4127934744db5b54eb4924482d7edafbf9554e820d1531c2e08c0e4ef54
+certifi==2026.6.17 \
+    --hash=sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db
+cffi==2.1.0 \
+    --hash=sha256:799416bae98336e400981ff6e532d67d5c709cfb30afb79865a1315f94b0e224
+charset-normalizer==3.4.9 \
+    --hash=sha256:84fd18bcc17526fc2b3c1af7d2b9217d32c9c04448c16ec693b9b4f1985c3d33
+click==8.4.2 \
+    --hash=sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76
+colorama==0.4.6 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+# Direct (AAP 0.6.1): Python-harness line/branch coverage; gates via .coveragerc fail_under.
+coverage==7.15.2 \
+    --hash=sha256:7dc2950a2992cd676d35c20ae63522836deeb034f08874699d14068710af3dc1
+cryptography==49.0.0 \
+    --hash=sha256:cbc77da8c523d5abd028635ba850a6966fcee2c82e2bf65a41d1d8afe0f98be9
+dnslib==0.9.26 \
+    --hash=sha256:e68719e633d761747c7e91bd241019ef5a2b61a63f56025939e144c841a70e0d
+dnspython==2.8.0 \
+    --hash=sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af
+docker==7.2.0 \
+    --hash=sha256:a3f45fdeb9165e2d25d9a1d02ddf3bc70fb572cf5ebbf9b58558c22caf29b71f
+docutils==0.19 \
+    --hash=sha256:5e1de4d849fee02c63b040a4a3fd567f4ab104defd8a5511fbbc24a8a017efbc
+execnet==2.1.2 \
+    --hash=sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec
+idna==3.18 \
+    --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2
+iniconfig==2.3.0 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+jmespath==1.1.0 \
+    --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+# Direct (AAP 0.6.1): headless AWS emulator CLI for the dataset-staging test layer.
+localstack==2026.6.1 \
+    --hash=sha256:f905b83d798c1c40a342761600f84f79b5d764ea348452ea38fd6018aa18aec7
+localstack-client==2.11 \
+    --hash=sha256:1cbd7bf1f03b9b553ffe7ea10fe137f44e8d690a37af9c6515eba61a2379fc46
+markdown-it-py==4.2.0 \
+    --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+mdurl==0.1.2 \
+    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+packaging==26.2 \
+    --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e
+pluggy==1.6.0 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+plux==1.16.0 \
+    --hash=sha256:d31a46809f6160278d8726a9e2e2b0eda5fa959fe489ec0d65951c123ed37534
+psutil==7.2.2 \
+    --hash=sha256:076a2d2f923fd4821644f5ba89f059523da90dc9014e85f8e45a5774ca5bc6f9
+pyasn1==0.6.4 \
+    --hash=sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+Pygments==2.20.0 \
+    --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
+PyJWT==2.13.0 \
+    --hash=sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728
+PyOTP==2.10.0 \
+    --hash=sha256:1df2f6a1bcc3bb0716172a5215ddc2f8c7c7fd26a13df9927d52e1746934836c
+# Direct (AAP 0.6.1): integration/E2E orchestrator; emits JUnit XML via --junitxml.
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+# Direct (AAP 0.6.1): optional golden-file support; disabled by default in pytest.ini (MI-02).
+pytest-golden==1.0.1 \
+    --hash=sha256:189abdbf61bad53423db5a9005390c1f96cc1aa404e39f2cbeea8a229a17b99b
+# Direct (AAP 0.6.1): parallel execution (-n auto) that validates test isolation.
+pytest-xdist==3.8.0 \
+    --hash=sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88
+python-dateutil==2.9.0.post0 \
+    --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+python-dotenv==1.2.2 \
+    --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a
+PyYAML==6.0.3 \
+    --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+rich==15.0.0 \
+    --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+rsa==4.7.2 \
+    --hash=sha256:78f9a9bf4e7be0c5ded4583326e7461e3a3c5aae24073648b4bdfa797d78c9d2
+ruamel.yaml==0.19.1 \
+    --hash=sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93
+s3transfer==0.19.1 \
+    --hash=sha256:d5fd7005ee39307455ad5f310b5ea67f4b1960d7fed5b3671ee50c249de675de
+semver==3.0.4 \
+    --hash=sha256:9c824d87ba7f7ab4a1890799cec8596f15c1241cb473404ea1cb0c55e4b04746
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+tabulate==0.10.0 \
+    --hash=sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3
+testfixtures==12.3.0 \
+    --hash=sha256:da013e07f1e850b4d92ea6045c4a71f49d6ddcaab11c8b29f65ea38ff678aee8
+urllib3==2.7.0 \
+    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897

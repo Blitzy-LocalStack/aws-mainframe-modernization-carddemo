@@ -1,6 +1,28 @@
       ***************************************************************
       * CBIMPORT_test.cbl - GCBLUnit test for app/cbl/CBIMPORT.cbl
       ***************************************************************
+      * TYPE        : GCBLUnit spec-replica / reverse-map contract
+      *               test (supplemental specification, MA-15 / MA-18).
+      * Executes UUT: NO.  app/cbl/CBIMPORT.cbl is a monolithic, file-
+      *               driven main (0000-MAIN OPENs an INDEXED EXPFILE
+      *               plus six sequential output files).  This unit
+      *               layer REPLICATES only the record-type dispatch and
+      *               the customer reverse-map logic in WORKING-STORAGE
+      *               as a SUPPLEMENTAL SPECIFICATION; it does NOT, and
+      *               does not claim to, execute CBIMPORT.  The byte-
+      *               identical export->import round-trip that DOES run
+      *               the real program is owned by the integration layer
+      *               (tests/integration/test_export_import.py).
+      * PRIVACY (MA-13):
+      *   All customer values seeded here are well-known SYNTHETIC
+      *   placeholders (JOHN DOE / descending-digit non-issued SSN
+      *   987654321 / DOB 1985-03-15) taken from the AWS CardDemo
+      *   synthetic demo seeds - not real PII.  Assertions run through
+      *   the vendored GCBLUnit, whose assert diagnostics are hardened
+      *   to emit only operand LENGTHS and the first-diff OFFSET (never
+      *   the operand bytes), so no complete SSN, name, DOB or
+      *   government-ID is ever printed, even on a failing assertion.
+      ***************************************************************
       * PURPOSE:
       *   Spec-encode the unit-testable core of CBIMPORT (Branch
       *   Migration Import): the 6-way record-type dispatch of
@@ -67,6 +89,22 @@
        01  WS-EXP-SSN               PIC 9(09) VALUE 987654321.
        01  WS-EXP-DOB               PIC X(10) VALUE '1985-03-15'.
        01  WS-EXP-FICO              PIC 9(03) VALUE 789.
+      * Byte-identical 01-level "actual" mirrors for the decoded
+      * CUSTOMER-RECORD fields.  WHY (Refactoring Rationale, MA-19):
+      * GCBLUnit's assert-equals is a CALL, and GnuCOBOL under
+      * -Wall -Wextra rejects a 05-level copybook sub-item passed BY
+      * REFERENCE ("not a 01 or 77 level item", -Wcall-params).  The
+      * decoded CUST-* fields are 05-level, so each is copied into its
+      * same-PIC/USAGE 01-level mirror immediately before the assertion
+      * (a byte-preserving MOVE).  Alternatives Considered: suppressing
+      * with -Wno-call-params was REJECTED - the reviewer asked for a
+      * code fix, not a silenced diagnostic.
+       01  WS-ACT-CUST-ID           PIC 9(09).
+       01  WS-ACT-FIRST-NAME        PIC X(25).
+       01  WS-ACT-LAST-NAME         PIC X(25).
+       01  WS-ACT-SSN               PIC 9(09).
+       01  WS-ACT-DOB               PIC X(10).
+       01  WS-ACT-FICO              PIC 9(03).
       * Receives the failure count from gcblunit-result (S9(9) COMP per
       * the framework contract) before it is mapped onto RETURN-CODE.
        01  WS-RESULT                PIC S9(9) COMP VALUE 0.
@@ -74,6 +112,14 @@
       * ============================================================
       * 0000-MAIN : entry unit - runs the three scenarios in order,
       * then publishes the failure count as the process exit code.
+      * PARAMS  : none (standalone cobc -x main; no LINKAGE / run args).
+      * RETURNS : sets RETURN-CODE to the accumulated assertion-failure
+      *           count (0 => CI PASS; non-0 => CI FAIL).
+      * ERRORS  : none raised; GCBLUnit counts failures, never abends.
+      * WHY - Trade-off: the failure count is moved to RETURN-CODE (not
+      *           merely DISPLAYed) because scripts/run_unit_tests.sh
+      *           keys pass/fail off the process exit code, so the tally
+      *           MUST reach the exit status to be observable in CI.
       * ============================================================
        0000-MAIN.
       * Scenario 1 - record-type dispatch (spec-encodes the 2200
@@ -86,27 +132,33 @@
            PERFORM 2200-ENCODED
            MOVE 1 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
            MOVE 'A' TO EXPORT-REC-TYPE
            PERFORM 2200-ENCODED
            MOVE 2 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
            MOVE 'X' TO EXPORT-REC-TYPE
            PERFORM 2200-ENCODED
            MOVE 3 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
            MOVE 'T' TO EXPORT-REC-TYPE
            PERFORM 2200-ENCODED
            MOVE 4 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
            MOVE 'D' TO EXPORT-REC-TYPE
            PERFORM 2200-ENCODED
            MOVE 5 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
       * 'Q' stands in for ANY value other than C/A/X/T/D (WHEN OTHER).
            MOVE 'Q' TO EXPORT-REC-TYPE
            PERFORM 2200-ENCODED
            MOVE 6 TO WS-EXP-HANDLER
            CALL 'assert-equals' USING WS-EXP-HANDLER WS-HANDLER
+           END-CALL
       * Scenario 2 - customer reverse-map round-trip (spec 2300).
       * WHY - Trade-off: asserting the DISPLAY result of the binary
       * (COMP) id and the packed (COMP-3) FICO score proves the import
@@ -123,12 +175,29 @@
            MOVE '1985-03-15' TO EXP-CUST-DOB-YYYY-MM-DD
            MOVE 789 TO EXP-CUST-FICO-CREDIT-SCORE
            PERFORM 2300-ENCODED
-           CALL 'assert-equals' USING WS-EXP-CUST-ID CUST-ID
-           CALL 'assert-equals' USING WS-EXP-FIRST-NAME CUST-FIRST-NAME
-           CALL 'assert-equals' USING WS-EXP-LAST-NAME CUST-LAST-NAME
-           CALL 'assert-equals' USING WS-EXP-SSN CUST-SSN
-           CALL 'assert-equals' USING WS-EXP-DOB CUST-DOB-YYYY-MM-DD
-           CALL 'assert-equals' USING WS-EXP-FICO CUST-FICO-CREDIT-SCORE
+      * Copy each decoded 05-level field into its 01-level mirror before
+      * the CALL (see WS-ACT-* block for the MA-19 rationale); every MOVE
+      * is a same-PIC/USAGE byte-for-byte copy, so the compared value is
+      * identical to the decoded field.
+           MOVE CUST-ID TO WS-ACT-CUST-ID
+           CALL 'assert-equals' USING WS-EXP-CUST-ID WS-ACT-CUST-ID
+           END-CALL
+           MOVE CUST-FIRST-NAME TO WS-ACT-FIRST-NAME
+           CALL 'assert-equals' USING WS-EXP-FIRST-NAME
+               WS-ACT-FIRST-NAME
+           END-CALL
+           MOVE CUST-LAST-NAME TO WS-ACT-LAST-NAME
+           CALL 'assert-equals' USING WS-EXP-LAST-NAME WS-ACT-LAST-NAME
+           END-CALL
+           MOVE CUST-SSN TO WS-ACT-SSN
+           CALL 'assert-equals' USING WS-EXP-SSN WS-ACT-SSN
+           END-CALL
+           MOVE CUST-DOB-YYYY-MM-DD TO WS-ACT-DOB
+           CALL 'assert-equals' USING WS-EXP-DOB WS-ACT-DOB
+           END-CALL
+           MOVE CUST-FICO-CREDIT-SCORE TO WS-ACT-FICO
+           CALL 'assert-equals' USING WS-EXP-FICO WS-ACT-FICO
+           END-CALL
       * Scenario 3 - unknown-record tally (spec-encodes 2700) plus the
       * documented VALIDATE gap.
       * WHY - Assumption: 2700-ENCODED mirrors the single observable
@@ -147,15 +216,21 @@
            MOVE 'Q' TO EXPORT-REC-TYPE
            PERFORM 2700-ENCODED
            CALL 'assert-equals' USING WS-EXP-UNKNOWN WS-UNKNOWN-COUNT
+           END-CALL
       * Emit a readable tally into the CI log, then bridge the failure
       * count onto RETURN-CODE (GnuCOBOL maps it to the exit status).
            CALL 'gcblunit-summary'
+           END-CALL
            CALL 'gcblunit-result' USING WS-RESULT
+           END-CALL
            MOVE WS-RESULT TO RETURN-CODE
            STOP RUN.
       * ============================================================
       * 2200-ENCODED : replica of source 2200-PROCESS-RECORD-BY-TYPE.
       * Sets WS-HANDLER to the branch code the dispatcher would pick.
+      * PARAMS  : none (internal paragraph; reads EXPORT-REC-TYPE).
+      * RETURNS : none (sets the shared WS-HANDLER proxy in place).
+      * ERRORS  : none raised.
       * ============================================================
        2200-ENCODED.
            EVALUATE EXPORT-REC-TYPE
@@ -169,6 +244,10 @@
       * ============================================================
       * 2300-ENCODED : replica of source 2300-PROCESS-CUSTOMER-RECORD
       * reverse map, minus the WRITE (a file-layer concern).
+      * PARAMS  : none (internal paragraph; reads the EXP-CUST-* fields
+      *           of EXPORT-RECORD).
+      * RETURNS : none (populates the shared CUSTOMER-RECORD in place).
+      * ERRORS  : none raised.
       * WHY - Assumption: the MOVE set mirrors source 2300 field-for-
       * field so the decode under test is the exact production inverse;
       * INITIALIZE clears CUSTOMER-RECORD first, exactly as 2300 does.
@@ -196,9 +275,13 @@
       * ============================================================
       * 2700-ENCODED : replica of source 2700-PROCESS-UNKNOWN-RECORD
       * one observable side effect - increment the unknown-type tally.
+      * PARAMS  : none (internal paragraph).
+      * RETURNS : none (increments the shared WS-UNKNOWN-COUNT tally).
+      * ERRORS  : none raised.
       * ============================================================
        2700-ENCODED.
-           ADD 1 TO WS-UNKNOWN-COUNT.
+           ADD 1 TO WS-UNKNOWN-COUNT
+           END-ADD.
        END PROGRAM CBIMPORT-test.
       * ============================================================
       * Vendored GCBLUnit framework units (assert-equals, gcblunit-*).

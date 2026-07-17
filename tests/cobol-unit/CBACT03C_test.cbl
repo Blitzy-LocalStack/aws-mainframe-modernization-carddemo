@@ -1,8 +1,18 @@
       ******************************************************************
       * Program     : CBACT03C_test.cbl
       * Application : CardDemo -- automated test suite (unit layer)
-      * Type        : GCBLUnit COBOL unit test
-      * Under test  : app/cbl/CBACT03C.cbl (XREF master read/print)
+      * Type        : GCBLUnit COBOL layout-contract test
+      *               (supplemental specification, per MA-15 / MA-18)
+      * Contract    : copybook CVACT03Y (CARD-XREF-RECORD, RECLN 50) --
+      *               the fixed-width record layout CBACT03C depends on
+      * Executes UUT: NO. app/cbl/CBACT03C.cbl is a monolithic, file-driven
+      *               main; its real indexed-file read/print round-trip and
+      *               record counts are owned by the integration layer
+      *               (tests/integration/test_provisioning.py). This unit
+      *               layer asserts ONLY the DATA CONTRACT (record/field
+      *               lengths and byte offsets) and is deliberately retained
+      *               as a supplemental specification test -- it is NOT and
+      *               does not claim to be a CBACT03C program-execution test.
       *
       * PURPOSE:
       *   Validate the single-sourced, fixed-width record-layout
@@ -84,6 +94,20 @@
        01  WS-FAILS                    PIC S9(9) COMP.
       *
        PROCEDURE DIVISION.
+      *----------------------------------------------------------------*
+      * ROUTINE : 0000-MAIN
+      * PURPOSE : Drive every CVACT03Y layout/offset assertion in order,
+      *           publish the GCBLUnit tally, and map the accumulated
+      *           failure count to this process's exit status.
+      * PARAMS  : none (standalone cobc -x main; no LINKAGE / run args).
+      * RETURNS : sets RETURN-CODE to the accumulated assertion-failure
+      *           count (0 => CI PASS; non-0 => CI FAIL).
+      * ERRORS  : none raised; GCBLUnit counts failures, never abends.
+      * WHY - Trade-off: the failure count is moved to RETURN-CODE (not
+      *           merely DISPLAYed) because scripts/run_unit_tests.sh keys
+      *           pass/fail purely off the process exit code, so the tally
+      *           MUST reach the exit status to be observable in CI.
+      *----------------------------------------------------------------*
        0000-MAIN.
            DISPLAY 'CBACT03C_test: CVACT03Y layout contract'
       *
@@ -93,6 +117,7 @@
            MOVE 50 TO WS-EXP
            MOVE LENGTH OF CARD-XREF-RECORD TO WS-LEN
            CALL 'assert-equals' USING WS-EXP WS-LEN
+           END-CALL
       *
       *----------------------------------------------------------------*
       * 2) Field-length guards for each named field.                   *
@@ -100,14 +125,17 @@
            MOVE 16 TO WS-EXP
            MOVE LENGTH OF XREF-CARD-NUM TO WS-LEN
            CALL 'assert-equals' USING WS-EXP WS-LEN
+           END-CALL
       *
            MOVE 9 TO WS-EXP
            MOVE LENGTH OF XREF-CUST-ID TO WS-LEN
            CALL 'assert-equals' USING WS-EXP WS-LEN
+           END-CALL
       *
            MOVE 11 TO WS-EXP
            MOVE LENGTH OF XREF-ACCT-ID TO WS-LEN
            CALL 'assert-equals' USING WS-EXP WS-LEN
+           END-CALL
       *
       *----------------------------------------------------------------*
       * 3) Field-encoding / offset round-trip.                         *
@@ -123,21 +151,26 @@
            MOVE '1234567890123456' TO WS-E16
            MOVE CARD-XREF-RECORD(1:16) TO WS-X16
            CALL 'assert-equals' USING WS-E16 WS-X16
+           END-CALL
       *
            MOVE '123456789' TO WS-E9
            MOVE CARD-XREF-RECORD(17:9) TO WS-X9
            CALL 'assert-equals' USING WS-E9 WS-X9
+           END-CALL
       *
            MOVE '12345678901' TO WS-E11
            MOVE CARD-XREF-RECORD(26:11) TO WS-X11
            CALL 'assert-equals' USING WS-E11 WS-X11
+           END-CALL
       *
       *----------------------------------------------------------------*
       * Publish the tally (audit readability), then the failure        *
       * count, and map it to the process exit status (GCBLUnit).       *
       *----------------------------------------------------------------*
            CALL 'gcblunit-summary'
+           END-CALL
            CALL 'gcblunit-result' USING WS-FAILS
+           END-CALL
            MOVE WS-FAILS TO RETURN-CODE
            STOP RUN.
       *

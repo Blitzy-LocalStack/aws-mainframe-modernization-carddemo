@@ -1,8 +1,17 @@
       ************************************************************
       * Program-ID  : CBACT02C-test
       * Application : CardDemo automated test suite (UNIT layer)
-      * Type        : GCBLUnit COBOL unit test
-      * Under test  : app/cbl/CBACT02C.cbl (card master read/print)
+      * Type        : GCBLUnit COBOL layout-contract test
+      *               (supplemental specification, per MA-15 / MA-18)
+      * Contract    : copybook CVACT02Y (CARD-RECORD, 150 bytes) -- the
+      *               fixed-width record layout CBACT02C depends on
+      * Executes UUT: NO. CBACT02C is a monolithic, file-driven main; its
+      *               real read/print round-trip and record counts are
+      *               owned by the integration layer (tests/integration/
+      *               test_provisioning.py). This unit asserts ONLY the
+      *               data contract (record/field lengths and byte offsets)
+      *               and is deliberately retained as a supplemental
+      *               specification test -- NOT a CBACT02C execution test.
       * Framework   : GCBLUnit 1.22.6 (COPY "gcblunit.cbl" at end)
       *
       * PURPOSE:
@@ -46,7 +55,10 @@
       ************************************************************
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CBACT02C-test.
-       AUTHOR. Blitzy.
+      * WHY (MA-19): the obsolete AUTHOR paragraph was removed. AUTHOR is
+      * an archaic COBOL construct that cobc flags under -Wobsolete, which
+      * the test build (scripts/build_test_programs.sh) now treats as
+      * fatal; authorship is recorded in the header comment block above.
        DATA DIVISION.
        WORKING-STORAGE SECTION.
       *
@@ -86,6 +98,19 @@
       * and is copied into RETURN-CODE to become the exit status.
        01  WS-FAILURES               PIC S9(9) COMP.
       *
+      *-----------------------------------------------------------
+      * ROUTINE : MAIN (implicit first paragraph of PROCEDURE DIVISION)
+      * PURPOSE : Initialise GCBLUnit, assert the CVACT02Y record/field
+      *           lengths and the fixed-width byte-offset round-trip of
+      *           CARD-RECORD, then publish the tally and bridge the
+      *           failure count to the process exit status.
+      * PARAMS  : none (standalone cobc -x main; no LINKAGE).
+      * RETURNS : sets RETURN-CODE = accumulated assertion-failure count.
+      * ERRORS  : none raised; GCBLUnit counts failures, never abends.
+      * WHY - Trade-off: offsets are asserted against positional
+      *           CARD-RECORD(offset:len) slices rather than named fields
+      *           so a shifted offset (not just a wrong value) fails.
+      *-----------------------------------------------------------
        PROCEDURE DIVISION.
       *
       * WHY - Assumption: EXTERNAL counters are zero-initialised by
@@ -94,6 +119,7 @@
       * reproducible regardless of prior in-process state
       * (financial-grade determinism).
            CALL 'gcblunit-init'
+           END-CALL
       *
       *-----------------------------------------------------------
       * 1. Layout contract - record and per-field byte lengths
@@ -107,37 +133,44 @@
            MOVE LENGTH OF CARD-RECORD TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
            MOVE 16 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-NUM TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
            MOVE 11 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-ACCT-ID TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
            MOVE 3 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-CVV-CD TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
            MOVE 50 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-EMBOSSED-NAME TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
       * Documented quirk: field spelled CARD-EXPIRAION-DATE verbatim
            MOVE 10 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-EXPIRAION-DATE TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
 
            MOVE 1 TO WS-EXPECTED-LEN
            MOVE LENGTH OF CARD-ACTIVE-STATUS TO WS-ACTUAL-LEN
            CALL 'assert-equals'
                USING WS-EXPECTED-LEN WS-ACTUAL-LEN
+           END-CALL
       *
       *-----------------------------------------------------------
       * 2. Field-encoding / offset round-trip
@@ -165,18 +198,23 @@
       * even if an offset shifted.
            CALL 'assert-equals'
                USING WS-EXP-CARD-NUM CARD-RECORD(1:16)
+           END-CALL
 
            CALL 'assert-equals'
                USING WS-EXP-ACCT-ID CARD-RECORD(17:11)
+           END-CALL
 
            CALL 'assert-equals'
                USING WS-EXP-CVV CARD-RECORD(28:3)
+           END-CALL
 
            CALL 'assert-equals'
                USING WS-EXP-EXP-DATE CARD-RECORD(81:10)
+           END-CALL
 
            CALL 'assert-equals'
                USING WS-EXP-STATUS CARD-RECORD(91:1)
+           END-CALL
       *
       *-----------------------------------------------------------
       * 3. Publish result and bridge to the process exit code
@@ -186,7 +224,9 @@
       * the shared failure count and RETURN-CODE carries it out of
       * the process.
            CALL 'gcblunit-summary'
+           END-CALL
            CALL 'gcblunit-result' USING WS-FAILURES
+           END-CALL
            MOVE WS-FAILURES TO RETURN-CODE
            STOP RUN.
        END PROGRAM CBACT02C-test.

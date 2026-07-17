@@ -64,32 +64,94 @@ _carddemo_env_self="${BASH_SOURCE[0]:-$0}"
 _carddemo_scripts_dir="$(cd "$(dirname "$_carddemo_env_self")" 2>/dev/null && pwd)"
 if [ -z "$_carddemo_scripts_dir" ]; then
     echo "[carddemo] ERROR: unable to resolve scripts directory from '$_carddemo_env_self'." >&2
-    # WHY: return (not exit) so a bad source cannot kill an interactive shell.
+    # WHY (Trade-off): `return` when this file is sourced (the normal case) so a
+    # bad source cannot kill an interactive shell; `exit` only when it is executed
+    # directly. The `return ... || exit` idiom expresses both modes without an
+    # explicit sourced/executed branch here.
+    # shellcheck disable=SC2317  # MI-01: the `exit` fallback is reachable ONLY in
+    # executed mode; shellcheck cannot know `return` fails outside a function when
+    # executed, so it wrongly marks the fallback unreachable -- this directive
+    # documents that the guard is intentional and correct.
     return 1 2>/dev/null || exit 1
 fi
 export CARDDEMO_REPO_ROOT="${CARDDEMO_REPO_ROOT:-$(cd "$_carddemo_scripts_dir/.." && pwd)}"
 
 # ---------------------------------------------------------------------------
-# Core workspace / build / reports paths.
-# WHY (Refactoring rationale): defining these once here means each runner can
-# assume the directories exist instead of repeating mkdir logic (single source
-# of truth). All use `${VAR:-default}` so an outer override (from CI or a
-# per-test harness) always wins and re-sourcing is idempotent.
+# Trusted, shared, repo-local build / reports paths (the "trusted cache").
+# WHY (MA-04 -- separate the trusted cache from the mutable workspace):
+# compiled programs and CI reports are reusable build artifacts, not per-test
+# mutable state, so they stay in stable repo-local dirs that concurrent runs may
+# share safely. They are git-ignored as generated outputs (see .gitignore, MI-06).
+# All use `${VAR:-default}` so an outer override always wins and re-sourcing is
+# idempotent.
 # ---------------------------------------------------------------------------
 export CARDDEMO_BUILD_DIR="${CARDDEMO_BUILD_DIR:-$CARDDEMO_REPO_ROOT/build}"
 export CARDDEMO_REPORTS_DIR="${CARDDEMO_REPORTS_DIR:-$CARDDEMO_REPO_ROOT/reports}"
-export CARDDEMO_TEST_WORKSPACE="${CARDDEMO_TEST_WORKSPACE:-$CARDDEMO_BUILD_DIR/test-workspace}"
+
+# ---------------------------------------------------------------------------
+# Per-run, per-worker, CONTAINED test workspace (mutable, isolated) -- MA-04.
+# WHY (unique contained workspace per run/worker): the previous default was a
+# single shared repo-local dir (build/test-workspace) that every parallel
+# pytest-xdist worker wrote into, so concurrent runs corrupted each other's data
+# and generated files leaked into the repo tree. The workspace now lives OUTSIDE
+# the repo, under a per-UID base in TMPDIR, keyed by a stable-per-run id and (when
+# present) the xdist worker name, so concurrent runs/workers never collide and
+# nothing mutable is written inside the repo (Repository Hygiene, MI-06).
+# WHY (Alternatives Considered): a fresh `mktemp` on every source() was rejected
+# because this file is sourced by several cooperating processes in one pipeline
+# that must agree on ONE workspace. A stable key (CARDDEMO_RUN_ID, else the
+# sourcing shell's PID) gives that agreement while staying unique across runs; a
+# parent runner that wants all children to share one workspace exports
+# CARDDEMO_RUN_ID. An explicit CARDDEMO_TEST_WORKSPACE override still wins and is
+# symlink-validated before use by carddemo_ensure_workspace().
+# ---------------------------------------------------------------------------
+_carddemo_ws_base="${TMPDIR:-/tmp}"
+# WHY (MI-01 / SC2155): compute the uid in its own statement first, so the
+# command substitution's exit status is not masked by the `export` assignment.
+_carddemo_uid="$(id -u 2>/dev/null || echo 0)"
+export CARDDEMO_WS_BASE="${_carddemo_ws_base%/}/carddemo-test-$_carddemo_uid"
+_carddemo_run_id="${CARDDEMO_RUN_ID:-$$}"
+# WHY (Assumption/defensive): the xdist worker token comes from the environment,
+# so it is sanitised to a safe path component -- only [A-Za-z0-9_-] survive -- to
+# prevent a crafted PYTEST_XDIST_WORKER from escaping the workspace path.
+_carddemo_worker="${PYTEST_XDIST_WORKER:-}"
+_carddemo_worker="${_carddemo_worker//[^A-Za-z0-9_-]/}"
+export CARDDEMO_TEST_WORKSPACE="${CARDDEMO_TEST_WORKSPACE:-$CARDDEMO_WS_BASE/run-$_carddemo_run_id${_carddemo_worker:+/$_carddemo_worker}}"
 export CARDDEMO_DATA_DIR="${CARDDEMO_DATA_DIR:-$CARDDEMO_TEST_WORKSPACE/data}"
 
-# WHY (Assumption): dynamically CALL'd subprograms (CSUTLDTC, CBSTM03B) are
-# compiled as shared modules; GnuCOBOL locates them at run time via
-# COB_LIBRARY_PATH, so default it to the build dir.
-export COB_LIBRARY_PATH="${COB_LIBRARY_PATH:-$CARDDEMO_BUILD_DIR}"
+# ---------------------------------------------------------------------------
+# COB_LIBRARY_PATH canonical merge (MA-02).
+# WHY: dynamically CALL'd subprograms (CSUTLDTC, CBSTM03B, CBACT04C) are compiled
+# as shared modules that GnuCOBOL locates at run time via COB_LIBRARY_PATH. The
+# previous `${COB_LIBRARY_PATH:-$BUILD_DIR}` form silently OMITTED the build dir
+# whenever the caller already had COB_LIBRARY_PATH set, leaving freshly-built
+# modules unresolvable. We now PREPEND the build dir (idempotently) so the build
+# output is always first on the search path without discarding an inherited one.
+# ---------------------------------------------------------------------------
+if [ -n "${COB_LIBRARY_PATH:-}" ]; then
+    case ":$COB_LIBRARY_PATH:" in
+        *":$CARDDEMO_BUILD_DIR:"*) : ;;   # build dir already present -> no change
+        *) export COB_LIBRARY_PATH="$CARDDEMO_BUILD_DIR:$COB_LIBRARY_PATH" ;;
+    esac
+else
+    export COB_LIBRARY_PATH="$CARDDEMO_BUILD_DIR"
+fi
 
-# Ensure the shared directories exist (idempotent).
-# WHY (Trade-off): `|| true` so that sourcing on a read-only filesystem still
-# succeeds for callers that only need the variable bindings, not the dirs.
-mkdir -p "$CARDDEMO_BUILD_DIR" "$CARDDEMO_REPORTS_DIR" "$CARDDEMO_DATA_DIR" 2>/dev/null || true
+# Create the TRUSTED dirs eagerly (cheap; the build needs BUILD_DIR).
+# WHY (MA-04 -- failures are surfaced, not swallowed): the previous `|| true`
+# hid a failed mkdir; we now emit a diagnostic and record CARDDEMO_ENV_WARN so a
+# diligent caller can detect it, while still not hard-aborting a sourced shell.
+# The mutable workspace is provisioned by carddemo_ensure_workspace() (defined
+# below and invoked once helpers exist) so a build needing only BUILD_DIR is
+# unaffected by a workspace that cannot yet be created.
+export CARDDEMO_ENV_WARN=0
+for _carddemo_d in "$CARDDEMO_BUILD_DIR" "$CARDDEMO_REPORTS_DIR"; do
+    if ! mkdir -p "$_carddemo_d" 2>/dev/null; then
+        echo "[carddemo] WARN: could not create trusted dir '$_carddemo_d'" >&2
+        CARDDEMO_ENV_WARN=1
+    fi
+done
+unset _carddemo_d
 
 # ---------------------------------------------------------------------------
 # GnuCOBOL ASSIGN-name -> file bindings.
@@ -193,9 +255,14 @@ carddemo_rc_from_pytest() {
     local pyrc="${1:-1}" mapped
     case "$pyrc" in
         0) mapped="$CARDDEMO_RC_PASS" ;;   # all tests passed
-        5) mapped="$CARDDEMO_RC_WARN" ;;   # no tests collected -> warn (a layer's
-                                           # suite may be built in parallel and be
-                                           # absent at run time)
+        # WHY (MA-03 -- reserve RC=4 for expected business rejects only): pytest
+        # exit 5 means "no tests were collected". At the remediation stage every
+        # test layer exists, so an empty collection is an ABSENT ENABLED LAYER
+        # (a mis-selected path, a broken import, or a lost test tree), NOT a
+        # benign warning. It is therefore mapped to FAIL(8) so a silently empty
+        # run can never be mistaken for success. RC=4 stays reserved for genuine
+        # business rejects (e.g. posting reject codes) surfaced by the tests.
+        5) mapped="$CARDDEMO_RC_FAIL" ;;   # no tests collected -> absent layer -> FAIL
         1) mapped="$CARDDEMO_RC_FAIL" ;;   # one or more tests failed
         *) mapped="$CARDDEMO_RC_FAIL" ;;   # 2/3/4 (interrupt/internal/usage) -> fail
     esac
@@ -226,6 +293,96 @@ carddemo_require_cmd() {
     echo "[carddemo] ERROR: required command '$cmd' not found on PATH. ${hint}" >&2
     return 1
 }
+
+carddemo_reject_symlink() {
+    # Purpose : fail if a path exists and is a symbolic link (MA-04 path-safety).
+    # Parameters:
+    #   $1 (string) - absolute path to check.
+    # Returns : 0 if the path is absent or a real (non-symlink) entry; 1 if it is
+    #           a symbolic link.
+    # Errors  : writes a diagnostic to stderr when rejecting a symlink.
+    # WHY (Trade-off): a pre-existing symlink at a workspace/output path is the
+    # classic "redirect the write" attack -- mkdir -p and subsequent writes would
+    # happily follow it out of the contained area. Refusing to use a symlinked
+    # leaf fails closed. We check the leaf explicitly (mkdir -p alone would
+    # traverse a symlinked component silently).
+    local p="${1:-}"
+    if [ -L "$p" ]; then
+        echo "[carddemo] ERROR: refusing to use symlinked path '$p'" >&2
+        return 1
+    fi
+    return 0
+}
+
+carddemo_ensure_dir() {
+    # Purpose : create a directory, refusing symlinks and surfacing failures.
+    # Parameters:
+    #   $1 (string) - absolute directory path.
+    # Returns : 0 on success; 1 on symlink rejection, mkdir failure, or a
+    #           non-writable result.
+    # Errors  : diagnostics to stderr; never exits (safe when sourced).
+    # WHY (MA-04): centralises the "safe mkdir" so every mutable path is created
+    # the same way -- symlink-checked and writability-verified -- rather than a
+    # bare `mkdir -p ... || true` that hides both problems.
+    local d="${1:-}"
+    if [ -z "$d" ]; then
+        echo "[carddemo] ERROR: carddemo_ensure_dir requires a path." >&2
+        return 1
+    fi
+    carddemo_reject_symlink "$d" || return 1
+    if ! mkdir -p "$d" 2>/dev/null; then
+        echo "[carddemo] ERROR: cannot create directory '$d'." >&2
+        return 1
+    fi
+    if [ ! -w "$d" ]; then
+        echo "[carddemo] ERROR: directory not writable: '$d'." >&2
+        return 1
+    fi
+    return 0
+}
+
+carddemo_ensure_workspace() {
+    # Purpose : provision the per-run mutable workspace and its data dir (MA-04).
+    # Parameters: none (reads CARDDEMO_TEST_WORKSPACE / CARDDEMO_DATA_DIR).
+    # Returns : 0 on success; 1 if either directory cannot be safely created.
+    # Errors  : diagnostics to stderr via carddemo_ensure_dir.
+    # WHY (Refactoring rationale): runners call this the moment they actually need
+    # the workspace, so a pure build (which needs only the trusted BUILD_DIR) is
+    # never blocked by a workspace that cannot be provisioned.
+    carddemo_ensure_dir "$CARDDEMO_TEST_WORKSPACE" || return 1
+    carddemo_ensure_dir "$CARDDEMO_DATA_DIR" || return 1
+    return 0
+}
+
+carddemo_cleanup_workspace() {
+    # Purpose : remove the per-run workspace tree ("clean it", MA-04).
+    # Parameters: none (reads CARDDEMO_TEST_WORKSPACE / CARDDEMO_WS_BASE).
+    # Returns : always 0 (best-effort; a missing tree is not an error).
+    # Errors  : none.
+    # WHY (Trade-off / fail-safe): we delete ONLY a workspace that sits UNDER our
+    # own per-UID TMPDIR base, never a parent, the repo, or an operator-supplied
+    # path outside the base. This guarantees an accidental CARDDEMO_TEST_WORKSPACE
+    # override to a sensitive location can never trigger a destructive recursive
+    # remove -- the containment check is the safety interlock.
+    local ws="${CARDDEMO_TEST_WORKSPACE:-}" base="${CARDDEMO_WS_BASE:-}"
+    if [ -z "$ws" ] || [ -z "$base" ]; then
+        return 0
+    fi
+    case "$ws" in
+        "$base"/*) rm -rf "$ws" 2>/dev/null || true ;;
+        *) echo "[carddemo] not cleaning workspace outside contained base: $ws" >&2 ;;
+    esac
+    return 0
+}
+
+# Eagerly provision the mutable workspace so consumers that expect
+# CARDDEMO_DATA_DIR to exist after sourcing still find it. Failures are surfaced
+# (MA-04) via CARDDEMO_ENV_WARN, never silently swallowed, and never fatal to a
+# sourced shell.
+if ! carddemo_ensure_workspace; then
+    echo "[carddemo] WARN: per-run workspace not provisioned at source time" >&2
+    CARDDEMO_ENV_WARN=1
+fi
 
 # ---------------------------------------------------------------------------
 # Diagnostic entry point.

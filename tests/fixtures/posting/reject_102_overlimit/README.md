@@ -106,3 +106,19 @@ are copied into this folder and reshaped for the scenario — here, only `DALYTR
 adjusted to `+2065.01` to cross the limit by exactly one cent. The seed datasets are
 **REFERENCE ONLY and are never modified** (AAP §0.10.2); all edits live in the fixture
 copies under `tests/fixtures/…`.
+
+## Data governance / synthetic provenance (MA-24)
+
+The card number (`4859452612877065`), account id (`00000000007`), and any customer
+identity bytes in these fixtures are **synthetic, seed-derived** test data representing
+**no real person or account** — copied from the published AWS CardDemo sample datasets
+`app/data/ASCII/{dailytran,cardxref,acctdata,tcatbal}.txt`, which ship with the upstream
+open-source project as fabricated demonstration data. No value here was generated from,
+or corresponds to, a real payment instrument or individual. See master
+[`tests/fixtures/README.md`](../../README.md) §10 for the full attestation and
+derivation-of-record.
+
+**WHY this is recorded (Assumption / compliance).** A PAN that passes the Luhn check is
+indistinguishable, by inspection, from a live card number; a financial test suite must
+therefore *attest* provenance rather than leave a reviewer to assume it. The attestation
+makes the "seed-derived, non-person" origin explicit and auditable.

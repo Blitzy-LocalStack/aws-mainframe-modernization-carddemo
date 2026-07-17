@@ -93,3 +93,19 @@ At run time the indexed fixtures (`cardxref`, `acctdata`, `tcatbal`) are loaded
 flat → indexed by `tests/helpers/load_indexed.sh` /
 `tests/helpers/vsam_loader.load_indexed(...)` (an `IDCAMS REPRO` analog);
 `dailytran.txt` is sequential and is consumed as-is.
+
+## Data governance / synthetic provenance (MA-24)
+
+The card number (`4859452612877065`), account id (`00000000007`), and any customer
+identity bytes in these fixtures are **synthetic, seed-derived** test data
+representing **no real person or account** — copied from the published AWS CardDemo
+sample datasets `app/data/ASCII/{dailytran,cardxref,acctdata,tcatbal}.txt`, which
+ship with the upstream open-source project as fabricated demonstration data. No
+value here was generated from, or corresponds to, a real payment instrument or
+individual. See master [`tests/fixtures/README.md`](../../README.md) §10 for the
+full attestation and derivation-of-record.
+
+**WHY this is recorded (Assumption / compliance).** A PAN that passes the Luhn check
+is indistinguishable, by inspection, from a live card number; a financial test suite
+must therefore *attest* provenance rather than leave a reviewer to assume it. The
+attestation makes the "seed-derived, non-person" origin explicit and auditable.

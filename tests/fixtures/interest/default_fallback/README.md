@@ -13,8 +13,8 @@ golden-master model; the expected **"data-out"** lives in the mirror tree
 > **Byte-encoding contract — read this FIRST:**
 > [`../../README.md`](../../README.md) is the authoritative, byte-level contract
 > for **every** fixture (fixed width with **no delimiters**, zoned-decimal **sign
-> overpunch on the last byte** of signed fields, **LF** for the master files, and
-> the documented **CRLF exception** for `tcatbal`). This scenario README does
+> overpunch on the last byte** of signed fields, and **LF** line endings — this
+> scenario normalizes its `tcatbal.txt` to **LF** (§5, MI-04)). This scenario README does
 > **not** restate that contract — it only records *what this scenario does* and
 > *why*, per the Explainability mandate (AAP §0.10.1) for static `.txt` files that
 > cannot carry docstrings. These fixtures comply with the parent contract exactly.
@@ -45,6 +45,26 @@ golden-master model; the expected **"data-out"** lives in the mirror tree
   byte `{` is digit `0` with a positive sign.
 - Rate `00150{` decodes to **`+15.00`** — `S9(04)V99`, final byte `{` is digit `0`
   positive.
+
+## 1a. Two accounts and the final-flush defect (MA-22)
+
+This scenario ships **two** accounts — `00000000001` (non-final) and
+`00000000002` (final) — not one. `CBACT04C` writes an account back
+(`1050-UPDATE-ACCOUNT`) **only when the sequentially-keyed account id changes**, so
+a single-account fixture can never demonstrate a persisted account update (the
+trailing `ELSE PERFORM 1050-UPDATE-ACCOUNT` after the read loop is dead code under
+`PERFORM UNTIL END-OF-FILE = 'Y'`). The second account makes `00000000001` a
+**non-final** account whose `REWRITE` genuinely fires, while `00000000002` documents
+the production **final-flush defect** (its record is never rewritten). Both accounts
+carry a **blank** `ACCT-GROUP-ID`, so **both** take the status-23 → `DEFAULT`
+fallback that is the point of this scenario.
+
+> **See [`../happy_path/README.md`](../happy_path/README.md) §2 and §7 for the full
+> MA-22 treatment**, including the empirically-verified, **out-of-scope** divergence
+> between `CBACT04C`'s *integrated* multi-account interest arithmetic and the
+> isolated `(1000 × 15)/1200 = 12.50` formula. As there, **do not assert a persisted
+> `194.00 → 206.50` balance** — that is not what the compiled program does, and
+> `CBACT04C` is immutable REFERENCE source (AAP §0.8.2).
 
 ## 2. Mechanism — WHY the fallback triggers (core explanation)
 
@@ -93,7 +113,7 @@ group id and re-reads key `DEFAULT   010001`, which resolves to rate `15.00`.
 | `1200-GET-INTEREST-RATE` | Reads DISCGRP with the account's (blank) group key; on `INVALID KEY` → status **23** → moves `'DEFAULT'` and performs the fallback read. |
 | `1200-A-GET-DEFAULT-INT-RATE` | Re-reads DISCGRP with key `DEFAULT   010001`; resolves `DIS-INT-RATE = 15.00`. |
 | `1300-COMPUTE-INTEREST` | `COMPUTE WS-MONTHLY-INT = (TRAN-CAT-BAL * DIS-INT-RATE) / 1200` → `12.50`; accumulates into `WS-TOTAL-INT` and writes the interest transaction. |
-| `1050-UPDATE-ACCOUNT` | `ADD WS-TOTAL-INT TO ACCT-CURR-BAL` (194.00 → 206.50), then zeroes `ACCT-CURR-CYC-CREDIT` / `ACCT-CURR-CYC-DEBIT` and rewrites the account. |
+| `1050-UPDATE-ACCOUNT` | Runs at the account-id control break: `ADD WS-TOTAL-INT TO ACCT-CURR-BAL`, zeroes `ACCT-CURR-CYC-CREDIT` / `ACCT-CURR-CYC-DEBIT`, and `REWRITE`s the account. It fires for the **non-final** account `00000000001` (whose record therefore changes) but **not** for the final account `00000000002` (final-flush defect, §1a). The exact persisted balance is **not** asserted here — see `../happy_path/README.md` §7 for the out-of-scope integrated-arithmetic divergence. |
 | `1400-COMPUTE-FEES` | Stub (`* To be implemented`) → no fee transaction. |
 
 ## 4. Coordination with the shared mock `tests/mocks/mock_discgrp.txt`
@@ -123,25 +143,29 @@ gets status 23 and falls back to `DEFAULT`.
 
 | File | Copybook | `RECLN` | Line ending | Records | Purpose |
 |---|---|---:|---|---:|---|
-| `acctdata.txt` | `CVACT01Y` | 300 | LF | 1 | Verbatim seed account `00000000001`; **blank `ACCT-GROUP-ID` (bytes 113–122)** is the fallback trigger; `ACCT-CURR-BAL = 194.00`. |
-| `tcatbal.txt` | `CVTRA01Y` | 50 | **CRLF** | 1 | `TRAN-CAT-BAL = 1000.00`, type `01`, category `0001` — the balance interest is accrued on. |
+| `acctdata.txt` | `CVACT01Y` | 300 | LF | 2 | Accounts `00000000001` (`ACCT-CURR-BAL = 194.00`, non-final) and `00000000002` (`158.00`, final). **Both** carry a **blank `ACCT-GROUP-ID` (bytes 113–122)** — the fallback trigger for each. |
+| `tcatbal.txt` | `CVTRA01Y` | 50 | LF | 2 | One row per account: `TRAN-CAT-BAL = 1000.00`, type `01`, category `0001` — the balance interest is accrued on. |
 | `discgrp.txt` | `CVTRA02Y` | 50 | LF | 17 | **`DEFAULT` rows only**; `DEFAULT   010001` rate = `15.00`. **No** blank-group, `A000000000`, or `ZEROAPR` rows (those seed groups are omitted so only the `DEFAULT` fallback can resolve). |
-| `cardxref.txt` | `CVACT03Y` | 50 | LF | 1 | card `9680294154603697` → cust `000000001` → acct `00000000001` (+14-space `FILLER`); identical to `happy_path`. |
+| `cardxref.txt` | `CVACT03Y` | 50 | LF | 2 | card `9680294154603697` → cust `000000001` → acct `00000000001`; card `0923877193247330` → cust `000000002` → acct `00000000002` (each +14-space `FILLER`). |
 
-> **CRLF choice for `tcatbal.txt` (documented per parent §3.2/§9.1).** The seed
-> `app/data/ASCII/tcatbal.txt` ships as **CRLF**, and this fixture **preserves
-> that CRLF** to mirror the seed byte-for-byte. `tests/helpers/load_indexed.sh`
-> strips the trailing `\r` so the record still loads as exactly **50 bytes**. The
-> other three fixtures (`acctdata`, `discgrp`, `cardxref`) are **LF** — they mirror
-> LF seeds, per the parent contract's default.
+> **LF normalization for `tcatbal.txt` (MI-04, documented per parent §3.2/§9.1).**
+> The seed `app/data/ASCII/tcatbal.txt` ships as **CRLF**, but this fixture
+> **normalizes `tcatbal.txt` to LF** so all four files in this scenario share one
+> line ending. **Why LF (Trade-off):** the loader treats one physical line as one
+> fixed-length record, and a stray `\r` risks being absorbed into the trailing
+> `FILLER` and pushing the record one byte past `RECLN`; LF removes that hazard.
+> The record *content* bytes are unchanged, so the one-byte line-ending divergence
+> from the seed is immaterial. Verified: all four fixtures here are **LF only** (no
+> `\r`), each `tcatbal`/`discgrp`/`cardxref` row 50 bytes and each `acctdata` row
+> 300 bytes.
 
 ## 6. `ASSIGN`-name mapping
 
 GnuCOBOL binds each COBOL `SELECT … ASSIGN TO <NAME>` to a same-named runtime
 environment variable (wired by `scripts/test_env.sh`). All four inputs are
-`ORGANIZATION IS INDEXED`, so the harness performs a **flat → indexed load** via
-`tests/helpers/load_indexed.sh` (an `IDCAMS REPRO` analog) **before** invoking
-`CBACT04C`.
+`ORGANIZATION IS INDEXED`, so the harness performs a **flat → indexed load** (via
+`tests/helpers/vsam_loader.py` today; `load_indexed.sh` once it wraps it — master
+§1) — an `IDCAMS REPRO` analog — **before** invoking `CBACT04C`.
 
 | Fixture | `ASSIGN` name | Key length | Organization |
 |---|---|---|---|
@@ -154,26 +178,48 @@ environment variable (wired by `scripts/test_env.sh`). All four inputs are
 
 These are **input** fixtures and contain **no runtime timestamps** (the interest
 domain consumes no `DALYTRAN` `PROC-TS`), so the four files are inherently
-**byte-stable** across runs. Any run-varying values live only on the **output**
-side — the emitted interest transaction's `TRAN-ID` and processing timestamps —
-and are normalized by `tests/helpers/golden_compare.py` when the produced
-datasets are compared against the golden mirror. Nothing here must be regenerated
-between runs.
+**byte-stable** across runs. On the **output** side, the emitted interest
+transaction's fields split into deterministic and run-varying (MI-03):
+
+- **`TRAN-ID` is DETERMINISTIC** — built as `PARM-DATE` + an ascending
+  `WS-TRANID-SUFFIX` (e.g. for `PARM-DATE = 2022071800`: `2022071800000001`,
+  `2022071800000002`, …). With a fixed injected `PARM-DATE` it is reproducible and
+  is **asserted exactly**; it is **not** normalized away. (An earlier revision
+  wrongly grouped `TRAN-ID` with the volatile timestamps — corrected here.)
+- **`ORIG-TS` / `PROC-TS` on the written record are runtime** (from the
+  `DB2-FORMAT-TS` clock) and are the only fields normalized by
+  `tests/helpers/golden_compare.py` at compare time (master §6.3).
+
+Nothing in the input fixtures must be regenerated between runs.
 
 ## 8. Expected outcome (authoritative for the golden mirror & asserts)
 
-The golden agent creates the byte-identically-named mirror
-`tests/golden/interest/default_fallback/`. Expected end state:
+The **[planned]** golden mirror `tests/golden/interest/default_fallback/` (not
+present today — master §1) must be captured from **actual** program output. The
+documented business-rule expectation and the verified structural behavior:
 
-- One **interest transaction** with amount **`12.50`**, computed via the
-  **`DEFAULT`** group (reached through the status-23 fallback).
-- `ACCT-CURR-BAL` updated **`194.00` → `206.50`** (`+12.50`).
-- `ACCT-CURR-CYC-CREDIT` and `ACCT-CURR-CYC-DEBIT` **zeroed** by
-  `1050-UPDATE-ACCOUNT`.
-- **No fee transaction** (`1400-COMPUTE-FEES` stub).
+- **Rate path:** the interest rate is resolved via the **`DEFAULT`** group, reached
+  through the **status-23 fallback** — the branch this scenario exists to cover.
+- **Per-category interest (documented rule):** each account's `1000.00` category
+  balance accrues `(1000.00 × 15.00) / 1200 = 12.50`; assert this **exactly** at
+  the formula level.
+- **Non-final account `00000000001` IS flushed** (`1050-UPDATE-ACCOUNT`: interest
+  added, cycle credit/debit zeroed, `REWRITE`); **final account `00000000002` is
+  NOT flushed** (final-flush defect, §1a).
+- **`TRAN-ID`** is the deterministic `PARM-DATE`+suffix id (§7); **no fee
+  transaction** (`1400-COMPUTE-FEES` stub).
 
-Numerically identical to `interest/happy_path`, but this scenario exercises the
-**status-23 → `DEFAULT` fallback** branch rather than the direct DISCGRP hit.
+> **⚠ Do not assert a persisted `194.00 → 206.50` balance.** As documented in
+> `../happy_path/README.md` §7, an end-to-end run of the compiled `CBACT04C` over
+> the two-account fixture confirmed the *structural* behavior above but showed its
+> **integrated multi-account interest arithmetic diverges** from the isolated
+> `12.50`/`206.50` figures. That divergence is internal to the **immutable**
+> production program (AAP §0.8.2) and is a documented out-of-scope limitation, not a
+> value to fabricate into a golden.
+
+This scenario reaches the interest computation via the **status-23 → `DEFAULT`
+fallback** branch, whereas `interest/happy_path` uses a **direct** DISCGRP hit;
+that branch difference is the reason both scenarios exist.
 
 ## 9. Sources & scope
 
@@ -183,5 +229,12 @@ Numerically identical to `interest/happy_path`, but this scenario exercises the
   `app/cbl/CBACT04C.cbl`. Coordinates with `tests/mocks/mock_discgrp.txt` (§4).
 - **Seeds and production sources are REFERENCE-only and are never edited**
   (AAP §0.8.2). Fixtures are derived copies/subsets reshaped for this scenario.
+- **Synthetic-data provenance (MA-24).** The card numbers, account ids, and
+  customer ids in `cardxref.txt` are **synthetic, seed-derived** values copied from
+  `app/data/ASCII/{cardxref,acctdata}.txt` (account `00000000002` / card
+  `0923877193247330` byte-for-byte from the published seed); they represent **no
+  real person or account**. Only non-identity business-rule fields (group id,
+  balances) were reshaped. See master §10 for the full attestation.
 - Consumed by `tests/integration/test_cbact04c_interest.py` (and the end-to-end
-  interest cycle) through the shared helpers in `tests/helpers/*`.
+  interest cycle) through the shared helpers in `tests/helpers/*` — both
+  **[planned]**, not present on the branch today (master §1).

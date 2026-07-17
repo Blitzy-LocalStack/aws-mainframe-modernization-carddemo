@@ -13,15 +13,36 @@
 
 This tree holds **deterministic, fixed-width, flat-record _input_ fixtures** for
 the three-layer CardDemo suite (COBOL unit → pytest integration → end-to-end
-batch cycle). Fixtures are consumed primarily by `tests/integration/**` and
-`tests/e2e/**` through the shared helpers in `tests/helpers/*` (notably
-`tests/helpers/load_indexed.sh`, `tests/helpers/record_codec.py`,
-`tests/helpers/cobol_runner.py`, and `tests/helpers/golden_compare.py`).
+batch cycle). Per the AAP, the fixtures are consumed by the `tests/integration/**`
+and `tests/e2e/**` layers through the shared helpers in `tests/helpers/*`.
 
 Fixtures are the **"data-in"** side of the golden-master verification model: a
 test loads a scenario's fixtures into an isolated workspace, runs the compiled
 program under test, and compares the produced datasets against the **"data-out"**
-expectations that live in the parallel `tests/golden/**` tree.
+expectations in the parallel `tests/golden/**` tree.
+
+> **Availability status (verified against the branch — not aspirational).** This
+> README documents the *target* architecture from the AAP; **not every referenced
+> artifact exists at this checkpoint**, and every reference below is a contract for
+> when the artifact lands, never a claim that it exists today. As currently
+> committed on this branch:
+>
+> - **Present** in `tests/helpers/`: `record_codec.py` (encode/decode fixed-width +
+>   zoned-decimal), `vsam_loader.py` (the flat→indexed loader), and
+>   `golden_compare.py` (deterministic comparator).
+> - **Not yet present** — authored by later test-suite agents per the AAP plan and
+>   named here only as the eventual consumers/producers of these fixtures:
+>   `tests/helpers/load_indexed.sh`, `tests/helpers/cobol_runner.py`, and the
+>   `tests/integration/**`, `tests/e2e/**`, and `tests/golden/**` trees.
+>
+> **Why name not-yet-present artifacts at all (Trade-off).** Fixture authoring must
+> encode the width/key/endianness contract those consumers will rely on, so the
+> contract has to be written *before* the consumers exist. The alternative —
+> deferring this README until every consumer lands — would let fixtures drift from
+> the layouts the programs compile against. The load-bearing loader that exists
+> **today** is `tests/helpers/vsam_loader.py`; `load_indexed.sh` is the planned thin
+> wrapper around it, and each mention of `load_indexed.sh` below should be read as
+> "`vsam_loader.py` now, `load_indexed.sh` once it wraps it."
 
 ```
 tests/fixtures/<domain>/<scenario>/   ← input records  (this tree)
@@ -57,7 +78,13 @@ tests/fixtures/<domain>/<scenario>/<record-file>.txt
 - **`scenario`** ∈ { `happy_path`, `reject_100_card_missing`,
   `reject_101_acct_missing`, `reject_102_overlimit`, `reject_103_expired`,
   `boundary_exact_limit`, `boundary_expiry_equal`, `empty_input`,
-  `zero_balance` }
+  `zero_balance`, `default_fallback` }
+  > **`default_fallback` is interest-only.** It is the `CBACT04C` DEFAULT
+  > disclosure-group fallback case (VSAM status 23 → `DEFAULT` group; see §6.2),
+  > and it exists as a committed scenario directory today:
+  > `tests/fixtures/interest/default_fallback/`. It was omitted from earlier
+  > revisions of this list even though the directory shipped — the enumeration is
+  > corrected here so the inventory matches the tree on disk.
 - **`<record-file>.txt`** — one file per input record type, named for the logical
   dataset it stands in for (e.g. `dailytran.txt`, `acctdata.txt`, `cardxref.txt`,
   `tcatbal.txt`, `discgrp.txt`). Contents follow the byte-exact layouts in §5.
@@ -65,13 +92,21 @@ tests/fixtures/<domain>/<scenario>/<record-file>.txt
 ### 2.1 Fixtures ↔ golden mirroring (critical)
 
 The `<domain>/<scenario>/` path **MUST be mirrored one-for-one** under
-`tests/golden/<domain>/<scenario>/`.
+`tests/golden/<domain>/<scenario>/`. (This is a firm rule — **MUST**, not
+"should" — that binds every scenario the moment its golden mirror is authored;
+see the availability note below for the current state of `tests/golden/**`.)
 
 > **Why:** `tests/helpers/golden_compare.py` pairs each input scenario with its
 > expected output purely by path. If the two trees drift, the comparator cannot
 > locate the golden master for a scenario and the test cannot assert. Keep the
 > domain and scenario directory names **byte-identical** across the two trees —
 > same spelling, same case, same underscores.
+
+> **Availability.** The `tests/golden/**` mirror tree is **not yet present on this
+> branch** (see §1) — it is authored by the golden/integration agents per the AAP.
+> The one-for-one mirroring rule above is therefore the **contract those agents
+> must honor when the tree lands**, stated here so fixtures and goldens cannot
+> drift; it is not a claim that any golden file exists today.
 
 Example of a correctly mirrored pair:
 
@@ -105,6 +140,15 @@ before authoring any fixture.
 - **Every record line is EXACTLY the copybook `RECLN`** for its record type
   (350, 300, 150, 50, 500, or 80 bytes — see §5). A line that is one byte short
   or long shifts every subsequent field and silently corrupts the record.
+
+  > **Verified enforcement (not just guidance).** `tests/helpers/record_codec.py`
+  > and `tests/helpers/vsam_loader.py` **reject** any physical row whose length is
+  > not exactly `RECLN`; they do **not** pad short rows or truncate long ones, and
+  > they do **not** silently drop blank lines. The *only* input treated as "empty"
+  > is a **genuinely zero-byte dataset** (0 bytes, no records) — see §7. An author
+  > who miscounts a width gets a hard failure at load, not a corrupted record. This
+  > is a deliberate financial-integrity stance: a malformed monetary record must
+  > never be silently coerced into a well-formed-looking one.
 - **Padding:**
   - Text (`X`) fields are padded on the **RIGHT with spaces**.
   - Unsigned numeric (`9`) fields are padded on the **LEFT with `0`**.
@@ -204,9 +248,26 @@ definition, not because any character marks it.
 | Domain | Program(s) under test | Input record types (copybook) | Applicable scenarios |
 |---|---|---|---|
 | `posting` | `CBTRN02C` | DALYTRAN (`CVTRA06Y`, sequential); XREF (`CVACT03Y`, indexed by card #); ACCOUNT (`CVACT01Y`, indexed by acct-id); TCATBAL (`CVTRA01Y`, indexed by acct+type+cat) | **all 9** |
-| `interest` | `CBACT04C` | TCATBAL (`CVTRA01Y`); ACCOUNT (`CVACT01Y`); DISCGRP (`CVTRA02Y`); XREF (`CVACT03Y`) | `happy_path`, `zero_balance`, **+ DEFAULT-group-fallback case** |
+| `interest` | `CBACT04C` | TCATBAL (`CVTRA01Y`); ACCOUNT (`CVACT01Y`); DISCGRP (`CVTRA02Y`); XREF (`CVACT03Y`, read by its **alternate acct-id key**, §4.2) | `happy_path`, `zero_balance`, `default_fallback` |
 | `statement` | `CBSTM03A` / `CBSTM03B` | TRNX (`COSTM01`); XREF (`CVACT03Y`); CUSTOMER (`CVCUS01Y`); ACCOUNT (`CVACT01Y`) | `happy_path`, `empty_input` |
 | `provisioning` | `CBACT01C` / `CBACT02C` / `CBACT03C`, `CBCUS01C` | ACCOUNT (`CVACT01Y`); CARD (`CVACT02Y`); XREF (`CVACT03Y`); CUSTOMER (`CVCUS01Y`) | `happy_path`, `empty_input` |
+
+> **Interest fixtures carry ≥ 2 accounts, and their `tcatbal` is LF (scenario
+> exception).** Each `interest/*` scenario intentionally ships **two** accounts
+> (`00000000001` and `00000000002`) rather than one. `CBACT04C` flushes an account
+> to disk (`1050-UPDATE-ACCOUNT`: add interest, zero cycle credit/debit, `REWRITE`)
+> **only when the sequentially-keyed account id changes** — so with a single
+> account the sole/final account is **never** rewritten. The second account makes
+> the first a **non-final** account whose `REWRITE` path is genuinely exercised,
+> while the final account documents the production **final-flush defect** (the
+> trailing `ELSE PERFORM 1050-UPDATE-ACCOUNT` is dead code under `PERFORM UNTIL
+> END-OF-FILE = 'Y'`). Because `TCATBAL` is `ORGANIZATION IS INDEXED`, records are
+> read in **key order**, so `…001` always precedes `…002` regardless of flat-file
+> order. Each interest scenario's `tcatbal.txt` is normalized to **LF** (not the
+> seed's CRLF) and documented in that scenario's own `README` — see §3.2 and the
+> `interest/*` scenario READMEs. Full detail (including a known out-of-scope
+> arithmetic divergence in the *integrated* multi-account run) lives in
+> `tests/fixtures/interest/happy_path/README.md`.
 
 ### 4.1 File-name casing quirk of the units under test
 
@@ -236,6 +297,18 @@ the underlying file dictates how the fixture is loaded:
   > acct+type+cat; DISCGRP by group+type+cat). A clean ascending load avoids
   > out-of-sequence write errors and makes the fixture human-diffable against
   > the golden output.
+
+  > **Primary AND alternate keys (verified — keys are NOT all at offset 0).** A
+  > VSAM KSDS analog can carry more than a single leading key. `XREF`
+  > (`CVACT03Y`) has a **primary** key `XREF-CARD-NUM` at **offset 1** (bytes
+  > 1–16) **and an ALTERNATE key `XREF-ACCT-ID` at offset 26** (bytes 26–36,
+  > §5.3). `CBACT04C` reads the cross-reference **by account id** — its
+  > `1110-GET-XREF-DATA` issues `READ … KEY IS FD-XREF-ACCT-ID` — so the loader
+  > **must model the alternate index**, not just a leading primary key. The
+  > current `tests/helpers/vsam_loader.py` emits both the primary and the
+  > `ALTERNATE RECORD KEY` (accepting a non-zero `key_offset`, e.g. 25 for the
+  > 0-based acct-id column), and its cache identity includes the full key schema
+  > so a primary-only build is never reused for an alternate-key read.
 
 ---
 
@@ -526,20 +599,43 @@ Validation runs two lookups then two boundary checks:
 
 ### 6.3 Determinism note tied to the rules
 
-`DALYTRAN-PROC-TS` (and the interest/statement `*-PROC-TS` / `*-ORIG-TS` values
-written from `DB2-FORMAT-TS`) are **runtime timestamps**. To keep golden-master
-comparison byte-deterministic:
+Not every timestamp is non-deterministic, and the two must not be confused. The
+verified rule that `tests/helpers/record_codec.py` / `golden_compare.py` implement
+is: **mask ONLY the runtime processing timestamp (`PROC-TS`) in place; preserve
+`ORIG-TS` and every other byte exactly.**
 
-- Input fixtures **must leave `PROC-TS` blank** (26 spaces), exactly as in the
-  seed (verified: bytes 305–330 of the first `dailytran` record are 26 blanks).
+- **`ORIG-TS` on an _input_ record is DETERMINISTIC and is preserved.**
+  `DALYTRAN-ORIG-TS` (bytes 279–304) is author-supplied fixture data — indeed its
+  first 10 bytes are the transaction date the posting expiration check consumes
+  (§6.1, reject 103). It is **not** a runtime value, it is **not** masked, and it
+  **must** be a fixed literal in the fixture. Treating input `ORIG-TS` as
+  "non-deterministic" (an earlier, incorrect claim) would wrongly scrub a
+  load-bearing field.
+- **`PROC-TS` is the only runtime-varying byte range in these input fixtures, and
+  it must be blank.** Input fixtures **must leave `PROC-TS` (bytes 305–330) blank**
+  (26 spaces), exactly as in the seed (verified: bytes 305–330 of the first
+  `dailytran` record are 26 blanks). The comparator masks exactly this range and
+  nothing else.
 - Any date the program **consumes** (e.g. the run/processing date) must be a
   **fixed literal** injected via the program's `PARM-DATE`, **not** the wall
-  clock, so that reruns produce byte-identical output.
+  clock, so reruns produce byte-identical output.
 
-  > **Why:** an un-normalized processing timestamp is the single most common
-  > source of flaky golden-master diffs for mainframe batch. Pinning it at the
-  > input (blank `PROC-TS`) and injecting a fixed `PARM-DATE` removes the only
-  > non-deterministic input to these programs.
+  > **Why the asymmetry (mask `PROC-TS`, keep `ORIG-TS`):** an un-normalized
+  > processing timestamp is the single most common source of flaky golden-master
+  > diffs for mainframe batch, so `PROC-TS` is pinned blank on input and masked on
+  > output. `ORIG-TS`, by contrast, carries meaning the program branches on, so
+  > scrubbing it would both destroy determinism-of-meaning and hide real diffs.
+
+  > **Documented limitation — `CBACT04C`-_written_ transactions.** The interest
+  > program's emitted transaction (`1300-B-WRITE-TX`) fills **both** its `ORIG-TS`
+  > and `PROC-TS` from the runtime clock (`DB2-FORMAT-TS`), unlike the deterministic
+  > *input* `ORIG-TS` above. Because the comparator masks only `PROC-TS`, a byte-
+  > exact golden comparison of that written record's `ORIG-TS` is **not** currently
+  > deterministic. This is a known limitation to resolve where such output is
+  > compared (e.g. by injecting a fixed clock or masking the written `ORIG-TS`
+  > specifically for `CBACT04C` output); it is recorded here rather than hidden. The
+  > deterministic, always-safe field on that written record is its **`TRAN-ID`**,
+  > which is `PARM-DATE` + an ascending suffix (see the interest scenario READMEs).
 
 ---
 
@@ -599,8 +695,8 @@ Fixtures are **cut down / adjusted** from the ASCII seed datasets in
 ### 9.1 Per-scenario documentation (mandated)
 
 Because static `.txt` fixtures cannot carry docstrings, **every scenario
-subfolder SHOULD carry a short `README`** (or, equivalently, the fixture-builder
-helper that emits it SHOULD carry a docstring) stating:
+subfolder MUST carry a short `README`** (this is a mandatory Explainability
+carrier, not a suggestion) stating:
 
 1. **Scenario intent** — what condition this scenario represents.
 2. **The exact business rule it exercises** — e.g. "`CBTRN02C` reject 102, `>=`
@@ -608,9 +704,19 @@ helper that emits it SHOULD carry a docstring) stating:
    23".
 3. **The expected outcome** — POST vs. specific reject code/message, or the
    exact computed interest value.
+4. **Fixture bytes & governance** — the per-file record width, record count, and
+   line ending, plus the synthetic-data provenance/attestation required by §10
+   whenever the scenario carries PAN or identity-shaped data.
 
 This satisfies the project Explainability review gate (AAP §0.10.1) for static
 fixtures.
+
+> **Wording is deliberately `MUST`, not `should` (Refactoring Rationale).** An
+> earlier revision weakened this to "should," which let scenario directories ship
+> with **no** Explainability carrier at all — a direct review-gate violation. The
+> obligation is restored to **`MUST`**: a scenario directory without a `README` (or
+> an emitting helper whose docstring carries the same content) is non-conforming.
+> Every scenario directory currently on the branch carries this README.
 
 ### 9.2 How to add a new scenario
 
@@ -626,17 +732,100 @@ fixtures.
 5. For indexed inputs, ensure the fixture is **pre-sorted by key** so
    `tests/helpers/load_indexed.sh` loads it cleanly (§4.2).
 
-### 9.3 Referenced helpers and trees (defined by the suite, not invented here)
+### 9.3 Referenced helpers and trees (with verified availability)
 
-- `tests/helpers/load_indexed.sh` — flat → indexed loader (`IDCAMS REPRO` analog).
-- `tests/helpers/record_codec.py` — encode/decode fixed-width + zoned-decimal.
-- `tests/helpers/cobol_runner.py` — compile + run wrapper, `ASSIGN`-name binding,
-  return-code capture.
-- `tests/helpers/golden_compare.py` — deterministic golden-master comparator.
-- `tests/golden/**` — the parallel expected-output tree (§2.1).
-- `tests/mocks/**` — disclosure-group edge rows, MQ stub, LocalStack manifest.
+Each entry is annotated **[present]** (committed on this branch today) or
+**[planned]** (authored by later test-suite agents per the AAP; referenced here
+only as an eventual consumer/producer of these fixtures — never claimed to exist
+now). See the availability note in §1.
 
-> **Assumption:** these helper and mock paths are defined elsewhere in the test
-> suite per the project plan. This README references them only as the consumers
-> of these fixtures; it does not introduce any new tool or command.
+- `tests/helpers/record_codec.py` — **[present]** encode/decode fixed-width +
+  zoned-decimal.
+- `tests/helpers/vsam_loader.py` — **[present]** flat → indexed loader
+  (`IDCAMS REPRO` analog); models primary **and** alternate keys (§4.2).
+- `tests/helpers/golden_compare.py` — **[present]** deterministic golden-master
+  comparator (masks only `PROC-TS`, §6.3).
+- `tests/mocks/**` — **[present]** disclosure-group edge rows, MQ stub, LocalStack
+  manifest (see `tests/mocks/README.md`).
+- `tests/helpers/load_indexed.sh` — **[planned]** thin `bash` wrapper around
+  `vsam_loader.py`; until it lands, invoke `vsam_loader.py` directly.
+- `tests/helpers/cobol_runner.py` — **[planned]** compile + run wrapper,
+  `ASSIGN`-name binding, return-code capture.
+- `tests/golden/**` — **[planned]** the parallel expected-output tree (§2.1).
+- `tests/integration/**`, `tests/e2e/**` — **[planned]** the pytest layers that
+  consume these fixtures.
 
+> **Why annotate availability (Assumption made explicit).** The planned artifacts
+> are defined elsewhere in the suite per the project plan; this README references
+> them only as the consumers/producers of these fixtures and introduces no new tool
+> or command. Marking each **[present]/[planned]** keeps the document from
+> describing a future artifact as if it already exists — the exact defect this
+> section previously had.
+
+
+---
+
+## 10. Data governance & synthetic-provenance attestation
+
+> **Scope.** This section is the mandated attestation for every fixture that
+> carries a **Primary Account Number (PAN / card number)** or **identity-shaped
+> data** (customer name, address, SSN, government-issued id, date of birth, phone,
+> FICO). It exists to satisfy the data-governance review gate: test data that
+> *looks* like real cardholder data must have a demonstrable non-person origin.
+
+### 10.1 Attestation
+
+**No real cardholder, account, or personal data appears anywhere in this fixture
+tree.** Every PAN, account id, customer identity, SSN, government id, date of
+birth, address, and phone number in `tests/fixtures/**` is **synthetic test data
+derived byte-for-byte from the AWS CardDemo published sample seed datasets** in
+`app/data/ASCII/*.txt` (`acctdata`, `carddata`, `cardxref`, `custdata`,
+`dailytran`, `discgrp`, `tcatbal`). Those seeds ship with the upstream
+open-source AWS CardDemo project as **fabricated demonstration data**; they
+describe **no real person or account**.
+
+### 10.2 Generator, seed, and derivation of record
+
+- **Generator / source of record.** The identity and PAN values are **not
+  independently generated here** — they are **copied verbatim** from the CardDemo
+  ASCII seeds and then, where a scenario requires, reshaped **only in
+  non-identity, business-rule fields** (monetary amounts, dates, group ids,
+  balances). The seed files are the single source of record; §8 lists them.
+- **Seed.** The upstream CardDemo sample dataset (the `app/data/ASCII/*.txt` files
+  committed in this repository) is the fixed "seed" for all derivation. It is
+  **REFERENCE-only and never modified** (AAP §0.8.2), so the provenance chain is
+  reproducible: every fixture identity/PAN value can be traced back to a specific
+  seed row by its key.
+- **Reshaping discipline.** When a scenario needs a second or altered record
+  (e.g. the interest scenarios' second account `00000000002`, sourced
+  byte-for-byte from `acctdata.txt` line 2 and `cardxref.txt`), the **identity and
+  PAN bytes are taken unchanged from the seed**; only business-rule fields are
+  adjusted. This keeps every card number and identity attributable to a published
+  synthetic seed rather than to an invented (and possibly real-collision) value.
+
+> **Why derive from the seeds rather than mint fresh PANs (Alternatives
+> Considered / Trade-off).** Two alternatives were weighed: (a) generating fresh
+> reserved-range test PANs (e.g. ISO/IEC 7812 test ranges) with a documented
+> Luhn/identity generator, and (b) reusing the published CardDemo synthetic seeds.
+> Option (b) was chosen because the units under test already validate against the
+> seed-shaped cross-reference/account/customer records, so seed-derived fixtures
+> stay internally consistent (card → xref → account → customer chains resolve) **and**
+> inherit the seeds' documented synthetic, non-person status — giving demonstrable
+> provenance without introducing a second, independently-attested generator. A PAN
+> that happens to be Luhn-valid here is Luhn-valid **because the upstream synthetic
+> seed made it so**, not because it was matched to any issuer.
+
+### 10.3 What each scenario README must record
+
+Every scenario `README` whose folder contains PAN or identity data (all `posting`,
+`statement`, and `provisioning` scenarios, and the `interest` cross-reference
+files) **MUST** state, briefly:
+
+1. that the PAN/identity bytes are synthetic and seed-derived (citing the seed
+   file and, where useful, the seed row key);
+2. that they represent **no real person or account**;
+3. any business-rule fields that were reshaped away from the seed value (so the
+   provenance of the *changed* bytes is also explicit).
+
+This attestation, colocated with the bytes it describes, is what makes the
+fixture tree audit-defensible for financial-enterprise review.

@@ -109,3 +109,19 @@ The four files here are **new, empty files** — they are **not** derived rows a
 are **REFERENCE ONLY and are never modified** (AAP §0.8.2). They are named in the
 table above **solely to establish provenance** — i.e. which CardDemo master each
 empty fixture stands in for — and no seed content is copied into this folder.
+
+## Data governance / synthetic provenance (MA-24)
+
+This scenario contains **no cardholder data at all**: all four fixtures are
+**0-byte** files, so there are no PANs, account ids, names, SSNs, DOBs, or
+government ids present. The non-person seed masters these empty files stand in for
+(`app/data/ASCII/{acctdata,carddata,cardxref,custdata}.txt`) are themselves
+**synthetic** fabricated demonstration data shipped with the upstream open-source
+AWS CardDemo project, representing **no real person or account**. See master
+[`tests/fixtures/README.md`](../../README.md) §10 for the full attestation.
+
+> **WHY this is recorded even for an empty scenario (compliance completeness).**
+> The MA-24 attestation is a per-scenario Explainability carrier requirement; a
+> reviewer auditing data governance should be able to open *any* scenario README —
+> including the empty ones — and find the provenance statement, rather than having
+> to infer that "0 bytes" implies "no sensitive data."
