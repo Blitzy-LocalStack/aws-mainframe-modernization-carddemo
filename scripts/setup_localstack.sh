@@ -12,7 +12,12 @@
 #
 # Usage:
 #   scripts/setup_localstack.sh        # executed: brings up LocalStack, exits rc
-#   source scripts/setup_localstack.sh # sourced  : also exports AWS_ENDPOINT_URL
+#   scripts/setup_localstack.sh -h     # executed: print usage, exit 0 (NO bring-
+#                                      #           up, NO token request, no side
+#                                      #           effects)
+#   source scripts/setup_localstack.sh # sourced  : also exports AWS_ENDPOINT_URL.
+#                                      #           CLI args are NOT parsed when
+#                                      #           sourced; the caller owns them.
 #
 # Parameters (environment inputs):
 #   LOCALSTACK_AUTH_TOKEN      - if already set (CI secret), the token request is
@@ -34,6 +39,9 @@
 # Return / Exit codes (CardDemo RC rubric):
 #   0  LocalStack is up on an ALLOWLISTED endpoint and S3 was seeded AND verified
 #      from the manifest.
+#   2  usage error (unknown CLI argument; executed mode only) - DISTINCT from the
+#      rubric so an invocation typo is never mistaken for a soft-skip. A -h/--help
+#      flag prints usage and exits 0 with NO bring-up and NO token request.
 #   4  soft skip/warn: an OPTIONAL prerequisite is missing (tools, token,
 #      instance not ready, manifest absent) and CARDDEMO_REQUIRE_LOCALSTACK != 1.
 #   8  HARD FAIL, used for two distinct classes (finding MA-05 -- fail closed):
@@ -94,6 +102,65 @@ fi
 _ls_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/test_env.sh
 source "$_ls_script_dir/test_env.sh"
+
+carddemo_ls_usage() {
+    # Purpose : print the LocalStack setup script's usage synopsis.
+    # Parameters: none.
+    # Returns : always 0; the banner is written to stdout.
+    # Errors  : none.
+    # WHY (consistency): mirrors carddemo_master_usage() in run_tests.sh so every
+    # entry point presents a uniform CLI contract (a lone -h/--help, and RC=2
+    # rejection of anything else) -- closing QA finding [C2].
+    cat <<'USAGE'
+Usage: scripts/setup_localstack.sh [-h|--help]
+
+Brings up headless (Docker-less) LocalStack and seeds the S3 resources needed by
+the dataset-staging E2E tests, exporting AWS_ENDPOINT_URL. Takes NO positional
+arguments; it is parameterised entirely by the environment (see the file header:
+LOCALSTACK_AUTH_TOKEN, LOCALSTACK_AGENT_TOKEN_URL, CARDDEMO_LS_TIMEOUT,
+CARDDEMO_REQUIRE_LOCALSTACK, and CARDDEMO_* paths from scripts/test_env.sh).
+
+Options:
+  -h, --help   show this help and exit 0 (NO bring-up, NO token request)
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Top-level CLI contract (EXECUTED mode only).
+# WHY (QA [C2] -- a help flag must never provision a cloud resource): this script
+# previously had NO top-level argument parser (its `case` statements lived only
+# inside functions), so `setup_localstack.sh --help` fell through to the bring-up
+# flow and initiated a REAL `localstack ephemeral create` -- a genuine cloud
+# side-effect that even mints an agent token first. We now parse a small explicit
+# contract at entry, BEFORE the teardown trap or the dispatcher: -h/--help prints
+# usage and exits 0 with no bring-up; any other argument is rejected with the
+# reserved usage code (CARDDEMO_RC_USAGE=2), DISTINCT from the rubric {0,4,8} so
+# an invocation typo is never reclassified as a soft-skip.
+# WHY (Assumption -- parse ONLY when executed): when this file is SOURCED (by
+# run_e2e_tests.sh, so the exported AWS_ENDPOINT_URL reaches pytest's process),
+# "$@" refers to the CALLER's positional parameters, which may legitimately hold
+# the caller's own flags / pytest passthrough. Parsing them here would wrongly
+# reject the caller's arguments, so the parser is gated to executed mode and the
+# sourced entry takes no arguments (Trade-off: `source ... <args>` is
+# intentionally unsupported; the caller owns its own CLI).
+# WHY (Refactoring rationale -- `if`, not a `while ... shift` loop): every branch
+# terminates the script (like run_unit_tests.sh), so a shift-loop would leave the
+# shift provably unreachable (shellcheck SC2317). A single guarded `case` on the
+# first token is the faithful, symmetric adaptation.
+# ---------------------------------------------------------------------------
+if [ "$_CARDDEMO_LS_SOURCED" = "0" ] && [ "$#" -gt 0 ]; then
+    case "$1" in
+        -h|--help)
+            carddemo_ls_usage
+            exit 0
+            ;;
+        *)
+            echo "[localstack] ERROR: unknown argument '$1'" >&2
+            carddemo_ls_usage >&2
+            exit "${CARDDEMO_RC_USAGE}"
+            ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
 # Security allowlist + reliability tunables.

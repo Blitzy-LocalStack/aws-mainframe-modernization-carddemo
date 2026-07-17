@@ -10,22 +10,33 @@
 #   and maps pytest's exit status onto the CardDemo condition-code rubric.
 #
 # Usage:
-#   scripts/run_e2e_tests.sh [--with-localstack] [extra pytest args...]
+#   scripts/run_e2e_tests.sh [--with-localstack] [-h|--help] [pytest args...]
 #     e.g. scripts/run_e2e_tests.sh --with-localstack -k full_batch -vv
+#     Long-form pytest options are passed after a `--` sentinel, e.g.
+#       scripts/run_e2e_tests.sh --with-localstack -- --tb=long
 #   The env var CARDDEMO_WITH_LOCALSTACK=1 is equivalent to --with-localstack.
 #
 # Parameters:
 #   --with-localstack (optional flag) - bring up LocalStack before the run.
-#   $@ (optional)                     - remaining args passed through to pytest.
+#   -h, --help                        - print usage and exit 0.
+#   $@ (optional)                     - pytest passthrough. Short options
+#                   (-k, -vv, ...) and bare positionals forward verbatim; any
+#                   token after a `--` sentinel also forwards verbatim. An
+#                   UNRECOGNISED long option (--foo) before `--` is a usage error
+#                   (RC=2) so a mistyped flag never reaches pytest silently.
 #   Environment inputs (from scripts/test_env.sh): CARDDEMO_REPO_ROOT,
 #   CARDDEMO_BUILD_DIR, CARDDEMO_REPORTS_DIR, and all ASSIGN-name bindings.
 #   CARDDEMO_WITH_LOCALSTACK (optional) - "1" enables the AWS layer.
 #
 # Return / Exit codes (CardDemo RC rubric):
 #   0  all e2e tests passed (and LocalStack, if requested, came up clean).
-#   4  nothing to run yet (tests/e2e absent / no tests collected), OR the
-#      optional LocalStack layer soft-skipped (missing tools/token) - warn only.
-#   8  test failures, an internal pytest error, or a hard build/prereq failure.
+#   2  usage error (unknown option) - DISTINCT and never aggregated into the
+#      rubric, so a CLI typo cannot masquerade as a test warn/fail.
+#   4  nothing to run yet (the tests/e2e directory is absent), OR the optional
+#      LocalStack layer soft-skipped (missing tools/token) - warn only.
+#   8  test failures, no tests collected (an empty/broken enabled layer, mapped
+#      from pytest exit 5), an internal pytest error, or a hard build/prereq
+#      failure.
 #
 # Errors / Exceptions:
 #   Missing pytest -> diagnostic + exit 8. Hard build failure (RC>=8) -> exit 8
@@ -54,19 +65,79 @@ export PYTHONPATH="$CARDDEMO_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 CARDDEMO_E2E_REPORT="${CARDDEMO_REPORTS_DIR}/e2e.xml"
 _edir="$CARDDEMO_REPO_ROOT/tests/e2e"
 
+carddemo_e2e_usage() {
+    # Purpose : print the e2e runner's usage synopsis.
+    # Parameters: none.
+    # Returns : always 0; the banner is written to stdout.
+    # Errors  : none.
+    # WHY (consistency): mirrors carddemo_master_usage() in run_tests.sh and
+    # carddemo_int_usage() in run_integration_tests.sh so every runner presents a
+    # uniform CLI contract (a lone -h/--help, and RC=2 rejection of an unknown
+    # option) -- closing QA finding [C2].
+    cat <<'USAGE'
+Usage: scripts/run_e2e_tests.sh [--with-localstack] [-h|--help] [pytest args...]
+
+Runs the Python end-to-end layer:
+  pytest tests/e2e -m e2e --junitxml=reports/e2e.xml
+
+Options:
+  --with-localstack   bring up the headless LocalStack AWS layer first
+  -h, --help          show this help and exit 0
+
+Passthrough to pytest:
+  Short options (-k, -vv, ...) and bare positionals forward verbatim, e.g.
+    scripts/run_e2e_tests.sh --with-localstack -k full_batch -vv
+  Long-form pytest options are forwarded after a `--` sentinel, e.g.
+    scripts/run_e2e_tests.sh -- --tb=long --maxfail=1
+  An unrecognised long option (--foo) before `--` is a usage error (RC=2).
+USAGE
+}
+
 # ---------------------------------------------------------------------------
-# Argument split: peel off --with-localstack, pass everything else to pytest.
-# WHY (Refactoring rationale): a dedicated flag is clearer than overloading a
-# pytest marker, and keeping a separate passthru array lets callers still add
-# arbitrary pytest options (-k, -vv, ...) without us parsing them.
+# Parse CLI arguments.
+# WHY (QA [C2]): the previous parser recognised ONLY --with-localstack and swept
+# everything else (including -h/--help and typos like --bogus) into the pytest
+# passthru, so --help was silently ignored and a mistyped flag surfaced only as
+# pytest's RC=8 with no option-naming diagnostic. We now honour -h/--help
+# (usage + exit 0) and reject an UNRECOGNISED long option with the reserved
+# usage code (CARDDEMO_RC_USAGE=2), DISTINCT from the test rubric {0,4,8}.
+# WHY (Trade-off -- passthrough contract): short options (-k, -vv) and bare
+# positionals still forward verbatim; long-form pytest options forward after a
+# `--` sentinel; only an unrecognised long option BEFORE `--` is a usage error.
+# This preserves the documented `--with-localstack -k full_batch -vv` example
+# while catching a fat-fingered `--bogus` (Alternatives Considered: a full
+# allowlist of valid pytest flags was rejected as unmaintainable and brittle
+# against pytest upgrades).
 # ---------------------------------------------------------------------------
 _with_localstack="${CARDDEMO_WITH_LOCALSTACK:-0}"
 _passthru=()
-for _arg in "$@"; do
-    case "$_arg" in
-        --with-localstack) _with_localstack=1 ;;
-        *) _passthru+=("$_arg") ;;
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --with-localstack)
+            _with_localstack=1
+            ;;
+        -h|--help)
+            carddemo_e2e_usage
+            exit 0
+            ;;
+        --)
+            # Explicit end-of-options sentinel: forward everything after verbatim.
+            shift
+            _passthru+=("$@")
+            break
+            ;;
+        --*)
+            echo "[e2e] ERROR: unknown option '$1'" >&2
+            echo "[e2e] (to pass a long pytest option through, place it after '--')" >&2
+            carddemo_e2e_usage >&2
+            exit "${CARDDEMO_RC_USAGE}"
+            ;;
+        *)
+            # Short options (-k, -vv) and bare positionals go straight to pytest.
+            _passthru+=("$1")
+            ;;
     esac
+    shift
 done
 
 carddemo_write_empty_junit() {

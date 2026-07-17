@@ -484,6 +484,21 @@ class CobolRunner:
         workspace: "str | os.PathLike[str]",
         reports_dir: "str | os.PathLike[str] | None" = None,
     ) -> None:
+        """Bind this runner to a build dir, per-test workspace, and optional reports dir.
+
+        Purpose
+        -------
+        Resolve the three injected locations to absolute paths and eagerly create
+        the per-test workspace, its ``data/`` sub-directory, and (when supplied)
+        the reports directory, so every subsequent program launch is isolated and
+        path-stable regardless of the process's later working directory.
+
+        Parameters, Returns, and Raises are documented once on the class docstring
+        (see :class:`CobolRunner`) and are deliberately not repeated here to keep
+        the constructor's contract single-sourced and free of documentation drift
+        (Trade-off: one authoritative description over a duplicated one that could
+        silently diverge from the signature).
+        """
         # Resolve to absolute paths up front so later subprocess launches are
         # immune to any later `chdir`, and so RunResult carries unambiguous paths.
         # WHY (Assumption): the injected paths may be relative to the repo root;
