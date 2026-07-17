@@ -1,84 +1,120 @@
-# Posting fixture — boundary: amount EXACTLY at credit limit (POSTS)
+# Posting fixture — boundary: exactly at credit limit (POST)
 
-These fixtures drive `app/cbl/CBTRN02C.cbl` with a transaction whose amount lands
-`WS-TEMP-BAL` **exactly on** the account credit limit. Because the program's
-comparison is **`>=`**, the transaction **POSTS** (it is *not* rejected). This is
-the "on the line" half of the `>=` credit-limit boundary pair; its sibling
-`reject_102_overlimit` is one cent over and rejects.
+This scenario proves the credit-limit test in `CBTRN02C` is **inclusive** (`>=`):
+a transaction whose amount makes the running balance land **exactly on** the
+account credit limit must **POST**, not reject.
 
 > **Why this README exists.** Static fixed-width `.txt` fixtures cannot carry
-> docstrings, so — per the Explainability rule (AAP §0.10.1) — this is the mandated
-> *why*. The byte-encoding contract lives in the master
-> **[`tests/fixtures/README.md`](../../README.md)**; this README only covers what is
-> specific to the exact-limit boundary.
+> docstrings, so — per the Explainability rule (AAP §0.10.1) and the master
+> contract's §9.1/§10.3 mandate — this file carries the "why." All byte-encoding
+> rules live in the master **[`tests/fixtures/README.md`](../../README.md)**; this
+> README points to them rather than duplicating them.
 
-## 1. Business rule exercised — `CBTRN02C` `1500-VALIDATE-TRAN` (over-limit check)
+## 1. Business rule exercised — `CBTRN02C`, paragraph `1500-B-LOOKUP-ACCT`
 
-```
-COMPUTE WS-TEMP-BAL = ACCT-CURR-CYC-CREDIT - ACCT-CURR-CYC-DEBIT + DALYTRAN-AMT
+Quoted verbatim from `app/cbl/CBTRN02C.cbl`:
+
+```cobol
+COMPUTE WS-TEMP-BAL = ACCT-CURR-CYC-CREDIT
+                    - ACCT-CURR-CYC-DEBIT
+                    + DALYTRAN-AMT
 IF ACCT-CREDIT-LIMIT >= WS-TEMP-BAL
-    (POST)
+    CONTINUE
 ELSE
-    reject reason 102 "OVERLIMIT TRANSACTION"
+    MOVE 102 TO WS-VALIDATION-FAIL-REASON
+    MOVE 'OVERLIMIT TRANSACTION'
+      TO WS-VALIDATION-FAIL-REASON-DESC
+END-IF
 ```
 
-With this scenario's values — `ACCT-CURR-CYC-CREDIT = 0.00`,
-`ACCT-CURR-CYC-DEBIT = 0.00`, `DALYTRAN-AMT = +2065.00`, `ACCT-CREDIT-LIMIT =
-+2065.00`:
+Arithmetic for account `7` (cycle credit = cycle debit = `0.00`, credit limit
+`+2065.00`, transaction amount `+2065.00`):
 
 - `WS-TEMP-BAL = 0.00 - 0.00 + 2065.00 = 2065.00`
-- the test `2065.00 >= 2065.00` is **TRUE**, so the transaction **POSTS**.
+- `2065.00 >= 2065.00` is **TRUE → POST** (reason stays `0`; no reject 102).
 
-> **WHY the amount is exactly the limit — Trade-off vs. `reject_102_overlimit`.** The
-> comparison is `>=`, not `>`. A balance **exactly at** the limit therefore **posts**
-> (this scenario), while **one cent over** **rejects** (`reject_102_overlimit`,
-> `AMT +2065.01`). The pair pins the operator to `>=`: a "well under" amount would
-> also post but would not prove the single-cent edge is handled correctly, so the
-> amount here is deliberately the limit **exactly** and nothing less.
+The expiration guard in the same paragraph also passes, so there is no reject
+103: `ACCT-EXPIRAION-DATE (2024-12-13) >= DALYTRAN-ORIG-TS(1:10) (2022-06-10)`
+is TRUE.
 
-> **WHY the transaction date stays inside the validity window.** The expiration
-> check (reason 103) runs after the over-limit check; both branches move into the
-> same reason field, so a triggered 103 would overwrite the POST result. This
-> fixture's `DALYTRAN-ORIG-TS` date (`2022-06-10`) is earlier than the account's
-> `ACCT-EXPIRAION-DATE` (`2024-12-13`), so the expiration check stays on its
-> POST path and the exact-limit POST is the sole, deterministic outcome.
+## 2. Trade-off — why the amount is *exactly* the limit (vs. `reject_102_overlimit`)
 
-## 2. Fixture files in this folder
+This fixture is the **positive** counterpart to the sibling scenario
+[`reject_102_overlimit`](../reject_102_overlimit/). Same account, card, and
+category; the **only** difference is the transaction amount:
 
-| File | Copybook | `RECLN` | Line ending | Records | Role / key values |
-|---|---|---:|---|---:|---|
-| `dailytran.txt` | `CVTRA06Y` (DALYTRAN) | 350 | LF | 1 | Transaction `AMT +2065.00` (`00000206500{`) = the credit limit exactly; `CARD 4859452612877065`, `ORIG-TS` date `2022-06-10`, `PROC-TS` blank. |
-| `cardxref.txt` | `CVACT03Y` (XREF) | 50 | LF | 1 | card `4859452612877065` → cust `000000007` → acct `00000000007`. |
-| `acctdata.txt` | `CVACT01Y` (ACCOUNT) | 300 | LF | 1 | account `00000000007`: `CREDIT-LIMIT 2065.00`, cycle credit/debit `0.00`, `EXPIRAION-DATE 2024-12-13`. |
-| `tcatbal.txt` | `CVTRA01Y` (TCATBAL) | 50 | LF | 1 | category row `00000000007 / 01 / 0001`, `TRAN-CAT-BAL 0.00` (update-branch target). |
+| Scenario | `DALYTRAN-AMT` | `WS-TEMP-BAL` | `>=` limit? | Result |
+|---|---|---|---|---|
+| `boundary_exact_limit` (here) | `0000020650{` (+2065.00) | 2065.00 | TRUE | **POST**, `RC 0` |
+| `reject_102_overlimit` | `0000020650A` (+2065.01) | 2065.01 | FALSE | reject **102** |
 
-## 3. Expected outcome (authoritative intent; golden is [planned])
+Documenting both sides pins the operator down to **`>=` (inclusive)**, not `>`.
+A "well under" amount would also post, but would never prove the single-cent
+edge; the amount here is therefore deliberately the limit **exactly**. That
+inclusive boundary is the financial-correctness edge this scenario pair exists
+to lock in.
 
-- **`RETURN-CODE = 0`** — POST, no reject.
-- **`DALYREJS` empty.**
-- **`TCATBAL` updated (`2700-B-UPDATE`):** `0.00 + 2065.00 = 2065.00`.
-- **ACCOUNT updated** and the posted transaction **written to `TRANSACT`**.
+## 3. Fixture files in this folder
 
-## 4. Data governance / synthetic provenance (MA-24)
+| File | ASSIGN name | Copybook | RECLN | Role |
+|---|---|---|---:|---|
+| `dailytran.txt` | `DALYTRAN` (SEQUENTIAL) | `CVTRA06Y` | 350 | Driving transaction; `DALYTRAN-AMT = 0000020650{` (+2065.00); card `4859452612877065`. |
+| `cardxref.txt` | `XREFFILE` (INDEXED, key 16@0) | `CVACT03Y` | 50 | Maps card → account `7` (avoids reject 100). |
+| `acctdata.txt` | `ACCTFILE` (INDEXED, key 11@0) | `CVACT01Y` | 300 | Account `7`; `ACCT-CREDIT-LIMIT = 00000020650{` (+2065.00); cycle credit/debit = 0. |
+| `tcatbal.txt` | `TCATBALF` (INDEXED, key 17@0) | `CVTRA01Y` | 50 | Seed row acct7/01/0001 at `+0.00` → forces the `2700-B-UPDATE` (REWRITE) branch. |
+
+## 4. Expected outcome
+
+Authoritative summary; the byte-level golden mirror lives at
+[`tests/golden/posting/boundary_exact_limit/`](../../../golden/posting/boundary_exact_limit/).
+
+- `RETURN-CODE = 0`.
+- Exactly **1** record written to `TRANSACT` (transaction id
+  `0000000000683580`); `DALYREJS` **empty** (no rejects).
+- `TCATBAL` row `00000000007/01/0001`: balance `0.00 → 2065.00` (`0000020650{`)
+  via `2700-B-UPDATE`.
+- `ACCOUNT 7`: `ACCT-CURR-BAL` `193.00 → 2258.00` (`00000022580{`);
+  `ACCT-CURR-CYC-CREDIT` `0.00 → 2065.00` (`00000020650{`);
+  `ACCT-CURR-CYC-DEBIT` unchanged.
+
+> **Determinism caveat.** The emitted `TRANSACT` record's `TRAN-PROC-TS` is a
+> runtime timestamp; it is **normalized** before golden comparison by
+> [`tests/helpers/golden_compare.py`](../../../helpers/golden_compare.py).
+
+## 5. Encoding & determinism
+
+All fixtures follow the byte-encoding contract in
+[`tests/fixtures/README.md`](../../README.md) — fixed widths (350 / 50 / 300 /
+50), zoned-decimal sign overpunch on signed money fields, ISO `X(10)` dates, LF
+line endings, and derivation from the `app/data/ASCII/*` seeds (which are never
+edited). Those tables are **not** repeated here.
+
+> **CRLF → LF choice for `tcatbal.txt` (documented per master §3.2).** The
+> `tcatbal` seed ships as CRLF; this fixture is authored with **LF** to match
+> the folder-wide LF mandate. This is safe because the loader strips `\r`/`\n`,
+> and uniform LF prevents a stray `\r` from being absorbed into the trailing
+> 22-byte `FILLER` and pushing the record one byte past `RECLN`.
+
+## 6. Assumptions
+
+- `DALYTRAN-ORIG-TS` and `DALYTRAN-PROC-TS` are fixed literals (ORIG-TS =
+  `2022-06-10 19:27:53.000000`; PROC-TS = blank), so reruns are byte-identical.
+- Seed cycle balances are zero (`ACCT-CURR-CYC-CREDIT = ACCT-CURR-CYC-DEBIT =
+  0.00`), so `WS-TEMP-BAL` equals the transaction amount exactly — the cleanest
+  way to land the running balance on the limit.
+- The scenario is self-contained: the card resolves via `cardxref.txt`, the
+  account via `acctdata.txt`, and the category-balance row via `tcatbal.txt`.
+
+## 7. Data governance (synthetic provenance, per master §10)
 
 Card `4859452612877065`, account `00000000007`, and customer `000000007` are
-**synthetic, seed-derived** values from the published AWS CardDemo sample datasets,
-representing **no real person or account**; only the amount is tuned to the exact
-limit. See master §10.
-
-## 5. Sources & scope
-
-- **Derived from (never edited):** `app/data/ASCII/{dailytran,cardxref,acctdata,tcatbal}.txt`.
-- **Record layouts:** `app/cpy/{CVTRA06Y,CVACT03Y,CVACT01Y,CVTRA01Y}.cpy`.
-- **Business rule:** `app/cbl/CBTRN02C.cbl` (`1500-VALIDATE-TRAN`, over-limit `>=`).
-- **Consumed by (when present):** `tests/integration/test_cbtrn02c_posting.py` —
-  **[planned]** (master §1).
-
-**Minimal-change principle (mandatory).** Seeds under `app/data/ASCII/` and all
-production sources under `app/` are **REFERENCE ONLY and are never modified**
-(AAP §0.8.2).
+**synthetic, seed-derived** values from the published AWS CardDemo sample
+datasets (`app/data/ASCII/*`); they represent **no real person or account**.
+Only the business-rule field — `DALYTRAN-AMT` — is reshaped (to exactly the
+credit limit); all identity bytes are carried unchanged from the seeds.
 
 ---
 
-*This README is the mandatory Explainability artifact (AAP §0.10.1) for the four
-static `.txt` fixtures in this folder.*
+*Mandatory Explainability artifact (AAP §0.10.1) for the four static `.txt`
+fixtures in this folder. Production sources under `app/` and seeds under
+`app/data/` are REFERENCE ONLY and are never modified (AAP §0.8.2).*
