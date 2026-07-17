@@ -43,6 +43,32 @@ Environment variables (names/defaults mirror ``scripts/test_env.sh`` EXACTLY):
 * ``CARDDEMO_TEST_WORKSPACE`` -> ``<workspace base>/run-<id>`` (bash default)
 * ``CARDDEMO_DATA_DIR``       -> ``<CARDDEMO_TEST_WORKSPACE>/data``
 
+Additional environment variables this conftest recognises (test-harness policy,
+NOT persisted by ``test_env.sh``):
+
+* ``CARDDEMO_REQUIRE_COBOL``  -> when truthy (``1``/``true``/``yes``/``on``), a
+  genuinely-absent COBOL toolchain / build script / helper module is a HARD
+  FAILURE instead of a clean skip. This mirrors the existing
+  ``CARDDEMO_REQUIRE_LOCALSTACK`` convention in ``scripts/setup_localstack.sh``
+  and is what a CI run sets so a required layer can never silently vanish behind
+  a green-looking (all-skipped) report (QA finding M1).
+* ``CARDDEMO_BUILD_TIMEOUT``  -> wall-clock seconds allowed for the one-time
+  compile subprocess (default ``600``); bounds the build stage so a hung
+  compiler cannot stall a run indefinitely (QA finding M3).
+
+Security & concurrency contract (QA findings M3, M6)
+----------------------------------------------------
+* The repository root is anchored to THIS file's own location and any
+  ``CARDDEMO_REPO_ROOT`` override is validated against it -- an override that
+  points at a different tree is rejected, never followed (no arbitrary roots).
+* ``CARDDEMO_BUILD_DIR`` / ``CARDDEMO_REPORTS_DIR`` overrides must resolve to a
+  location CONTAINED under the repository root; an escaping path is rejected.
+* The one-time build runs under a cross-process file lock and a per-run stamp,
+  so under ``pytest-xdist -n auto`` the programs are compiled EXACTLY ONCE for
+  the whole run (never once-per-worker, never racing) and the compile subprocess
+  inherits only a MINIMAL, curated environment (no ambient cloud credentials or
+  tokens leak into the child).
+
 Return-code rubric (from ``scripts/test_env.sh`` / ``build_test_programs.sh``):
 ``0`` pass, ``4`` warn/reject, ``8`` fail, ``16`` fatal, ``2`` usage.
 
@@ -63,13 +89,27 @@ Fixtures exposed
 # import-time cost or risking a version-specific attribute lookup at load time.
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+# WHY (Trade-off): ``from __future__ import annotations`` makes every annotation
+# a lazy string, so these names are needed ONLY by a static type checker, never
+# at runtime. Importing them under ``TYPE_CHECKING`` (False at run time) keeps
+# the string annotations ``"Iterator[...]"`` / ``"NoReturn"`` resolvable for
+# mypy/pyright while adding zero import cost to the actual test run.
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import NoReturn
 
 # ---------------------------------------------------------------------------
 # sys.path bootstrap -- MUST run at import time, before any ``tests.*`` import.
@@ -114,6 +154,79 @@ _MARKERS = (
     ("slow", "long-running tests (may be deselected for fast local iteration)."),
 )
 
+# ---------------------------------------------------------------------------
+# M1 -- "required layer" gate (mirrors scripts/setup_localstack.sh's
+# CARDDEMO_REQUIRE_LOCALSTACK convention EXACTLY, for one uniform policy).
+# ---------------------------------------------------------------------------
+# WHY (Refactoring rationale + Convention): setup_localstack.sh already grades a
+# genuinely-absent OPTIONAL layer as a HARD FAILURE when its
+# ``CARDDEMO_REQUIRE_<LAYER>`` flag is set, and a clean skip otherwise. Reusing
+# the identical ``CARDDEMO_REQUIRE_COBOL`` name/semantics here means a CI run
+# turns *one* family of flags on and every layer -- LocalStack and now COBOL --
+# obeys the same "absent-required-layer == FAIL, never a green-looking skip"
+# rule. Without this gate the Python layer could skip all COBOL-dependent tests
+# and still exit 0 with an all-skipped (superficially green) report (M1).
+_STRICT_ENV = "CARDDEMO_REQUIRE_COBOL"
+
+# ---------------------------------------------------------------------------
+# M3 -- bounded build stage.
+# ---------------------------------------------------------------------------
+# WHY (Trade-off): 600 s is generous for the ~13-program GnuCOBOL compile (which
+# finishes in seconds on the reference runner) yet still finite, so a wedged
+# compiler surfaces as an actionable timeout failure instead of hanging CI. The
+# value is overridable via ``CARDDEMO_BUILD_TIMEOUT`` for slow/instrumented
+# (``--coverage``) builds.
+_BUILD_TIMEOUT_ENV = "CARDDEMO_BUILD_TIMEOUT"
+_DEFAULT_BUILD_TIMEOUT = 600.0  # seconds
+# Poll cadence while waiting on the build lock. WHY (Trade-off): 0.25 s is small
+# enough that a waiting xdist worker starts almost immediately once the single
+# builder releases the lock, but large enough not to busy-spin a core.
+_LOCK_POLL_INTERVAL = 0.25  # seconds
+
+# Names of the lock + completion-stamp files placed inside the build directory.
+# WHY (Assumption): build/ is git-ignored (see .gitignore ``/build/``), so these
+# coordination files are never committed; keeping them beside the artifacts they
+# guard means every worker derives the same path from the same build_dir.
+_BUILD_LOCK_NAME = ".build.lock"
+_BUILD_STAMP_NAME = ".build.complete"
+
+# ---------------------------------------------------------------------------
+# M6 -- minimal build-subprocess environment (allowlist).
+# ---------------------------------------------------------------------------
+# WHY (Security -- least privilege): the compile child only needs a working
+# toolchain (PATH/locale/tmp) plus the suite's own contract variables. Passing
+# the FULL ambient environment would leak unrelated secrets -- AWS credentials,
+# the LocalStack auth token, CI tokens -- into a process that has no use for
+# them (M6). We therefore ALLOWLIST exactly the keys/prefixes the build needs
+# and drop everything else. An allowlist (not a denylist) is chosen so a
+# newly-introduced secret variable is excluded by DEFAULT rather than only if
+# someone remembers to add it to a blocklist (Alternatives Considered).
+_ENV_ALLOW_KEYS = frozenset(
+    {
+        "PATH",          # locate bash / cobc / cc -- without it the build cannot run
+        "HOME",          # gcc/cobc read HOME for temp + config
+        "PWD",
+        "SHELL",
+        "TERM",
+        "USER",
+        "LOGNAME",
+        "TZ",
+        "TMPDIR",        # gcc/cobc scratch space
+        "TEMP",
+        "TMP",
+        "LANG",          # locale affects cobc diagnostics / text handling
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_NUMERIC",
+    }
+)
+# Prefix allowlist: the suite's own CARDDEMO_* contract, GnuCOBOL's COB_* runtime
+# knobs, GCOV_* coverage controls, and the xdist worker/run identifiers (harmless
+# identifiers, part of the parallel-run contract -- never secrets).
+_ENV_ALLOW_PREFIXES = ("CARDDEMO_", "COB_", "GCOV_", "PYTEST_XDIST_")
+
 
 def _tail(text: str, max_lines: int = 40) -> str:
     """Return the last ``max_lines`` lines of ``text`` for concise diagnostics.
@@ -146,6 +259,374 @@ def _tail(text: str, max_lines: int = 40) -> str:
     if not text:
         return ""
     return "\n".join(text.splitlines()[-max_lines:])
+
+
+def _is_truthy(value: "str | None") -> bool:
+    """Interpret an environment-variable string as a boolean flag.
+
+    Purpose
+    -------
+    Provide one shared, case-insensitive reading of the on/off flags this
+    conftest honours (currently ``CARDDEMO_REQUIRE_COBOL``), so every call site
+    agrees on exactly which spellings mean "enabled".
+
+    Parameters
+    ----------
+    value : str | None
+        The raw environment value (``os.environ.get(...)`` result), which may be
+        ``None`` when the variable is unset.
+
+    Returns
+    -------
+    bool
+        ``True`` iff ``value`` -- lower-cased and stripped -- is one of
+        ``{"1", "true", "yes", "on"}``; ``False`` otherwise (including ``None``).
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Convention + Trade-off): "1" is the canonical trigger that matches the
+    # bash side (scripts/setup_localstack.sh tests `= "1"`); we ALSO accept
+    # true/yes/on so a CI author who writes ``CARDDEMO_REQUIRE_COBOL=true`` is
+    # not silently ignored. Accepting a small fixed set (rather than "any
+    # non-empty string") avoids surprising activation from an accidental value.
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strict_cobol_required() -> bool:
+    """Return whether an absent COBOL layer must HARD-FAIL rather than skip.
+
+    Purpose
+    -------
+    Centralise the read of ``CARDDEMO_REQUIRE_COBOL`` so the "required layer"
+    policy (QA finding M1) is evaluated identically everywhere.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when the operator/CI demands the COBOL toolchain be present
+        (missing -> failure); ``False`` for the default developer-friendly mode
+        (missing -> clean skip).
+
+    Raises
+    ------
+    None
+    """
+    return _is_truthy(os.environ.get(_STRICT_ENV))
+
+
+def _require_or_skip(reason: str) -> "NoReturn":
+    """Fail (strict mode) or skip (default) when a required dependency is absent.
+
+    Purpose
+    -------
+    Implement the M1 contract in one place: a genuinely-absent COBOL dependency
+    (compiler, build script, or helper module) becomes a HARD, report-visible
+    FAILURE when ``CARDDEMO_REQUIRE_COBOL`` is set, and a clean skip otherwise.
+    This is what stops a CI run from exiting green with an all-skipped report
+    that hides a missing required layer.
+
+    Parameters
+    ----------
+    reason : str
+        Human-readable explanation of what is missing; surfaced verbatim in the
+        pytest failure/skip message.
+
+    Returns
+    -------
+    NoReturn
+        Never returns normally -- always raises ``Failed`` (strict) or
+        ``Skipped`` (default) via pytest.
+
+    Raises
+    ------
+    Failed
+        (via :func:`pytest.fail`) when strict mode is active.
+    Skipped
+        (via :func:`pytest.skip`) when strict mode is inactive.
+    """
+    if _strict_cobol_required():
+        # ``pytrace=False``: the actionable signal is the missing-dependency
+        # message, not a traceback into this helper. Failing (not skipping)
+        # makes the absence show up as an ERROR-bearing JUnit case that the
+        # runner scripts map to RC>=8 -- i.e. it can never masquerade as green.
+        pytest.fail(
+            f"{reason} (required because {_STRICT_ENV} is set).",
+            pytrace=False,
+        )
+    pytest.skip(f"{reason}; skipping (set {_STRICT_ENV}=1 to require it).")
+
+
+def _validate_repo_root() -> Path:
+    """Resolve the repository root from a TRUSTED anchor, validating any override.
+
+    Purpose
+    -------
+    Anchor the suite to the repository that physically contains THIS file, and
+    reject any ``CARDDEMO_REPO_ROOT`` environment override that would redirect
+    execution to a different tree (QA finding M6 -- "arbitrary roots accepted").
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved (absolute, symlink-free) repository root.
+
+    Raises
+    ------
+    Failed
+        (via :func:`pytest.fail`) if ``CARDDEMO_REPO_ROOT`` is set but does not
+        resolve to the same directory as the trusted ``__file__``-derived anchor,
+        or does not look like the CardDemo repository (missing marker dirs).
+    """
+    # The trusted anchor cannot be spoofed by the environment: it is derived from
+    # the on-disk location of this very module (``<repo>/tests/conftest.py`` ->
+    # grandparent == repo root). WHY (Assumption): conftest.py's position in the
+    # tree is fixed by the repository layout, so its grandparent is authoritative.
+    trusted = _REPO_ROOT
+    override = os.environ.get("CARDDEMO_REPO_ROOT")
+    if override:
+        candidate = Path(override).resolve()
+        # WHY (Security -- enforce a CANONICAL root, not merely a plausible one):
+        # we require the override to resolve to the SAME directory as the trusted
+        # anchor. Honouring a divergent value would let an attacker (or a
+        # misconfiguration) point the whole harness -- builds, ASSIGN bindings,
+        # golden roots -- at an arbitrary tree. Because scripts/test_env.sh
+        # derives CARDDEMO_REPO_ROOT as the parent of scripts/ (identical to this
+        # anchor after ``.resolve()``), the legitimate runner flow always passes;
+        # only a redirecting value is rejected.
+        if candidate != trusted:
+            pytest.fail(
+                "CARDDEMO_REPO_ROOT="
+                f"{override!r} resolves to {candidate}, which is not this test "
+                f"tree's repository root ({trusted}). Refusing to run against a "
+                "different tree (security containment, QA finding M6).",
+                pytrace=False,
+            )
+        # A resolved-equal override is redundant but harmless; validate markers
+        # below against the trusted anchor regardless of which value we started
+        # from, so a corrupted/partial checkout is caught early.
+    # Validate the repository "shape" so we fail fast with a clear message rather
+    # than deep inside a build/run against a tree that is not CardDemo at all.
+    # WHY (Assumption): these three directories are invariant landmarks of the
+    # repository (the units under test, their copybooks/scripts, and this test
+    # tree); their joint presence is a cheap, reliable identity check.
+    for marker in ("scripts", "tests", os.path.join("app", "cbl")):
+        if not (trusted / marker).is_dir():
+            pytest.fail(
+                f"repository root {trusted} is missing expected directory "
+                f"{marker!r}; refusing to run against an unrecognised tree "
+                "(QA finding M6).",
+                pytrace=False,
+            )
+    return trusted
+
+
+def _contained_under(child: "str | os.PathLike[str]", parent: Path, *, label: str) -> Path:
+    """Resolve ``child`` and require it to live inside ``parent``; else fail.
+
+    Purpose
+    -------
+    Enforce the M6 containment allowlist for operator-supplied output locations
+    (``CARDDEMO_BUILD_DIR`` / ``CARDDEMO_REPORTS_DIR``): a path override is only
+    honoured when it resolves to somewhere under the (already validated)
+    repository root, so a crafted ``..``/absolute value cannot make the harness
+    write outside the repo.
+
+    Parameters
+    ----------
+    child : str | os.PathLike[str]
+        The candidate path (typically an environment override or a default built
+        from ``parent``).
+    parent : pathlib.Path
+        The containing directory the child must resolve under (the repo root).
+    label : str
+        Short name of the setting being validated (e.g. ``"CARDDEMO_BUILD_DIR"``),
+        used only to make the failure message actionable.
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved, contained child path.
+
+    Raises
+    ------
+    Failed
+        (via :func:`pytest.fail`) if the resolved child escapes ``parent``.
+    """
+    resolved = Path(child).resolve()
+    # WHY (Refactoring rationale): compare on the RESOLVED paths so that symlinks
+    # and ``..`` segments are collapsed BEFORE the containment test -- a lexical
+    # (string-prefix) check on the raw value could be fooled by ``<repo>/../evil``
+    # or a symlink, whereas ``.resolve()`` + ``is_relative_to`` reasons about the
+    # real target. ``is_relative_to`` (Python 3.9+) is the intent-revealing form
+    # of "is parent an ancestor of resolved?".
+    if resolved != parent and not resolved.is_relative_to(parent):
+        pytest.fail(
+            f"{label}={str(child)!r} resolves to {resolved}, which is outside "
+            f"the repository root {parent}. Refusing an out-of-tree location "
+            "(security containment, QA finding M6).",
+            pytrace=False,
+        )
+    return resolved
+
+
+def _run_token() -> str:
+    """Return a token that is STABLE across the workers of one pytest run.
+
+    Purpose
+    -------
+    Provide the identity written into the build-completion stamp so the one-time
+    compile can be shared across ``pytest-xdist`` workers (build ONCE per run,
+    not once per worker) yet still be rebuilt on a subsequent, independent
+    invocation (QA finding M3).
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``PYTEST_XDIST_TESTRUNUID`` when running under xdist (identical for every
+        worker of the same run), else a process-local token. The non-xdist
+        fallback is sufficient because, without xdist, the session-scoped build
+        fixture executes exactly once in a single process anyway.
+
+    Raises
+    ------
+    None
+    """
+    # WHY (Assumption -- verified empirically): xdist exports
+    # PYTEST_XDIST_TESTRUNUID with the SAME value to the controller and every
+    # worker of a run, so keying the stamp on it makes all workers agree "this
+    # run already built". Absent xdist the variable is unset; a per-process token
+    # (pid) is a correct fallback because the single process builds once and a
+    # later invocation gets a new pid -> a fresh rebuild (no stale reuse).
+    return os.environ.get("PYTEST_XDIST_TESTRUNUID") or f"pid-{os.getpid()}"
+
+
+def _minimal_build_env(repo_root: Path, build_dir: Path) -> "dict[str, str]":
+    """Build a MINIMAL, curated environment for the compile subprocess.
+
+    Purpose
+    -------
+    Hand ``scripts/build_test_programs.sh`` only the variables a COBOL compile
+    legitimately needs, dropping unrelated ambient secrets (AWS credentials,
+    LocalStack token, CI tokens) so they never leak into the child (QA finding
+    M6). The suite's own ``CARDDEMO_REPO_ROOT`` / ``CARDDEMO_BUILD_DIR`` are then
+    pinned to the VALIDATED values so the child cannot be steered by a hostile
+    ambient copy of them.
+
+    Parameters
+    ----------
+    repo_root : pathlib.Path
+        The validated repository root, pinned into ``CARDDEMO_REPO_ROOT``.
+    build_dir : pathlib.Path
+        The validated, contained build directory, pinned into
+        ``CARDDEMO_BUILD_DIR``.
+
+    Returns
+    -------
+    dict[str, str]
+        A fresh environment mapping suitable for ``subprocess.run(env=...)``.
+
+    Raises
+    ------
+    None
+    """
+    env: "dict[str, str]" = {}
+    for key, value in os.environ.items():
+        # WHY (Security -- allowlist, not denylist): admit a variable only if it
+        # is an explicitly-approved key OR carries an approved prefix. Anything
+        # else (an unknown, possibly-secret variable) is excluded by default.
+        if key in _ENV_ALLOW_KEYS or key.startswith(_ENV_ALLOW_PREFIXES):
+            env[key] = value
+    # Pin the two contract variables to the validated paths so the sourced
+    # test_env.sh honours OUR root/build dir rather than any ambient override
+    # that survived the allowlist (CARDDEMO_* is allow-prefixed, so a hostile
+    # value could otherwise ride along -- we overwrite it here to be safe).
+    env["CARDDEMO_REPO_ROOT"] = str(repo_root)
+    env["CARDDEMO_BUILD_DIR"] = str(build_dir)
+    return env
+
+
+@contextlib.contextmanager
+def _build_lock(lock_path: Path, timeout: float) -> "Iterator[None]":
+    """Hold an exclusive, cross-process advisory lock for the duration of a block.
+
+    Purpose
+    -------
+    Serialise the one-time compile so that, under ``pytest-xdist``, at most one
+    worker builds at a time (QA finding M3 -- "repeated unlocked builds"). While
+    the single builder holds the lock, every other worker BLOCKS here, so no
+    consumer ever observes a half-written build directory -- the build is atomic
+    from a reader's point of view.
+
+    Parameters
+    ----------
+    lock_path : pathlib.Path
+        Filesystem path of the lock file. Its parent directory must already
+        exist; the file itself is created if absent.
+    timeout : float
+        Maximum seconds to wait to acquire the lock before giving up. Bounds the
+        wait so a wedged builder cannot hang the waiters forever (M3 -- "bounded
+        stages").
+
+    Yields
+    ------
+    None
+        Control is yielded to the ``with`` body only once the lock is held.
+
+    Raises
+    ------
+    TimeoutError
+        If the lock cannot be acquired within ``timeout`` seconds.
+    OSError
+        If the lock file cannot be opened for a reason other than contention.
+    """
+    # WHY (Alternatives Considered): the ``filelock`` package is the usual choice
+    # but is NOT installed in this environment, so we use stdlib ``fcntl.flock``
+    # directly. flock gives a robust cross-process advisory lock on Linux (the
+    # documented runner OS) and is released automatically if the holder dies,
+    # which prevents a crashed builder from deadlocking the rest of the run.
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break  # lock acquired
+            except OSError as exc:
+                # EAGAIN/EWOULDBLOCK/EACCES mean "held by someone else" -> wait
+                # and retry until the deadline. Any other errno is a real fault.
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not acquire build lock {lock_path} within "
+                        f"{timeout:.0f}s"
+                    ) from exc
+                time.sleep(_LOCK_POLL_INTERVAL)
+        yield
+    finally:
+        # WHY (Refactoring rationale): unlock explicitly BEFORE closing so the
+        # release is deterministic even if a later close were to be delayed, then
+        # always close the descriptor to avoid an fd leak across the session.
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -188,9 +669,11 @@ def repo_root() -> Path:
 
     Purpose
     -------
-    Provide the single anchor from which every other path fixture is derived,
-    honouring an operator-supplied ``CARDDEMO_REPO_ROOT`` override when present
-    and otherwise falling back to this file's grandparent directory.
+    Provide the single anchor from which every other path fixture is derived.
+    The root is taken from this file's own on-disk location (the trusted
+    anchor); an operator-supplied ``CARDDEMO_REPO_ROOT`` is validated against
+    that anchor rather than blindly trusted, so the environment cannot redirect
+    the suite to an arbitrary tree (QA finding M6).
 
     Parameters
     ----------
@@ -203,13 +686,17 @@ def repo_root() -> Path:
 
     Raises
     ------
-    None
+    Failed
+        (via :func:`pytest.fail`, from :func:`_validate_repo_root`) if a
+        ``CARDDEMO_REPO_ROOT`` override diverges from the trusted anchor or the
+        tree is missing its expected marker directories.
     """
-    # WHY (Assumption): honour CARDDEMO_REPO_ROOT first so a run driven by the
-    # sibling scripts (which export it) and a bare pytest run agree on the same
-    # root; the computed grandparent is only the fallback. ``.resolve()`` makes
-    # downstream comparisons stable against the resolved paths CobolRunner emits.
-    return Path(os.environ.get("CARDDEMO_REPO_ROOT", _REPO_ROOT)).resolve()
+    # WHY (Refactoring rationale): the previous body honoured CARDDEMO_REPO_ROOT
+    # verbatim (``os.environ.get(..., _REPO_ROOT)``), which "accepted an
+    # arbitrary root" -- exactly the M6 defect. All validation now lives in the
+    # single testable helper so the security contract is exercised by unit tests
+    # rather than hidden in a fixture body.
+    return _validate_repo_root()
 
 
 @pytest.fixture(scope="session")
@@ -230,18 +717,25 @@ def build_dir(repo_root: Path) -> Path:
     Returns
     -------
     pathlib.Path
-        The build-directory path. Not necessarily created yet -- the build
-        script and/or the ``built_programs`` fixture create it.
+        The resolved build-directory path, guaranteed to be CONTAINED under
+        ``repo_root``. Not necessarily created yet -- the build script and/or the
+        ``built_programs`` fixture create it.
 
     Raises
     ------
-    None
+    Failed
+        (via :func:`pytest.fail`, from :func:`_contained_under`) if a
+        ``CARDDEMO_BUILD_DIR`` override resolves outside the repository root.
     """
     # WHY (Assumption): mirror test_env.sh's ``CARDDEMO_BUILD_DIR:-<root>/build``
     # exactly so this fixture names the same directory the build script writes
     # to. Not created here on purpose: directory creation is the build step's
     # responsibility, and an empty build dir must not read as "already built".
-    return Path(os.environ.get("CARDDEMO_BUILD_DIR", repo_root / "build"))
+    # WHY (Security, M6): an override is honoured only if it resolves UNDER the
+    # repo root; a ``..``/absolute escape is rejected so the harness cannot be
+    # induced to write build artifacts outside the tree.
+    raw = os.environ.get("CARDDEMO_BUILD_DIR", repo_root / "build")
+    return _contained_under(raw, repo_root, label="CARDDEMO_BUILD_DIR")
 
 
 @pytest.fixture(scope="session")
@@ -262,14 +756,22 @@ def reports_dir(repo_root: Path) -> Path:
     Returns
     -------
     pathlib.Path
-        The reports directory, guaranteed to exist on return.
+        The reports directory (CONTAINED under ``repo_root``), guaranteed to
+        exist on return.
 
     Raises
     ------
+    Failed
+        (via :func:`pytest.fail`, from :func:`_contained_under`) if a
+        ``CARDDEMO_REPORTS_DIR`` override resolves outside the repository root.
     OSError
         If the directory cannot be created (e.g. permission denied).
     """
-    path = Path(os.environ.get("CARDDEMO_REPORTS_DIR", repo_root / "reports"))
+    # WHY (Security, M6): validate/contain the (possibly overridden) location
+    # BEFORE creating it, so a hostile ``CARDDEMO_REPORTS_DIR`` cannot cause an
+    # mkdir outside the repository tree.
+    raw = os.environ.get("CARDDEMO_REPORTS_DIR", repo_root / "reports")
+    path = _contained_under(raw, repo_root, label="CARDDEMO_REPORTS_DIR")
     # WHY (Trade-off): create eagerly (``parents=True, exist_ok=True``) rather
     # than lazily, so a test that merely wants somewhere to drop an artifact
     # never has to guard for a missing directory; being idempotent, doing it in
@@ -286,8 +788,13 @@ def built_programs(repo_root: Path, build_dir: Path) -> Path:
     -------
     Guarantee the compiled GnuCOBOL programs exist before any integration/e2e
     test runs, by invoking the authoritative ``scripts/build_test_programs.sh``
-    exactly once per session (session scope caches the result). Environments
-    without a COBOL compiler skip cleanly rather than erroring the session.
+    EXACTLY ONCE PER RUN -- even under ``pytest-xdist``, where each worker has its
+    own session. A cross-process lock serialises the compile and a per-run stamp
+    lets the first worker build while the rest reuse the artifacts, so the build
+    never races or repeats once-per-worker (QA finding M3). The compile subprocess
+    is bounded by a timeout and receives only a minimal, curated environment (QA
+    finding M6). When the COBOL toolchain is genuinely absent the fixture skips by
+    default but HARD-FAILS under ``CARDDEMO_REQUIRE_COBOL`` (QA finding M1).
 
     Parameters
     ----------
@@ -295,7 +802,8 @@ def built_programs(repo_root: Path, build_dir: Path) -> Path:
         Repository root; used as the subprocess working directory and to locate
         the build script.
     build_dir : pathlib.Path
-        The build directory returned to callers once the compile succeeds.
+        The (validated, contained) build directory returned to callers once the
+        compile succeeds; also hosts the lock and completion-stamp files.
 
     Returns
     -------
@@ -305,89 +813,158 @@ def built_programs(repo_root: Path, build_dir: Path) -> Path:
     Raises
     ------
     Skipped
-        (via ``pytest.skip``) if ``cobc`` is not on ``PATH`` or the build script
-        is absent -- COBOL-dependent tests cannot run and are skipped, not
-        failed.
+        (via :func:`_require_or_skip`) if ``cobc`` is absent or the build script
+        is missing AND ``CARDDEMO_REQUIRE_COBOL`` is not set -- COBOL-dependent
+        tests are skipped, not failed.
     Failed
-        (via ``pytest.fail``) if the build script exits fatally (RC >= 8) or with
-        an otherwise-unexpected code -- a real, actionable build breakage.
+        (via :func:`pytest.fail`) if the toolchain is absent while
+        ``CARDDEMO_REQUIRE_COBOL`` is set, if the build exceeds its timeout, or if
+        the build script exits fatally (RC >= 8) / with an otherwise-unexpected
+        code -- all real, actionable breakages.
     """
-    # WHY (Assumption): a missing compiler is an *environment* condition, not a
-    # test defect, so we skip (not fail). This lets the Python suite be collected
-    # and any non-COBOL portions be exercised on machines without GnuCOBOL,
-    # exactly as the agent_prompt requires. Detection via shutil.which matches
-    # the same check the build script performs before it exits 8.
+    # WHY (M1): a missing compiler is an *environment* condition. By DEFAULT it is
+    # a clean skip so the Python suite still collects and any non-COBOL portions
+    # run on machines without GnuCOBOL. But when CARDDEMO_REQUIRE_COBOL is set
+    # (CI), the same absence is a HARD FAILURE -- a required layer must never hide
+    # behind a green-looking all-skipped report. Detection via shutil.which
+    # matches the check the build script itself performs before it exits 8.
     if shutil.which("cobc") is None:
-        pytest.skip("GnuCOBOL 'cobc' not found on PATH; skipping COBOL-dependent tests")
+        _require_or_skip("GnuCOBOL 'cobc' not found on PATH")
 
     build_script = repo_root / "scripts" / "build_test_programs.sh"
-    # WHY (Assumption): during a partial checkout the script may be absent; treat
-    # that like a missing compiler (skip) so collection and non-COBOL tests stay
-    # green instead of erroring on a FileNotFoundError from the subprocess.
+    # WHY (M1): during a partial checkout the script may be absent; treat that
+    # exactly like a missing compiler -- skip by default, fail when required --
+    # instead of erroring on a FileNotFoundError from the subprocess.
     if not build_script.is_file():
-        pytest.skip(
-            f"build script not found: {build_script}; skipping COBOL-dependent tests"
-        )
+        _require_or_skip(f"build script not found: {build_script}")
 
-    # Run the build ONCE. WHY (Trade-off): session scope plus an idempotent build
-    # script means we pay the ~13-program compile cost a single time and every
-    # test reuses the artifacts -- the dominant runtime saving for the suite.
-    # capture_output keeps the child's compile noise out of pytest's streams
-    # unless we deliberately surface the tail on failure below; text=True yields
-    # str (not bytes) so ``_tail`` can splitlines() directly.
-    completed = subprocess.run(
-        ["bash", str(build_script)],
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
-    )
+    # Ensure the build directory exists BEFORE we place the lock/stamp inside it.
+    # WHY (Assumption): directory creation is normally the build step's job, but
+    # the lock and completion stamp must live at a stable, agreed path that every
+    # xdist worker can open, so we create the (already-validated, contained) dir
+    # here. It stays empty of artifacts until the single builder populates it.
+    build_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = build_dir / _BUILD_LOCK_NAME
+    stamp_path = build_dir / _BUILD_STAMP_NAME
+    token = _run_token()
 
-    rc = completed.returncode
-    # WHY (Trade-off): treat RC >= 8 (fatal) OR any code that is not 0/4 as a
-    # failure. RC == 4 (warn) is intentionally allowed through because it means
-    # an optional / known-unsupported program (e.g. CBEXPORT/CBIMPORT) did not
-    # compile while the core programs did -- the suite should still run. An
-    # unexpected code such as 2 (usage) signals we invoked the script wrongly,
-    # which is a real bug and must surface, hence it is excluded from (0, 4).
-    if rc >= _RC_FAIL or rc not in (0, _RC_WARN):
-        tail = _tail(completed.stderr) or _tail(completed.stdout) or "(no output captured)"
-        # ``pytrace=False``: the traceback would point at this fixture, not at
-        # the actual COBOL compile error, so it adds noise; the captured tail is
-        # the signal a developer needs.
-        pytest.fail(
-            f"scripts/build_test_programs.sh failed (exit {rc}). Last output:\n{tail}",
-            pytrace=False,
-        )
+    # Resolve the (overridable) build-stage timeout defensively. WHY (Trade-off):
+    # a malformed CARDDEMO_BUILD_TIMEOUT should not crash collection with a
+    # ValueError -- we fall back to the safe default so the suite still runs.
+    try:
+        build_timeout = float(os.environ.get(_BUILD_TIMEOUT_ENV, _DEFAULT_BUILD_TIMEOUT))
+        if build_timeout <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        build_timeout = _DEFAULT_BUILD_TIMEOUT
 
-    return build_dir
+    # A waiting worker must be willing to wait for the single builder to finish a
+    # full compile, so the lock-acquisition budget is the build budget plus a
+    # margin for stamp I/O. WHY (bounded stage, M3): still finite, so a wedged
+    # builder surfaces as a TimeoutError rather than hanging every waiter forever.
+    lock_timeout = build_timeout + 60.0
+
+    try:
+        with _build_lock(lock_path, lock_timeout):
+            # Fast path: another worker in THIS run already built successfully.
+            # WHY (build ONCE per run, M3): the stamp records the shared run token
+            # (PYTEST_XDIST_TESTRUNUID); if it already carries our token the
+            # artifacts are current for this run and we must NOT recompile. A
+            # stamp from an earlier run (different token) is ignored so a fresh
+            # invocation always rebuilds -- no stale reuse across runs.
+            if stamp_path.is_file() and stamp_path.read_text(encoding="utf-8").strip() == token:
+                return build_dir
+
+            # Slow path: we are the elected builder for this run. Run the build
+            # ONCE, under the lock, with a MINIMAL environment and a bounded
+            # timeout. capture_output keeps compile noise out of pytest's streams
+            # unless we surface the tail on failure; text=True yields str so
+            # ``_tail`` can splitlines() directly.
+            try:
+                completed = subprocess.run(
+                    ["bash", str(build_script)],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=build_timeout,
+                    # WHY (M6 -- least privilege): a curated allowlist env, so no
+                    # ambient AWS/LocalStack/CI secret leaks into the compiler
+                    # child; CARDDEMO_REPO_ROOT/BUILD_DIR are pinned to the
+                    # validated paths so the child cannot be redirected.
+                    env=_minimal_build_env(repo_root, build_dir),
+                )
+            except subprocess.TimeoutExpired as exc:
+                tail = _tail(exc.stderr) if isinstance(exc.stderr, str) else ""
+                pytest.fail(
+                    "scripts/build_test_programs.sh exceeded the "
+                    f"{build_timeout:.0f}s build timeout ({_BUILD_TIMEOUT_ENV} to "
+                    f"adjust). Last output:\n{tail or '(no output captured)'}",
+                    pytrace=False,
+                )
+
+            rc = completed.returncode
+            # WHY (Trade-off): treat RC >= 8 (fatal) OR any code that is not 0/4 as
+            # a failure. RC == 4 (warn) is allowed through because it means an
+            # optional / known-unsupported program (e.g. CBEXPORT/CBIMPORT) did not
+            # compile while the core programs did -- the suite should still run. An
+            # unexpected code such as 2 (usage) signals we invoked the script
+            # wrongly, a real bug, hence excluded from (0, 4).
+            if rc >= _RC_FAIL or rc not in (0, _RC_WARN):
+                tail = _tail(completed.stderr) or _tail(completed.stdout) or "(no output captured)"
+                # ``pytrace=False``: the traceback would point at this fixture,
+                # not the COBOL compile error; the captured tail is the signal a
+                # developer needs. We do NOT write the stamp on failure, so the
+                # build is retried on the next attempt rather than falsely cached.
+                pytest.fail(
+                    f"scripts/build_test_programs.sh failed (exit {rc}). Last output:\n{tail}",
+                    pytrace=False,
+                )
+
+            # Publish the completion stamp ATOMICALLY (write-temp-then-rename) so a
+            # crash mid-write can never leave a half-written token that a later
+            # reader would mistake for a valid one. WHY (M3 -- atomic publication):
+            # os.replace is atomic on the same filesystem, so the stamp appears
+            # complete-or-not-at-all to every subsequent worker.
+            tmp_stamp = stamp_path.with_suffix(stamp_path.suffix + ".tmp")
+            tmp_stamp.write_text(token, encoding="utf-8")
+            os.replace(tmp_stamp, stamp_path)
+            return build_dir
+    except TimeoutError as exc:
+        # Lock could not be acquired within the budget -- the elected builder is
+        # wedged. Surface it as an actionable failure (bounded stage, M3).
+        pytest.fail(str(exc), pytrace=False)
 
 
 @pytest.fixture(scope="function")
-def workspace(tmp_path: Path) -> Path:
+def workspace(tmp_path: Path) -> "Iterator[Path]":
     """Fresh, isolated per-test working directory (with a ``data/`` subdir).
 
     Purpose
     -------
-    Give each test its own scratch workspace so runs never share mutable state.
-    A ``data/`` sub-directory is pre-created to match the layout the sibling
-    scripts describe as ``CARDDEMO_DATA_DIR=<CARDDEMO_TEST_WORKSPACE>/data``, into
-    which the harness binds every GnuCOBOL ASSIGN name.
+    Give each test its own scratch workspace so runs never share mutable state,
+    and reclaim it on teardown so long parallel runs do not accumulate stale
+    indexed/VSAM files (QA finding M3 -- "workspace leakage"). A ``data/``
+    sub-directory is pre-created to match the layout the sibling scripts describe
+    as ``CARDDEMO_DATA_DIR=<CARDDEMO_TEST_WORKSPACE>/data``, into which the
+    harness binds every GnuCOBOL ASSIGN name.
 
     Parameters
     ----------
     tmp_path : pathlib.Path
         pytest's built-in per-test temporary-directory fixture; the source of
-        isolation and of automatic post-test cleanup.
+        isolation. Each test gets a distinct ``tmp_path`` (and, under xdist, each
+        worker has its own base), so cleaning it here is always safe.
 
-    Returns
-    -------
+    Yields
+    ------
     pathlib.Path
         The per-test workspace root (``tmp_path``); ``<workspace>/data`` exists.
 
     Raises
     ------
     OSError
-        If the ``data/`` sub-directory cannot be created.
+        If the ``data/`` sub-directory cannot be created (during setup only;
+        teardown never raises -- see below).
     """
     # WHY (Trade-off): function scope (a fresh ``tmp_path`` per test) is the
     # deliberate opposite of the session-scoped build -- compiling is expensive
@@ -399,7 +976,14 @@ def workspace(tmp_path: Path) -> Path:
     # those name one directory for the whole run, which would defeat the
     # per-test isolation the Python layer depends on.
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
-    return tmp_path
+    yield tmp_path
+    # WHY (M3 -- deterministic cleanup): pytest retains a few recent ``tmp_path``
+    # trees for post-mortem debugging, which is fine for a handful of tests but
+    # lets indexed-file fixtures pile up during a large parallel suite. We remove
+    # this test's tree eagerly. ``ignore_errors=True`` (Trade-off) guarantees a
+    # teardown hiccup -- e.g. a file still held on an exotic FS -- can never turn
+    # a passing test red; reclaiming space is best-effort, correctness is not.
+    shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 @pytest.fixture(scope="function")
@@ -434,22 +1018,28 @@ def cobol_runner(built_programs: Path, workspace: Path, reports_dir: Path):
     Raises
     ------
     Skipped
-        (via ``pytest.skip``) if ``tests.helpers.cobol_runner`` cannot be
-        imported (e.g. a partial checkout without the helpers) -- so collection
-        and the non-runner tests stay green.
+        (via :func:`_require_or_skip`) if ``tests.helpers.cobol_runner`` cannot
+        be imported (e.g. a partial checkout without the helpers) AND
+        ``CARDDEMO_REQUIRE_COBOL`` is not set -- so collection and the non-runner
+        tests stay green.
+    Failed
+        (via :func:`_require_or_skip`) if the helper import fails while
+        ``CARDDEMO_REQUIRE_COBOL`` is set -- the runner layer is required, so its
+        absence must not hide behind a skip (QA finding M1).
     """
     # WHY (Trade-off): import LAZILY inside the fixture body, not at module top.
     # If the helpers module were imported at collection time, a partial checkout
     # missing tests/helpers/ would make the WHOLE conftest fail to load and every
     # test error out. Importing here degrades that failure mode to a clean
-    # per-test skip that affects only tests actually requesting a runner.
+    # per-test skip (or, under CARDDEMO_REQUIRE_COBOL, a targeted failure) that
+    # affects only tests actually requesting a runner.
     try:
         from tests.helpers.cobol_runner import CobolRunner
     except ImportError as exc:  # pragma: no cover - only hit on partial checkouts
-        pytest.skip(
-            f"tests.helpers.cobol_runner not available ({exc}); "
-            "skipping runner-dependent test"
-        )
+        # WHY (M1): route through the same required-layer gate as the compiler so
+        # an absent runner helper is graded consistently -- skip by default, fail
+        # when the operator/CI demands the COBOL layer be present.
+        _require_or_skip(f"tests.helpers.cobol_runner not available ({exc})")
 
     # WHY (Assumption): the constructor signature
     # ``CobolRunner(build_dir, workspace, reports_dir)`` is a hard contract
