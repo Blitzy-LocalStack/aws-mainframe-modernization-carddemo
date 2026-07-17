@@ -1,0 +1,39 @@
+# =============================================================================
+# tests/requirements-test.txt
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Pinned, test-only Python dependencies for the AWS CardDemo automated test
+#   suite (integration + e2e pytest layers, coverage measurement, and the
+#   LocalStack-targeted AWS client shims). Install with:
+#       python3 -m pip install -r tests/requirements-test.txt
+#
+# WHY (pinning rationale):
+#   - Exact '==' pins guarantee deterministic, reproducible CI runs, which is a
+#     financial-enterprise requirement; a floating range could silently change
+#     behavior between runs and break byte-deterministic golden comparisons.
+#   - 'localstack' itself is deliberately NOT listed here: it is a CLI tool
+#     installed/managed separately and driven headless (Docker-less
+#     'localstack ephemeral create'), not a pytest import dependency. Only its
+#     awscli client shims (below) are Python packages.
+# =============================================================================
+
+# Core test runner + JUnit-XML reporting used by every pytest layer.
+pytest==9.1.1
+
+# Parallel execution (`pytest -n auto`) used to PROVE test isolation.
+pytest-xdist==3.8.0
+
+# Python-harness line/branch coverage (COBOL coverage is gcov, measured separately).
+coverage==7.15.2
+
+# LocalStack-targeted AWS clients for the optional S3 dataset-staging layer.
+# WHY: awscli-local provides `awslocal`, a thin wrapper that points awscli at the
+# LocalStack endpoint, so tests never touch a real AWS account.
+awscli-local==0.22.2
+awscli==1.45.49
+
+# Optional golden-file plugin. Pinned to 1.0.1 because older 0.2.x releases
+# pinned pytest<8 and would conflict with pytest 9.x. The suite's PRIMARY golden
+# path uses the custom comparator tests/helpers/golden_compare.py (no pytest
+# version constraint), so this plugin is a convenience only.
+pytest-golden==1.0.1

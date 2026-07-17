@@ -1,0 +1,17 @@
+{
+  "name": "carddemo-tests",
+  "version": "1.0.0",
+  "description": "cobolget manifest for the AWS CardDemo test suite. Declares GCBLUnit as a debug/test dependency used to compile and run the COBOL unit tests in tests/cobol-unit/*_test.cbl. NOTE: cobolget's native manifest filename is modules.json; this file is named tests/cobolget.json per the project's test plan (the AAP-mandated name) but follows the cobolget schema. GCBLUnit is ALSO vendored directly as tests/cobol-unit/gcblunit.cbl, so this manifest is primarily a provenance/reproducibility record of the framework version, not a hard runtime dependency. 'modules' is intentionally empty because this project consumes a framework rather than publishing COBOL modules (cobolget publish/validate would require a non-empty list, which is not applicable here).",
+  "dialect": "gnucobol",
+  "modules": [],
+  "licenses": ["Apache-2.0"],
+  "authors": ["AWS CardDemo test suite"],
+  "dependencies": {},
+  "dependencies-debug": {
+    "gcblunit": "^1.22.6"
+  },
+  "scripts": {
+    "install": "cobolget install",
+    "update": "cobolget update"
+  }
+}
