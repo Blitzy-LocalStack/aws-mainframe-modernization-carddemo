@@ -735,11 +735,20 @@ def normalize(
 
     Operates in one of two modes, selected by ``layout`` (see the module docstring):
 
-    * **Record mode** (``layout`` given) -- byte-exact. Every physical row must be exactly
-      the layout's record length; the run-generated PROC-TS field is blanked *in place*
-      while the deterministic ORIG-TS, trailing FILLER, and total record width are preserved
-      verbatim. No ISO regex runs and trailing whitespace is never stripped. This fixes the
-      pre-fix defect where a 350-byte record collapsed to ~278 characters (CR-04).
+    * **Record mode** (``layout`` given) -- byte-exact. The body is framed into fixed-width
+      records **by width**: any newlines that are present are honoured as separators and then
+      each segment is sliced into exact ``reclen``-sized records. This makes a raw
+      ``ORGANIZATION SEQUENTIAL`` output -- which is ``N*reclen`` concatenated bytes with NO
+      delimiters (CBTRN02C's DALYREJS reject stream and CBACT04C's TRANSACT interest stream) --
+      compare equal to the committed golden, which stores one record per line (QA findings
+      M3 + C3). Each ``normalize_ts`` field is blanked *in place* while every other byte --
+      the deterministic ORIG-TS of a posted transaction, trailing FILLER (including the
+      LOW-VALUES ``0x00`` GnuCOBOL emits for un-populated fields), and total record width --
+      is preserved verbatim. No ISO regex runs and trailing whitespace is never stripped.
+      This fixes the pre-fix defect where a 350-byte record collapsed to ~278 characters
+      (CR-04). The trailing EOF newline is canonicalised (a program output of ``N*reclen``
+      bytes with no final newline and a committed golden with one final newline are treated
+      as equal), so the reclen+1 golden framing round-trips faithfully.
     * **Text mode** (``layout is None``) -- free-form statement/report text. Embedded
       ISO-8601-like timestamps are replaced by a stable sentinel and (by default) trailing
       whitespace is stripped, because in free-form text those are formatting artifacts.
@@ -766,9 +775,10 @@ def normalize(
     Returns
     -------
     str
-        The normalized text with ``\\n`` line endings. In record mode every line retains the
-        layout's exact width (only PROC-TS blanked); in text mode timestamps are replaced by
-        a stable sentinel.
+        The normalized text with ``\\n`` line endings. In record mode every record retains
+        the layout's exact width (only PROC-TS blanked) and the output ends with exactly one
+        trailing newline for non-empty content (empty input yields ``""``); in text mode
+        timestamps are replaced by a stable sentinel.
 
     Raises
     ------
@@ -805,16 +815,64 @@ def normalize(
             )
         _layout_obj, _reclen, scrub_proc_ts, _mask = _record_layout_context(layout)
 
-        normalized_lines: List[str] = []
-        # ``split("\n")`` preserves a trailing newline as a trailing empty element that
-        # round-trips through ``"\n".join`` -- keeping the byte count faithful. The empty
-        # trailing element (from an EOF newline) is NOT a record and is passed through
-        # untouched; every non-empty line is width-validated + PROC-TS-masked by the codec.
-        for line in text.split("\n"):
-            if line != "":
-                line = scrub_proc_ts(line)  # raises RecordLengthError on a bad width
-            normalized_lines.append(line)
-        return "\n".join(normalized_lines)
+        # --- EOF-newline canonicalisation (QA finding M3) ---------------------------
+        # WHY: a fixed-width record file is fully self-delimited by its record length, so
+        # whether the file ends with a trailing newline is a *framing artifact*, not record
+        # data. CBTRN02C (DALYREJS) and the batch programs' indexed outputs are read back as
+        # exactly N*reclen bytes with NO trailing newline, whereas the committed goldens are
+        # stored with a single trailing newline (the reclen+1 framing: dalyrejs=431,
+        # acctdat=301, tcatbal=51). The previous implementation preserved the trailing empty
+        # element produced by ``split("\n")``, so a 430-byte program output compared UNEQUAL
+        # to its 431-byte golden purely because of that one EOF byte, and ``update=True``
+        # regeneration wrote a byte that then failed to round-trip. Canonicalising BOTH
+        # sides to "records joined by \n + exactly one trailing \n" (for non-empty content)
+        # makes the with/without-EOF-newline pair compare equal AND keeps regeneration
+        # byte-faithful to the committed framing. Within-record bytes are untouched, so the
+        # byte-exact record contract (only PROC-TS blanked) is fully preserved.
+        #
+        # WHY treat ""/"\n" as empty (Assumption): an empty file, or a file that is a lone
+        # newline, represents zero records and must match the 0-byte empty goldens
+        # (e.g. tranfile.expected for reject scenarios). This mirrors
+        # ``vsam_loader._validated_blob``'s own empty-input handling, keeping the two
+        # helpers' notion of "empty" identical (single source of truth).
+        if text in ("", "\n"):
+            return ""
+        segments = text.split("\n")
+        if segments and segments[-1] == "":
+            # Drop the single empty element produced by a trailing EOF newline. A remaining
+            # zero-width segment is handled by the per-segment guard below (it is an INTERIOR
+            # blank line -- a malformed zero-width row -- and must never be silently accepted).
+            segments.pop()
+
+        # --- Width-based framing (QA findings M3 + C3) ------------------------------
+        # WHY: GnuCOBOL ``ORGANIZATION IS SEQUENTIAL`` outputs are raw *concatenated*
+        # fixed-width records with NO delimiter between them. CBTRN02C's DALYREJS reject
+        # stream and CBACT04C's TRANSACT interest stream are both written this way, so a
+        # two-record interest output arrives as a single 700-byte blob (2*350) that contains
+        # zero newlines. The committed goldens, by contrast, store one record per line
+        # (reclen+1 framing). Framing must therefore be by fixed WIDTH while *tolerating*
+        # optional newline separators, so that BOTH the separator-less program output and the
+        # newline-delimited golden reduce to the identical record sequence:
+        #   * split on any newlines that ARE present (handles the golden side), then
+        #   * slice each resulting segment into exact reclen-sized records (handles the raw
+        #     program-output side, which arrives as one long segment).
+        # WHY reject a non-multiple segment (Assumption): a segment whose length is not a
+        # positive whole multiple of reclen cannot be a run of fixed-width records, so it is
+        # a genuinely malformed row; it is handed to the codec, which raises RecordLengthError
+        # (reporting expected-vs-actual width) rather than being silently padded/truncated.
+        # The previous implementation validated each newline-split segment as ONE record,
+        # which worked only for single-record outputs and wrongly rejected any multi-record
+        # separator-less sequential file (the real CBACT04C interest output). Within-record
+        # bytes -- including LOW-VALUES (0x00) FILLER that GnuCOBOL emits for un-populated
+        # trailing fields -- are preserved verbatim; only the normalize_ts fields are blanked.
+        records: List[str] = []
+        for segment in segments:
+            if not segment or (len(segment) % _reclen) != 0:
+                # Zero-width or non-multiple: force the codec's precise RecordLengthError.
+                scrub_proc_ts(segment)
+            for _off in range(0, len(segment), _reclen):
+                records.append(scrub_proc_ts(segment[_off:_off + _reclen]))
+        return "\n".join(records) + "\n"
 
     # --- TEXT MODE: free-form statement/report ------------------------------------------
     effective_strip = True if strip_trailing_ws is None else bool(strip_trailing_ws)

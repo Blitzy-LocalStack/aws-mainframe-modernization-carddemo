@@ -10,13 +10,15 @@
 #   into an indexed file in EXACTLY the same way the Python test harness does.
 #
 #   All real work (fixture normalisation, generation + compilation of the COBOL
-#   loader, and writing the native indexed file) is delegated to the single
-#   source of truth, `python3 -m tests.helpers.vsam_loader`. This wrapper only
-#   validates its arguments and forwards them; it deliberately implements NONE of
-#   the loading logic itself.
+#   loader, and writing the native indexed file INCLUDING any alternate-key
+#   sidecars) is delegated to the single source of truth,
+#   `python3 -m tests.helpers.vsam_loader`. This wrapper only validates its
+#   arguments and forwards them (options AND positionals); it deliberately
+#   implements NONE of the loading logic itself.
 #
 # Usage:
 #   bash tests/helpers/load_indexed.sh <flat_file> <indexed_file> <reclen> <key_length> [key_offset]
+#   bash tests/helpers/load_indexed.sh --layout NAME [--alt-key OFF:LEN[:dup]] <flat_file> <indexed_file>
 #   bash tests/helpers/load_indexed.sh -h | --help
 #
 # Parameters (positional):
@@ -25,18 +27,28 @@
 #   <indexed_file>  (string, required) Destination path for the GnuCOBOL native
 #                   indexed file to create (output). Any pre-existing target is
 #                   removed first by the loader (the DELETE analog).
-#   <reclen>        (positive integer, required) Fixed record length in
-#                   characters, matching the copybook layout of the fixture.
-#   <key_length>    (positive integer, required) Length in characters of the
-#                   leading primary RECORD KEY (every CardDemo key starts at
-#                   offset 0).
+#   <reclen>        (positive integer, required UNLESS --layout is given) Fixed
+#                   record length in characters, matching the copybook layout.
+#   <key_length>    (positive integer, required UNLESS --layout is given) Length
+#                   in characters of the leading primary RECORD KEY.
 #   [key_offset]    (non-negative integer, optional; default 0) Key offset within
-#                   the record. Only 0 is supported by the underlying loader; it
-#                   is accepted here solely to mirror the module's positional
-#                   signature 1:1.
+#                   the record. Only 0 is supported by the underlying loader.
 #
-# Options:
-#   -h, --help      Print this usage banner and exit 0.
+# Options (forwarded verbatim to the module, which validates them):
+#   --layout NAME            Derive reclen/key_length AND the layout's alternate
+#                            keys from a record_codec layout name (e.g. XREF,
+#                            ACCOUNT). Mutually exclusive with the positional
+#                            reclen/key_length. This is how CBACT04C's XREF file
+#                            (which is read by its account-id ALTERNATE key) is
+#                            staged so its `.1` sidecar is produced (QA fix C1).
+#   --alt-key OFF:LEN[:dup]  Add an ALTERNATE RECORD KEY at byte OFF, LEN wide;
+#                            optional dup=0 disables WITH DUPLICATES. Repeatable;
+#                            merged with any keys implied by --layout.
+#   --std STD                cobc dialect (default: ibm-strict).
+#   --cobc COBC              cobc command/path used to build the loader.
+#   --cache-dir DIR          directory for the cached loader binary.
+#   --compile-timeout SECONDS / --run-timeout SECONDS  loader wall-clock ceilings.
+#   -h, --help               Print this usage banner and exit 0.
 #
 # Return / Exit codes (CardDemo RC rubric, sourced from scripts/test_env.sh):
 #   0  (CARDDEMO_RC_PASS)  the fixture was loaded into the indexed file.
@@ -107,15 +119,27 @@ _li_usage() {
     # the two.
     cat <<'USAGE'
 Usage: load_indexed.sh <flat_file> <indexed_file> <reclen> <key_length> [key_offset]
+       load_indexed.sh --layout NAME [--alt-key OFF:LEN[:dup]] <flat_file> <indexed_file>
        load_indexed.sh -h | --help
 
   <flat_file>     path to the flat fixed-width fixture to load (input)
   <indexed_file>  destination path for the GnuCOBOL indexed file (output)
-  <reclen>        fixed record length in characters (positive integer)
-  <key_length>    leading primary-key length in characters (positive integer)
+  <reclen>        fixed record length in characters (positive integer; omit with --layout)
+  <key_length>    leading primary-key length in characters (positive integer; omit with --layout)
   [key_offset]    optional key offset within the record; only 0 is supported
                   (non-negative integer, default 0)
-  -h, --help      show this help and exit 0
+
+Options (forwarded to the module):
+  --layout NAME            derive reclen/key_length + alternate keys from a
+                           record_codec layout (e.g. XREF); mutually exclusive
+                           with positional reclen/key_length
+  --alt-key OFF:LEN[:dup]  add an ALTERNATE RECORD KEY (repeatable; merged with --layout)
+  --std STD                cobc dialect (default: ibm-strict)
+  --cobc COBC              cobc command/path
+  --cache-dir DIR          cached-loader directory
+  --compile-timeout SEC    loader compile ceiling
+  --run-timeout SEC        loader run ceiling
+  -h, --help               show this help and exit 0
 
 Delegates all loading to: python3 -m tests.helpers.vsam_loader
 USAGE
@@ -141,59 +165,115 @@ _li_is_nonneg_int() {
 }
 
 # ---------------------------------------------------------------------------
-# Handle -h/--help BEFORE the argument-count check.
-# WHY (Assumption): `--help` is a single token and would otherwise trip the
-# "need 4 or 5 arguments" rule; operators expect help to work regardless of the
-# other arguments, so it is checked first and exits 0 (success, not a usage
-# error). `${1:-}` keeps this safe under `set -u` when no arguments are given.
+# Separate options (forwarded verbatim to the module) from positionals.
+# WHY (QA fix C1 / Refactoring Rationale): the previous version was positional-only
+# and could not stage an alternate-keyed file (CBACT04C reads XREF by its account-id
+# ALTERNATE key, which needs the `.1` sidecar). The underlying module ALREADY accepts
+# --layout / --alt-key (and --std/--cobc/...); this wrapper's sole remaining job is to
+# forward them, so we parse a leading run of recognised options into `_li_opts` and
+# collect the rest as positionals. Validation of the options themselves (layout name,
+# alt-key format, mutual exclusion) stays in the module -- the single source of truth --
+# rather than being duplicated here. `-h/--help` is handled inside the loop so it works
+# regardless of position, matching operators' expectations.
 # ---------------------------------------------------------------------------
-case "${1:-}" in
-    -h|--help) _li_usage; exit 0 ;;
-esac
+_li_opts=()          # option tokens forwarded to the module (e.g. --layout XREF)
+_li_pos=()           # positional tokens: flat, indexed, [reclen], [key_length], [key_offset]
+_li_layout_given=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            _li_usage
+            exit 0
+            ;;
+        --layout|--alt-key|--std|--cobc|--cache-dir|--compile-timeout|--run-timeout)
+            # Two-token option (`--opt value`). WHY: value-taking options must consume
+            # their argument so it is never misread as a positional (flat/indexed).
+            if [ "$#" -lt 2 ]; then
+                echo "[load_indexed] ERROR: option '$1' requires a value." >&2
+                _li_usage >&2
+                exit "${CARDDEMO_RC_USAGE}"
+            fi
+            [ "$1" = "--layout" ] && _li_layout_given=1
+            _li_opts+=("$1" "$2")
+            shift 2
+            ;;
+        --layout=*|--alt-key=*|--std=*|--cobc=*|--cache-dir=*|--compile-timeout=*|--run-timeout=*)
+            # Single-token option (`--opt=value`).
+            case "$1" in --layout=*) _li_layout_given=1 ;; esac
+            _li_opts+=("$1")
+            shift
+            ;;
+        --)
+            # Explicit end-of-options: everything after is positional.
+            shift
+            while [ "$#" -gt 0 ]; do _li_pos+=("$1"); shift; done
+            ;;
+        -*)
+            echo "[load_indexed] ERROR: unknown option '$1'." >&2
+            _li_usage >&2
+            exit "${CARDDEMO_RC_USAGE}"
+            ;;
+        *)
+            _li_pos+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # ---------------------------------------------------------------------------
-# Validate the argument count: exactly 4 (no key_offset) or 5 (with key_offset).
-# WHY: catching an obviously wrong invocation here lets us return the reserved
-# usage code (2) so CI can distinguish an operator mistake from a genuine load
-# failure (8).
+# Validate the positional geometry, distinctly from a real load failure (RC=2 vs 8).
+# WHY: <flat_file> and <indexed_file> are always required. Without --layout we also
+# require a POSITIVE reclen + key_length (a zero-length record or key is meaningless)
+# and accept an optional NON-NEGATIVE key_offset. With --layout the geometry comes from
+# the codec, so numeric positionals are rejected here to give a crisp operator error
+# instead of relying on the module's argparse (whose nonzero exit this wrapper would
+# otherwise collapse into the generic FAIL code).
 # ---------------------------------------------------------------------------
-if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-    echo "[load_indexed] ERROR: expected 4 or 5 arguments, received $#." >&2
+_li_npos=${#_li_pos[@]}
+if [ "$_li_npos" -lt 2 ]; then
+    echo "[load_indexed] ERROR: <flat_file> and <indexed_file> are required." >&2
     _li_usage >&2
     exit "${CARDDEMO_RC_USAGE}"
 fi
+_li_flat="${_li_pos[0]}"
+_li_indexed="${_li_pos[1]}"
 
-# Positional arguments. Referencing $1..$4 is safe now that the count is >= 4;
-# key_offset is optional, so it is read defensively via ${5:-} (set -u safe).
-_li_flat="$1"
-_li_indexed="$2"
-_li_reclen="$3"
-_li_key_length="$4"
-_li_key_offset="${5:-}"
-
-# ---------------------------------------------------------------------------
-# Validate the numeric arguments distinctly from a real load failure.
-# WHY: reclen and key_length must be POSITIVE (a zero-length record or key is
-# meaningless); key_offset, when supplied, must be a NON-NEGATIVE integer because
-# 0 is both its default and the only value the loader supports. All three are
-# operator inputs, so a bad value is a usage error (2), not a load fault. The
-# `2>/dev/null` guards the arithmetic test against a non-numeric token that
-# short-circuiting has not already rejected.
-# ---------------------------------------------------------------------------
-if ! _li_is_nonneg_int "$_li_reclen" || ! [ "$_li_reclen" -gt 0 ] 2>/dev/null; then
-    echo "[load_indexed] ERROR: <reclen> must be a positive integer, got '$_li_reclen'." >&2
-    _li_usage >&2
-    exit "${CARDDEMO_RC_USAGE}"
-fi
-if ! _li_is_nonneg_int "$_li_key_length" || ! [ "$_li_key_length" -gt 0 ] 2>/dev/null; then
-    echo "[load_indexed] ERROR: <key_length> must be a positive integer, got '$_li_key_length'." >&2
-    _li_usage >&2
-    exit "${CARDDEMO_RC_USAGE}"
-fi
-if [ -n "$_li_key_offset" ] && ! _li_is_nonneg_int "$_li_key_offset"; then
-    echo "[load_indexed] ERROR: [key_offset] must be a non-negative integer, got '$_li_key_offset'." >&2
-    _li_usage >&2
-    exit "${CARDDEMO_RC_USAGE}"
+if [ "$_li_layout_given" -eq 1 ]; then
+    # --layout supplies reclen/key_length/alternate-keys, so no numeric positionals.
+    if [ "$_li_npos" -gt 2 ]; then
+        echo "[load_indexed] ERROR: --layout cannot be combined with positional" \
+             "reclen/key_length/key_offset." >&2
+        _li_usage >&2
+        exit "${CARDDEMO_RC_USAGE}"
+    fi
+else
+    if [ "$_li_npos" -lt 4 ] || [ "$_li_npos" -gt 5 ]; then
+        echo "[load_indexed] ERROR: expected <flat> <indexed> <reclen> <key_length>" \
+             "[key_offset] (or use --layout), received $_li_npos positional(s)." >&2
+        _li_usage >&2
+        exit "${CARDDEMO_RC_USAGE}"
+    fi
+    _li_reclen="${_li_pos[2]}"
+    _li_key_length="${_li_pos[3]}"
+    _li_key_offset="${_li_pos[4]:-}"
+    # The `2>/dev/null` guards the arithmetic test against a non-numeric token that
+    # short-circuiting has not already rejected.
+    if ! _li_is_nonneg_int "$_li_reclen" || ! [ "$_li_reclen" -gt 0 ] 2>/dev/null; then
+        echo "[load_indexed] ERROR: <reclen> must be a positive integer, got '$_li_reclen'." >&2
+        _li_usage >&2
+        exit "${CARDDEMO_RC_USAGE}"
+    fi
+    if ! _li_is_nonneg_int "$_li_key_length" || ! [ "$_li_key_length" -gt 0 ] 2>/dev/null; then
+        echo "[load_indexed] ERROR: <key_length> must be a positive integer, got '$_li_key_length'." >&2
+        _li_usage >&2
+        exit "${CARDDEMO_RC_USAGE}"
+    fi
+    if [ -n "$_li_key_offset" ] && ! _li_is_nonneg_int "$_li_key_offset"; then
+        echo "[load_indexed] ERROR: [key_offset] must be a non-negative integer, got '$_li_key_offset'." >&2
+        _li_usage >&2
+        exit "${CARDDEMO_RC_USAGE}"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -221,17 +301,22 @@ export PYTHONPATH="$CARDDEMO_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 # does NOT abort on a nonzero loader exit -- that lets us capture the code and map
 # EVERY failure mode (VsamLoadError=1, geometry/usage=2, etc.) onto the single
 # rubric FAIL code (8), keeping this wrapper's contract simple: it either loaded
-# the fixture (0) or it did not (8). The ${...:+...} form appends the key_offset
-# argument only when one was supplied, matching the module's positional signature
-# exactly. The module's own stdout (the indexed path) is left untouched for
-# callers that capture it.
+# the fixture (0) or it did not (8). Forwarded options (`_li_opts`, e.g.
+# --layout/--alt-key) precede the positionals (`_li_pos`) so argparse binds them
+# cleanly; both are passed via "${arr[@]}" which is empty-array-safe under `set -u`
+# on this image's bash 5.x. The module's own stdout (the indexed path) is left
+# untouched for callers that capture it.
 # ---------------------------------------------------------------------------
-if python3 -m tests.helpers.vsam_loader \
-        "$_li_flat" "$_li_indexed" "$_li_reclen" "$_li_key_length" \
-        ${_li_key_offset:+"$_li_key_offset"}; then
+if python3 -m tests.helpers.vsam_loader "${_li_opts[@]}" "${_li_pos[@]}"; then
     # Confirmation goes to stderr so stdout stays a 1:1 pass-through of the path.
-    echo "[load_indexed] OK: loaded '$_li_flat' -> '$_li_indexed'" \
-         "(reclen=$_li_reclen, key_length=$_li_key_length)." >&2
+    # WHY: describe the geometry source (explicit numbers or --layout) so the log line
+    # is meaningful in both invocation modes.
+    if [ "$_li_layout_given" -eq 1 ]; then
+        echo "[load_indexed] OK: loaded '$_li_flat' -> '$_li_indexed' (via --layout)." >&2
+    else
+        echo "[load_indexed] OK: loaded '$_li_flat' -> '$_li_indexed'" \
+             "(reclen=$_li_reclen, key_length=$_li_key_length)." >&2
+    fi
     exit "${CARDDEMO_RC_PASS}"
 else
     _li_rc=$?

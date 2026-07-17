@@ -102,6 +102,7 @@ from pathlib import Path
 __all__ = [
     "VsamLoadError",
     "load_indexed",
+    "unload_indexed",
     "geometry_for",
     "alternate_keys_for",
 ]
@@ -125,13 +126,19 @@ _RUN_TIMEOUT_S = 120
 # They are module constants (not magic strings scattered across the code) so the
 # COBOL generator and the runner cannot drift apart.
 # ---------------------------------------------------------------------------
-_DD_FLAT_IN = "FLATIN"    # generated ``SELECT FLAT-FILE ASSIGN TO FLATIN``
-_DD_INDEX_OUT = "IDXOUT"  # generated ``SELECT IDX-FILE  ASSIGN TO IDXOUT``
+_DD_FLAT_IN = "FLATIN"    # generated loader:   ``SELECT FLAT-FILE ASSIGN TO FLATIN``
+_DD_INDEX_OUT = "IDXOUT"  # generated loader:   ``SELECT IDX-FILE  ASSIGN TO IDXOUT``
+_DD_INDEX_IN = "IDXIN"    # generated unloader: ``SELECT IDX-FILE  ASSIGN TO IDXIN``
+_DD_FLAT_OUT = "FLATOUT"  # generated unloader: ``SELECT FLAT-FILE ASSIGN TO FLATOUT``
 
 # Program-id of the generated loader. A fixed name is safe because each distinct
 # (reclen, key_length, std) combination is compiled to its own standalone executable;
 # the program-id is irrelevant to a ``-x`` built binary and never collides on disk.
 _LOADER_PROGRAM_ID = "VSAMLDR"
+
+# Program-id of the generated *unloader* (indexed -> flat). Same rationale as the loader:
+# each geometry is a distinct content-addressed binary, so a fixed program-id is safe.
+_UNLOADER_PROGRAM_ID = "VSAMULD"
 
 # Version marker for the generated loader source. WHY (MA-10 cache identity): this is
 # folded into the compiler fingerprint so that whenever the generator's emitted source
@@ -139,6 +146,15 @@ _LOADER_PROGRAM_ID = "VSAMLDR"
 # cached binaries are invalidated even if the cobc banner and --std are unchanged. Bump
 # this string on any change to _generate_loader_source's output.
 _LOADER_SOURCE_VERSION = "2-segmented-altkeys"
+
+# Version marker embedded in the generated *unloader* source. WHY: unlike the loader
+# (whose version rides in the compiler fingerprint), the unloader stamps its version as a
+# source comment so it is captured directly by the content-addressed source digest -- a
+# bump changes the emitted bytes and therefore the cache filename, invalidating any stale
+# unloader binary without disturbing the independently keyed loader cache. The unloader's
+# and loader's generated sources are always textually distinct, so even sharing a cache
+# directory and compiler fingerprint they can never collide (their source digests differ).
+_UNLOADER_SOURCE_VERSION = "1-primary-key-order"
 
 # Return codes the generated loader emits, surfaced verbatim in error messages.
 # WHY (Refactoring Rationale): naming them once keeps the COBOL generator, the runner's
@@ -515,6 +531,202 @@ def _generate_loader_source(
     return source
 
 
+def _generate_unloader_source(
+    reclen: int,
+    key_length: int,
+    key_offset: int = 0,
+    alternate_keys: "tuple[tuple[int, int, bool], ...]" = (),
+) -> str:
+    """Return the COBOL source text of an *unloader* for one record geometry.
+
+    Purpose
+    -------
+    Produce a minimal, dialect-agnostic, free-format COBOL program that reads a native
+    GnuCOBOL ``ORGANIZATION IS INDEXED`` file **sequentially in ascending primary-key
+    order** and copies every logical record -- unchanged and unpadded -- to a headerless
+    fixed-width record-sequential blob. This is the compiled engine behind
+    :func:`unload_indexed`: the read-back counterpart of :func:`_generate_loader_source`,
+    and the automated analog of an ``IDCAMS REPRO`` that dumps an indexed cluster to a
+    flat sequential dataset. It lets the golden-master comparator verify the *logical*
+    content of an indexed output (ACCTFILE, TCATBAL, TRANFILE) without depending on the
+    opaque, unstable on-disk byte layout of the ISAM container.
+
+    The generated program:
+
+    * reads ``IDX-FILE`` (``ASSIGN TO IDXIN``) as ``ORGANIZATION IS INDEXED``,
+      ``ACCESS MODE IS SEQUENTIAL``, ``RECORD KEY IS IDX-KEY`` plus one
+      ``ALTERNATE RECORD KEY`` clause per alternate key, opened ``INPUT``. Sequential
+      ``READ ... NEXT`` on an indexed file returns records in ascending primary-key
+      order, which is what makes the unload deterministic;
+    * writes ``FLAT-FILE`` (``ASSIGN TO FLATOUT``) as ``ORGANIZATION IS SEQUENTIAL`` with
+      fixed ``reclen``-character records and no separators -- exactly the framing the
+      loader consumes, so a load->unload round-trip is byte-faithful;
+    * checks ``FILE STATUS`` after every OPEN and WRITE, emitting a
+      ``FILE STATUS IS: NNNN`` diagnostic and a non-zero ``RETURN-CODE`` on any error
+      (mirroring the fail-fast convention of the production batch programs).
+
+    WHY declare the same alternate keys as the loader (Assumption): a GnuCOBOL indexed
+    file records how many keys it was built with; opening it INPUT with a mismatched key
+    set can fail FILE STATUS 39 (conflicting fixed file attributes). The unloader is
+    therefore given the *same* geometry (primary + alternates) that built the file, even
+    though it only ever navigates by the primary key. CardDemo's three indexed *outputs*
+    (ACCTFILE, TCATBAL, TRANFILE) are primary-key only, so in practice no alternate clause
+    is emitted; the parameter exists so an alt-keyed file can still be unloaded.
+
+    Parameters
+    ----------
+    reclen : int
+        Fixed record length in characters. Must be a positive integer.
+    key_length : int
+        Length in characters of the primary key. Must satisfy ``0 < key_length``.
+    key_offset : int
+        Zero-based offset of the primary key within the record. Defaults to 0.
+    alternate_keys : tuple[tuple[int, int, bool], ...]
+        Zero or more ``(offset, length, with_duplicates)`` alternate-key descriptors that
+        the file was built with (declared so the OPEN INPUT key set matches the file).
+
+    Returns
+    -------
+    str
+        The complete COBOL source (free format), ready to be written to a ``.cbl`` file
+        and compiled with ``cobc -x -free``.
+
+    Raises
+    ------
+    VsamLoadError
+        If ``reclen``/``key_length``/``key_offset`` violate the positive-``reclen`` /
+        ``0 < key_length`` / ``0 <= key_offset`` / ``key_offset+key_length <= reclen``
+        contract, or if any key span is out of range or overlaps another.
+    """
+    if reclen <= 0:
+        raise VsamLoadError(f"reclen must be a positive integer, got {reclen!r}")
+    if key_length <= 0 or key_offset < 0 or key_offset + key_length > reclen:
+        raise VsamLoadError(
+            f"primary key must satisfy 0 < key_length and 0 <= key_offset and "
+            f"key_offset+key_length <= reclen "
+            f"(reclen={reclen}, key_offset={key_offset}, key_length={key_length})"
+        )
+
+    # Reuse the exact same record-carving used by the loader so the IDX-REC layout (named
+    # primary/alternate key fields + FILLER gaps) is identical on both sides -- a single
+    # source of truth for the record geometry (Refactoring Rationale).
+    segments, _primary_name, alt_names = _record_segments(
+        reclen, key_offset, key_length, alternate_keys
+    )
+
+    field_lines = ["       01 IDX-REC."]
+    for name, ln in segments:
+        field_name = name if name is not None else "FILLER"
+        field_lines.append(f"          05 {field_name:<10} PIC X({ln}).")
+    idx_rec_layout = "\n".join(field_lines) + "\n"
+
+    alt_clause_lines = []
+    for name, (_off, _ln, dup) in zip(alt_names, alternate_keys):
+        dup_clause = " WITH DUPLICATES" if dup else ""
+        alt_clause_lines.append(
+            f"               ALTERNATE RECORD KEY IS {name}{dup_clause}"
+        )
+    alt_key_clauses = ("\n".join(alt_clause_lines) + "\n") if alt_clause_lines else ""
+
+    # WHY (Trade-off): as with the loader, an f-string template is used rather than a
+    # COPY/REPLACING indirection -- there is one tiny, self-contained program shape and a
+    # template keeps it readable and faithful to the REPRO semantics. The ``source-version``
+    # comment embeds _UNLOADER_SOURCE_VERSION into the emitted bytes so the content-address
+    # digest self-invalidates when this generator changes.
+    source = f"""\
+      *> ==================================================================
+      *> {_UNLOADER_PROGRAM_ID} -- generated INDEXED -> flat unloader (do not edit).
+      *> source-version: {_UNLOADER_SOURCE_VERSION}
+      *>
+      *> Purpose : read a native GnuCOBOL ORGANIZATION IS INDEXED file in ascending
+      *>           PRIMARY-key order and copy every logical record, unchanged and
+      *>           unpadded, to a headerless fixed-width record-sequential blob of
+      *>           {reclen}-byte records. Automated analog of an IDCAMS REPRO that
+      *>           dumps an indexed cluster to a flat sequential dataset, used to
+      *>           verify the LOGICAL content of an indexed output independent of the
+      *>           opaque ISAM on-disk byte layout.
+      *>
+      *> WHY ACCESS MODE IS SEQUENTIAL + READ NEXT: on an indexed file this walks the
+      *>   records in ascending primary-key order, giving a deterministic, sorted dump
+      *>   regardless of the order in which the program under test wrote them -- exactly
+      *>   what a byte-stable golden comparison needs.
+      *> ==================================================================
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. {_UNLOADER_PROGRAM_ID}.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+      *> ASSIGN names are resolved from same-named environment variables at run
+      *> time (set by unload_indexed): {_DD_INDEX_IN} -> input indexed file,
+      *> {_DD_FLAT_OUT} -> output flat blob.
+           SELECT IDX-FILE ASSIGN TO {_DD_INDEX_IN}
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS SEQUENTIAL
+               RECORD KEY IS IDX-KEY
+{alt_key_clauses}               FILE STATUS IS WS-IDX-STATUS.
+           SELECT FLAT-FILE ASSIGN TO {_DD_FLAT_OUT}
+               ORGANIZATION IS SEQUENTIAL
+               ACCESS MODE IS SEQUENTIAL
+               FILE STATUS IS WS-FLAT-STATUS.
+       DATA DIVISION.
+       FILE SECTION.
+       FD IDX-FILE
+           RECORD CONTAINS {reclen} CHARACTERS.
+{idx_rec_layout}       FD FLAT-FILE
+           RECORD CONTAINS {reclen} CHARACTERS.
+       01 FLAT-REC PIC X({reclen}).
+       WORKING-STORAGE SECTION.
+      *> Two-byte FILE STATUS receivers; "00"/"02" mean the last I/O succeeded ("02" is
+      *> a duplicate-alternate-key info status on READ and is treated as success).
+       01 WS-IDX-STATUS  PIC XX VALUE "00".
+       01 WS-FLAT-STATUS PIC XX VALUE "00".
+       01 WS-EOF         PIC X  VALUE "N".
+      *> Unloaded-record counter, echoed on success for auditability.
+       01 WS-COUNT       PIC 9(9) VALUE 0.
+       PROCEDURE DIVISION.
+       0000-MAIN SECTION.
+       0000-MAIN-PARA.
+           OPEN INPUT IDX-FILE
+           IF WS-IDX-STATUS NOT = "00"
+               DISPLAY "{_UNLOADER_PROGRAM_ID}: OPEN INPUT FAILED FILE STATUS IS: "
+                   WS-IDX-STATUS
+               MOVE {_RC_OPEN_FAILURE} TO RETURN-CODE
+               STOP RUN
+           END-IF
+           OPEN OUTPUT FLAT-FILE
+           IF WS-FLAT-STATUS NOT = "00"
+               DISPLAY "{_UNLOADER_PROGRAM_ID}: OPEN OUTPUT FAILED FILE STATUS IS: "
+                   WS-FLAT-STATUS
+               MOVE {_RC_OPEN_FAILURE} TO RETURN-CODE
+               STOP RUN
+           END-IF
+           PERFORM UNTIL WS-EOF = "Y"
+               READ IDX-FILE NEXT RECORD
+                   AT END
+                       MOVE "Y" TO WS-EOF
+                   NOT AT END
+                       MOVE IDX-REC TO FLAT-REC
+                       WRITE FLAT-REC
+                       IF WS-FLAT-STATUS NOT = "00"
+                           DISPLAY "{_UNLOADER_PROGRAM_ID}: WRITE FAILED "
+                               "FILE STATUS IS: " WS-FLAT-STATUS
+                           MOVE {_RC_WRITE_FAILURE} TO RETURN-CODE
+                           CLOSE IDX-FILE
+                           CLOSE FLAT-FILE
+                           STOP RUN
+                       END-IF
+                       ADD 1 TO WS-COUNT
+               END-READ
+           END-PERFORM
+           CLOSE IDX-FILE
+           CLOSE FLAT-FILE
+           DISPLAY "{_UNLOADER_PROGRAM_ID}: UNLOADED " WS-COUNT " RECORD(S)"
+           MOVE 0 TO RETURN-CODE
+           STOP RUN.
+"""
+    return source
+
+
 def _default_cache_dir() -> Path:
     """Return the directory where compiled loader binaries are cached.
 
@@ -726,6 +938,148 @@ def _compiler_fingerprint(cobc_path: str, std: str) -> str:
     return h.hexdigest()[:16]
 
 
+def _compile_source(
+    source: str,
+    *,
+    describe: str,
+    exe_prefix: str,
+    std: str,
+    cobc: str,
+    cache_dir: "str | os.PathLike[str] | None",
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
+) -> str:
+    """Compile (or reuse a cached) standalone ``-x`` binary for a generated COBOL source.
+
+    Purpose
+    -------
+    The shared compile-and-cache engine behind both :func:`_compiled_loader` and
+    :func:`_compiled_unloader`. Given the full generated COBOL source text, return the path
+    to an executable built from it -- compiling with the project ``cobc`` on the first
+    request and reusing the cached binary on every subsequent request. The cache filename
+    embeds a content-addressed digest of the *exact* source AND a compiler fingerprint, so a
+    binary built for one program shape, geometry, or toolchain can never be silently reused
+    for a different one (MA-10).
+
+    WHY factor this out (Refactoring Rationale): the loader and the unloader need
+    byte-for-byte the same secure-cache, content-address, parallel-safe atomic-publish, and
+    bounded-compile behaviour. Duplicating ~70 lines of it would invite the two copies to
+    drift (a fix or hardening applied to one but not the other); a single shared engine
+    keeps them provably identical and is the correct home for that logic.
+
+    Parameters
+    ----------
+    source : str
+        Complete free-format COBOL source (pure ASCII by construction).
+    describe : str
+        Human-readable description of the artifact (e.g. ``"the GnuCOBOL indexed-file
+        loader (reclen=300, key_length=11, ...)"``), folded verbatim into the timeout and
+        failure messages so a diagnostic still identifies the geometry after this
+        generalisation (keyword-only).
+    exe_prefix : str
+        Short (<= 31 char) base name for the compiled binary and its temporary ``.cbl``
+        (e.g. ``"vsamldr"`` / ``"vsamuld"``), keyword-only. The content-addressed cache
+        name is ``<exe_prefix>_<src_digest>_<fingerprint>``; because the loader and unloader
+        emit textually distinct sources their digests already differ, so a shared prefix
+        would still not collide -- distinct prefixes are used purely for on-disk legibility.
+    std : str
+        Compiler dialect passed to ``cobc --std=`` (keyword-only).
+    cobc : str
+        ``cobc`` command name or explicit path (keyword-only), resolved via
+        :func:`_resolve_cobc`.
+    cache_dir : str | os.PathLike | None
+        Directory for cached binaries (keyword-only). ``None`` selects
+        :func:`_default_cache_dir`.
+    compile_timeout : float
+        Wall-clock ceiling (seconds) for the ``cobc`` invocation (keyword-only).
+
+    Returns
+    -------
+    str
+        Filesystem path to the compiled, executable binary.
+
+    Raises
+    ------
+    VsamLoadError
+        If ``cobc`` cannot be resolved, the cache directory cannot be secured, the compile
+        exceeds ``compile_timeout``, or compilation fails.
+    """
+    cobc_path = _resolve_cobc(cobc)
+    cache = Path(os.fspath(cache_dir)) if cache_dir is not None else _default_cache_dir()
+    # WHY (MA-10): the cache dir holds executables we will run, so it MUST be private and
+    # owned by us -- _secure_dir enforces 0700 + ownership and refuses a symlinked path.
+    _secure_dir(cache)
+
+    # Content-address the binary: the digest covers the exact generated source, so any
+    # change in program shape or geometry (reclen, key_length, key_offset, alternate keys)
+    # yields a different source and therefore a different cache file. The compiler
+    # fingerprint is appended so a toolchain/dialect change also invalidates the cache.
+    src_digest = hashlib.sha256(source.encode("ascii")).hexdigest()[:16]
+    fp = _compiler_fingerprint(cobc_path, std)
+
+    exe_ext = ".exe" if os.name == "nt" else ""
+    final_bin = cache / f"{exe_prefix}_{src_digest}_{fp}{exe_ext}"
+
+    # Cache hit: reuse the already-built binary. WHY: recompiling the same tiny program on
+    # every fixture load/unload would dominate the runtime of a large suite; the digest
+    # fully captures the source+toolchain so a hit is guaranteed correct.
+    if final_bin.is_file() and os.access(final_bin, os.X_OK):
+        return str(final_bin)
+
+    # Compile inside a private temp directory *within the cache dir*, then atomically
+    # publish the finished binary with os.replace.
+    # WHY (parallel-safety Trade-off): pytest-xdist runs tests in parallel workers that may
+    # request the same binary simultaneously. Building into a per-attempt temp dir and
+    # os.replace()-ing the result (an atomic rename on the same filesystem) means a
+    # concurrent worker either sees no binary yet or the fully-built one -- never a
+    # half-written file. Multiple winners simply overwrite an identical binary.
+    with tempfile.TemporaryDirectory(dir=str(cache), prefix=".build-") as tmpd:
+        tmp = Path(tmpd)
+        # WHY (short source base name): GnuCOBOL validates the SOURCE file's base name as a
+        # candidate program word and rejects names longer than a COBOL word (31 chars). The
+        # content-addressed cache name is far longer, so we compile from a short fixed name
+        # inside this already-unique temp dir and only the *cached* binary carries the long
+        # digest name (a plain filename, length-safe).
+        src_path = tmp / f"{exe_prefix}.cbl"
+        # The generated source is pure ASCII by construction; encode strictly so any
+        # accidental non-ASCII would surface immediately rather than reach the compiler.
+        src_path.write_text(source, encoding="ascii")
+        tmp_bin = tmp / (f"{exe_prefix}.exe" if os.name == "nt" else exe_prefix)
+
+        cmd = [cobc_path, "-x", f"--std={std}", "-free", "-o", str(tmp_bin), str(src_path)]
+        try:
+            # Bounded + minimal-env compile (MA-10): a wedged compiler becomes a clean
+            # TimeoutExpired rather than an indefinite hang, and the child sees only a
+            # vetted environment.
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=compile_timeout,
+                env=_minimal_child_env({}),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VsamLoadError(
+                f"timed out compiling {describe} after {compile_timeout}s (std={std!r})."
+            ) from exc
+
+        # WHY (Assumptions): success is judged by the process return code AND the binary
+        # existing -- NOT by empty stderr. The gcc backend emits a benign
+        # "_FORTIFY_SOURCE redefined" warning on every compile on this runner, so a
+        # non-empty stderr is normal and must not be treated as failure.
+        if proc.returncode != 0 or not tmp_bin.is_file():
+            raise VsamLoadError(
+                f"failed to compile {describe} (std={std!r}); "
+                f"cobc exit code {proc.returncode}.\n"
+                f"--- cobc stdout ---\n{proc.stdout}\n"
+                f"--- cobc stderr ---\n{proc.stderr}\n"
+                f"--- generated source ---\n{source}"
+            )
+
+        os.replace(str(tmp_bin), str(final_bin))
+
+    return str(final_bin)
+
+
 def _compiled_loader(
     reclen: int,
     key_length: int,
@@ -781,86 +1135,96 @@ def _compiled_loader(
         compile exceeds ``compile_timeout``, or compilation of the generated loader
         fails.
     """
-    cobc_path = _resolve_cobc(cobc)
-    cache = Path(os.fspath(cache_dir)) if cache_dir is not None else _default_cache_dir()
-    # WHY (MA-10): the cache dir holds executables we will run, so it MUST be private and
-    # owned by us -- _secure_dir enforces 0700 + ownership and refuses a symlinked path.
-    _secure_dir(cache)
-
-    # Content-address the binary: the digest covers the exact generated source, so any
-    # change in geometry (reclen, key_length, key_offset, alternate keys) yields a
-    # different source and therefore a different cache file. The compiler fingerprint is
-    # appended so a toolchain/dialect change also invalidates the cache.
+    # Delegate to the shared compile-and-cache engine. WHY (Refactoring Rationale): the
+    # cache/secure-dir/atomic-publish machinery now lives once in _compile_source; this
+    # function's remaining job is purely to render the loader source for this geometry and
+    # hand it over with a geometry-identifying description for diagnostics.
     source = _generate_loader_source(reclen, key_length, key_offset, alternate_keys)
-    src_digest = hashlib.sha256(source.encode("ascii")).hexdigest()[:16]
-    fp = _compiler_fingerprint(cobc_path, std)
+    describe = (
+        "the GnuCOBOL indexed-file loader "
+        f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
+        f"alternate_keys={alternate_keys!r})"
+    )
+    return _compile_source(
+        source,
+        describe=describe,
+        exe_prefix="vsamldr",
+        std=std,
+        cobc=cobc,
+        cache_dir=cache_dir,
+        compile_timeout=compile_timeout,
+    )
 
-    exe_ext = ".exe" if os.name == "nt" else ""
-    final_bin = cache / f"vsamldr_{src_digest}_{fp}{exe_ext}"
 
-    # Cache hit: reuse the already-built binary. WHY: recompiling the same tiny program
-    # on every fixture load would dominate the runtime of a large suite; the digest fully
-    # captures the source+toolchain so a hit is guaranteed correct.
-    if final_bin.is_file() and os.access(final_bin, os.X_OK):
-        return str(final_bin)
+def _compiled_unloader(
+    reclen: int,
+    key_length: int,
+    *,
+    key_offset: int = 0,
+    alternate_keys: "tuple[tuple[int, int, bool], ...]" = (),
+    std: str,
+    cobc: str,
+    cache_dir: "str | os.PathLike[str] | None",
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
+) -> str:
+    """Compile (or reuse a cached) unloader binary for one full record geometry.
 
-    # Compile inside a private temp directory *within the cache dir*, then atomically
-    # publish the finished binary with os.replace.
-    # WHY (parallel-safety Trade-off): pytest-xdist runs tests in parallel workers that
-    # may request the same loader simultaneously. Building into a per-attempt temp dir
-    # and os.replace()-ing the result (an atomic rename on the same filesystem) means a
-    # concurrent worker either sees no binary yet or the fully-built one -- never a
-    # half-written file. Multiple winners simply overwrite an identical binary.
-    with tempfile.TemporaryDirectory(dir=str(cache), prefix=".build-") as tmpd:
-        tmp = Path(tmpd)
-        # WHY (short source base name): GnuCOBOL validates the SOURCE file's base name as
-        # a candidate program word and rejects names longer than a COBOL word (31 chars).
-        # The content-addressed cache name (vsamldr_<digest>_<fp>) is far longer, so we
-        # compile from a short fixed name inside this already-unique temp dir and only the
-        # *cached* binary carries the long digest name (a plain filename, length-safe).
-        src_path = tmp / "vsamldr.cbl"
-        # The generated source is pure ASCII by construction; encode strictly so any
-        # accidental non-ASCII would surface immediately rather than reach the compiler.
-        src_path.write_text(source, encoding="ascii")
-        tmp_bin = tmp / ("vsamldr.exe" if os.name == "nt" else "vsamldr")
+    Purpose
+    -------
+    The read-back counterpart of :func:`_compiled_loader`: return the path to an executable
+    INDEXED->flat unloader built for exactly this record geometry (primary key + any
+    alternate keys), dialect, and compiler build, via the shared :func:`_compile_source`
+    engine (content-addressed, cached, parallel-safe). See :func:`_generate_unloader_source`
+    for what the produced binary does.
 
-        cmd = [cobc_path, "-x", f"--std={std}", "-free", "-o", str(tmp_bin), str(src_path)]
-        try:
-            # Bounded + minimal-env compile (MA-10): a wedged compiler becomes a clean
-            # TimeoutExpired rather than an indefinite hang, and the child sees only a
-            # vetted environment.
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=compile_timeout,
-                env=_minimal_child_env({}),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise VsamLoadError(
-                "timed out compiling the GnuCOBOL indexed-file loader after "
-                f"{compile_timeout}s (reclen={reclen}, key_length={key_length}, "
-                f"std={std!r})."
-            ) from exc
+    Parameters
+    ----------
+    reclen : int
+        Fixed record length in characters.
+    key_length : int
+        Primary-key length in characters (``0 < key_length``).
+    key_offset : int
+        Zero-based offset of the primary key (keyword-only). Defaults to 0.
+    alternate_keys : tuple[tuple[int, int, bool], ...]
+        Alternate-key descriptors ``(offset, length, with_duplicates)`` the file was built
+        with (keyword-only), declared so the OPEN INPUT key set matches the file.
+    std : str
+        Compiler dialect passed to ``cobc --std=`` (keyword-only).
+    cobc : str
+        ``cobc`` command name or explicit path (keyword-only), resolved via
+        :func:`_resolve_cobc`.
+    cache_dir : str | os.PathLike | None
+        Directory for cached binaries (keyword-only). ``None`` selects
+        :func:`_default_cache_dir`.
+    compile_timeout : float
+        Wall-clock ceiling (seconds) for the ``cobc`` invocation (keyword-only).
 
-        # WHY (Assumptions): success is judged by the process return code AND the binary
-        # existing -- NOT by empty stderr. The gcc backend emits a benign
-        # "_FORTIFY_SOURCE redefined" warning on every compile on this runner, so a
-        # non-empty stderr is normal and must not be treated as failure.
-        if proc.returncode != 0 or not tmp_bin.is_file():
-            raise VsamLoadError(
-                "failed to compile the GnuCOBOL indexed-file loader "
-                f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
-                f"alternate_keys={alternate_keys!r}, std={std!r}); "
-                f"cobc exit code {proc.returncode}.\n"
-                f"--- cobc stdout ---\n{proc.stdout}\n"
-                f"--- cobc stderr ---\n{proc.stderr}\n"
-                f"--- generated source ---\n{source}"
-            )
+    Returns
+    -------
+    str
+        Filesystem path to the compiled, executable unloader binary.
 
-        os.replace(str(tmp_bin), str(final_bin))
-
-    return str(final_bin)
+    Raises
+    ------
+    VsamLoadError
+        If the geometry is invalid, ``cobc`` cannot be resolved, the cache directory cannot
+        be secured, or the compile exceeds ``compile_timeout`` / fails.
+    """
+    source = _generate_unloader_source(reclen, key_length, key_offset, alternate_keys)
+    describe = (
+        "the GnuCOBOL indexed-file unloader "
+        f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
+        f"alternate_keys={alternate_keys!r})"
+    )
+    return _compile_source(
+        source,
+        describe=describe,
+        exe_prefix="vsamuld",
+        std=std,
+        cobc=cobc,
+        cache_dir=cache_dir,
+        compile_timeout=compile_timeout,
+    )
 
 
 def _validated_blob(flat_path: "str | os.PathLike[str]", reclen: int) -> bytes:
@@ -1272,6 +1636,194 @@ def load_indexed(
         shutil.rmtree(workdir, ignore_errors=True)
 
     return indexed
+
+
+def unload_indexed(
+    indexed_path: "str | os.PathLike[str]",
+    reclen: int,
+    key_length: int,
+    key_offset: int = 0,
+    *,
+    alternate_keys: "object" = (),
+    cobc: str = "cobc",
+    std: str = "ibm-strict",
+    cache_dir: "str | os.PathLike[str] | None" = None,
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
+    run_timeout: float = _RUN_TIMEOUT_S,
+) -> "list[str]":
+    """Read a GnuCOBOL indexed file back into flat logical records in primary-key order.
+
+    Purpose
+    -------
+    The public read-back companion of :func:`load_indexed`, and the automated analog of an
+    ``IDCAMS REPRO`` that dumps an indexed cluster to a flat sequential dataset. Given the
+    path of a native GnuCOBOL ``ORGANIZATION IS INDEXED`` file, it returns the file's
+    logical records -- each a fixed ``reclen``-character string -- in ascending
+    **primary-key** order. This is what lets the golden-master comparator verify an indexed
+    *output* of a program under test (ACCTFILE, TCATBAL, TRANFILE): the opaque, unstable
+    ISAM on-disk byte layout is never compared directly; only the deterministic logical
+    record content is (QA finding C2). WHY a compiled COBOL reader rather than parsing the
+    BDB/VBISAM container in Python (Alternatives Considered): the on-disk format is an
+    implementation detail of the ISAM backend and can differ by build; reading it with a
+    program compiled by the *same* ``cobc`` guarantees we observe exactly the logical
+    records the programs under test wrote, with zero format assumptions.
+
+    The read is performed against the file **in place** (it is opened INPUT only, never
+    written), so unloading never mutates the output being verified.
+
+    Parameters
+    ----------
+    indexed_path : str | os.PathLike
+        Path to the native GnuCOBOL indexed file to read. Must exist; refused if the path
+        itself is a symbolic link (MA-04, matching :func:`load_indexed`).
+    reclen : int
+        Fixed record length in characters. Must be a positive integer and match the
+        geometry the file was built with.
+    key_length : int
+        Length in characters of the primary key. Must satisfy ``0 < key_length`` and
+        ``key_offset + key_length <= reclen``.
+    key_offset : int, optional
+        Zero-based offset of the primary key within the record. Defaults to ``0``.
+    alternate_keys : object, optional
+        Alternate keys as :class:`record_codec.AlternateKey` objects or
+        ``(offset, length, with_duplicates)`` tuples (keyword-only). Supply the *same*
+        alternate keys the file was built with so the OPEN INPUT key set matches the file
+        (a mismatch can fail FILE STATUS 39). CardDemo's three indexed outputs are
+        primary-key only, so this defaults to none.
+    cobc : str, optional
+        ``cobc`` command name or explicit path used to build the unloader (keyword-only).
+        Defaults to ``"cobc"``. **Must be the same compiler that built the indexed file**,
+        because only that compiler reliably reads its own indexed-file format.
+    std : str, optional
+        Compiler dialect passed to ``cobc --std=`` (keyword-only). Defaults to
+        ``"ibm-strict"`` to match the repository's compile convention.
+    cache_dir : str | os.PathLike | None, optional
+        Directory in which the compiled unloader binary is cached (keyword-only). Defaults
+        to :func:`_default_cache_dir`.
+    compile_timeout : float, optional
+        Wall-clock ceiling (seconds) for the unloader compile (keyword-only).
+    run_timeout : float, optional
+        Wall-clock ceiling (seconds) for the unloader run (keyword-only).
+
+    Returns
+    -------
+    list[str]
+        The logical records as fixed ``reclen``-character strings, in ascending primary-key
+        order. An empty indexed file yields an empty list. Joining the result with ``"\\n"``
+        (or concatenating it) and passing it to
+        :func:`golden_compare.assert_matches_golden` with the matching ``layout`` verifies
+        the output byte-exactly (that comparator frames fixed-width records by width, so
+        either joiner compares equal to the committed golden).
+
+    Raises
+    ------
+    VsamLoadError
+        If ``reclen``/``key_length``/``key_offset`` violate the geometry contract; if an
+        alternate key is malformed or out of range; if the file does not exist or is a
+        symlink; if the unloader fails to compile or times out; if the unloader run exits
+        non-zero or times out (its ``FILE STATUS IS: NNNN`` diagnostic is included); or if
+        the unloaded blob length is not a whole multiple of ``reclen``.
+    """
+    # --- Argument validation (fail loud, fail early; mirrors load_indexed) -------
+    if not isinstance(reclen, int) or reclen <= 0:
+        raise VsamLoadError(f"reclen must be a positive integer, got {reclen!r}")
+    if not isinstance(key_length, int) or key_length <= 0:
+        raise VsamLoadError(f"key_length must be a positive integer, got {key_length!r}")
+    if not isinstance(key_offset, int) or key_offset < 0 or key_offset + key_length > reclen:
+        raise VsamLoadError(
+            f"primary key must satisfy 0 <= key_offset and key_offset+key_length <= "
+            f"reclen (reclen={reclen}, key_offset={key_offset!r}, key_length={key_length})"
+        )
+    alt_keys = _normalize_alternate_keys(alternate_keys, reclen)
+
+    indexed = os.fspath(indexed_path)
+    source = Path(indexed)
+
+    # --- Refuse to read through a symlinked source (MA-04) -----------------------
+    # WHY: symmetry with load_indexed's write-side guard -- if the path is a pre-planted
+    # symlink we refuse to follow it rather than read a file outside the intended
+    # workspace. is_symlink() is checked before exists() because a dangling symlink should
+    # be reported as the symlink refusal, not as "does not exist".
+    if source.is_symlink():
+        raise VsamLoadError(
+            f"refusing to read indexed file through symbolic link {indexed!r}"
+        )
+    if not source.is_file():
+        raise VsamLoadError(
+            f"indexed file to unload does not exist (or is not a regular file): {indexed!r}"
+        )
+
+    # --- REPRO-out analog: build (or reuse) the unloader -------------------------
+    unloader_bin = _compiled_unloader(
+        reclen,
+        key_length,
+        key_offset=key_offset,
+        alternate_keys=alt_keys,
+        std=std,
+        cobc=cobc,
+        cache_dir=cache_dir,
+        compile_timeout=compile_timeout,
+    )
+
+    # --- Run the unloader into a private workspace, then read the flat blob ------
+    # WHY (isolation Trade-off): the flat dump is written into a per-run 0700 workspace
+    # created inside the source file's own directory (so nothing transient escapes into a
+    # shared temp area), and is always removed in the finally-block. We never write next to
+    # the indexed file under a predictable name, which could race a parallel worker.
+    workdir = Path(tempfile.mkdtemp(dir=str(source.parent), prefix=".vsamuld-work-"))
+    try:
+        out_blob = workdir / (source.name + ".flatout")
+        child_env = _minimal_child_env(
+            {_DD_INDEX_IN: indexed, _DD_FLAT_OUT: str(out_blob)}
+        )
+        try:
+            proc = subprocess.run(
+                [unloader_bin],
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=run_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VsamLoadError(
+                f"indexed-file unloader timed out after {run_timeout}s for "
+                f"{indexed!r} (reclen={reclen}, key_length={key_length})."
+            ) from exc
+
+        if proc.returncode != 0:
+            raise VsamLoadError(
+                f"indexed-file unloader failed for {indexed!r} "
+                f"(reclen={reclen}, key_length={key_length}, key_offset={key_offset}, "
+                f"alternate_keys={alt_keys!r}); exit code {proc.returncode}.\n"
+                f"--- unloader stdout ---\n{proc.stdout}\n"
+                f"--- unloader stderr ---\n{proc.stderr}"
+            )
+
+        # An empty index legitimately produces no output file (OPEN OUTPUT with zero
+        # WRITEs) or a zero-byte one; treat both as "zero records" rather than an error.
+        data = out_blob.read_bytes() if out_blob.is_file() else b""
+    finally:
+        # Always remove the private workspace (the flat dump and any leftover files).
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    # --- Frame the flat blob into fixed-width logical records --------------------
+    # WHY reject a non-multiple length (Assumption): the unloader writes exactly
+    # reclen-byte records with no separators, so a total that is not a whole multiple of
+    # reclen means the file geometry disagrees with the declared reclen -- a corrupt read
+    # that must surface loudly, never be silently truncated.
+    if len(data) % reclen != 0:
+        raise VsamLoadError(
+            f"unloaded blob length {len(data)} is not a whole multiple of reclen "
+            f"{reclen} for {indexed!r} (declared geometry disagrees with the file)."
+        )
+    # Decode as UTF-8. WHY (Assumptions): CardDemo records are pure ASCII (zoned decimal,
+    # packed-as-display, text, and blank/low-value fill), a strict subset of UTF-8, so each
+    # byte maps to exactly one character and the reclen slicing below stays byte-aligned. A
+    # genuinely non-ASCII byte would raise here, surfacing an unexpected encoding rather
+    # than silently corrupting the record framing -- consistent with the rest of the
+    # harness, which also treats program output as UTF-8.
+    text = data.decode("utf-8")
+    return [text[off:off + reclen] for off in range(0, len(text), reclen)]
 
 
 def geometry_for(layout_name: str) -> "tuple[int, int]":

@@ -76,6 +76,7 @@ one of Alternatives Considered, Refactoring Rationale, Assumptions, or Trade-off
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -143,6 +144,18 @@ _COB_LIBRARY_PATH = "COB_LIBRARY_PATH"
 # The workspace sub-directory that holds the ASSIGN-name data files, mirroring
 # test_env.sh's `CARDDEMO_DATA_DIR=<workspace>/data`.
 _DATA_SUBDIR = "data"
+
+# Whitelist of characters permitted in an ASSIGN name bound by :meth:`CobolRunner.assign_path`.
+# WHY (QA finding i1 -- Security/hardening): assign_path builds ``<workspace>/data/<name>``,
+# so a name that is a path component ('..'), an absolute path, or contains a separator could
+# bind a file OUTSIDE the isolated per-test workspace and defeat isolation. A conservative
+# character whitelist plus an explicit reject of the traversal components ('.' / '..') closes
+# that hole as defense-in-depth. WHY allow '.' / '-' (Trade-off vs. the stricter [A-Za-z0-9_]
+# a reviewer might reach for): the loader/unloader publish alternate-key sidecars named
+# ``<file>.1`` and the module's documented contract accepts auxiliary bare filenames, so dots
+# and hyphens WITHIN a name are legitimate and safe (a single path component can never escape
+# ``data/``); only the *whole-name* tokens '.' and '..' are dangerous and are rejected below.
+_ASSIGN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class CobolRunError(RuntimeError):
@@ -347,6 +360,86 @@ class RunResult:
         return path.read_text(encoding=encoding)
 
 
+def _resolve_geometry(
+    layout: "str | None",
+    reclen: "int | None",
+    key_length: "int | None",
+    alternate_keys: "object | None",
+) -> "tuple[int, int, object]":
+    """Resolve ``(reclen, key_length, alternate_keys)`` from an optional layout name.
+
+    Purpose
+    -------
+    Shared geometry resolution for both indexed-file directions:
+    :meth:`CobolRunner.load_input` (staging an indexed INPUT) and
+    :meth:`CobolRunner.unload_output` (reading an indexed OUTPUT). When ``layout`` is given,
+    its record length, primary-key length, and alternate-key descriptors come from the
+    single-source record codec (via :mod:`vsam_loader`), and any explicitly supplied
+    ``reclen``/``key_length`` must *agree* with it. WHY reject a conflict rather than pick a
+    winner (Assumption): a caller who passes both a layout and a disagreeing explicit value
+    has a bug that would otherwise silently mis-handle the file; failing loudly surfaces it.
+    WHY factor this out (Refactoring Rationale): load and unload must agree byte-for-byte on
+    geometry; a single resolver makes them provably identical and prevents the two sides
+    from drifting (e.g. a fix applied to staging but not to read-back).
+
+    Parameters
+    ----------
+    layout : str or None
+        Logical record-layout name (e.g. ``"XREF"``, ``"ACCOUNT"``) or ``None``.
+    reclen : int or None
+        Explicit record length, or ``None`` to derive it from ``layout``.
+    key_length : int or None
+        Explicit primary-key length, or ``None`` to derive it from ``layout``.
+    alternate_keys : object or None
+        Explicit alternate-key descriptors; ``None`` derives them from ``layout`` (or an
+        empty tuple when no layout is given); an explicit ``()`` forces a primary-key-only
+        file even for an alternate-keyed layout.
+
+    Returns
+    -------
+    tuple[int, int, object]
+        ``(reclen, key_length, alternate_keys)`` fully resolved for a :mod:`vsam_loader`
+        call.
+
+    Raises
+    ------
+    ValueError
+        If neither ``layout`` nor both ``reclen`` and ``key_length`` are supplied, or if an
+        explicit ``reclen``/``key_length`` conflicts with ``layout``'s geometry.
+    """
+    if layout is not None:
+        # WHY (QA finding C1/C2): deriving geometry AND alternate keys from the layout means
+        # a caller can never forget to stage/declare the alternate-key sidecars that a
+        # program like CBACT04C (which reads XREF by its account-id ALTERNATE key) requires.
+        from tests.helpers.vsam_loader import geometry_for, alternate_keys_for
+
+        geo_reclen, geo_keylen = geometry_for(layout)
+        if reclen is None:
+            reclen = geo_reclen
+        elif reclen != geo_reclen:
+            raise ValueError(
+                f"reclen={reclen} conflicts with layout {layout!r} geometry "
+                f"(reclen={geo_reclen})"
+            )
+        if key_length is None:
+            key_length = geo_keylen
+        elif key_length != geo_keylen:
+            raise ValueError(
+                f"key_length={key_length} conflicts with layout {layout!r} geometry "
+                f"(key_length={geo_keylen})"
+            )
+        if alternate_keys is None:
+            alternate_keys = alternate_keys_for(layout)
+
+    if reclen is None or key_length is None:
+        raise ValueError(
+            "either layout= or both reclen= and key_length= must be supplied"
+        )
+    if alternate_keys is None:
+        alternate_keys = ()
+    return reclen, key_length, alternate_keys
+
+
 class CobolRunner:
     """Execute compiled CardDemo batch programs against an isolated workspace.
 
@@ -433,15 +526,26 @@ class CobolRunner:
         Raises
         ------
         ValueError
-            If ``name`` is empty or contains a path separator (which would let a
-            binding escape the isolated workspace).
+            If ``name`` is empty, is a path-traversal component (``"."`` or ``".."``),
+            or contains any character outside ``[A-Za-z0-9._-]`` (e.g. a path separator,
+            NUL, whitespace, or a control/shell metacharacter) -- any of which could let a
+            binding escape the isolated per-test workspace (QA finding i1).
         """
-        # WHY (Assumption): ASSIGN names are bare identifiers; rejecting anything
-        # that looks like a path prevents a stray "../" from silently binding a
-        # file outside the per-test workspace and defeating isolation.
-        if not name or os.sep in name or (os.altsep and os.altsep in name):
+        # WHY (QA finding i1 -- hardening): assign_path builds ``<workspace>/data/<name>``,
+        # so ``name`` MUST be a single, benign path component. The previous guard rejected
+        # only names containing an OS path separator, which let the bare traversal token
+        # ``".."`` through -- ``data_dir / ".."`` resolves to the workspace root, binding a
+        # file OUTSIDE the isolated data directory and defeating per-test isolation. We now
+        # (1) reject the ``"."``/``".."`` traversal components explicitly and (2) require the
+        # remaining name to match a conservative character whitelist, which also rejects
+        # absolute paths, separators, NUL bytes, and control/whitespace characters. A name
+        # that passes both checks is a single component that can only ever resolve inside
+        # ``data_dir`` (Assumption: ``Path(base) / "<bare component>"`` never escapes base).
+        if not name or name in (".", "..") or not _ASSIGN_NAME_RE.match(name):
             raise ValueError(
-                f"ASSIGN name {name!r} must be a bare name without path separators"
+                f"ASSIGN name {name!r} must be a bare filename matching "
+                f"[A-Za-z0-9._-]+ and not '.' or '..' (a path separator or traversal "
+                f"component could bind a file outside the isolated workspace)."
             )
         return self.data_dir / name
 
@@ -513,9 +617,12 @@ class CobolRunner:
         self,
         assign_name: str,
         flat_path: "str | os.PathLike[str]",
-        reclen: int,
-        key_length: int,
+        reclen: "int | None" = None,
+        key_length: "int | None" = None,
         key_offset: int = 0,
+        *,
+        alternate_keys: "tuple[tuple[int, int, bool], ...] | None" = None,
+        layout: "str | None" = None,
     ) -> Path:
         """Load a flat fixture into the indexed file bound to an ASSIGN name.
 
@@ -524,7 +631,13 @@ class CobolRunner:
         Convenience for programs that declare ``ORGANIZATION IS INDEXED`` inputs:
         it materialises a flat fixed-width fixture as a native GnuCOBOL indexed
         file at the workspace path bound to ``assign_name`` (the automated analog
-        of ``IDCAMS REPRO``), so the program can OPEN and read it.
+        of ``IDCAMS REPRO``), so the program can OPEN and read it -- **including any
+        alternate-key sidecar files** the program relies on.
+
+        Passing ``layout`` (e.g. ``layout="XREF"``) resolves the record geometry AND
+        the alternate-key descriptors from the single-source record codec, so a caller
+        stages an alternate-keyed file correctly without transcribing offsets:
+        ``runner.load_input("XREFFILE", fixture, layout="XREF")``.
 
         Parameters
         ----------
@@ -532,13 +645,26 @@ class CobolRunner:
             ASSIGN external name whose bound path will receive the indexed file.
         flat_path : str | os.PathLike[str]
             Path to the flat fixed-width fixture to load.
-        reclen : int
-            Fixed record length in characters.
-        key_length : int
-            Leading primary-key length in characters (keys are at offset 0).
+        reclen : int or None, optional
+            Fixed record length in characters. Required unless ``layout`` is given
+            (from which it is derived). Defaults to ``None``.
+        key_length : int or None, optional
+            Leading primary-key length in characters. Required unless ``layout`` is
+            given (from which it is derived). Defaults to ``None``.
         key_offset : int, optional
             Key offset within the record. Only ``0`` is supported by the loader;
             a non-zero value is rejected there. Defaults to ``0``.
+        alternate_keys : tuple[tuple[int, int, bool], ...] or None, optional
+            Secondary-index descriptors as ``(offset, length, allow_duplicates)``
+            tuples (or :class:`record_codec.AlternateKey` objects), forwarded to
+            :func:`load_indexed` so it emits the matching ``ALTERNATE RECORD KEY``
+            clauses and produces the ``<file>.N`` sidecars. ``None`` (default) means
+            "derive from ``layout`` if one is given, otherwise none". Pass an explicit
+            ``()`` to force a primary-key-only file even for an alternate-keyed layout.
+        layout : str or None, optional
+            Logical record-layout name (e.g. ``"XREF"``). When given, its geometry and
+            alternate keys are resolved from :mod:`record_codec` and fill any of
+            ``reclen``/``key_length``/``alternate_keys`` left unset. Defaults to ``None``.
 
         Returns
         -------
@@ -547,6 +673,10 @@ class CobolRunner:
 
         Raises
         ------
+        ValueError
+            If neither ``layout`` nor both ``reclen`` and ``key_length`` are supplied,
+            or if an explicit ``reclen``/``key_length`` conflicts with ``layout``'s
+            geometry (a silent geometry mismatch would corrupt the loaded file).
         tests.helpers.vsam_loader.VsamLoadError
             If the load fails (bad geometry, unreadable fixture, compile/run
             failure); propagated unchanged from :func:`load_indexed`.
@@ -558,10 +688,197 @@ class CobolRunner:
         # cycles within the helpers namespace package.
         from tests.helpers.vsam_loader import load_indexed
 
+        # Resolve geometry + alternate keys via the shared resolver (single source of
+        # truth, shared with unload_output). WHY (QA finding C1): deriving the alternate-key
+        # descriptors from the layout means a caller can never forget to stage the ``.1``
+        # sidecar that CBACT04C needs to read XREF by its account-id ALTERNATE key.
+        reclen, key_length, alternate_keys = _resolve_geometry(
+            layout, reclen, key_length, alternate_keys
+        )
+
         indexed_path = self.assign_path(assign_name)
         # load_indexed writes to `indexed_path` and returns it; wrap to Path so the
-        # return type is consistent with the rest of this module.
-        return Path(load_indexed(flat_path, indexed_path, reclen, key_length, key_offset))
+        # return type is consistent with the rest of this module. alternate_keys is
+        # forwarded so the ALTERNATE RECORD KEY sidecars are produced (C1).
+        return Path(
+            load_indexed(
+                flat_path,
+                indexed_path,
+                reclen,
+                key_length,
+                key_offset,
+                alternate_keys=alternate_keys,
+            )
+        )
+
+    def load_sequential(
+        self,
+        assign_name: str,
+        flat_path: "str | os.PathLike[str]",
+        reclen: "int | None" = None,
+    ) -> Path:
+        """Stage a flat fixture as a headerless sequential input for an ASSIGN name.
+
+        Purpose
+        -------
+        Materialise a flat fixed-width fixture at the workspace path bound to
+        ``assign_name`` as a byte-exact ``N * reclen`` blob with **no** trailing
+        record terminator, for programs that declare ``ORGANIZATION IS SEQUENTIAL``
+        line-sequential inputs (e.g. ``CBTRN02C``'s ``DALYTRAN`` daily-transaction
+        file). Without this helper a caller would copy the fixture verbatim, and a
+        shipped fixture that carries a trailing newline (351 bytes for one 350-byte
+        record) is read by GnuCOBOL as a spurious extra partial record -- for
+        ``CBTRN02C`` that surfaced as a phantom second rejected transaction in
+        ``DALYREJS`` (QA finding M2, a silent wrong-result defect).
+
+        Parameters
+        ----------
+        assign_name : str
+            ASSIGN external name whose bound workspace path will receive the blob.
+        flat_path : str | os.PathLike[str]
+            Path to the flat fixed-width fixture to stage.
+        reclen : int or None, optional
+            Fixed record length in characters. When given (recommended), every row
+            is validated to be exactly ``reclen`` wide and the result is a strict
+            ``N * reclen`` blob -- a malformed fixture fails loudly. When ``None``,
+            each line's single trailing terminator is stripped and the rows are
+            concatenated without width validation (convenience for callers that do
+            not know the geometry). Defaults to ``None``.
+
+        Returns
+        -------
+        Path
+            The path of the staged sequential file (== ``assign_path(assign_name)``).
+
+        Raises
+        ------
+        tests.helpers.vsam_loader.VsamLoadError
+            If ``reclen`` is given and a row is not exactly ``reclen`` wide, or the
+            fixture cannot be read; propagated unchanged from ``_validated_blob``.
+        FileNotFoundError
+            If ``flat_path`` does not exist (raised while reading the fixture).
+        """
+        dest = self.assign_path(assign_name)
+        if reclen is not None:
+            # WHY (single source of truth): delegate the strip-and-validate to
+            # vsam_loader._validated_blob -- the exact routine the indexed loader
+            # uses for its flat inputs -- so a sequential fixture is subject to the
+            # identical CR-03 width contract (one trailing \r/\n stripped per row,
+            # every row exactly `reclen`, headerless N*reclen result). Reusing it
+            # (rather than re-implementing the strip here) guarantees the two staging
+            # paths can never drift apart, which is why reaching for the sibling
+            # module's leading-underscore helper is justified between these two
+            # tightly-coupled helpers in the same package.
+            from tests.helpers.vsam_loader import _validated_blob
+
+            blob = _validated_blob(flat_path, reclen)
+            dest.write_bytes(blob)
+            return dest
+
+        # reclen is None: convenience path with no width validation. Normalise line
+        # endings, then strip a single trailing terminator per row and concatenate.
+        # WHY (Trade-off): mirroring _validated_blob's newline handling keeps the
+        # "empty means empty" and "one terminator per row" semantics consistent even
+        # on the unvalidated path, so the only difference from the strict path is the
+        # absence of the per-row width assertion -- not a different stripping rule.
+        raw = Path(flat_path).read_text(encoding="latin-1")
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        if raw in ("", "\n"):
+            dest.write_text("", encoding="latin-1")
+            return dest
+        lines = raw.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()  # drop the single empty element from a trailing EOF newline
+        dest.write_text("".join(lines), encoding="latin-1")
+        return dest
+
+    def unload_output(
+        self,
+        assign_name: str,
+        reclen: "int | None" = None,
+        key_length: "int | None" = None,
+        key_offset: int = 0,
+        *,
+        alternate_keys: "tuple[tuple[int, int, bool], ...] | None" = None,
+        layout: "str | None" = None,
+    ) -> "list[str]":
+        """Read the indexed OUTPUT bound to an ASSIGN name into flat logical records.
+
+        Purpose
+        -------
+        Convenience for verifying programs that write ``ORGANIZATION IS INDEXED`` outputs
+        (e.g. ``CBTRN02C``'s posted ``TRANSACT``, ``CBACT04C``'s updated ``ACCTFILE`` and
+        ``TCATBAL``): it reads the native GnuCOBOL indexed file at the workspace path bound
+        to ``assign_name`` back into its logical records -- each a fixed
+        ``reclen``-character string, in ascending **primary-key** order -- so a
+        golden-master comparison can assert on record content without ever touching the
+        opaque, unstable ISAM on-disk byte layout (QA finding C2). It is the read-back
+        mirror of :meth:`load_input`, and the two share :func:`_resolve_geometry` so a
+        ``layout=`` resolves identically on both sides.
+
+        Typical use::
+
+            runner.run("CBACT04C")
+            records = runner.unload_output("ACCTFILE", layout="ACCOUNT")
+            assert_matches_golden("\\n".join(records), golden_path, layout="ACCOUNT")
+
+        Parameters
+        ----------
+        assign_name : str
+            ASSIGN external name whose bound workspace path holds the indexed output.
+        reclen : int or None, optional
+            Fixed record length in characters. Required unless ``layout`` is given (from
+            which it is derived). Defaults to ``None``.
+        key_length : int or None, optional
+            Primary-key length in characters. Required unless ``layout`` is given (from
+            which it is derived). Defaults to ``None``.
+        key_offset : int, optional
+            Zero-based offset of the primary key within the record. Defaults to ``0``.
+        alternate_keys : tuple[tuple[int, int, bool], ...] or None, optional
+            Alternate-key descriptors the file was built with, forwarded so the reader's
+            OPEN INPUT key set matches the file (a mismatch can fail FILE STATUS 39).
+            ``None`` (default) derives them from ``layout`` if given, else none; an explicit
+            ``()`` forces primary-key-only. CardDemo's indexed outputs are primary-key only.
+        layout : str or None, optional
+            Logical record-layout name (e.g. ``"ACCOUNT"``). When given, its geometry and
+            alternate keys fill any of ``reclen``/``key_length``/``alternate_keys`` left
+            unset. Defaults to ``None``.
+
+        Returns
+        -------
+        list[str]
+            The logical records as fixed ``reclen``-character strings in ascending
+            primary-key order; an empty indexed file yields ``[]``. Join with ``"\\n"`` (or
+            concatenate) for :func:`golden_compare.assert_matches_golden`, whose record mode
+            frames fixed-width records by width so either joiner compares equal to the
+            committed golden.
+
+        Raises
+        ------
+        ValueError
+            If neither ``layout`` nor both ``reclen`` and ``key_length`` are supplied, or if
+            an explicit ``reclen``/``key_length`` conflicts with ``layout``'s geometry.
+        tests.helpers.vsam_loader.VsamLoadError
+            If the unload fails (bad geometry, missing/symlinked file, compile/run failure,
+            or a blob length that is not a whole multiple of ``reclen``); propagated
+            unchanged from :func:`unload_indexed`.
+        """
+        # WHY (Trade-off): import the unloader lazily, like load_input, so a test that never
+        # reads an indexed output pays neither the import cost nor the implicit `cobc`
+        # requirement of the indexed-file machinery.
+        from tests.helpers.vsam_loader import unload_indexed
+
+        reclen, key_length, alternate_keys = _resolve_geometry(
+            layout, reclen, key_length, alternate_keys
+        )
+        indexed_path = self.assign_path(assign_name)
+        return unload_indexed(
+            indexed_path,
+            reclen,
+            key_length,
+            key_offset,
+            alternate_keys=alternate_keys,
+        )
 
     def run(
         self,

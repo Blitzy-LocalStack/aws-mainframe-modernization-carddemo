@@ -92,7 +92,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
@@ -113,6 +113,8 @@ __all__ = [
     "CUSTOMER_LAYOUT",
     "TRAN_LAYOUT",
     "TRNX_LAYOUT",
+    "REJECT_LAYOUT",
+    "INTTRAN_LAYOUT",
     "LAYOUTS",
     "reclen_of",
     "keylen_of",
@@ -550,7 +552,10 @@ def _validated_record(raw: str, reclen: int, *, context: str = "record") -> str:
     Raises
     ------
     RecordLengthError
-        If the row (after newline stripping) is not exactly ``reclen`` characters.
+        If the row (after newline stripping) is not exactly ``reclen`` characters, or if
+        it contains a non-ASCII (multi-byte) character, which would make the character
+        count differ from the byte count and misalign the fixed field offsets (QA finding
+        i2).
     """
     # Strip at most one trailing line terminator (``\r\n``, ``\n`` or ``\r``);
     # inner characters are never touched so embedded data is preserved.
@@ -565,6 +570,26 @@ def _validated_record(raw: str, reclen: int, *, context: str = "record") -> str:
             f"{context}: expected exactly {reclen} characters but got {len(stripped)} "
             f"-- nonconforming physical rows are rejected (no pad/truncate); "
             f"row={stripped[:64]!r}{'...' if len(stripped) > 64 else ''}"
+        )
+    # WHY (QA finding i2 -- byte-vs-character length guard): every field offset in this
+    # codec is byte-oriented and every CardDemo field is fixed-width single-byte
+    # (ASCII / EBCDIC-transcoded). ``len(stripped)`` counts CHARACTERS, so a record that
+    # contains a multi-byte character (an accented letter, an emoji, a smart quote) can
+    # satisfy the reclen *character* check above yet occupy MORE than reclen BYTES, silently
+    # desynchronising every downstream offset and corrupting the record when it is written
+    # back or compared as bytes -- exactly the kind of misaligned money value a financial
+    # harness must never decode. Requiring the record be pure ASCII makes the character
+    # count provably equal the byte count, so the width contract holds at the byte level
+    # too. (Assumption verified across the corpus during remediation: every shipped fixture
+    # and golden -- including the LOW-VALUES/0x00 filler batch programs emit, which IS ASCII
+    # -- is already single-byte, so this rejects only genuinely mis-encoded input.)
+    if not stripped.isascii():
+        bad = next((c for c in stripped if ord(c) > 0x7F), "")
+        raise RecordLengthError(
+            f"{context}: record contains a non-ASCII character {bad!r} "
+            f"(U+{ord(bad):04X}) -- fixed-width records must be single-byte ASCII so the "
+            f"character count equals the byte count (QA finding i2); a multi-byte character "
+            f"would misalign every downstream field offset."
         )
     return stripped
 
@@ -1252,6 +1277,70 @@ TRNX_LAYOUT = RecordLayout(
     ),
 )
 
+# REJECT-RECORD -- CBTRN02C DALYREJS output, RECLN 430, key = DALYTRAN-ID(16) @ 0.
+# WHY (Contract Fidelity, MA-11 / QA finding M1+M3): CBTRN02C writes a rejected daily
+# transaction as its verbatim 350-byte DALYTRAN image (REJECT-TRAN-DATA PIC X(350))
+# immediately followed by an 80-byte VALIDATION-TRAILER = WS-VALIDATION-FAIL-REASON
+# PIC 9(04) + WS-VALIDATION-FAIL-REASON-DESC PIC X(76). Modelling this as a first-class
+# 430-byte record type lets golden_compare run the reject stream in *record mode*
+# (byte-exact, width-enforced) instead of the lenient text mode that a 430-byte line
+# was forced into before -- text mode rstrips trailing spaces and scrubs any
+# space-format timestamp anywhere on the line, so a wrong reason code padded with the
+# right number of blanks, a same-format-but-wrong ORIG-TS, or a width drift could all
+# slip through undetected.
+#
+# The 350-byte prefix reuses DALYTRAN_LAYOUT.fields verbatim (single source of truth for
+# the CVTRA06Y geometry): this inherits ORIG-TS@278 normalize_ts=False (the deterministic
+# originating stamp copied from the input transaction is PRESERVED and therefore
+# asserted) and PROC-TS@304 normalize_ts=True (the runtime wall-clock stamp is blanked
+# before comparison). In the committed reject goldens PROC-TS is unset (26 blanks), which
+# the normaliser accepts as a legitimate empty value.
+#
+# WHY key_length=16 (Assumption): the reject record leads with DALYTRAN-ID, so its key
+# geometry matches DALYTRAN even though DALYREJS is a *sequential* (not indexed) output;
+# key_length is carried for layout self-consistency and is harmless for sequential use.
+REJECT_LAYOUT = RecordLayout(
+    name="REJECT",
+    reclen=430,
+    key_length=16,
+    key_offset=0,
+    fields=DALYTRAN_LAYOUT.fields + (
+        # VALIDATION-TRAILER (CBTRN02C working storage, appended to the 350-byte image).
+        Field("WS-VALIDATION-FAIL-REASON", 350, 4, "uint"),              # PIC 9(04) reason 100-103
+        Field("WS-VALIDATION-FAIL-REASON-DESC", 354, 76, "text"),        # PIC X(76) reason text
+    ),
+)
+
+# INT-TRAN-RECORD -- CBACT04C interest-transaction output, CVTRA05Y geometry (350B/key16).
+# WHY (QA finding C3 / determinism): CBACT04C writes each accrued-interest transaction to
+# the TRANSACT file using the CVTRA05Y layout, but -- UNLIKE an ordinary posted transaction
+# whose TRAN-ORIG-TS is the deterministic originating stamp copied from the source
+# transaction -- CBACT04C sets BOTH TRAN-ORIG-TS *and* TRAN-PROC-TS to the runtime
+# CURRENT-DATE (DB2-FORMAT-TS, dash/dot: YYYY-MM-DD-HH.MM.SS.NNNNNN; see CBACT04C moving
+# DB2-FORMAT-TS to both TRAN-ORIG-TS and TRAN-PROC-TS). Under the base TRAN layout only
+# PROC-TS is normalised, so the run-generated ORIG-TS would make every interest golden
+# non-deterministic. This variant therefore flags BOTH timestamps normalize_ts=True so
+# golden comparison blanks them together.
+#
+# WHY a SEPARATE layout, not a change to TRAN (Alternatives Considered): ordinary posted
+# transactions MUST keep asserting their deterministic ORIG-TS, so TRAN cannot blank it.
+# A per-call normalize_ts override was also considered but rejected -- a named layout
+# integrates transparently with golden_compare's record mode (which looks up
+# LAYOUTS[name]) and keeps the policy declarative and discoverable.
+# WHY dc_replace (Refactoring Rationale): the field list is cloned from TRAN_LAYOUT with
+# only TRAN-ORIG-TS's normalize_ts flipped, so the 350-byte CVTRA05Y geometry stays
+# single-sourced from TRAN and cannot drift.
+INTTRAN_LAYOUT = RecordLayout(
+    name="INTTRAN",
+    reclen=350,
+    key_length=16,
+    key_offset=0,
+    fields=tuple(
+        dc_replace(fld, normalize_ts=True) if fld.name == "TRAN-ORIG-TS" else fld
+        for fld in TRAN_LAYOUT.fields
+    ),
+)
+
 # Registry keyed by logical record name. WHY: a single dict lets helpers such as
 # vsam_loader resolve reclen/keylen by name (e.g. reclen_of("ACCOUNT")) instead of
 # importing each layout constant individually. TRAN (CVTRA05Y, posting output) and TRNX
@@ -1267,6 +1356,8 @@ LAYOUTS: dict[str, RecordLayout] = {
     "CUSTOMER": CUSTOMER_LAYOUT,
     "TRAN": TRAN_LAYOUT,
     "TRNX": TRNX_LAYOUT,
+    "REJECT": REJECT_LAYOUT,
+    "INTTRAN": INTTRAN_LAYOUT,
 }
 
 
@@ -1358,24 +1449,86 @@ def alternate_keys_of(name: str) -> tuple[AlternateKey, ...]:
         raise KeyError(f"unknown record layout {name!r}; known: {sorted(LAYOUTS)}") from None
 
 
+# Offsets within a 26-char timestamp where a SEPARATOR (not a digit) is expected. Both
+# dialects CardDemo emits share this shape, differing only in which separator sits where:
+#   space format : YYYY-MM-DD HH:MM:SS.ffffff   (seeds / CBTRN02C -- '-','-',' ',':',':','.')
+#   DB2   format : YYYY-MM-DD-HH.MM.SS.NNNNNN   (CBACT04C CURRENT-DATE -- '-','-','-','.','.','.')
+# The other twenty offsets are always digits. WHY (Assumption): accepting the union of
+# separators {'-','.',':' ,' '} at these six offsets validates BOTH dialects with one
+# rule, so neither the posting nor the interest path needs a dialect-specific matcher.
+_TS_SEP_POSITIONS = frozenset({4, 7, 10, 13, 16, 19})
+_TS_SEP_CHARS = frozenset("-.: ")
+
+
+def _is_normalizable_ts_field(value: str) -> bool:
+    """Return whether a 26-char field value is a legitimate timestamp (or all-blank).
+
+    Purpose
+    -------
+    Guard :func:`normalize_timestamps` (QA finding m1): before a ``normalize_ts`` field is
+    blanked, confirm it actually holds a 26-byte timestamp -- either the unset/all-blank
+    value COBOL leaves for a stamp that was never written, or a well-formed timestamp in
+    one of the two dialects CardDemo emits. A value that is neither is corrupt (a
+    mis-decoded record or a wrong offset), and blanking it would silently hide the defect,
+    so the caller raises instead of masking.
+
+    Parameters
+    ----------
+    value : str
+        The 26-character field slice to check.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``value`` is 26 spaces (legitimate unset) OR matches the shared
+        timestamp shape (a digit at each of the twenty digit offsets and one of
+        ``-``/``.``/``:``/space at each of the six separator offsets); ``False`` otherwise.
+
+    Raises
+    ------
+    None
+    """
+    # All-blank is an intentionally VALID value: COBOL leaves an unwritten PROC-TS as
+    # spaces, and the committed reject goldens carry exactly this (26 blanks). WHY
+    # (Assumption): treating blank as valid is essential -- rejecting it would break every
+    # reject-stream comparison whose PROC-TS was never set.
+    if value == " " * 26:
+        return True
+    if len(value) != 26:
+        return False
+    for i, ch in enumerate(value):
+        if i in _TS_SEP_POSITIONS:
+            if ch not in _TS_SEP_CHARS:
+                return False
+        elif not ch.isdigit():
+            return False
+    return True
+
+
 def normalize_timestamps(raw: str, layout: RecordLayout, sentinel: str = " ") -> str:
     """Blank the non-deterministic timestamp fields of a record for golden comparison.
 
     Purpose
     -------
-    Replace every field flagged :attr:`Field.normalize_ts` -- exactly the single
-    runtime-generated processing timestamp (``PROC-TS``) -- with a fixed sentinel so
-    that two runs that differ only in posting time compare byte-identical. It lives
-    here, beside the layout that defines those offsets, so ``golden_compare.py`` reuses
-    the same offsets rather than duplicating them (WHY: Trade-off -- single-sourcing the
-    offsets beats a marginally more convenient home in the comparator).
+    Replace every field flagged :attr:`Field.normalize_ts` -- the runtime-generated
+    timestamp(s) -- with a fixed sentinel so that two runs that differ only in wall-clock
+    time compare byte-identical. It lives here, beside the layout that defines those
+    offsets, so ``golden_compare.py`` reuses the same offsets rather than duplicating them
+    (WHY: Trade-off -- single-sourcing the offsets beats a marginally more convenient home
+    in the comparator).
 
-    WHY (Refactoring Rationale): the originating timestamp ``ORIG-TS`` is deliberately
-    **not** flagged and therefore **not** blanked. It is deterministic business data
-    copied from the input transaction; masking it (as an earlier build did) discarded a
-    field the golden comparison must verify and was the root of the "350 bytes collapse
-    to 278" defect. Only the truly non-deterministic ``PROC-TS`` is masked, and it is
-    overwritten *in place* so the record keeps its exact width.
+    Which fields are blanked is LAYOUT-DEFINED: for most layouts it is exactly the single
+    processing timestamp (``PROC-TS``), while the deterministic originating stamp
+    (``ORIG-TS``) is left intact as business data the golden must verify. The ``INTTRAN``
+    layout is the deliberate exception -- CBACT04C sets BOTH stamps from the runtime clock,
+    so that layout flags both (see ``INTTRAN_LAYOUT``).
+
+    WHY validate-before-blank (QA finding m1): each ``normalize_ts`` field is first checked
+    with :func:`_is_normalizable_ts_field`; only a genuine 26-byte timestamp (either
+    dialect) or an all-blank unset field may be masked. Blanking by position without this
+    check would silently paper over a corrupt record or a wrong offset -- exactly the class
+    of defect a financial harness must surface, not hide. The mask is written *in place*
+    so the record keeps its exact width.
 
     Parameters
     ----------
@@ -1398,7 +1551,9 @@ def normalize_timestamps(raw: str, layout: RecordLayout, sentinel: str = " ") ->
     ------
     ValueError
         If ``sentinel`` is not exactly one character (a multi-char sentinel would change
-        the record length and desynchronise every downstream offset).
+        the record length and desynchronise every downstream offset), or if a
+        ``normalize_ts`` field of length 26 holds neither a valid timestamp nor all
+        blanks (QA finding m1 -- a corrupt record must fail loudly, not be masked).
     RecordLengthError
         If ``raw`` is not exactly ``layout.reclen`` characters after newline stripping.
     """
@@ -1407,6 +1562,20 @@ def normalize_timestamps(raw: str, layout: RecordLayout, sentinel: str = " ") ->
     chars = list(_validated_record(raw, layout.reclen, context=f"{layout.name} normalize_timestamps"))
     for fld in layout.fields:
         if fld.normalize_ts:
+            # WHY (m1): validate the field actually holds a timestamp (or is unset/blank)
+            # before overwriting it. Only 26-byte fields carry the timestamp contract, so
+            # the shape check is scoped to that length; any other normalize_ts width (none
+            # exist today) is blanked without a shape assertion. A failure here means the
+            # record is corrupt or an offset is wrong -- surfacing it beats silently hiding
+            # a defect behind a blank field.
+            if fld.length == 26:
+                chunk = "".join(chars[fld.start:fld.end])
+                if not _is_normalizable_ts_field(chunk):
+                    raise ValueError(
+                        f"{layout.name}.{fld.name}: expected a 26-byte timestamp or all "
+                        f"blanks before normalisation but got {chunk!r} "
+                        f"(a corrupt record or a wrong field offset)"
+                    )
             chars[fld.start:fld.end] = sentinel * fld.length
     return "".join(chars)
 
@@ -1549,6 +1718,10 @@ def _validate_layouts() -> None:
         "ACCOUNT": (300, 11), "DALYTRAN": (350, 16), "DISGROUP": (50, 16),
         "XREF": (50, 16), "TCATBAL": (50, 17), "CARD": (150, 16),
         "CUSTOMER": (500, 9), "TRAN": (350, 16), "TRNX": (350, 32),
+        # REJECT = 350-byte DALYTRAN image + 80-byte VALIDATION-TRAILER (CBTRN02C DALYREJS).
+        "REJECT": (430, 16),
+        # INTTRAN = CVTRA05Y interest transaction (CBACT04C); shares TRAN's geometry.
+        "INTTRAN": (350, 16),
     }
     for name, layout in LAYOUTS.items():
         cursor = 0
