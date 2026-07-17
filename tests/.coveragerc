@@ -1,0 +1,48 @@
+# =============================================================================
+# tests/.coveragerc
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Configure coverage.py measurement of the CardDemo test suite's PYTHON
+#   harness code (the reusable tests/helpers and tests/mocks packages). COBOL
+#   line coverage is produced SEPARATELY via gcov on the GnuCOBOL-transpiled C
+#   and is NOT measured here.
+#
+# Invocation (IMPORTANT):
+#   This rcfile lives under tests/, so run coverage from the repo root pointing
+#   at it explicitly:
+#       coverage run --rcfile=tests/.coveragerc -m pytest tests/integration tests/e2e
+#       coverage report --rcfile=tests/.coveragerc
+#   (or export COVERAGE_RCFILE=tests/.coveragerc). The 'source' paths below are
+#   repo-root-relative because coverage runs from the repo root.
+#
+# WHY:
+#   - Assumption: the artifacts worth measuring on the Python side are the
+#     reusable helper/mock packages (the harness); the compiled COBOL programs
+#     are the real units-under-test and are covered by gcov.
+#   - Trade-off: branch coverage is enabled for stricter (financial-grade)
+#     measurement even though it is noisier and slightly slower than line-only.
+# =============================================================================
+[run]
+branch = True
+relative_files = True
+source =
+    tests/helpers
+    tests/mocks
+
+omit =
+    */__pycache__/*
+    */.pytest_cache/*
+
+[report]
+show_missing = True
+skip_empty = False
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+
+[html]
+directory = reports/coverage-html
+
+[xml]
+output = reports/coverage.xml
