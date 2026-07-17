@@ -10,20 +10,29 @@
 #   <testcase>.
 #
 # Usage:
-#   scripts/run_unit_tests.sh          # normal run
+#   scripts/run_unit_tests.sh          # normal run (takes NO positional args)
+#   scripts/run_unit_tests.sh -h|--help   # print usage and exit 0
 #   source scripts/test_env.sh first is NOT required (this script sources it).
 #
 # Parameters (environment inputs, from scripts/test_env.sh):
 #   CARDDEMO_REPO_ROOT, CARDDEMO_BUILD_DIR, CARDDEMO_REPORTS_DIR.
+#   CARDDEMO_RC_USAGE (usage-error code) and CARDDEMO_RUN_ID (the per-run
+#   workspace key) are also consumed, and carddemo_cleanup_workspace is invoked
+#   on exit to reclaim that workspace.
 #
 # Return / Exit codes (CardDemo RC rubric):
 #   0  all unit-test programs passed (exit 0).
+#   2  operator usage error -- an unknown/invalid CLI argument was supplied.
 #   4  no unit-test programs found yet (suite authored in parallel) -> warn.
 #   8  one or more unit-test programs failed, or the build failed.
 #
 # Errors / Exceptions:
-#   A build failure (RC>=8) aborts before running tests. A missing compiled
-#   executable for a discovered test source is reported and counted as a failure.
+#   An unrecognised CLI argument is rejected with a usage banner and the
+#   reserved usage code (RC=2), so an invocation typo can never be silently
+#   reclassified as a passing run. A build failure (RC>=8) aborts before running
+#   tests. A missing compiled executable for a discovered test source is
+#   reported and counted as a failure. The per-run test workspace is removed on
+#   every exit path (an EXIT trap) so repeated CI runs leave no orphaned dirs.
 #
 # WHY (design rationale):
 #   - Alternatives Considered: GCBLUnit (pure GnuCOBOL) was selected over a
@@ -47,10 +56,86 @@ set -euo pipefail
 shopt -u patsub_replacement 2>/dev/null || true
 
 _unit_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# WHY (I-2 -- one workspace shared by parent and child, then reclaimed):
+# scripts/test_env.sh keys its per-run workspace on CARDDEMO_RUN_ID, falling
+# back to the sourcing shell's PID. Exporting it HERE -- before sourcing and
+# before spawning the child build_test_programs.sh -- makes this runner and that
+# child agree on ONE workspace directory, which the EXIT trap below reclaims in
+# a single sweep. Without this the parent and the child would each mint a
+# distinct run-<PID> directory and BOTH would leak on every invocation.
+# Assumption: an outer orchestrator that already exported CARDDEMO_RUN_ID (to
+# share one workspace across layers) still wins via the ${VAR:-default} form.
+export CARDDEMO_RUN_ID="${CARDDEMO_RUN_ID:-$$}"
+
 # shellcheck source=scripts/test_env.sh
 source "$_unit_script_dir/test_env.sh"
 
+# WHY (I-2 -- no orphaned workspaces): reclaim the per-run workspace on EVERY
+# exit path (normal, warn, build-fail, usage-error, or --help) so repeated CI
+# invocations do not accumulate /tmp/carddemo-test-<uid>/run-* directories.
+# carddemo_cleanup_workspace is containment-guarded: it deletes ONLY a path
+# under our own CARDDEMO_WS_BASE, never build/ or reports/ (which live under the
+# repo, not the workspace). Trade-off: a bash EXIT trap runs its body but does
+# NOT alter the script's exit status unless it calls `exit` itself, so the RC
+# rubric returned by the explicit `exit "$overall_rc"` calls below is preserved.
+# Alternatives Considered: installing this trap inside test_env.sh was rejected
+# because a trap set by a *sourced* file fires on the CALLER's lifecycle -- the
+# runner owns the run, so the runner must own teardown.
+trap 'carddemo_cleanup_workspace' EXIT
+
 CARDDEMO_UNIT_REPORT="${CARDDEMO_REPORTS_DIR}/unit.xml"
+
+carddemo_unit_usage() {
+    # Purpose : print the CLI usage banner for the unit-test runner.
+    # Parameters: none.
+    # Returns : always 0; the banner is written to stdout.
+    # Errors  : none.
+    # WHY (consistency): mirrors carddemo_build_usage() in the sibling
+    # build_test_programs.sh so both entry points present a uniform CLI contract
+    # (a lone -h/--help, and rejection of anything else). Keeping the two runners
+    # symmetric removes the asymmetry that motivated QA-01.
+    cat <<'USAGE'
+Usage: run_unit_tests.sh [-h|--help]
+  -h, --help   show this help and exit 0
+This runner takes NO positional arguments; it is parameterised entirely by the
+environment exported from scripts/test_env.sh.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Parse CLI arguments.
+# WHY (QA-01 -- an invalid argument must never masquerade as a passing run):
+# the runner previously had NO argument parser, so any token (e.g. --bogus) was
+# silently ignored and the suite still returned RC=0; a mistyped flag in CI
+# therefore looked like success. We now reject any unrecognised argument with a
+# usage banner and the reserved usage code (CARDDEMO_RC_USAGE=2) -- identical
+# semantics to build_test_programs.sh. RC=2 stays exclusive to usage errors and
+# never collides with the test rubric {0,4,8}, so genuine test outcomes and
+# invocation errors remain distinguishable in CI. This parser runs AFTER the
+# EXIT trap is installed so the -h/--help and usage-error exits also reclaim the
+# per-run workspace (I-2).
+# WHY (Refactoring rationale -- `if`, not the sibling's `while`): unlike
+# build_test_programs.sh, this runner accepts NO value-consuming flags -- every
+# branch below terminates the script -- so a `while ... shift` loop would leave
+# `shift` provably unreachable (shellcheck SC2317). A single guarded `case` on
+# the first token is the faithful adaptation: a lone -h/--help prints help and
+# exits 0; any other first token is an unknown argument and is rejected. The
+# outcome is identical to the sibling for every input a zero-flag runner can see.
+# ---------------------------------------------------------------------------
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        -h|--help)
+            carddemo_unit_usage
+            exit 0
+            ;;
+        *)
+            echo "[unit] ERROR: unknown argument '$1'" >&2
+            carddemo_unit_usage >&2
+            exit "${CARDDEMO_RC_USAGE}"
+            ;;
+    esac
+fi
 
 carddemo_xml_escape() {
     # Purpose : XML-escape a string so captured COBOL output is safe inside the
