@@ -274,6 +274,62 @@ _carddemo_ls_positive_int() {
     esac
 }
 
+_carddemo_ls_write_envfile() {
+    # Purpose : persist the resolved gateway URL to the workspace envfile with
+    #           restrictive (0600) permissions.
+    # Parameters:
+    #   $1 (string) - envfile path to (over)write.
+    #   $2 (string) - the AWS_ENDPOINT_URL value to record.
+    # Returns : 0 on success; the write's own rc on failure.
+    # Errors  : none swallowed here; a failed write surfaces to the caller.
+    # WHY (finding F5 -- mode 600): the envfile lives under a SHARED workspace
+    # base, so the checkpoint policy asks for mode 600 uniformly. Creating it
+    # inside a `( umask 077; ... )` subshell guarantees the file is 0600 from the
+    # instant it exists -- there is NO create-then-chmod window in which another
+    # user could read it (a plain `chmod 600` AFTER the write would leave exactly
+    # that race). The subshell also confines the umask change so the caller's
+    # umask is untouched (Trade-off: one extra subshell vs. a global umask side
+    # effect). NOTE: the file contains ONLY AWS_ENDPOINT_URL -- never the auth
+    # token -- so this is defense-in-depth, not a confidentiality fix.
+    local _ef="$1" _url="$2"
+    ( umask 077; printf 'AWS_ENDPOINT_URL=%s\n' "$_url" > "$_ef" )
+}
+
+_carddemo_ls_probe_local_endpoint() {
+    # Purpose : decide whether a candidate endpoint is a healthy, ALLOWLISTED
+    #           LocalStack emulator that can be adopted directly (no ephemeral
+    #           instance, no agent token).
+    # Parameters:
+    #   $1 (string) - candidate endpoint URL (e.g. http://localhost:4566).
+    # Returns : 0 if the host is allowlisted AND its /_localstack/health answers
+    #           within the health budget; 1 otherwise (caller falls back).
+    # Errors  : none -- a probe failure is a normal "fall back to ephemeral"
+    #           signal, not an error.
+    # WHY (finding F1 -- adopt a provisioned local emulator): the runner may
+    # already expose a healthy LocalStack (e.g. a Docker container on :4566, the
+    # exact setup the environment provisions), while `localstack ephemeral create`
+    # FAILS here (missing /usr/lib/localstack). Probing and adopting the local
+    # endpoint FIRST is faster, needs no cloud token, and -- crucially -- lets
+    # `--with-localstack` succeed on this runner instead of false-failing on a
+    # healthy S3 layer. Alternatives Considered: a `docker` presence check was
+    # rejected as too narrow (it would miss a remote-but-loopback-forwarded or a
+    # non-Docker local gateway); an actual health probe is the authoritative test
+    # of "can I use this endpoint right now?". SECURITY: the same default-deny
+    # allowlist that guards the ephemeral gateway is applied here, so a mis-set
+    # AWS_ENDPOINT_URL pointing at public AWS is never probed or adopted.
+    local _url="$1" _host
+    [ -n "$_url" ] || return 1
+    _host="$(_carddemo_ls_url_host "$_url" || true)"
+    [ -n "$_host" ] || return 1
+    _carddemo_ls_host_allowed "$_host" || return 1
+    # Bounded health probe: the connect/max-time caps mean a black-holed endpoint
+    # cannot stall discovery -- it fails fast and we fall back to ephemeral.
+    curl -fsS \
+        --connect-timeout "$CARDDEMO_LS_HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$CARDDEMO_LS_HEALTH_MAX_TIME" \
+        "$_url/_localstack/health" >/dev/null 2>&1
+}
+
 _carddemo_ls_cleanup() {
     # Purpose : idempotent teardown -- remove the scratch temp dir always, and
     #           delete a created ephemeral instance UNLESS bring-up succeeded.
@@ -344,8 +400,15 @@ carddemo_setup_localstack_main() {
     # -- prerequisites (optional layer) --------------------------------------
     # WHY (Assumption): the AWS layer is optional; a runner without these tools
     # should skip cleanly (WARN) unless the operator demanded it (REQUIRE=1).
+    # WHY (finding F1 -- split core vs ephemeral-only prerequisites): jq, curl and
+    # awslocal are needed by BOTH bring-up paths (health probe + S3 seed/verify),
+    # so they are the core requirement checked here. The `localstack` CLI is
+    # required ONLY for the ephemeral fallback, so it is checked later, inside the
+    # not-adopted branch. Demanding `localstack` up front would wrongly WARN-skip a
+    # runner that has a perfectly healthy local emulator (and awslocal) but no
+    # ephemeral CLI -- exactly the provisioned-Docker case F1 must support.
     local _missing=0 _c
-    for _c in localstack jq curl awslocal; do
+    for _c in jq curl awslocal; do
         if ! command -v "$_c" >/dev/null 2>&1; then
             echo "[localstack] optional tool '$_c' not found on PATH" >&2
             _missing=1
@@ -365,71 +428,116 @@ carddemo_setup_localstack_main() {
         return "$_soft_rc"
     }
 
-    # -- agent token ----------------------------------------------------------
-    # WHY (Assumption): CI may inject LOCALSTACK_AUTH_TOKEN as a secret; only
-    # request an ephemeral agent token when one is not already present.
-    if [ -z "${LOCALSTACK_AUTH_TOKEN:-}" ]; then
-        local token_url="${LOCALSTACK_AGENT_TOKEN_URL:-https://v2.api.localstack.cloud/v1/auth/agent-token}"
-        # SECURITY (MA-05): the token carries an authorization credential, so the
-        # endpoint that mints it MUST be an allowlisted LocalStack host. A
-        # rejected URL is a HARD failure and is never contacted.
-        _carddemo_ls_require_allowed_url "token endpoint" "$token_url" || return "$CARDDEMO_RC_FAIL"
-        echo "[localstack] requesting agent token from $token_url ..."
-        local _resp
-        if ! _resp="$(curl -fsS \
-                --connect-timeout "$CARDDEMO_LS_CONNECT_TIMEOUT" \
-                --max-time "$CARDDEMO_LS_MAX_TIME" \
-                -X POST "$token_url" 2>/dev/null)"; then
-            echo "[localstack] agent-token request failed/timed out - skipping (rc=$_soft_rc)" >&2
-            return "$_soft_rc"
-        fi
-        LOCALSTACK_AUTH_TOKEN="$(printf '%s' "$_resp" | jq -r '.token // empty')"
-        API_ENDPOINT="$(printf '%s' "$_resp" | jq -r '.api_endpoint // empty')"
-        export LOCALSTACK_AUTH_TOKEN API_ENDPOINT
-        if [ -z "$LOCALSTACK_AUTH_TOKEN" ]; then
-            echo "[localstack] token response had no .token - skipping (rc=$_soft_rc)" >&2
-            return "$_soft_rc"
-        fi
+    # -- discover + adopt an already-running local emulator (finding F1) ------
+    # WHY (finding F1 -- prefer a healthy local endpoint over ephemeral create):
+    # the runner may already expose a healthy LocalStack (e.g. a Docker container
+    # on :4566, exactly what the environment provisions), whereas `localstack
+    # ephemeral create` FAILS here (missing /usr/lib/localstack). Probing and
+    # adopting the local endpoint first makes `--with-localstack` succeed on this
+    # runner (previously it false-failed exit 4/8 even though every S3 test
+    # passed). We fall back to the ephemeral/token flow ONLY when no local
+    # endpoint answers, matching the checkpoint P1 mode policy ("use the supported
+    # local path if available; otherwise ephemeral").
+    local _adopted_local=0
+    local _candidate_endpoint="${AWS_ENDPOINT_URL:-http://localhost:4566}"
+    # SECURITY: if the operator EXPLICITLY preset AWS_ENDPOINT_URL, it must clear
+    # the same default-deny allowlist as the ephemeral gateway BEFORE we probe it
+    # -- a non-LocalStack host (e.g. *.amazonaws.com) is a HARD failure (fail
+    # closed), never contacted, so a stray endpoint can neither be probed nor
+    # adopted. When AWS_ENDPOINT_URL is unset the candidate is loopback :4566,
+    # which is inherently allowlisted.
+    if [ -n "${AWS_ENDPOINT_URL:-}" ]; then
+        _carddemo_ls_require_allowed_url "preset endpoint" "$AWS_ENDPOINT_URL" || return "$CARDDEMO_RC_FAIL"
+    fi
+    if _carddemo_ls_probe_local_endpoint "$_candidate_endpoint"; then
+        export AWS_ENDPOINT_URL="$_candidate_endpoint"
+        _adopted_local=1
+        echo "[localstack] adopted healthy local emulator at $AWS_ENDPOINT_URL (allowlisted)"
+        echo "[localstack] skipping ephemeral create + agent-token flow"
+    else
+        echo "[localstack] no healthy local emulator at $_candidate_endpoint; using ephemeral path"
     fi
 
-    # -- create ephemeral instance (bounded) ---------------------------------
-    # MI-01 (SC2155): declaration and command substitution are split so a
-    # non-zero rc from the substitution is not masked by `local`.
-    local _name
-    _name="agent-$(date +%s)-$$"
-    echo "[localstack] creating ephemeral instance '$_name' ..."
-    local _create_out
-    if ! _create_out="$(timeout "$CARDDEMO_LS_CLI_TIMEOUT" \
-            localstack ephemeral create --name "$_name" 2>&1)"; then
-        echo "[localstack] 'ephemeral create' failed/timed out - skipping (rc=$_soft_rc):" >&2
-        echo "$_create_out" >&2
-        return "$_soft_rc"
-    fi
-    # Capture an instance identifier for cleanup (MA-06). Prefer a JSON id/name
-    # from the CLI output; fall back to the name we chose (which we control).
-    # WHY (Assumption): the create output format may be JSON or human text, so we
-    # try jq first and degrade to our known --name so cleanup always has a key.
-    _carddemo_ls_instance_id="$(printf '%s' "$_create_out" \
-        | jq -r '(.id // .instance_id // .name // empty)' 2>/dev/null || true)"
-    if [ -z "$_carddemo_ls_instance_id" ]; then
-        _carddemo_ls_instance_id="$_name"
-    fi
-    echo "[localstack] ephemeral instance id: $_carddemo_ls_instance_id"
+    # -- ephemeral bring-up (ONLY when no local emulator was adopted) ---------
+    # WHY (finding F1): everything from the agent-token request through the
+    # ephemeral create and gateway parse/security check is relevant ONLY to the
+    # ephemeral path. When a local emulator was adopted above, AWS_ENDPOINT_URL is
+    # already set and allowlisted, so this whole block is skipped -- no token is
+    # minted and no cloud instance is created.
+    if [ "$_adopted_local" != "1" ]; then
+        # The `localstack` CLI is required ONLY for the ephemeral fallback; its
+        # absence here is an optional-layer gap (WARN, or FAIL under REQUIRE).
+        if ! command -v localstack >/dev/null 2>&1; then
+            echo "[localstack] 'localstack' CLI not found and no local emulator to adopt - skipping (rc=$_soft_rc)" >&2
+            return "$_soft_rc"
+        fi
 
-    # WHY (Assumption): the CLI prints the gateway URL; take the first http(s)
-    # URL it emits, falling back to the standard local gateway if none parses.
-    local _endpoint
-    _endpoint="$(printf '%s\n' "$_create_out" | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -1 || true)"
-    if [ -z "$_endpoint" ]; then
-        _endpoint="${AWS_ENDPOINT_URL:-http://localhost:4566}"
-        echo "[localstack] could not parse endpoint from CLI output; using $_endpoint" >&2
+        # -- agent token ------------------------------------------------------
+        # WHY (Assumption): CI may inject LOCALSTACK_AUTH_TOKEN as a secret; only
+        # request an ephemeral agent token when one is not already present.
+        if [ -z "${LOCALSTACK_AUTH_TOKEN:-}" ]; then
+            local token_url="${LOCALSTACK_AGENT_TOKEN_URL:-https://v2.api.localstack.cloud/v1/auth/agent-token}"
+            # SECURITY (MA-05): the token carries an authorization credential, so the
+            # endpoint that mints it MUST be an allowlisted LocalStack host. A
+            # rejected URL is a HARD failure and is never contacted.
+            _carddemo_ls_require_allowed_url "token endpoint" "$token_url" || return "$CARDDEMO_RC_FAIL"
+            echo "[localstack] requesting agent token from $token_url ..."
+            local _resp
+            if ! _resp="$(curl -fsS \
+                    --connect-timeout "$CARDDEMO_LS_CONNECT_TIMEOUT" \
+                    --max-time "$CARDDEMO_LS_MAX_TIME" \
+                    -X POST "$token_url" 2>/dev/null)"; then
+                echo "[localstack] agent-token request failed/timed out - skipping (rc=$_soft_rc)" >&2
+                return "$_soft_rc"
+            fi
+            LOCALSTACK_AUTH_TOKEN="$(printf '%s' "$_resp" | jq -r '.token // empty')"
+            API_ENDPOINT="$(printf '%s' "$_resp" | jq -r '.api_endpoint // empty')"
+            export LOCALSTACK_AUTH_TOKEN API_ENDPOINT
+            if [ -z "$LOCALSTACK_AUTH_TOKEN" ]; then
+                echo "[localstack] token response had no .token - skipping (rc=$_soft_rc)" >&2
+                return "$_soft_rc"
+            fi
+        fi
+
+        # -- create ephemeral instance (bounded) ------------------------------
+        # MI-01 (SC2155): declaration and command substitution are split so a
+        # non-zero rc from the substitution is not masked by `local`.
+        local _name
+        _name="agent-$(date +%s)-$$"
+        echo "[localstack] creating ephemeral instance '$_name' ..."
+        local _create_out
+        if ! _create_out="$(timeout "$CARDDEMO_LS_CLI_TIMEOUT" \
+                localstack ephemeral create --name "$_name" 2>&1)"; then
+            echo "[localstack] 'ephemeral create' failed/timed out - skipping (rc=$_soft_rc):" >&2
+            echo "$_create_out" >&2
+            return "$_soft_rc"
+        fi
+        # Capture an instance identifier for cleanup (MA-06). Prefer a JSON id/name
+        # from the CLI output; fall back to the name we chose (which we control).
+        # WHY (Assumption): the create output format may be JSON or human text, so we
+        # try jq first and degrade to our known --name so cleanup always has a key.
+        _carddemo_ls_instance_id="$(printf '%s' "$_create_out" \
+            | jq -r '(.id // .instance_id // .name // empty)' 2>/dev/null || true)"
+        if [ -z "$_carddemo_ls_instance_id" ]; then
+            _carddemo_ls_instance_id="$_name"
+        fi
+        echo "[localstack] ephemeral instance id: $_carddemo_ls_instance_id"
+
+        # WHY (Assumption): the CLI prints the gateway URL; take the first http(s)
+        # URL it emits, falling back to the standard local gateway if none parses.
+        local _endpoint
+        _endpoint="$(printf '%s\n' "$_create_out" | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -1 || true)"
+        if [ -z "$_endpoint" ]; then
+            _endpoint="${AWS_ENDPOINT_URL:-http://localhost:4566}"
+            echo "[localstack] could not parse endpoint from CLI output; using $_endpoint" >&2
+        fi
+        # SECURITY (MA-05): whether parsed or defaulted, the gateway MUST be an
+        # allowlisted LocalStack host before we export it or send a single AWS call
+        # to it. This closes the "fallback can route outside LocalStack" hole.
+        _carddemo_ls_require_allowed_url "gateway endpoint" "$_endpoint" || return "$CARDDEMO_RC_FAIL"
+        export AWS_ENDPOINT_URL="$_endpoint"
+        echo "[localstack] gateway endpoint: $AWS_ENDPOINT_URL (allowlisted)"
     fi
-    # SECURITY (MA-05): whether parsed or defaulted, the gateway MUST be an
-    # allowlisted LocalStack host before we export it or send a single AWS call
-    # to it. This closes the "fallback can route outside LocalStack" hole.
-    _carddemo_ls_require_allowed_url "gateway endpoint" "$_endpoint" || return "$CARDDEMO_RC_FAIL"
-    export AWS_ENDPOINT_URL="$_endpoint"
-    echo "[localstack] gateway endpoint: $AWS_ENDPOINT_URL (allowlisted)"
 
     # -- readiness poll (completion-aware, bounded) ---------------------------
     local _deadline=$(( SECONDS + _timeout )) _ready=0
@@ -451,14 +559,14 @@ carddemo_setup_localstack_main() {
     done
     if [ "$_ready" != "1" ]; then
         echo "[localstack] instance not healthy before timeout - skipping seed (rc=$_soft_rc)" >&2
-        printf 'AWS_ENDPOINT_URL=%s\n' "$AWS_ENDPOINT_URL" > "$envfile"
+        _carddemo_ls_write_envfile "$envfile" "$AWS_ENDPOINT_URL"
         return "$_soft_rc"
     fi
 
     # -- manifest presence (optional layer) ----------------------------------
     if [ ! -f "$manifest" ]; then
         echo "[localstack] manifest not present ($manifest) - endpoint up, seed skipped (rc=$_soft_rc)"
-        printf 'AWS_ENDPOINT_URL=%s\n' "$AWS_ENDPOINT_URL" > "$envfile"
+        _carddemo_ls_write_envfile "$envfile" "$AWS_ENDPOINT_URL"
         return "$_soft_rc"
     fi
 
@@ -486,29 +594,92 @@ carddemo_setup_localstack_main() {
         fi
     done < <(jq -r '(.buckets // [])[] | if type=="object" then .name else . end' "$manifest" 2>/dev/null)
 
-    local _bucket _key _content _tmp
-    while IFS=$'\t' read -r _bucket _key _content; do
+    # WHY (finding F6): each object stages EITHER an inline `content` string OR a
+    # `source_file` (a repo-relative path whose raw bytes -- including BINARY
+    # EBCDIC with NULs/overpunch and no newline -- are uploaded verbatim), and may
+    # carry a sha256 for AUTHORITATIVE post-upload verification.
+    #
+    # WHY (bug fix over an earlier @tsv + `IFS=$'\t' read` parse): a TAB is an
+    # IFS-*whitespace* character, so `read` COLLAPSES runs of tabs and DROPS empty
+    # fields. An object that omits `content` (i.e. stages via source_file) emits
+    # two adjacent tabs, which the reader merged -- shifting every later field left
+    # so `source_file` wrongly received the sha256 and the upload aborted. We now
+    # stream one COMPACT JSON object per line (`jq -c`) and pull each field with
+    # its own `jq -r`: an absent value decodes to "" in its CORRECT slot, and jq
+    # escapes any embedded tab/newline so exactly one physical line == one object.
+    # Trade-off: a few extra jq calls per object vs. a correctness bug -- there are
+    # only a handful of objects so the cost is negligible and correctness wins.
+    # Alternative considered: a non-whitespace delimiter (e.g. '|'), rejected
+    # because inline `content` may legitimately contain it, whereas JSON is
+    # lossless. `size` is intentionally NOT parsed here: a sha256 match proves
+    # byte-identity (which subsumes length), and the pytest layer asserts
+    # ContentLength explicitly, so re-checking size in bash would be redundant.
+    local _obj _bucket _key _content _srcfile _sha _tmp _upload _actual_sha
+    while IFS= read -r _obj; do
+        [ -z "$_obj" ] && continue
+        _bucket="$(printf '%s' "$_obj" | jq -r '.bucket // ""')"
+        _key="$(printf '%s' "$_obj" | jq -r '.key // ""')"
+        _content="$(printf '%s' "$_obj" | jq -r '.content // ""')"
+        _srcfile="$(printf '%s' "$_obj" | jq -r '.source_file // ""')"
+        _sha="$(printf '%s' "$_obj" | jq -r '.sha256 // ""')"
         [ -z "$_bucket" ] && continue
         [ -z "$_key" ] && continue
-        _tmp="$_carddemo_ls_tempdir/obj.$$"
-        printf '%s' "$_content" > "$_tmp"
-        echo "[localstack]   cp -> s3://$_bucket/$_key"
+        _tmp=""
+        if [ -n "$_srcfile" ]; then
+            # WHY (Trade-off): a file-referenced payload is uploaded DIRECTLY from
+            # its on-disk path (no temp copy) because `s3 cp <file> s3://...`
+            # transfers arbitrary bytes faithfully; staging binary EBCDIC through a
+            # `printf` temp file would corrupt it. A missing source file is a HARD
+            # integrity failure, never a silent empty upload. CARDDEMO_REPO_ROOT is
+            # exported by test_env.sh, so the path resolves the same as the Python
+            # seeder's repo-base + source_file.
+            _upload="$CARDDEMO_REPO_ROOT/$_srcfile"
+            if [ ! -f "$_upload" ]; then
+                echo "[localstack]   INTEGRITY: source_file not found for s3://$_bucket/$_key: $_upload" >&2
+                return "$CARDDEMO_RC_FAIL"
+            fi
+            echo "[localstack]   cp (source_file $_srcfile) -> s3://$_bucket/$_key"
+        else
+            _tmp="$_carddemo_ls_tempdir/obj.$$"
+            printf '%s' "$_content" > "$_tmp"
+            _upload="$_tmp"
+            echo "[localstack]   cp -> s3://$_bucket/$_key"
+        fi
         if ! timeout "$CARDDEMO_LS_AWSCLI_TIMEOUT" \
-                awslocal s3 cp "$_tmp" "s3://$_bucket/$_key" >/dev/null 2>&1; then
+                awslocal s3 cp "$_upload" "s3://$_bucket/$_key" >/dev/null 2>&1; then
             echo "[localstack]   INTEGRITY: failed to upload s3://$_bucket/$_key" >&2
-            rm -f "$_tmp" 2>/dev/null || true
+            [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null || true
             return "$CARDDEMO_RC_FAIL"
         fi
-        rm -f "$_tmp" 2>/dev/null || true
+        # Only the inline path created a temp file; remove it (NEVER the source
+        # file, which is REFERENCE seed data that must remain byte-identical).
+        [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null || true
         # Verify the object is actually present (do not trust cp's rc alone).
         if ! timeout "$CARDDEMO_LS_AWSCLI_TIMEOUT" \
                 awslocal s3 ls "s3://$_bucket/$_key" >/dev/null 2>&1; then
             echo "[localstack]   INTEGRITY: object s3://$_bucket/$_key not found after cp" >&2
             return "$CARDDEMO_RC_FAIL"
         fi
-    done < <(jq -r '(.objects // [])[] | [.bucket, .key, (.content // "")] | @tsv' "$manifest" 2>/dev/null)
+        # WHY (finding F6 -- authoritative checksum): when the manifest declares a
+        # sha256, stream the STAGED object back and compare digests so the bring-up
+        # itself PROVES byte-fidelity (not merely presence) -- the audit anchor a
+        # financial dataset-staging workflow needs. A mismatch (or an unreadable
+        # object, which yields the empty-input digest) is a HARD integrity failure.
+        # `|| _actual_sha=""` keeps a failed download from tripping `set -e`; the
+        # comparison below still fails closed. Skipped only when no sha256 exists.
+        if [ -n "$_sha" ]; then
+            _actual_sha="$(timeout "$CARDDEMO_LS_AWSCLI_TIMEOUT" \
+                awslocal s3 cp "s3://$_bucket/$_key" - 2>/dev/null \
+                | sha256sum | cut -d' ' -f1)" || _actual_sha=""
+            if [ "$_actual_sha" != "$_sha" ]; then
+                echo "[localstack]   INTEGRITY: sha256 mismatch for s3://$_bucket/$_key" >&2
+                echo "[localstack]              expected $_sha got ${_actual_sha:-<none>}" >&2
+                return "$CARDDEMO_RC_FAIL"
+            fi
+        fi
+    done < <(jq -c '(.objects // [])[]' "$manifest" 2>/dev/null)
 
-    printf 'AWS_ENDPOINT_URL=%s\n' "$AWS_ENDPOINT_URL" > "$envfile"
+    _carddemo_ls_write_envfile "$envfile" "$AWS_ENDPOINT_URL"
     echo "[localstack] bring-up complete; wrote $envfile"
     # Mark success LAST so the EXIT trap keeps (does not delete) the instance the
     # pytest layer is about to use.

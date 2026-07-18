@@ -49,9 +49,21 @@ NOT persisted by ``test_env.sh``):
 * ``CARDDEMO_REQUIRE_COBOL``  -> when truthy (``1``/``true``/``yes``/``on``), a
   genuinely-absent COBOL toolchain / build script / helper module is a HARD
   FAILURE instead of a clean skip. This mirrors the existing
-  ``CARDDEMO_REQUIRE_LOCALSTACK`` convention in ``scripts/setup_localstack.sh``
-  and is what a CI run sets so a required layer can never silently vanish behind
-  a green-looking (all-skipped) report (QA finding M1).
+  ``CARDDEMO_REQUIRE_LOCALSTACK`` convention in ``scripts/setup_localstack.sh``.
+  It is an OPTIONAL, opt-in strict gate: an operator (or a stricter CI variant)
+  may set it so a required layer can never silently vanish behind a green-looking
+  (all-skipped) report (QA finding M1). The shipped default CI workflow
+  (``.github/workflows/tests.yml``) deliberately does NOT arm it -- see the WHY
+  note on the M1 gate below for the reason -- and does not need to, because the
+  catastrophic all-skipped case is already prevented by build-first gating:
+  ``scripts/build_test_programs.sh`` exits 8 when ``cobc`` is absent, failing the
+  build (and therefore CI) before any test could even be collected to skip.
+* ``CARDDEMO_REQUIRE_LOCALSTACK`` -> the LocalStack peer of the flag above: when
+  truthy, an absent/unreachable S3 emulator turns the dataset-staging E2E tests
+  from a clean skip into a HARD FAILURE. It mirrors the identical bash flag that
+  ``scripts/setup_localstack.sh`` already honours, so a single CI switch makes
+  BOTH the bring-up script and the pytest layer treat the AWS layer as required
+  (QA finding F4). Consumed via the :func:`localstack_gate` session fixture.
 * ``CARDDEMO_BUILD_TIMEOUT``  -> wall-clock seconds allowed for the one-time
   compile subprocess (default ``600``); bounds the build stage so a hung
   compiler cannot stall a run indefinitely (QA finding M3).
@@ -161,12 +173,88 @@ _MARKERS = (
 # WHY (Refactoring rationale + Convention): setup_localstack.sh already grades a
 # genuinely-absent OPTIONAL layer as a HARD FAILURE when its
 # ``CARDDEMO_REQUIRE_<LAYER>`` flag is set, and a clean skip otherwise. Reusing
-# the identical ``CARDDEMO_REQUIRE_COBOL`` name/semantics here means a CI run
-# turns *one* family of flags on and every layer -- LocalStack and now COBOL --
-# obeys the same "absent-required-layer == FAIL, never a green-looking skip"
-# rule. Without this gate the Python layer could skip all COBOL-dependent tests
+# the identical ``CARDDEMO_REQUIRE_COBOL`` name/semantics here gives operators one
+# uniform "absent-required-layer == FAIL, never a green-looking skip" rule they can
+# opt into across every layer (LocalStack and COBOL) by turning on one family of
+# flags. Without this gate the Python layer could skip all COBOL-dependent tests
 # and still exit 0 with an all-skipped (superficially green) report (M1).
+#
+# WHY the SHIPPED default CI does NOT arm this flag (Assumption + Trade-off): arming
+# ``CARDDEMO_REQUIRE_COBOL=1`` by default would promote the export/import module's
+# own strict gate to a HARD FAILURE, but CBEXPORT/CBIMPORT cannot compile under
+# GnuCOBOL (a documented ``EXPORT-SEQUENCE-NUM`` production-source defect). Fixing
+# production COBOL is OUT OF SCOPE -- ``app/cbl`` is REFERENCE-only per AAP 0.8.2 --
+# so a default-armed flag would leave CI PERMANENTLY RED on a defect this test-only
+# suite is forbidden to fix. The shipped ``.github/workflows/tests.yml`` therefore
+# leaves the flag UNSET (COBOL tests still run; only the unfixable pair is skipped
+# with an explicit, documented reason) and relies on build-first gating for the
+# catastrophic case: ``scripts/build_test_programs.sh`` exits 8 when ``cobc`` is
+# wholly absent, so a missing toolchain fails the build -- hence CI -- regardless of
+# this flag. The flag stays available for a stricter opt-in CI/dev run that has no
+# such unfixable programs, where it correctly fails an all-skipped COBOL layer
+# instead of letting it exit 0.
 _STRICT_ENV = "CARDDEMO_REQUIRE_COBOL"
+
+# WHY (finding F4 -- symmetric LocalStack gate): the dataset-staging E2E layer is
+# OPTIONAL by default (a developer without LocalStack still gets a green core
+# suite via a clean skip), but a CI job that OPTED IN with
+# ``run_e2e_tests.sh --with-localstack`` must NOT let an absent/unreachable
+# emulator masquerade as a green all-skipped report. This flag is the pytest peer
+# of the identically-named switch ``scripts/setup_localstack.sh`` already honours,
+# so one CI variable makes BOTH sides treat the AWS layer as required. It is kept
+# SEPARATE from ``CARDDEMO_REQUIRE_COBOL`` so the two layers can be required
+# independently (Trade-off: two flags vs. one blunt "require everything").
+_STRICT_LOCALSTACK_ENV = "CARDDEMO_REQUIRE_LOCALSTACK"
+
+# ---------------------------------------------------------------------------
+# QA Issue 2 -- "no hidden / unexpected skips" enforcement gate.
+# ---------------------------------------------------------------------------
+# WHY (Refactoring rationale -- closes the QA finding "an unexpected pytest.skip()
+# in a required test passes CI green"): a genuine ``pytest.skip()`` is VISIBLE in
+# the JUnit report and the ``-ra`` summary, but on its own it does NOT change any
+# layer/master/CI exit status. That let a financial reject-case or monetary test be
+# silently disabled while CI stayed green, relying on a human noticing a skip-count
+# delta. The hooks below turn any UNEXPECTED skip into a hard, report-visible
+# session failure while still permitting the small, DOCUMENTED set of skips that are
+# legitimately expected.
+#
+# WHY an explicit (module, reason) allowlist rather than a bare "at most N skips"
+# count (Alternatives Considered): a numeric cap would let a forced skip slip in
+# whenever an expected one happened to be absent, and would need re-tuning every
+# time the documented set changed. Matching each skip against a self-documenting
+# allowlist is precise (a forced skip in a required test never matches) and auditable
+# (the allowed set is spelled out here in code).
+#
+# WHY exactly these two entries (Assumptions, verified empirically on this runner):
+#   * ``test_export_import.py`` skipping with the "CBEXPORT/CBIMPORT do not compile"
+#     reason is the ONE documented, AAP-out-of-scope (0.8.2) production-source defect
+#     that cannot be fixed here. It is an explicit, reasoned skip in the default
+#     developer mode -- and that module's OWN local gate still HARD-FAILS it under an
+#     opt-in ``CARDDEMO_REQUIRE_COBOL=1`` run, so it is never SILENTLY skipped when
+#     required.
+#   * ``test_localstack_dataset_staging.py`` is the OPT-IN AWS layer; skipping is its
+#     normal default outcome (it runs only with ``--with-localstack``), so any skip
+#     reason there is expected -- hence a module-level allow (reason ``None``).
+# The known ``CBACT04C`` ``xfail(strict=True)`` is intentionally NOT listed: an xfail
+# is a distinct outcome governed by ``xfail_strict=True`` (pytest.ini), not a skip,
+# and is excluded from this gate by the ``wasxfail`` check in the report hook below.
+#
+# Each entry is ``(nodeid_substring, reason_substring_or_None)``; a skip is allowed
+# iff its nodeid contains the module substring AND (the reason substring is ``None``
+# OR appears in the skip's reason text).
+_SKIP_ALLOWLIST = (
+    ("test_export_import.py", "CBEXPORT/CBIMPORT do not compile"),
+    ("test_localstack_dataset_staging.py", None),
+)
+
+# Accumulator of UNEXPECTED genuine skips observed during the session, keyed by test
+# nodeid so a skip reported once per test is never double-counted. WHY a module-global
+# rather than a fixture (Trade-off): pytest's report hook ``pytest_runtest_logreport``
+# receives only the report object (no session/config), and each pytest run is a fresh
+# process, so a module-level dict reset in ``pytest_configure`` is the simplest correct
+# store. Under ``pytest-xdist`` the CONTROLLER process receives every worker's forwarded
+# report here, so the controller accumulates the complete picture for the whole run.
+_UNEXPECTED_SKIPS: "dict[str, str]" = {}
 
 # ---------------------------------------------------------------------------
 # M3 -- bounded build stage.
@@ -362,6 +450,78 @@ def _require_or_skip(reason: str) -> "NoReturn":
             pytrace=False,
         )
     pytest.skip(f"{reason}; skipping (set {_STRICT_ENV}=1 to require it).")
+
+
+def _strict_localstack_required() -> bool:
+    """Return whether an absent LocalStack layer must HARD-FAIL rather than skip.
+
+    Purpose
+    -------
+    LocalStack peer of :func:`_strict_cobol_required`: centralise the read of
+    ``CARDDEMO_REQUIRE_LOCALSTACK`` so the "required AWS layer" policy (QA finding
+    F4) is evaluated identically wherever it is consulted.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when the operator/CI demands a reachable LocalStack emulator
+        (absent -> failure); ``False`` for the default developer-friendly mode
+        (absent -> clean skip).
+
+    Raises
+    ------
+    None
+    """
+    return _is_truthy(os.environ.get(_STRICT_LOCALSTACK_ENV))
+
+
+def _require_localstack_or_skip(reason: str) -> "NoReturn":
+    """Fail (strict) or skip (default) when the LocalStack layer is unavailable.
+
+    Purpose
+    -------
+    LocalStack peer of :func:`_require_or_skip`, implementing the F4 contract in
+    one place: an absent/unreachable S3 emulator becomes a HARD, report-visible
+    FAILURE when ``CARDDEMO_REQUIRE_LOCALSTACK`` is set, and a clean skip
+    otherwise. This is what stops a ``--with-localstack`` CI run from exiting
+    green with an all-skipped report that hides a missing required layer.
+
+    Parameters
+    ----------
+    reason : str
+        Human-readable explanation of what is missing/unreachable; surfaced
+        verbatim in the pytest failure/skip message.
+
+    Returns
+    -------
+    NoReturn
+        Never returns normally -- always raises ``Failed`` (strict) or
+        ``Skipped`` (default) via pytest.
+
+    Raises
+    ------
+    Failed
+        (via :func:`pytest.fail`) when strict mode is active.
+    Skipped
+        (via :func:`pytest.skip`) when strict mode is inactive.
+    """
+    # WHY (finding F4): identical fail-vs-skip mechanics to the COBOL gate, but
+    # keyed on the LocalStack flag. Failing (not skipping) under REQUIRE makes the
+    # absence an ERROR-bearing JUnit case the runner scripts map to RC>=8, so it
+    # can never masquerade as green. pytrace=False keeps the actionable
+    # missing-emulator message front-and-centre instead of a helper traceback.
+    if _strict_localstack_required():
+        pytest.fail(
+            f"{reason} (required because {_STRICT_LOCALSTACK_ENV} is set).",
+            pytrace=False,
+        )
+    pytest.skip(
+        f"{reason}; skipping (set {_STRICT_LOCALSTACK_ENV}=1 to require it)."
+    )
 
 
 def _validate_repo_root() -> Path:
@@ -661,6 +821,250 @@ def pytest_configure(config: pytest.Config) -> None:
     # re-declaring markers already present in pytest.ini is harmless.
     for name, description in _MARKERS:
         config.addinivalue_line("markers", f"{name}: {description}")
+
+    # WHY (Assumption -- defensive reset): each pytest run is normally a fresh
+    # process, so the module-global "no hidden skips" accumulator starts empty. But
+    # a caller that invokes ``pytest.main()`` more than once in the same interpreter
+    # would otherwise carry a prior run's unexpected-skip records into the next
+    # session. Clearing at configure time makes the gate correct even in that reuse
+    # case, at zero cost to the common one-process-per-run path.
+    _UNEXPECTED_SKIPS.clear()
+
+
+def _skip_reason_text(report: "pytest.TestReport") -> str:
+    """Extract a human-readable skip reason from a pytest ``TestReport``.
+
+    Purpose
+    -------
+    Normalise the several shapes ``report.longrepr`` can take for a skipped test
+    into one reason string the "no hidden skips" gate can pattern-match against its
+    allowlist (see :data:`_SKIP_ALLOWLIST`).
+
+    Parameters
+    ----------
+    report : pytest.TestReport
+        A test report whose ``skipped`` flag is set. For a ``pytest.skip(msg)`` the
+        ``longrepr`` is typically a ``(path, lineno, "Skipped: <msg>")`` tuple; other
+        outcomes may carry a plain string or an object.
+
+    Returns
+    -------
+    str
+        The skip message with any single leading ``"Skipped: "`` marker removed; an
+        empty string when no reason can be recovered.
+
+    Raises
+    ------
+    None
+        Extraction is best-effort and never raises -- an unrecognised ``longrepr``
+        shape falls back to ``str(longrepr)`` so the caller still sees the skip.
+    """
+    longrepr = getattr(report, "longrepr", None)
+    if longrepr is None:
+        return ""
+    # WHY (Assumption): pytest packs a skip as a 3-tuple (path, lineno, message) and
+    # only the message is meaningful to the allowlist. Falling back to ``str()`` for
+    # any other shape keeps this robust to future/edge longrepr forms rather than
+    # raising and masking the real signal (the skip itself).
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        text = str(longrepr[2])
+    else:
+        text = str(longrepr)
+    # A leading "Skipped: " is noise pytest prepends when reporting; strip exactly
+    # one occurrence so an allowlist reason-fragment matches the message a test
+    # author actually wrote.
+    marker = "Skipped: "
+    if text.startswith(marker):
+        text = text[len(marker):]
+    return text
+
+
+def _skip_is_allowlisted(nodeid: str, reason: str) -> bool:
+    """Return whether a genuine skip is one of the documented, expected skips.
+
+    Purpose
+    -------
+    Decide if a skipped test matches an entry in :data:`_SKIP_ALLOWLIST`, so the
+    "no hidden skips" gate permits the small documented set (the export/import
+    compile defect; the opt-in LocalStack layer) while flagging every other skip as
+    unexpected.
+
+    Parameters
+    ----------
+    nodeid : str
+        The skipped test's node id (e.g.
+        ``tests/integration/test_export_import.py::test_export_import_roundtrip``).
+    reason : str
+        The extracted skip reason (see :func:`_skip_reason_text`).
+
+    Returns
+    -------
+    bool
+        ``True`` iff some allowlist entry's module fragment appears in ``nodeid`` AND
+        (that entry's reason fragment is ``None`` OR appears in ``reason``); else
+        ``False``.
+
+    Raises
+    ------
+    None
+    """
+    for module_fragment, reason_fragment in _SKIP_ALLOWLIST:
+        if module_fragment in nodeid and (reason_fragment is None or reason_fragment in reason):
+            return True
+    return False
+
+
+def pytest_runtest_logreport(report: "pytest.TestReport") -> None:
+    """Record any UNEXPECTED genuine skip for the end-of-session "no hidden skips" gate.
+
+    Purpose
+    -------
+    Observe every test outcome and remember the ones that are genuine
+    ``pytest.skip()`` skips OUTSIDE the documented allowlist, so
+    :func:`pytest_sessionfinish` can fail the run. Implements the QA "no hidden
+    skips" contract (an unexpected skip in a required test must not pass CI green).
+
+    Parameters
+    ----------
+    report : pytest.TestReport
+        The per-phase report pytest emits for setup/call/teardown of each test.
+        Under ``pytest-xdist`` this fires on the CONTROLLER for every worker's
+        forwarded report, so the controller observes the whole run.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    None
+    """
+    # WHY enforce only when the toolchain is PRESENT (Assumption + Trade-off): when
+    # ``cobc`` is absent this suite is in its documented developer-friendly degraded
+    # mode, where COBOL-dependent tests skip and a green run is intentional (the M1
+    # gate's "skip by default"). Enforcing "no unexpected skips" there would turn that
+    # SUPPORTED mode red. When ``cobc`` IS present (CI installs it; a proper dev box
+    # has it) every COBOL test is expected to run, so a skip outside the allowlist is
+    # genuinely unexpected and must fail. This keeps the gate strict exactly where it
+    # matters without regressing the no-compiler mode.
+    if shutil.which("cobc") is None:
+        return
+    # Only GENUINE skips count. An xfail is ALSO reported with ``skipped`` True but
+    # carries a ``wasxfail`` attribute; it is a distinct expected-failure outcome
+    # governed by ``xfail_strict`` (pytest.ini) and must NOT be treated as a hidden
+    # skip here.
+    if not report.skipped or hasattr(report, "wasxfail"):
+        return
+    reason = _skip_reason_text(report)
+    if _skip_is_allowlisted(report.nodeid, reason):
+        return
+    # Keyed by nodeid so a test that skips (one skipped report) is recorded once; a
+    # later phase's report for the same test cannot inflate the count.
+    _UNEXPECTED_SKIPS[report.nodeid] = reason
+
+
+def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
+    """Fail the session if any UNEXPECTED skip was observed (no-hidden-skips gate).
+
+    Purpose
+    -------
+    Turn the accumulated set of unexpected genuine skips into a hard, auditable
+    session failure so a silently-disabled required test can never leave the
+    layer/master/CI status green. Only ESCALATES an otherwise-passing status; a run
+    that is already failing keeps its (at-least-as-severe) status.
+
+    Parameters
+    ----------
+    session : pytest.Session
+        The finishing session; its ``exitstatus`` is the authoritative value the
+        runner scripts map onto the CardDemo RC rubric.
+    exitstatus : int
+        The exit status pytest computed from test outcomes. Read for context; the
+        gate mutates ``session.exitstatus`` (which pytest honours as the final code)
+        rather than this parameter.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    None
+        The gate reports via ``session.exitstatus`` + a stderr diagnostic, never by
+        raising (an exception here is swallowed and would NOT set the exit code).
+    """
+    # WHY evaluate only on the CONTROLLER (Assumption): under ``pytest-xdist`` the
+    # controller receives every worker's report in ``pytest_runtest_logreport`` and
+    # its exit status is the one the runner observes; a worker (identified by the
+    # ``workerinput`` config attribute) sees only its own subset and its exit code is
+    # not the run's, so letting a worker escalate would be both incomplete and
+    # ineffective. Without xdist there is no ``workerinput`` and this simply runs
+    # once, in-process.
+    if hasattr(session.config, "workerinput"):
+        return
+    if not _UNEXPECTED_SKIPS:
+        return
+    # Emit a prominent, reproducible diagnostic to stderr so the failure is
+    # actionable in the run log the runner scripts capture -- naming the offending
+    # nodeid and reason for every unexpected skip.
+    lines = [
+        "",
+        "=================== NO-HIDDEN-SKIPS GATE FAILED ===================",
+        f"{len(_UNEXPECTED_SKIPS)} unexpected skip(s) detected outside the documented allowlist.",
+        "A genuine pytest.skip() in a required test must not pass CI green.",
+        "Allowlisted skips: export/import compile-defect; opt-in LocalStack layer.",
+        "Offending skip(s):",
+    ]
+    for nodeid, reason in sorted(_UNEXPECTED_SKIPS.items()):
+        lines.append(f"  - {nodeid}\n      reason: {reason.strip() or '(no reason given)'}")
+    lines.append("===================================================================")
+    print("\n".join(lines), file=sys.stderr)
+    # WHY escalate ONLY from a passing status (Trade-off): if tests already failed
+    # (``exitstatus`` != OK) the run is red for a stronger reason and we must neither
+    # mask nor downgrade it; we only PROMOTE an otherwise-green run to failed so an
+    # unexpected skip cannot hide behind a ``tests=N failures=0`` report.
+    # ``TESTS_FAILED`` (1) maps to the runner's FAIL(8) rubric via
+    # ``scripts/test_env.sh``'s ``carddemo_rc_from_pytest``.
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture(scope="session")
+def localstack_gate():
+    """Return the LocalStack "require-or-skip" gate as a callable.
+
+    Purpose
+    -------
+    Expose the module-private :func:`_require_localstack_or_skip` policy to test
+    modules OUTSIDE this conftest (notably
+    ``tests/e2e/test_localstack_dataset_staging.py``) WITHOUT them importing a
+    private helper. A test whose LocalStack precondition is unmet calls
+    ``gate(reason)``; the call HARD-FAILS under ``CARDDEMO_REQUIRE_LOCALSTACK``
+    and cleanly skips otherwise (QA finding F4).
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Callable[[str], NoReturn]
+        A one-argument callable ``gate(reason)`` that never returns normally --
+        it raises pytest ``Failed`` (strict) or ``Skipped`` (default).
+
+    Raises
+    ------
+    None
+        Returning the callable cannot fail; the fail/skip happens only when a
+        test invokes it.
+    """
+    # WHY (Alternatives Considered): returning the function OBJECT (rather than
+    # having the fixture itself fail/skip) lets the CONSUMING test decide WHEN and
+    # with WHAT reason to trip the gate -- e.g. "endpoint unset" vs. "endpoint
+    # unreachable" produce distinct, actionable messages a bare fixture could not
+    # carry. Session scope: the policy is process-wide and stateless, so one
+    # shared callable suffices for the whole run.
+    return _require_localstack_or_skip
 
 
 @pytest.fixture(scope="session")

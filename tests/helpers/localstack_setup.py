@@ -20,10 +20,17 @@ script publishes:
    in a bounded loop; :func:`is_available` / :func:`wait_until_ready` issue the
    identical HTTP GET and poll the identical path.
 3. **Manifest seeding.** The script reads ``tests/mocks/localstack_s3_manifest.json``
-   with two ``jq`` filters -- ``(.buckets // [])[] | if type=="object" then .name
-   else . end`` and ``(.objects // [])[] | [.bucket, .key, (.content // "")] |
-   @tsv``. :func:`iter_buckets` / :func:`iter_objects` reproduce those exact
-   normalizations in Python so the two seeders never diverge.
+   with two ``jq`` passes -- ``(.buckets // [])[] | if type=="object" then .name
+   else . end`` for buckets, and ``(.objects // [])[]`` streaming one *compact
+   JSON object per line* whose fields are then read individually with ``jq -r
+   '.bucket // ""'`` and so on. (The object pass deliberately avoids ``@tsv``: a
+   tab is an IFS-whitespace character, so a tab-joined row with an empty field
+   collapses under ``read`` and shifts later fields -- per-field JSON extraction
+   preserves empty fields losslessly.) :func:`iter_buckets` / :func:`iter_objects`
+   reproduce those exact normalizations in Python -- including each object's
+   optional ``source_file`` (a repo-relative path whose raw bytes, e.g. BINARY
+   EBCDIC, are uploaded verbatim) alongside its inline ``content`` -- so the two
+   seeders never diverge.
 
 Design decisions (WHY)
 ----------------------
@@ -556,29 +563,41 @@ def iter_buckets(manifest: dict) -> list[str]:
     return result
 
 
-def iter_objects(manifest: dict) -> list[tuple[str, str, str]]:
-    """Normalize the manifest's ``objects`` list into ``(bucket, key, content)`` rows.
+def iter_objects(manifest: dict) -> list[tuple[str, str, str, str]]:
+    """Normalize the manifest's ``objects`` list into ``(bucket, key, content, source_file)`` rows.
 
     Purpose:
-        Reproduce, in Python, the bash script's object ``jq`` filter
-        ``(.objects // [])[] | [.bucket, .key, (.content // "")] | @tsv`` so the
-        two seeders upload exactly the same objects with the same payloads.
+        Reproduce, in Python, the bash script's per-object normalization -- it
+        streams ``(.objects // [])[]`` as one compact JSON object per line and
+        reads each field with ``jq -r '.bucket // ""'`` / ``'.key // ""'`` /
+        ``'.content // ""'`` / ``'.source_file // ""'`` -- so the two seeders
+        upload exactly the same objects with the same payloads, including the
+        file-referenced (real and/or BINARY) datasets that inline ``content``
+        strings cannot represent.
 
     Parameters:
         manifest (dict): A manifest object as returned by :func:`load_manifest`.
             A missing or non-list ``objects`` key yields an empty result.
 
     Returns:
-        list[tuple[str, str, str]]: One ``(bucket, key, content)`` tuple per valid
-        object entry, in manifest order. ``content`` defaults to the empty string
-        when the field is absent or ``null`` (mirroring ``.content // ""``). Rows
-        missing a non-empty ``bucket`` or ``key`` are skipped, exactly as the bash
-        loop's ``[ -z "$_bucket" ] && continue`` / ``[ -z "$_key" ] && continue``.
+        list[tuple[str, str, str, str]]: One ``(bucket, key, content,
+        source_file)`` tuple per valid object entry, in manifest order.
+        ``content`` and ``source_file`` each default to the empty string when the
+        field is absent or ``null`` (mirroring ``// ""``). Rows missing a
+        non-empty ``bucket`` or ``key`` are skipped, exactly as the bash loop's
+        ``[ -z "$_bucket" ] && continue`` / ``[ -z "$_key" ] && continue``.
 
     Raises:
         None.
     """
-    result: list[tuple[str, str, str]] = []
+    # WHY (finding F6 -- source_file added): the tuple grew from three to four
+    # fields so the Python seeder can stage a real (and possibly BINARY EBCDIC)
+    # dataset from a repo-relative path, which inline single-line `content`
+    # strings are architecturally incapable of carrying. The ONLY consumers of
+    # this function are seed_from_manifest and the dataset-staging E2E test, both
+    # updated in lockstep, so widening the return contract here is safe (no other
+    # caller depends on the old three-field shape).
+    result: list[tuple[str, str, str, str]] = []
     objects = manifest.get("objects")
     if not isinstance(objects, list):
         return result
@@ -591,16 +610,21 @@ def iter_objects(manifest: dict) -> list[tuple[str, str, str]]:
         raw_key = entry.get("key")
         bucket = raw_bucket.strip() if isinstance(raw_bucket, str) else ""
         key = raw_key.strip() if isinstance(raw_key, str) else ""
-        # WHY (Assumption): bucket and key are REQUIRED; content is OPTIONAL and
-        # defaults to empty. `(.content // "")` treats both a missing key AND a JSON
-        # null as "", so we coerce anything that is not a str to "" as well, keeping
-        # byte-for-byte parity with the tsv the bash loop would have produced.
+        # WHY (Assumption): bucket and key are REQUIRED; content and source_file
+        # are OPTIONAL and each default to empty. `(.x // "")` treats both a
+        # missing key AND a JSON null as "", so we coerce anything that is not a
+        # str to "" as well, keeping byte-for-byte parity with the per-field
+        # `jq -r '.x // ""'` extraction the bash loop performs. source_file is NOT
+        # stripped: a path is used verbatim so a (deliberately unusual)
+        # leading/trailing space cannot be silently altered.
         raw_content = entry.get("content")
         content = raw_content if isinstance(raw_content, str) else ""
+        raw_source = entry.get("source_file")
+        source_file = raw_source if isinstance(raw_source, str) else ""
         if not bucket or not key:
             _diag(f"skipping object with empty bucket/key (bucket={bucket!r}, key={key!r})")
             continue
-        result.append((bucket, key, content))
+        result.append((bucket, key, content, source_file))
     return result
 
 
@@ -644,8 +668,11 @@ def seed_from_manifest(
 
     Purpose:
         Provide the Python equivalent of the bash script's S3 seeding loop:
-        create every declared bucket and upload every declared object so the
-        dataset-staging tests have deterministic fixtures to assert against.
+        create every declared bucket and upload every declared object -- whether
+        it declares an inline ``content`` string or a ``source_file`` (a
+        repo-relative path whose raw, possibly BINARY, bytes are staged verbatim)
+        -- so the dataset-staging tests have deterministic fixtures to assert
+        against.
 
     Parameters:
         manifest_path (str | os.PathLike[str] | None): Manifest to seed from;
@@ -697,11 +724,45 @@ def seed_from_manifest(
             )
 
     # --- objects --------------------------------------------------------------
-    for bucket, key, content in iter_objects(manifest):
-        # WHY (Trade-off): the payload is staged to a temp file and uploaded with
-        # `s3 cp <file> s3://...`, rather than piped inline, because `cp` from a
-        # real file transfers arbitrary bytes faithfully and matches the bash
-        # loop's `printf '%s' "$content" > "$_tmp"; awslocal s3 cp "$_tmp" ...`.
+    # WHY (finding F6): an object stages EITHER an inline `content` string OR a
+    # `source_file` (a repo-relative path whose raw bytes -- including binary
+    # EBCDIC with NULs and overpunch sign bytes -- are uploaded verbatim). Resolve
+    # the repo base ONCE, preferring the environment's CARDDEMO_REPO_ROOT
+    # (authoritative in CI) and falling back to the location-derived root, exactly
+    # as load_manifest does, so a source_file resolves identically to the bash
+    # seeder's "$CARDDEMO_REPO_ROOT/$_srcfile".
+    env_root = os.environ.get("CARDDEMO_REPO_ROOT")
+    repo_base = Path(env_root) if env_root else _repo_root()
+    for bucket, key, content, source_file in iter_objects(manifest):
+        if source_file:
+            # WHY (Trade-off): a file-referenced payload is uploaded DIRECTLY from
+            # its on-disk path -- no temp copy -- because `s3 cp <file> s3://...`
+            # already transfers arbitrary bytes faithfully, and round-tripping a
+            # 15 KB binary EBCDIC dataset through a UTF-8 temp write would corrupt
+            # it. A missing source file is a hard, RECORDED error (never a silent
+            # empty upload), mirroring the bash seeder's integrity failure.
+            src = repo_base / source_file
+            if not src.is_file():
+                summary["errors"].append(
+                    f"source_file not found for {bucket}/{key}: {src}"
+                )
+                continue
+            proc = _awslocal(["s3", "cp", str(src), f"s3://{bucket}/{key}"], endpoint=ep)
+            if proc is None:
+                summary["errors"].append(f"awslocal unavailable uploading {bucket}/{key}")
+            elif proc.returncode == 0:
+                summary["objects"].append(f"{bucket}/{key}")
+            else:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                summary["errors"].append(
+                    f"cp failed for {bucket}/{key} (rc={proc.returncode}): {detail}"
+                )
+            continue
+
+        # WHY (Trade-off): an inline payload is staged to a temp file and uploaded
+        # with `s3 cp <file> s3://...`, rather than piped inline, because `cp` from
+        # a real file transfers bytes faithfully and matches the bash loop's
+        # `printf '%s' "$content" > "$_tmp"; awslocal s3 cp "$_tmp" ...`.
         tmp_path: str | None = None
         try:
             fd, tmp_path = tempfile.mkstemp(prefix="ls-seed-")
@@ -835,6 +896,200 @@ def get_object_text(
         return body.decode(encoding, errors="replace")
     # Defensive: if a future change makes stdout already-str, return it as-is.
     return body
+
+
+def list_buckets(*, endpoint: str | None = None) -> list[str]:
+    """List the names of all S3 buckets on the target LocalStack endpoint.
+
+    Purpose:
+        Give the dataset-staging E2E test an AUTHORITATIVE, seeder-independent way
+        to assert a declared bucket actually exists on S3 -- rather than trusting
+        a summary dict the seeder returned. Wraps ``awslocal s3api list-buckets``.
+
+    Parameters:
+        endpoint (str | None): Gateway URL; resolved by :func:`resolve_endpoint`
+            when ``None`` (keyword-only).
+
+    Returns:
+        list[str]: Bucket names as reported by S3, in the order returned. An empty
+        list is returned on any failure (no endpoint, CLI absent, non-zero exit,
+        unparseable JSON) or when no buckets exist.
+
+    Raises:
+        None.
+    """
+    # WHY (finding F7 -- authoritative source): `s3api list-buckets` returns
+    # structured JSON straight from the emulator, so the test asserts against S3's
+    # OWN view of the world, not the seeder's self-report. Alternatives Considered:
+    # `s3 ls` (no scheme) also lists buckets, but its human-formatted
+    # "<date> <name>" lines are more brittle to parse than the documented JSON.
+    ep = endpoint if endpoint is not None else resolve_endpoint()
+    if not ep:
+        return []
+    proc = _awslocal(["s3api", "list-buckets"], endpoint=ep)
+    if proc is None or proc.returncode != 0:
+        return []
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except (ValueError, TypeError):
+        _diag("list_buckets: could not parse s3api list-buckets JSON")
+        return []
+    buckets = payload.get("Buckets")
+    if not isinstance(buckets, list):
+        return []
+    names: list[str] = []
+    for entry in buckets:
+        if isinstance(entry, dict) and isinstance(entry.get("Name"), str):
+            names.append(entry["Name"])
+    return names
+
+
+def bucket_exists(bucket: str, *, endpoint: str | None = None) -> bool:
+    """Report whether a specific S3 bucket exists on the target endpoint.
+
+    Purpose:
+        Let the E2E test hard-assert the presence of each bucket the manifest
+        DECLARES, independently of the seeder's return value. Wraps ``awslocal
+        s3api head-bucket --bucket <bucket>`` (a zero exit means it exists and is
+        accessible).
+
+    Parameters:
+        bucket (str): Bucket name (without the ``s3://`` scheme).
+        endpoint (str | None): Gateway URL; resolved by :func:`resolve_endpoint`
+            when ``None`` (keyword-only).
+
+    Returns:
+        bool: ``True`` iff ``head-bucket`` exits zero (the bucket exists and is
+        reachable); ``False`` on any failure (no endpoint, empty name, CLI absent,
+        missing bucket, non-zero exit).
+
+    Raises:
+        None.
+    """
+    # WHY (finding F7): `head-bucket` is the canonical existence check -- a cheap
+    # HEAD that returns a zero exit when the bucket exists and non-zero otherwise,
+    # so its return code IS the boolean we want. Trade-off: we intentionally
+    # collapse "does not exist" and "exists but unreachable" into a single False,
+    # because for the staging test's purpose either outcome is a failure.
+    ep = endpoint if endpoint is not None else resolve_endpoint()
+    if not ep:
+        return False
+    if not bucket:
+        _diag("bucket_exists called with an empty bucket name")
+        return False
+    proc = _awslocal(["s3api", "head-bucket", "--bucket", bucket], endpoint=ep)
+    return proc is not None and proc.returncode == 0
+
+
+def head_object(
+    bucket: str,
+    key: str,
+    *,
+    endpoint: str | None = None,
+) -> dict | None:
+    """Return an S3 object's HEAD metadata (including ``ContentLength``).
+
+    Purpose:
+        Give the E2E test the object's server-side size WITHOUT downloading its
+        body, so it can assert ``ContentLength == declared size`` cheaply and then
+        (separately) verify the bytes. Wraps ``awslocal s3api head-object
+        --bucket <bucket> --key <key>``.
+
+    Parameters:
+        bucket (str): Bucket name (without the ``s3://`` scheme).
+        key (str): Object key within the bucket.
+        endpoint (str | None): Gateway URL; resolved by :func:`resolve_endpoint`
+            when ``None`` (keyword-only).
+
+    Returns:
+        dict | None: The parsed head-object metadata (keys such as
+        ``ContentLength`` (int), ``ETag`` (str), ...) on success, or ``None`` on
+        any failure (no endpoint, empty bucket/key, CLI absent, missing object,
+        non-zero exit, unparseable JSON).
+
+    Raises:
+        None.
+    """
+    # WHY (finding F7): a HEAD is the authoritative size source -- it reflects what
+    # S3 actually stored, so asserting on it (rather than on the local fixture's
+    # length) proves the upload's byte count round-tripped. Returning the whole
+    # dict (not just ContentLength) keeps the helper reusable for future metadata
+    # assertions without another CLI round-trip.
+    ep = endpoint if endpoint is not None else resolve_endpoint()
+    if not ep:
+        return None
+    if not bucket or not key:
+        _diag("head_object called with an empty bucket or key")
+        return None
+    proc = _awslocal(
+        ["s3api", "head-object", "--bucket", bucket, "--key", key],
+        endpoint=ep,
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        meta = json.loads(proc.stdout or "{}")
+    except (ValueError, TypeError):
+        _diag(f"head_object: could not parse head-object JSON for s3://{bucket}/{key}")
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def get_object_bytes(
+    bucket: str,
+    key: str,
+    *,
+    endpoint: str | None = None,
+) -> bytes | None:
+    """Fetch an S3 object's body and return it as RAW BYTES (binary-safe).
+
+    Purpose:
+        The binary-safe counterpart of :func:`get_object_text`. The E2E test uses
+        it to read back BINARY EBCDIC datasets (NUL bytes, sign overpunch, no
+        trailing newline) and assert an exact byte / SHA-256 match against the
+        source fixture -- something a text decode would corrupt. Wraps ``awslocal
+        s3 cp s3://<bucket>/<key> -`` capturing raw bytes.
+
+    Parameters:
+        bucket (str): Bucket name (without the ``s3://`` scheme).
+        key (str): Object key within the bucket.
+        endpoint (str | None): Gateway URL; resolved by :func:`resolve_endpoint`
+            when ``None`` (keyword-only).
+
+    Returns:
+        bytes | None: The object body as raw bytes on success (an empty object
+        yields ``b""``), or ``None`` on any failure (no endpoint, empty
+        bucket/key, CLI absent, missing object, non-zero exit).
+
+    Raises:
+        None.
+    """
+    # WHY (finding F7 -- binary fidelity): get_object_text decodes to str, which
+    # MANGLES binary EBCDIC (invalid UTF-8 -> U+FFFD replacement) and would make a
+    # SHA-256 assertion meaningless. Requesting text=False from _awslocal returns
+    # the untouched bytes, so the test can prove a byte-for-byte round-trip of the
+    # exact ACCTDATA dataset. `-` streams the body to stdout, so no temp file is
+    # created for a read-only fetch.
+    ep = endpoint if endpoint is not None else resolve_endpoint()
+    if not ep:
+        return None
+    if not bucket or not key:
+        _diag("get_object_bytes called with an empty bucket or key")
+        return None
+    proc = _awslocal(
+        ["s3", "cp", f"s3://{bucket}/{key}", "-"],
+        endpoint=ep,
+        text=False,
+    )
+    if proc is None or proc.returncode != 0:
+        return None
+    body = proc.stdout
+    if body is None:
+        return b""
+    if isinstance(body, bytes):
+        return body
+    # Defensive: if a future change makes stdout already-str, encode it back.
+    return body.encode("utf-8", errors="replace")
 
 
 def bring_up(name: str | None = None) -> str | None:

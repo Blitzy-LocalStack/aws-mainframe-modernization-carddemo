@@ -1,7 +1,7 @@
 {
-  "_comment": "LocalStack S3 seeding manifest for the AWS CardDemo dataset-staging tests. This file is consumed by scripts/setup_localstack.sh (bash/jq) and tests/helpers/localstack_setup.py, and mirrors the AWS Mainframe Modernization dataset-staging path where flat mainframe datasets are staged as S3 objects before a batch run. WHY (Assumption): JSON has no comment syntax, so all provenance/rationale lives in these leading underscore-prefixed keys, which the jq queries in setup_localstack.sh intentionally ignore (they read only .buckets and .objects). WHY (Determinism): buckets, keys, and inline content are fixed and reproducible so every CI run seeds byte-identical resources.",
-  "_schema": "BINDING CONTRACT (do not change shape): .buckets[] is EITHER a plain string OR an object with a .name key; .objects[] is an object with .bucket (string, required), .key (string, required), and .content (string, optional - defaults to empty). setup_localstack.sh evaluates: jq -r '(.buckets // [])[] | if type==\"object\" then .name else . end' and jq -r '(.objects // [])[] | [.bucket, .key, (.content // \"\")] | @tsv'.",
-  "_provenance": "Bucket names and dataset keys derived from the CardDemo data layout under app/data/ (ASCII and EBCDIC dataset trees). Two bucket declaration forms are intentionally used (one plain string, one {name} object) to exercise BOTH accepted schema variants of the setup script. One object intentionally omits .content to exercise the empty-object default path. Content values are single-line (no embedded newline) so jq @tsv + printf '%s' stage them byte-faithfully.",
+  "_comment": "LocalStack S3 seeding manifest for the AWS CardDemo dataset-staging tests. This file is consumed by scripts/setup_localstack.sh (bash/jq) and tests/helpers/localstack_setup.py, and mirrors the AWS Mainframe Modernization dataset-staging path where flat mainframe datasets are staged as S3 objects before a batch run. WHY (Assumption): JSON has no comment syntax, so all provenance/rationale lives in these leading underscore-prefixed keys, which the jq queries in setup_localstack.sh intentionally ignore (they read only .buckets and .objects). WHY (Determinism): buckets, keys, source files, and inline content are fixed and reproducible so every CI run seeds byte-identical resources; the sha256/size below are the audit anchors that make verification authoritative rather than self-reported.",
+  "_schema": "BINDING CONTRACT (both seeders parse this shape). .buckets[] is EITHER a plain string OR an object with a .name key. .objects[] is an object with: .bucket (string, required); .key (string, required); EXACTLY ONE payload source -- .source_file (string: a repo-root-relative path whose raw bytes are staged byte-faithfully, used for real and/or BINARY datasets) OR .content (string: an inline single-line UTF-8 payload; defaults to empty when both are absent); .sha256 (string, optional: hex SHA-256 of the object's staged bytes) and .size (integer, optional: exact byte length) which drive authoritative HEAD/GET/checksum verification. WHY (source_file added -- finding F6): inline single-line strings are architecturally incapable of carrying binary EBCDIC (which contains NULs, overpunch sign bytes, and no newline), so a file-reference mechanism is required to stage the real CardDemo datasets. Precedence: when .source_file is present it wins and .content is ignored. Bash extracts: jq -r '(.objects // [])[] | [.bucket, .key, (.content // \"\"), (.source_file // \"\"), (.sha256 // \"\"), (.size // \"\")] | @tsv'.",
+  "_provenance": "Bucket names and dataset keys derived from the CardDemo data layout under app/data/ (ASCII and EBCDIC dataset trees). Two bucket declaration forms are intentionally used (one plain string, one {name} object) to exercise BOTH accepted schema variants of the setup script. Objects deliberately mix a source_file ASCII dataset (app/data/ASCII/discgrp.txt), an inline-content marker (exercises the .content path with no embedded newline so jq @tsv + printf stage it byte-faithfully), and a source_file BINARY EBCDIC dataset (app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS) -- the representative datasets the AWS M2 staging workflow actually moves. WHY (finding F6): the previous revision staged only tiny inline placeholders plus one EMPTY EBCDIC object and carried no checksums, so it never exercised the real dataset bytes; the source-file references plus per-object sha256/size close that gap. The referenced files under app/data/ are REFERENCE seed data and are NEVER modified by the suite; their recorded sha256/size are stable because those seeds are immutable.",
   "buckets": [
     "carddemo-dataset-staging",
     { "name": "carddemo-dataset-staging-ebcdic" }
@@ -10,16 +10,23 @@
     {
       "bucket": "carddemo-dataset-staging",
       "key": "carddemo/datasets/ascii/DISCGRP.PS",
-      "content": "A00000000001000100150{0000000000000000000000000000"
+      "source_file": "app/data/ASCII/discgrp.txt",
+      "sha256": "dfdd3832805e3a4bf1d811ea2340ee8f6bf8e9fdf8d040fbd50e3c7b45b0ce2b",
+      "size": 2601
     },
     {
       "bucket": "carddemo-dataset-staging",
       "key": "carddemo/datasets/ascii/_MANIFEST.txt",
-      "content": "CardDemo dataset-staging manifest marker (deterministic fixture)."
+      "content": "CardDemo dataset-staging manifest marker (deterministic fixture).",
+      "sha256": "b4f6a5c9368243906c05556f5b4fda35c0f95d60e4fef6607a3f5782609f3559",
+      "size": 65
     },
     {
       "bucket": "carddemo-dataset-staging-ebcdic",
-      "key": "carddemo/datasets/ebcdic/ACCTDATA.PS"
+      "key": "carddemo/datasets/ebcdic/ACCTDATA.PS",
+      "source_file": "app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS",
+      "sha256": "23167cdff65ca6dfa2e5bccee89112e3e83a80247a38e251f3981377ab098ec9",
+      "size": 15000
     }
   ]
 }

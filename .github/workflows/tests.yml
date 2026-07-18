@@ -73,8 +73,12 @@ jobs:
   test-suite:
     name: Build and run the full CardDemo test suite
     # WHY (determinism): pin to ubuntu-24.04 so the toolchain matches the
-    # versions verified in the plan (GnuCOBOL 3.1.2 line on a gcc 13 backend,
-    # Python 3.12) rather than drifting silently with `ubuntu-latest`.
+    # versions verified in the plan (GnuCOBOL 3.1.2 line on a gcc 13 backend)
+    # rather than drifting silently with `ubuntu-latest`. Python is pinned to
+    # 3.13 via actions/setup-python below -- NOT the image's default 3.12 --
+    # because tests/requirements-test.txt is hash-locked on the CPython 3.13
+    # (cp313) reference platform, so the interpreter and the wheel hashes MUST
+    # agree or `--require-hashes` (added in the install step) fails closed (F8).
     runs-on: ubuntu-24.04
     env:
       # WHY: optional LocalStack auth token, read from a repo secret when
@@ -96,10 +100,14 @@ jobs:
           sudo apt-get install -y gnucobol jq
           cobc --version
 
-      - name: Set up Python 3.12
+      # WHY (F8): 3.13 matches the cp313 reference platform the pinned wheel
+      # hashes in tests/requirements-test.txt were resolved on; a 3.12 runner
+      # would fetch cp312 wheels whose hashes are absent from the lock, making
+      # the hash-verified install below fail.
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       # Step 2b: install the pinned pytest/coverage/awscli test dependencies.
       # WHY: `localstack` is deliberately NOT in requirements-test.txt -- it is a
@@ -108,7 +116,13 @@ jobs:
       - name: Install Python test dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r tests/requirements-test.txt
+          # WHY (F8 -- supply-chain integrity): --require-hashes forces pip to
+          # verify every wheel against the SHA-256 pinned in the manifest and to
+          # reject any unpinned/unhashed (including transitive) artifact, so a
+          # tampered or substituted dependency fails the install closed. The lock
+          # is a complete cp313 closure, which is exactly why the interpreter is
+          # pinned to 3.13 above.
+          python3 -m pip install --require-hashes -r tests/requirements-test.txt
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -147,6 +161,15 @@ jobs:
       - name: Run the full CardDemo test suite
         run: |
           if [ "${{ github.event.inputs.with_localstack }}" = "true" ]; then
+            # WHY (F4): when the operator EXPLICITLY opts into the AWS layer, an
+            # absent/unreachable emulator must NOT masquerade as a green
+            # all-skipped report. Exporting CARDDEMO_REQUIRE_LOCALSTACK=1 flips
+            # BOTH gates that honour it -- the bash bring-up (scripts/
+            # setup_localstack.sh) and the pytest layer (tests/conftest.py
+            # localstack_gate) -- from "skip/WARN when missing" to "hard FAIL",
+            # so the opt-in run tells the truth. It is set ONLY in this branch;
+            # the default push/PR path leaves the AWS layer optional (skip/WARN).
+            export CARDDEMO_REQUIRE_LOCALSTACK=1
             bash scripts/run_tests.sh --with-localstack
           else
             bash scripts/run_tests.sh
@@ -161,7 +184,12 @@ jobs:
         with:
           name: carddemo-test-reports
           path: reports/
-          if-no-files-found: warn
+          # WHY (F9): the runner scripts ALWAYS write JUnit XML into reports/, so
+          # an EMPTY reports/ means the suite never produced auditable results --
+          # a real failure of the CI contract, not a benign condition. `error`
+          # (not `warn`) makes that absence fail the upload step loudly instead
+          # of hiding a missing-report regression behind a green run.
+          if-no-files-found: error
 
       # Step 5b: surface pass/fail in the CI UI as check annotations. WHY
       # continue-on-error + fail_on_failure=false: this step is purely additive

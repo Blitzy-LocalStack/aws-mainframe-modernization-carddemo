@@ -322,10 +322,11 @@ def _strict_cobol_required() -> bool:
     ------
     None
     """
-    # WHY the identical env-var name/semantics as conftest (Assumption): a CI run that
-    # exports CARDDEMO_REQUIRE_COBOL=1 to force the whole COBOL layer to be required must
-    # see the SAME hard-fail behaviour from this module's local gate as from conftest's
-    # session gate -- otherwise a required-COBOL run could still go green here by skipping.
+    # WHY the identical env-var name/semantics as conftest (Assumption): an opt-in run
+    # that exports CARDDEMO_REQUIRE_COBOL=1 (the shipped default CI leaves it UNSET) to
+    # force the whole COBOL layer to be required must see the SAME hard-fail behaviour
+    # from this module's local gate as from conftest's session gate -- otherwise a
+    # required-COBOL run could still go green here by skipping.
     return _is_truthy(os.environ.get("CARDDEMO_REQUIRE_COBOL"))
 
 

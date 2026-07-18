@@ -72,11 +72,15 @@ runner, this test routes its unavailability through the local strict gate
   * **Default mode** -- a **documented, explicit skip** citing F-EXP-COMPILE (never a
     silent pass, never ``xfail``). This keeps local/dev CI green while the toolchain
     genuinely cannot build the pair.
-  * **Under ``CARDDEMO_REQUIRE_COBOL=1``** -- a **HARD FAILURE**. WHY (closes QA finding
-    **F-EXP-SKIP**): the prior code always skipped, so a required-COBOL CI could exit
-    GREEN with this mandatory feature never run -- masking that it is un-runnable. The
-    honest hard-fail is the correct resolution; it is NOT green-washed and the
-    underlying compile defect is out of scope to fix.
+  * **Under ``CARDDEMO_REQUIRE_COBOL=1``** (an OPT-IN strict mode, NOT armed by the
+    shipped default CI) -- a **HARD FAILURE**. WHY (closes QA finding **F-EXP-SKIP**):
+    the prior code always skipped, so a required-COBOL run could exit GREEN with this
+    mandatory feature never run -- masking that it is un-runnable. The honest hard-fail
+    is the correct resolution; it is NOT green-washed and the underlying compile defect
+    is out of scope to fix. NOTE: the shipped ``.github/workflows/tests.yml`` deliberately
+    leaves the flag UNSET precisely because this pair is unfixable here (AAP 0.8.2), so
+    under the shipped CI this test lands in the DEFAULT documented-skip branch above, not
+    the hard-fail branch; arming the flag is reserved for a stricter opt-in run.
 
 Crucially, the full round-trip assertion path below is implemented correctly so the
 test **auto-upgrades to a real, asserting test** the moment buildable
@@ -389,9 +393,10 @@ def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
 
     WHY the strict gate rather than an unconditional skip (Refactoring Rationale --
     closes QA finding F-EXP-SKIP): export/import is a MANDATORY feature. The prior code
-    always ``pytest.skip``-ped when the pair would not build, which meant a
-    required-COBOL CI (``CARDDEMO_REQUIRE_COBOL=1``) could still exit GREEN with the
-    feature never exercised -- masking that it is genuinely un-runnable. Routing through
+    always ``pytest.skip``-ped when the pair would not build, which meant a required-COBOL
+    run (opt-in ``CARDDEMO_REQUIRE_COBOL=1``, NOT set by the shipped default CI) could
+    still exit GREEN with the feature never exercised -- masking that it is genuinely
+    un-runnable. Routing through
     :func:`_require_or_skip` keeps the developer-friendly skip by default but makes a
     required-COBOL run FAIL honestly, so the un-buildable production defect is
     surfaced, never green-washed. Fixing the underlying COBOL is out of scope (production
