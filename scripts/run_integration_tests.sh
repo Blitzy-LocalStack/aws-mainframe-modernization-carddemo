@@ -137,21 +137,70 @@ CARDDEMO_INT_REPORT="${CARDDEMO_REPORTS_DIR}/integration.xml"
 _idir="$CARDDEMO_REPO_ROOT/tests/integration"
 
 carddemo_write_empty_junit() {
-    # Purpose : write a valid, empty JUnit document so CI always finds a report.
+    # Purpose : write a valid, CI-ingestible JUnit document when pytest itself did
+    #           not (or could not) produce one. Two shapes are emitted:
+    #             * benign EMPTY suite (tests=0, errors=0) -- a legitimate
+    #               "nothing to run" soft-skip that is NOT a failure; or
+    #             * ERROR-MARKED suite (errors=1 + a synthetic failing <testcase>
+    #               carrying an <error>) -- for a FAILED/aborted run so the
+    #               machine-readable report can never be mistaken for green.
+    #           The shape is chosen by whether an error message ($3) is supplied.
     # Parameters:
-    #   $1 (string) - suite name.
-    #   $2 (path)   - output file path.
-    # Returns : always 0.
+    #   $1 (string)           - suite name.
+    #   $2 (path)             - output file path.
+    #   $3 (string, optional) - error message. When present, an ERROR-MARKED
+    #                           report is written; when absent/empty, a benign
+    #                           EMPTY report is written.
+    # Returns : always 0; the JUnit document is written to $2.
     # Errors  : none.
-    # WHY (Trade-off): emitting an empty-but-valid report on a soft-skip keeps CI
-    # ingestion uniform (a missing file would otherwise be flagged as an error).
-    local name="$1" out="$2"
-    {
-        echo '<?xml version="1.0" encoding="UTF-8"?>'
-        echo '<testsuites>'
-        echo "  <testsuite name=\"$name\" tests=\"0\" failures=\"0\" errors=\"0\" skipped=\"0\" time=\"0\"/>"
-        echo '</testsuites>'
-    } > "$out"
+    # WHY (Trade-off -- QA-INT-01 + Areas-of-Concern #1): a *missing* report trips
+    # a CI publisher's "report not found" alarm, but a benign green empty report on
+    # a run that actually FAILED/aborted is worse -- it asserts failures=0 for a run
+    # that did not pass. So every failure/abnormal path now emits an EXPLICIT error
+    # marker (errors=1 + a failing <testcase>) instead of a green empty suite; the
+    # benign empty form is reserved solely for the genuine WARN soft-skip (the
+    # integration directory being absent), which is a "nothing ran", not a failure.
+    # Alternatives Considered: simply deleting the report on failure was rejected
+    # because a guaranteed-present, error-marked report is more actionable for a
+    # pure-XML CI consumer (that keys only on the XML) than an absent file.
+    local name="$1" out="$2" errmsg="${3:-}"
+    if [ -n "$errmsg" ]; then
+        # WHY (Assumption + Trade-off): the messages passed here are controlled
+        # runner strings (fixed text + a numeric exit code) that carry no XML
+        # metacharacters today, but we still escape &, < and > so the document is
+        # well-formed for ANY future message. bash 5.2's `patsub_replacement` (on by
+        # default) treats an unescaped '&' in a ${var//pat/repl} replacement as
+        # "the matched text" (sed-like), which would corrupt the &amp;/&lt;/&gt;
+        # entities into '<lt;', '>gt;', etc.; we therefore disable it for the
+        # duration of the escaping and restore the prior state, so '&' is a literal
+        # on every bash version (the guards make this a no-op on bashes that lack
+        # the option). Order matters: '&' is escaped FIRST so the '&' it introduces
+        # is not itself re-escaped by the following < / > passes.
+        local esc="$errmsg" _had_patsub=0
+        if shopt -q patsub_replacement 2>/dev/null; then _had_patsub=1; fi
+        shopt -u patsub_replacement 2>/dev/null || true
+        esc="${esc//&/&amp;}"
+        esc="${esc//</&lt;}"
+        esc="${esc//>/&gt;}"
+        if [ "$_had_patsub" -eq 1 ]; then shopt -s patsub_replacement 2>/dev/null || true; fi
+        {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<testsuites>'
+            echo "  <testsuite name=\"$name\" tests=\"1\" failures=\"0\" errors=\"1\" skipped=\"0\" time=\"0\">"
+            echo "    <testcase classname=\"$name\" name=\"run\" time=\"0\">"
+            echo "      <error message=\"$esc\">$esc</error>"
+            echo '    </testcase>'
+            echo '  </testsuite>'
+            echo '</testsuites>'
+        } > "$out"
+    else
+        {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<testsuites>'
+            echo "  <testsuite name=\"$name\" tests=\"0\" failures=\"0\" errors=\"0\" skipped=\"0\" time=\"0\"/>"
+            echo '</testsuites>'
+        } > "$out"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -188,7 +237,12 @@ fi
 overall_rc="$(carddemo_rc_worst "$overall_rc" "$build_rc")"
 if [ "$build_rc" -ge "${CARDDEMO_RC_FAIL}" ]; then
     echo "[integration] build failed (rc=$build_rc); cannot run integration tests" >&2
-    carddemo_write_empty_junit "carddemo-integration" "$CARDDEMO_INT_REPORT"
+    # WHY (Areas-of-Concern #1): a build failure means pytest never ran, so an
+    # error-marked report (not a green tests=0 one) is written -- a pure-XML CI
+    # consumer keying only on failures/errors then sees the failure rather than a
+    # misleading green empty suite whose non-zero exit code it might ignore.
+    carddemo_write_empty_junit "carddemo-integration" "$CARDDEMO_INT_REPORT" \
+        "integration build step failed (rc=$build_rc) before pytest could run"
     exit "$overall_rc"
 fi
 
@@ -207,6 +261,19 @@ fi
 # ---------------------------------------------------------------------------
 # Run pytest and map its exit code onto the rubric.
 # ---------------------------------------------------------------------------
+# WHY (QA-INT-01 -- an aborted run must never leave a STALE GREEN report):
+# pytest writes the --junitxml file only at its pytest_sessionfinish hook. If
+# pytest is terminated by a signal (SIGTERM/SIGINT/SIGKILL) before that hook runs,
+# the file is never refreshed, so a green report from a PRIOR run in a re-used
+# workspace would survive and misrepresent THIS aborted run as fully passing
+# (tests=N failures=0) even though the runner correctly exits non-zero. Removing
+# any pre-existing report immediately before invoking pytest guarantees a
+# signal-killed run leaves NO stale report; a normal run (pass OR fail) re-creates
+# an accurate one at sessionfinish. Alternatives Considered: trapping the signal to
+# rewrite the report was rejected as racy and shell-fragile; deleting-first is
+# deterministic and pairs with the post-run error-marker below.
+rm -f "$CARDDEMO_INT_REPORT"
+
 echo "[integration] running: ${CARDDEMO_PYTEST[*]} $_idir -m integration --junitxml=$CARDDEMO_INT_REPORT ${_passthru[*]:-}"
 set +e
 # WHY (Assumption): "${_passthru[@]+...}" guards against an unbound-variable
@@ -218,6 +285,30 @@ set -e
 
 mapped_rc="$(carddemo_rc_from_pytest "$pyrc")"
 overall_rc="$(carddemo_rc_worst "$overall_rc" "$mapped_rc")"
+
+# WHY (QA-INT-01 / Areas-of-Concern #1 -- keep the machine-readable report in
+# agreement with the authoritative exit code): after pytest returns, reconcile the
+# junitxml with what actually happened.
+#   * Report ABSENT -> pytest was killed before sessionfinish (a signal); it wrote
+#     nothing and we already removed any stale copy above. Emit an ERROR-MARKED
+#     junit recording the abnormal termination so CI finds a truthful (non-green)
+#     report instead of no file at all.
+#   * pytest exit 5 (no tests collected) -> pytest DID write a report, but a
+#     misleading tests=0/failures=0 (green-looking) one, while the rubric treats an
+#     empty enabled layer as FAIL. Overwrite it with an ERROR-MARKED junit so a
+#     pure-XML consumer cannot read the aborted/empty run as a pass. The runner's
+#     exit code (already aggregated to FAIL) is unchanged.
+# A normal completion (exit 0 with passes, or exit 1 with real failures) leaves the
+# authoritative pytest-written report untouched.
+if [ ! -f "$CARDDEMO_INT_REPORT" ]; then
+    echo "[integration] pytest wrote no report (exit=$pyrc); emitting error-marked junit" >&2
+    carddemo_write_empty_junit "carddemo-integration" "$CARDDEMO_INT_REPORT" \
+        "pytest terminated abnormally without writing a report (exit=$pyrc); run aborted"
+elif [ "$pyrc" -eq 5 ]; then
+    echo "[integration] pytest collected no tests (exit=5); replacing green empty report with error-marked junit" >&2
+    carddemo_write_empty_junit "carddemo-integration" "$CARDDEMO_INT_REPORT" \
+        "pytest collected no tests (exit=5); the enabled integration layer is empty or broken"
+fi
 
 echo "[integration] ============================================================"
 echo "[integration] pytest exit=$pyrc -> rubric=$mapped_rc ; aggregate RC=$overall_rc"
