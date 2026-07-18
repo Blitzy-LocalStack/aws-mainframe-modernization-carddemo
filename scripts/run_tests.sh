@@ -10,14 +10,31 @@
 #   exit status. All JUnit XML lands in reports/ for CI ingestion.
 #
 # Usage:
-#   scripts/run_tests.sh [--fail-fast|-x] [--with-localstack] [-h|--help]
+#   scripts/run_tests.sh [--fail-fast|-x] [--with-localstack|--require-localstack]
+#                        [--require-cobol] [--coverage] [-h|--help]
 #     source scripts/test_env.sh is performed internally; no prior setup needed.
 #
 # Parameters:
 #   --fail-fast, -x    stop at the first layer that FAILS (rc>=8); default is
 #                      run-all-layers-then-report.
-#   --with-localstack  bring up LocalStack for the e2e dataset-staging tests
-#                      (passed through to run_e2e_tests.sh).
+#   --with-localstack  bring up LocalStack for the e2e dataset-staging tests AND
+#                      REQUIRE it: exports CARDDEMO_REQUIRE_LOCALSTACK=1 so that,
+#                      if the emulator cannot be reached, the mandatory real-S3
+#                      staging tests HARD-FAIL (rc>=8) instead of soft-skipping.
+#   --require-localstack  explicit synonym for --with-localstack (identical
+#                      bring-up + REQUIRE behaviour); provided for discoverability
+#                      so the enforcement is obvious at the call site.
+#   --require-cobol    escalate a blocked COBOL deliverable (CBEXPORT/CBIMPORT,
+#                      which only WARN by default) into a HARD failure: exports
+#                      CARDDEMO_REQUIRE_COBOL=1 so the conftest gate turns the
+#                      export/import skips into failures (rc>=8). Opt-in because
+#                      the .cbl defect is unfixable here (app/cbl REFERENCE-only).
+#   --coverage         measure coverage across the whole suite from this one
+#                      command: exports CARDDEMO_COVERAGE=1 (gcov-instruments the
+#                      COBOL build; runs the Python layers under coverage.py), then
+#                      combines the data and writes reports/coverage.xml plus a
+#                      console summary. Below the harness threshold is informational
+#                      (AAP 0.7 -- a recommendation, not an SLA), not a suite fail.
 #   -h, --help         print usage and exit 0.
 #   (no positional args; unknown options are a usage error.)
 #
@@ -47,6 +64,14 @@
 #     builds; the rebuild is idempotent (cobc recompiles) and lets --fail-fast
 #     abort a broken-compile suite before any test layer, which is clearer than
 #     coupling every sub-runner to a shared skip-build flag.
+#   - Assumption (finding F3): passing --with-localstack is an EXPLICIT opt-in, so
+#     it must ENFORCE what it advertises. The master therefore exports
+#     CARDDEMO_REQUIRE_LOCALSTACK=1, which both setup_localstack.sh (bring-up) and
+#     the conftest LocalStack gate honour, converting an unreachable emulator from
+#     a silent soft-skip into a hard failure. Alternatives Considered: a separate
+#     "bring-up-but-tolerate-absence" flag was rejected -- the flag-absent default
+#     already provides exactly that lenient behaviour (staging soft-skips as warn),
+#     so a second lenient spelling would only blur the contract.
 # =============================================================================
 
 # WHY (Refactoring rationale): -u catches unset-variable bugs and -o pipefail
@@ -64,15 +89,23 @@ carddemo_master_usage() {
     # Returns : always 0.
     # Errors  : none.
     cat <<USAGE
-Usage: scripts/run_tests.sh [--fail-fast|-x] [--with-localstack] [-h|--help]
+Usage: scripts/run_tests.sh [--fail-fast|-x]
+                            [--with-localstack|--require-localstack]
+                            [--require-cobol] [--coverage] [-h|--help]
 
 Runs the full CardDemo test suite (build -> unit -> integration -> e2e) and
 exits with the worst condition code (0 pass / 4 warn / 8 fail / 16 fatal).
 
 Options:
-  -x, --fail-fast     stop at the first failing layer (rc>=8)
-      --with-localstack  bring up LocalStack for the e2e AWS staging tests
-  -h, --help          show this help and exit
+  -x, --fail-fast        stop at the first failing layer (rc>=8)
+      --with-localstack  bring up LocalStack for the e2e AWS staging tests AND
+                         require it (unreachable emulator -> hard fail, not skip)
+      --require-localstack  synonym for --with-localstack (explicit enforcement)
+      --require-cobol    escalate blocked CBEXPORT/CBIMPORT (WARN by default) to a
+                         hard failure (rc>=8); opt-in, the .cbl is unfixable here
+      --coverage         instrument the suite and write reports/coverage.xml (+ a
+                         console summary) from this single command
+  -h, --help             show this help and exit
 USAGE
 }
 
@@ -83,10 +116,26 @@ USAGE
 # ---------------------------------------------------------------------------
 _fail_fast=0
 _with_localstack=0
+_require_cobol=0
+_coverage=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -x|--fail-fast) _fail_fast=1 ;;
-        --with-localstack) _with_localstack=1 ;;
+        # WHY (finding F3): --with-localstack and its explicit synonym
+        # --require-localstack both mean "bring up AND require"; they set the same
+        # flag so the enforcement wiring below has a single source of truth and the
+        # two spellings can never drift into different behaviours.
+        --with-localstack|--require-localstack) _with_localstack=1 ;;
+        # WHY (finding F2): --require-cobol lets an operator escalate a blocked
+        # COBOL deliverable (CBEXPORT/CBIMPORT, which only WARN by default) into a
+        # hard failure. It is OPT-IN (not the default) precisely because the
+        # blocked .cbl cannot be fixed (app/cbl is REFERENCE-only per AAP 0.8.2),
+        # so defaulting it on would redden CI permanently.
+        --require-cobol) _require_cobol=1 ;;
+        # WHY (finding F4): --coverage wires the whole suite for a single-command
+        # coverage report -- it instruments the COBOL build (gcov) and runs the
+        # Python layers under coverage.py, then combines + writes reports/coverage.xml.
+        --coverage) _coverage=1 ;;
         -h|--help) carddemo_master_usage; exit 0 ;;
         *)
             echo "[run_tests] ERROR: unknown option '$1'" >&2
@@ -99,17 +148,83 @@ done
 
 mkdir -p "$CARDDEMO_REPORTS_DIR" "$CARDDEMO_BUILD_DIR"
 
-# e2e passthrough args (only --with-localstack, if requested).
+# ---------------------------------------------------------------------------
+# LocalStack enforcement wiring (finding F3).
+# WHY: the finding is that --with-localstack ENABLED but did not REQUIRE the
+# emulator, so an unreachable LocalStack degraded the mandatory real-S3 staging
+# tests to a silent soft-skip (warn) instead of a failure. Exporting
+# CARDDEMO_REQUIRE_LOCALSTACK=1 here -- at the public entry point, when the user
+# explicitly opted in -- makes BOTH the bring-up (setup_localstack.sh) and the
+# conftest LocalStack gate treat an absent/unhealthy emulator as a hard failure
+# (rc>=8). Trade-off: this is intentionally exported for the WHOLE suite process
+# (not just the e2e child) so the gate is armed no matter which layer reaches the
+# staging tests; the flag-absent path leaves it unset, preserving the lenient
+# default. This also makes the standalone CLI consistent with CI, which already
+# arms the same variable in its --with-localstack job.
+# ---------------------------------------------------------------------------
 _e2e_args=()
 if [ "$_with_localstack" = "1" ]; then
+    export CARDDEMO_REQUIRE_LOCALSTACK=1
     _e2e_args=(--with-localstack)
+fi
+
+# ---------------------------------------------------------------------------
+# Blocked-COBOL enforcement wiring (finding F2).
+# WHY: by default a KNOWN-UNSUPPORTED program (CBEXPORT/CBIMPORT) that fails to
+# compile against the immutable baseline is a WARN (rc=4) -- honestly non-green
+# but non-fatal, so the rest of the suite still runs. Passing --require-cobol
+# exports CARDDEMO_REQUIRE_COBOL=1, which the conftest gate honours by escalating
+# the corresponding export/import test skips into HARD failures (rc>=8). Trade-off:
+# this is opt-in, not default, because the .cbl defect cannot be fixed (app/cbl is
+# REFERENCE-only per AAP 0.8.2); forcing it on would make CI permanently red on a
+# condition no one is allowed to remediate here. Offering the flag still gives a
+# team that DOES intend to fix the copybook a single switch to make the gap fatal.
+# ---------------------------------------------------------------------------
+if [ "$_require_cobol" = "1" ]; then
+    export CARDDEMO_REQUIRE_COBOL=1
+fi
+
+# ---------------------------------------------------------------------------
+# Coverage wiring (finding F4) -- PRE-STAGE setup.
+# WHY: --coverage must instrument BOTH sides of the suite from one command, so
+# the switches are exported BEFORE any stage runs:
+#   * CARDDEMO_COVERAGE=1 makes build_test_programs.sh add gcov flags to the COBOL
+#     transpiled C (best-effort COBOL line coverage) and makes the integration/e2e
+#     sub-runners run pytest under coverage.py (Python-harness coverage).
+#   * COVERAGE_FILE is pinned to an ABSOLUTE path so every child process (each
+#     sub-runner, possibly in a different CWD) and the master's post-stage
+#     `coverage combine` agree on ONE data-file base regardless of CWD -- the
+#     alternative (relying on a shared CWD) was rejected as fragile across the
+#     `bash <child>` invocations.
+# A stale-data `coverage erase` is best-effort so a prior run cannot inflate this
+# run's numbers. Coverage tooling is an opt-in add-on: if `coverage` is missing we
+# degrade gracefully (the sub-runners warn and run uninstrumented).
+# ---------------------------------------------------------------------------
+_coverage_cmd=()
+if [ "$_coverage" = "1" ]; then
+    export CARDDEMO_COVERAGE=1
+    export COVERAGE_FILE="$CARDDEMO_REPO_ROOT/.coverage"
+    if command -v coverage >/dev/null 2>&1; then
+        _coverage_cmd=(coverage)
+    elif command -v python3 >/dev/null 2>&1 && python3 -c 'import coverage' >/dev/null 2>&1; then
+        _coverage_cmd=(python3 -m coverage)
+    fi
+    if [ "${#_coverage_cmd[@]}" -gt 0 ]; then
+        # WHY: erase from the repo root so the default/absolute data file and any
+        # leftover parallel shards from a previous run are cleared consistently.
+        ( cd "$CARDDEMO_REPO_ROOT" && "${_coverage_cmd[@]}" erase --rcfile="$CARDDEMO_COVERAGERC" ) \
+            >/dev/null 2>&1 || true
+    else
+        echo "[run_tests] WARN: --coverage requested but 'coverage' not available;" >&2
+        echo "[run_tests]       layers run uninstrumented and no coverage.xml is produced." >&2
+    fi
 fi
 
 echo "[run_tests] ############################################################"
 echo "[run_tests] # CardDemo full test suite"
 echo "[run_tests] #   repo      : $CARDDEMO_REPO_ROOT"
 echo "[run_tests] #   reports   : $CARDDEMO_REPORTS_DIR"
-echo "[run_tests] #   fail-fast : $_fail_fast ; with-localstack : $_with_localstack"
+echo "[run_tests] #   fail-fast : $_fail_fast ; with-localstack : $_with_localstack ; require-localstack : ${CARDDEMO_REQUIRE_LOCALSTACK:-0} ; require-cobol : ${CARDDEMO_REQUIRE_COBOL:-0} ; coverage : $_coverage"
 echo "[run_tests] ############################################################"
 
 overall_rc=0
@@ -156,6 +271,53 @@ while :; do
     carddemo_stage "e2e"         bash "$_master_script_dir/run_e2e_tests.sh" ${_e2e_args[@]+"${_e2e_args[@]}"} || break
     break
 done
+
+# ---------------------------------------------------------------------------
+# Coverage wiring (finding F4) -- POST-STAGE combine + report.
+# WHY: coverage.py parallel mode wrote one data shard per process; they must be
+# COMBINED before a report is meaningful. We then emit reports/coverage.xml (the
+# CI-ingestable artifact this finding is about) and print a console summary. All
+# steps run from the repo root so the rcfile's repo-root-relative source/output
+# paths resolve. Trade-off / mapping decision (AAP 0.7 -- the >=90% line target is
+# a RECOMMENDATION, not an SLA, and the mandatory branch coverage is already met):
+#   * a coverage TOOLING problem (missing tool, no data, xml not written) is a
+#     WARN -- you asked for coverage and we could not fully deliver it; while
+#   * being BELOW the harness fail_under threshold (coverage's exit 2, with the
+#     xml STILL written) is INFORMATIONAL only and is deliberately NOT folded into
+#     the suite RC, so an under-tested helper cannot masquerade as a test failure
+#     nor mask the real test outcome. The console `coverage report` still shows the
+#     percentages for visibility.
+# ---------------------------------------------------------------------------
+if [ "$_coverage" = "1" ]; then
+    _cov_xml="$CARDDEMO_REPORTS_DIR/coverage.xml"
+    if [ "${#_coverage_cmd[@]}" -gt 0 ]; then
+        (
+            cd "$CARDDEMO_REPO_ROOT" || exit 0
+            # Combine the per-process parallel shards; "no data" is tolerated and
+            # surfaced by the artifact check below rather than aborting here.
+            "${_coverage_cmd[@]}" combine --rcfile="$CARDDEMO_COVERAGERC" >/dev/null 2>&1 || true
+            # Write the XML artifact. -o is explicit so it is CWD-independent and
+            # cannot be silently redirected by an rcfile edit.
+            "${_coverage_cmd[@]}" xml --rcfile="$CARDDEMO_COVERAGERC" -o "$_cov_xml" >/dev/null 2>&1 || true
+            # Human-readable console summary (best-effort; fail_under exit 2 is
+            # informational only, hence `|| true`).
+            "${_coverage_cmd[@]}" report --rcfile="$CARDDEMO_COVERAGERC" 2>/dev/null || true
+        )
+        if [ -s "$_cov_xml" ]; then
+            echo "[run_tests] coverage: wrote $_cov_xml"
+            _summary+=("$(printf '  %-12s %s' "coverage" "reports/coverage.xml")")
+        else
+            echo "[run_tests] WARN: --coverage produced no coverage.xml (no data or tool error)" >&2
+            overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_WARN}")"
+            _summary+=("$(printf '  %-12s %s' "coverage" "MISSING (warn)")")
+        fi
+    else
+        # Tool was unavailable (already warned pre-stage); surface it in the summary
+        # and as a WARN so a requested-but-undelivered coverage run is not silent.
+        overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_WARN}")"
+        _summary+=("$(printf '  %-12s %s' "coverage" "unavailable (warn)")")
+    fi
+fi
 
 echo ""
 echo "[run_tests] ############################################################"

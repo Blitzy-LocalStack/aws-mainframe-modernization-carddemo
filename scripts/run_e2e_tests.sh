@@ -222,6 +222,27 @@ else
     exit "${CARDDEMO_RC_FAIL}"
 fi
 
+# ---------------------------------------------------------------------------
+# Optional coverage instrumentation of the Python harness (finding F4).
+# WHY: when CARDDEMO_COVERAGE=1 (set by `run_tests.sh --coverage`), pytest is run
+# UNDER coverage.py so the reusable harness (tests/helpers, tests/mocks) is
+# measured. We only prepend `coverage run -m` and leave the existing invocation
+# line untouched -- it already expands "${CARDDEMO_PYTEST[@]}", so wrapping the
+# array is the least-invasive hook. Parallel mode + the data-file location live
+# in the shared rcfile / COVERAGE_FILE (exported by the master), so the master's
+# `coverage combine` later merges every layer's data. Trade-off: a coverage tool
+# that is requested but unavailable is a WARN here (run uninstrumented) rather
+# than a hard failure -- coverage is an opt-in add-on, not a test gate.
+if [ "${CARDDEMO_COVERAGE:-0}" = "1" ]; then
+    if command -v coverage >/dev/null 2>&1; then
+        CARDDEMO_PYTEST=(coverage run --rcfile="$CARDDEMO_COVERAGERC" -m pytest)
+    elif command -v python3 >/dev/null 2>&1 && python3 -c 'import coverage' >/dev/null 2>&1; then
+        CARDDEMO_PYTEST=(python3 -m coverage run --rcfile="$CARDDEMO_COVERAGERC" -m pytest)
+    else
+        echo "[e2e] WARN: --coverage requested but 'coverage' unavailable; running uninstrumented" >&2
+    fi
+fi
+
 mkdir -p "$CARDDEMO_REPORTS_DIR"
 
 echo "[e2e] ============================================================"

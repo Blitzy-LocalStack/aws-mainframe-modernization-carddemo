@@ -33,17 +33,28 @@
 #
 # Return / Exit codes (CardDemo RC rubric):
 #   0  all requested programs (and, if --with-tests, all test programs) compiled
-#      cleanly; any known-unsupported program failed exactly as documented.
-#   8  cobc is unavailable; a promised program failed to compile; a
-#      known-unsupported program did NOT fail as documented (unexpected success
-#      or an unexpected different failure); or --with-tests was requested but the
-#      COBOL unit-test layer is absent/empty (finding MA-03: an explicitly
-#      ENABLED layer that is missing is a hard failure, never a soft warning).
+#      cleanly and no known-unsupported program was attempted (or none exist).
+#   4  warn: a KNOWN-UNSUPPORTED, immutable-baseline-blocked program
+#      (CBEXPORT/CBIMPORT) failed to compile exactly as documented, OR such a
+#      program UNEXPECTEDLY compiled (inventory drift). The core programs built,
+#      so the suite still runs, but the aggregate is honestly non-green because a
+#      required deliverable was NOT produced (finding F2). Opt in to --require-cobol
+#      (scripts/run_tests.sh) to escalate this WARN to a hard failure.
+#   8  cobc is unavailable; a promised (supported) program failed to compile; a
+#      known-unsupported program failed for a DIFFERENT reason than documented; or
+#      --with-tests was requested but the COBOL unit-test layer is absent/empty
+#      (finding MA-03: an explicitly ENABLED layer that is missing is a hard
+#      failure, never a soft warning).
 #   2  operator usage error (unknown flag).
 #
-#   RC=4 is deliberately NOT produced by this build script: per MA-03 the soft
-#   RC=4 rung is reserved for expected BUSINESS rejects at run time, never for
-#   missing build/test infrastructure.
+#   WHY (finding F2 reconciled with MA-03): RC=4 IS now produced -- for a
+#   KNOWN-UNSUPPORTED, permanently-blocked deliverable (a documented compile
+#   failure the AAP forbids fixing, since app/cbl is REFERENCE-only). This is
+#   deliberately distinct from "missing build/test infrastructure", which remains
+#   a hard RC=8: a blocked deliverable is a KNOWN condition worth flagging honestly
+#   (non-green) WITHOUT permanently reddening CI, whereas missing infrastructure is
+#   an actionable failure. Formerly this path returned 0, dishonestly reporting a
+#   blocked deliverable as build success.
 #
 # Errors / Exceptions:
 #   Missing cobc -> diagnostic to stderr, exit 8. A per-program compile failure
@@ -288,20 +299,32 @@ carddemo_compile_unsupported() {
     # Parameters:
     #   $1 (string) - program name (CBEXPORT / CBIMPORT).
     # Returns :
-    #   0  the documented baseline defect occurred exactly as expected
-    #      (compile failed with the CARDDEMO_UNSUPPORTED_SIGNATURE diagnostic).
-    #      This is the normal, documented state and does NOT fail the build.
-    #   4  UNEXPECTED SUCCESS -- the source now compiles (the immutable baseline
-    #      may have changed); a WARN so the operator reconciles the inventory,
-    #      but not a hard failure because an extra artifact is not harmful.
+    #   4  EITHER (a) the documented baseline defect occurred exactly as expected
+    #      (compile failed with the CARDDEMO_UNSUPPORTED_SIGNATURE diagnostic) --
+    #      a BLOCKED DELIVERABLE that must be surfaced honestly (finding F2); OR
+    #      (b) UNEXPECTED SUCCESS -- the source now compiles (the immutable
+    #      baseline may have changed) and the inventory needs reconciling. Both
+    #      are WARN: non-fatal (the core built, so the suite still runs) yet
+    #      non-green, so neither a blocked deliverable nor inventory drift is
+    #      silently reported as build success.
     #   8  UNEXPECTED FAILURE -- it failed for a DIFFERENT reason than the
     #      documented defect; surfaced as a real failure to investigate.
     # Errors  : writes the captured compiler diagnostics to stderr.
-    # WHY (Trade-off): attempting the compile (rather than skipping it) means a
-    # baseline that gets fixed upstream is detected immediately, while the
-    # signature check keeps the "expected" path from masking a genuinely new
-    # error. RC=4 is used ONLY for the benign inventory-drift case here; it is
-    # never used to hide a build error.
+    # WHY (finding F2): the documented-defect path formerly returned 0, which let
+    # the aggregate build report GREEN even though a required AAP deliverable
+    # (CBEXPORT/CBIMPORT) was blocked and produced no binary -- redefining a
+    # blocked deliverable as acceptable success. It now returns WARN(4): the exit
+    # code honestly reflects "not fully built" while staying non-fatal so the rest
+    # of the suite still runs (the conftest build fixture and every sub-runner
+    # already treat build rc==4 as non-blocking and rc>=8 as fatal, so this change
+    # aligns the build with the contract they were designed for).
+    # WHY (Trade-off, WARN not FAIL): a blocked-but-documented deliverable is a
+    # KNOWN, immutable-baseline condition (app/cbl is REFERENCE-only per AAP 0.8.2,
+    # so the .cbl cannot be fixed), deliberately distinct from a real test failure.
+    # An operator who wants it to be a hard error opts in via --require-cobol
+    # (run_tests.sh), which the conftest gate honours. Attempting the compile (not
+    # skipping) still detects an upstream fix immediately, and the signature check
+    # keeps the "expected" path from masking a genuinely new error (which returns 8).
     local name="$1" src out log
     local -a flags
     mapfile -t flags < <(carddemo_cobc_flags)
@@ -320,7 +343,9 @@ carddemo_compile_unsupported() {
         echo "[build]   KNOWN-UNSUPPORTED: '$name' cannot compile against the"
         echo "[build]   immutable baseline (missing FD key field"
         echo "[build]   '$CARDDEMO_UNSUPPORTED_SIGNATURE'); documented, expected."
-        return 0
+        echo "[build]   -> aggregating WARN (rc=4): blocked deliverable makes the"
+        echo "[build]   build non-green but stays non-fatal so the suite runs (F2)."
+        return "${CARDDEMO_RC_WARN}"
     fi
     echo "[build]   UNEXPECTED FAILURE building '$name' (not the documented" >&2
     echo "[build]   '$CARDDEMO_UNSUPPORTED_SIGNATURE' defect):" >&2
@@ -436,16 +461,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Attempt the KNOWN-UNSUPPORTED programs and report honestly (finding CR-01).
-# The documented baseline defect does not poison the aggregate RC; an
-# unexpected outcome (success, or a different error) is surfaced.
+# Attempt the KNOWN-UNSUPPORTED programs and report honestly (findings CR-01, F2).
+# The documented baseline defect now WARNs (rc=4) so the aggregate is honestly
+# non-green (a required deliverable was not produced); an unexpected outcome
+# (success, or a different error) is surfaced at rc=4/rc=8 respectively.
 # ---------------------------------------------------------------------------
 for _p in "${CARDDEMO_UNSUPPORTED_PROGRAMS[@]}"; do
     echo "[build] unsup  : $_p (known-unsupported; attempting)"
-    carddemo_compile_unsupported "$_p"
-    _unsup_rc=$?
-    # RC 0 (documented defect) contributes nothing; RC 4 (unexpected success)
-    # and RC 8 (unexpected failure) are aggregated so they surface in the total.
+    # WHY (errexit-safe, finding F2): this call now returns a non-zero WARN(4) for
+    # the documented-defect path (it used to return 0). Under `set -euo pipefail`
+    # a BARE call would abort the entire build the instant it returns non-zero --
+    # skipping CBIMPORT and the final aggregate/exit. Capturing via `|| _unsup_rc=$?`
+    # (the same errexit suppression the main/module loops get for free from their
+    # `if carddemo_compile ...; then` guards) lets the loop process every program
+    # and fold each outcome into overall_rc. Alternatives Considered: wrapping the
+    # call in `if ! ...; then` was rejected because we need the EXACT rc (4 vs 8),
+    # not just pass/fail.
+    _unsup_rc=0
+    carddemo_compile_unsupported "$_p" || _unsup_rc=$?
+    # WHY (finding F2): every non-zero outcome here is aggregated -- RC 4 (blocked
+    # deliverable failing as documented, OR unexpected success/inventory drift) and
+    # RC 8 (unexpected different failure) all surface in the total so the build can
+    # never report green while a required program is missing its binary.
     overall_rc="$(carddemo_rc_worst "$overall_rc" "$_unsup_rc")"
 done
 

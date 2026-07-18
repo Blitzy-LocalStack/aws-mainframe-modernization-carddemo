@@ -87,6 +87,12 @@ export CARDDEMO_REPO_ROOT="${CARDDEMO_REPO_ROOT:-$(cd "$_carddemo_scripts_dir/..
 # ---------------------------------------------------------------------------
 export CARDDEMO_BUILD_DIR="${CARDDEMO_BUILD_DIR:-$CARDDEMO_REPO_ROOT/build}"
 export CARDDEMO_REPORTS_DIR="${CARDDEMO_REPORTS_DIR:-$CARDDEMO_REPO_ROOT/reports}"
+# WHY (finding F4): the coverage rcfile path is centralised here -- the single
+# file every runner sources -- so the master (coverage combine/xml) and the
+# per-layer coverage-run wrappers all reference ONE rcfile and can never drift.
+# It is repo-root-relative because tests/.coveragerc's `source`/`[xml]` paths are
+# written relative to the repo root (coverage is invoked from there).
+export CARDDEMO_COVERAGERC="${CARDDEMO_COVERAGERC:-$CARDDEMO_REPO_ROOT/tests/.coveragerc}"
 
 # ---------------------------------------------------------------------------
 # Per-run, per-worker, CONTAINED test workspace (mutable, isolated) -- MA-04.
@@ -135,6 +141,54 @@ if [ -n "${COB_LIBRARY_PATH:-}" ]; then
     esac
 else
     export COB_LIBRARY_PATH="$CARDDEMO_BUILD_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# Repo-local virtualenv PATH self-provisioning (finding F1).
+# Purpose:
+#   Make the repo-local Python virtualenv's bin directory discoverable to every
+#   runner that sources this file, so the documented single-command entry points
+#   (e.g. `bash scripts/run_tests.sh --with-localstack`) find their Python-side
+#   tooling -- pytest, coverage, and especially `awslocal` -- WITHOUT the caller
+#   having to `source .venv/bin/activate` first.
+# Parameters (environment, all optional):
+#   CARDDEMO_VENV_DIR     - override the virtualenv location (default <repo>/.venv).
+#   CARDDEMO_NO_VENV_PATH - set to 1 to DISABLE this provisioning entirely.
+# Returns : none (exports an updated PATH when a venv bin dir is found).
+# Errors  : none raised; a missing venv is silently ignored (system PATH is used).
+#
+# WHY (Root cause of F1): the AWS-integration E2E layer invokes `awslocal`, which
+# on this runner is installed ONLY inside the repo virtualenv (.venv/bin/awslocal).
+# When a user runs the DOCUMENTED command on a clean login shell (venv NOT
+# activated), setup_localstack.sh could not find `awslocal`, reported
+# "prerequisites missing", and SKIPPED the mandatory real-S3 dataset-staging tests
+# -- silently turning a required AAP deliverable into a no-op while the suite still
+# reported non-fatal. Prepending the venv bin dir here (the single file EVERY
+# runner sources) restores the "no prior setup required" contract at its root
+# cause instead of patching each runner.
+# WHY (Idempotent + guarded, mirroring the COB_LIBRARY_PATH merge above):
+#   - Alternatives Considered: (a) requiring users to `activate` the venv was
+#     rejected because the entry points are documented as self-contained; (b)
+#     hard-failing when awslocal is absent was rejected because the venv bin dir
+#     is the deterministic, already-provisioned location -- adopting it is more
+#     helpful than erroring. An explicit CARDDEMO_NO_VENV_PATH escape hatch is
+#     provided for callers who deliberately manage their own interpreter (e.g. a
+#     CI image whose tools are already on PATH).
+#   - Assumption: a bin/ under the venv dir indicates a usable environment; we
+#     PREPEND it so its tools win over any older system copies, and reuse the same
+#     `case ":$PATH:"` guard as COB_LIBRARY_PATH so repeated sourcing in one
+#     pipeline never double-prepends.
+# ---------------------------------------------------------------------------
+if [ "${CARDDEMO_NO_VENV_PATH:-0}" != "1" ]; then
+    _carddemo_venv_dir="${CARDDEMO_VENV_DIR:-$CARDDEMO_REPO_ROOT/.venv}"
+    _carddemo_venv_bin="$_carddemo_venv_dir/bin"
+    if [ -d "$_carddemo_venv_bin" ]; then
+        case ":$PATH:" in
+            *":$_carddemo_venv_bin:"*) : ;;   # already on PATH -> no change
+            *) export PATH="$_carddemo_venv_bin:$PATH" ;;
+        esac
+    fi
+    unset _carddemo_venv_dir _carddemo_venv_bin
 fi
 
 # Create the TRUSTED dirs eagerly (cheap; the build needs BUILD_DIR).

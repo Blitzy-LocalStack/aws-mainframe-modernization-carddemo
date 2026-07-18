@@ -62,8 +62,10 @@ defined in copybook ``CVEXPORT`` copied into WORKING-STORAGE, NOT into the file 
 A ``RECORD KEY`` must name a field inside the file's own record, so ``cobc`` rejects the
 SELECT and emits no binary. This is a **production source defect**, and fixing production
 COBOL is explicitly OUT OF SCOPE (AAP Section 0.8.2 -- production code is REFERENCE
-only). The suite's build script ``scripts/build_test_programs.sh`` already classifies
-both as "KNOWN-UNSUPPORTED" and does not fail the build.
+only). The suite's build script ``scripts/build_test_programs.sh`` classifies both as
+"KNOWN-UNSUPPORTED": it now WARNs (rc=4) so the build is honestly non-green about the
+blocked deliverable (finding F2), while staying non-fatal (rc<8) so the rest of the
+suite still runs.
 
 Because export/import is an **AAP-mandatory feature** that cannot be exercised on this
 runner, this test routes its unavailability through the local strict gate
