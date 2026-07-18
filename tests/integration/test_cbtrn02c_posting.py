@@ -96,6 +96,18 @@ There is **no** ``__init__.py`` anywhere under ``tests/``; the tree resolves as 
 from __future__ import annotations
 
 import re
+
+# WHY (QA Issue 6 / F-D -- observable abend path): the CEE3ABD shim builder below
+# needs the standard build primitives -- ``shutil.which`` to locate ``cobc``,
+# ``subprocess.run`` to compile the shim, ``tempfile.mkdtemp`` for a private
+# scratch dir, and ``os.replace`` for an atomic same-filesystem publish. These are
+# imported at module top (not lazily) because the builder is a first-class helper
+# of this module, mirroring the committed CEEDAYS-shim pattern in
+# ``tests/integration/test_csutldtc_date.py``.
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -116,6 +128,26 @@ from tests.helpers.record_codec import (
     TCATBAL_LAYOUT,
     TRAN_LAYOUT,
 )
+
+# WHY (QA Issue 5 / F-B -- committed goldens must be the authoritative oracle): the
+# fixture-derived Decimal assertions below prove the posting math and reject reasons
+# independently, but the checkpoint/AAP (0.7.2) also requires the committed
+# tests/golden/posting/**/*.expected files to be *consumed* so any whole-record drift
+# (the QA Issue 2 filler-byte regression) is caught. assert_matches_golden is the suite's
+# AAP-designated byte-exact comparator (tests/helpers/golden_compare.py); a missing golden
+# is a hard error, never a silent pass. WHY both oracles coexist (Trade-off): the Decimal
+# model localises WHICH balance/reason is wrong, while the golden pins EVERY observable
+# output byte-for-byte (all five files: tranfile, acctdat, tcatbal, dalyrejs, return_code).
+from tests.helpers.golden_compare import assert_matches_golden
+
+# WHY (QA Issue 6 / F-D -- consistent required-layer gating): the CEE3ABD shim
+# builder reuses the suite's single strict-awareness gate so a *missing* toolchain
+# (``cobc`` off PATH) is graded identically everywhere -- a clean skip by default,
+# a hard failure under ``CARDDEMO_REQUIRE_COBOL`` (the same policy Issue 4 / F-C
+# established for provisioning's ``_ensure_cobdatft``). A genuine *compile failure*
+# of the shim source (which this module fully controls) is graded separately as a
+# hard failure -- see ``_ensure_cee3abd``.
+from tests.conftest import _require_or_skip
 
 # WHY (suite contract): the integration marker is registered in tests/pytest.ini with
 # --strict-markers, so a bare/mistyped marker is a hard error rather than a silent
@@ -997,6 +1029,276 @@ def _run_reject(cobol_runner: object, repo_root: Path, scenario: str) -> RejectO
     )
 
 
+# The five observable outputs CBTRN02C produces per scenario, paired with the golden
+# file name, the ASSIGN external name, the record layout, and how the file is read back.
+# WHY a single declarative table (single source of truth): every scenario asserts the
+# SAME five outputs, so listing them once -- rather than five open-coded calls per test --
+# keeps the golden contract reviewable in one place and impossible to get out of step
+# between the nine scenario tests. ``kind`` distinguishes the read-back mechanism:
+#   * "rc"      -> the run's integer RETURN-CODE (text mode, no layout);
+#   * "indexed" -> an ORGANIZATION INDEXED output read via unload_output (TRANFILE is
+#                  auto-created OUTPUT and may be absent on a reject/empty run);
+#   * "seq"     -> an ORGANIZATION SEQUENTIAL output read as raw bytes (DALYREJS is
+#                  empty on a clean post).
+_GOLDEN_OUTPUTS = (
+    ("return_code", "", None, "rc"),
+    ("tranfile", "TRANFILE", "TRAN", "indexed"),
+    ("acctdat", "ACCTFILE", "ACCOUNT", "indexed"),
+    ("tcatbal", "TCATBALF", "TCATBAL", "indexed"),
+    ("dalyrejs", "DALYREJS", "REJECT", "seq"),
+)
+
+
+def _assert_posting_goldens(cobol_runner, result, repo_root, scenario, *, update=None):
+    """Compare (or, under the guarded protocol, regenerate) a scenario's posting goldens.
+
+    Purpose
+    -------
+    QA Issue 5 (MAJOR) found this module proved its math/reject reasons with fixture-
+    derived Decimal assertions but never *consumed* the committed
+    ``tests/golden/posting/<scenario>/*.expected`` files, so whole-record drift -- the QA
+    Issue 2 ``zero_balance`` filler regression (20 trailing bytes that are NUL at runtime
+    but spaces in the stale golden) -- went uncaught. This helper is the single place that
+    wires the AAP-designated byte-exact comparator over ALL five observable outputs of one
+    scenario, driven by :data:`_GOLDEN_OUTPUTS`.
+
+    WHY one helper drives BOTH compare and regenerate (single source of truth): the
+    regeneration path (``update=True``) and the test's compare path (``update=None``) MUST
+    frame exactly the same bytes, or a regenerated golden would not round-trip. The
+    committed test calls always use the ``update=None`` default (pure compare); only a
+    deliberate, never-committed regeneration run passes ``update=True`` -- and even then
+    :func:`assert_matches_golden` still enforces the full MA-12 two-step guard.
+
+    WHY record mode (``layout=``) with ``encoding="latin-1"`` (Assumptions/Trade-off):
+    record mode frames fixed-width output by width and blanks only the layout's
+    ``normalize_ts`` field (TRAN/REJECT ``*-PROC-TS`` stamped from CURRENT-DATE), so the
+    non-deterministic timestamp never causes a flake while every other byte -- including
+    the LOW-VALUES ``0x00`` FILLER that distinguishes Issue 2 -- is compared verbatim.
+    latin-1 is the identity byte<->codepoint map, so goldens carrying NUL/overpunch bytes
+    are read and (re)written byte-for-byte with no re-encoding.
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        The active runner (its workspace holds the indexed TRANFILE/ACCTFILE/TCATBALF).
+    result : tests.helpers.cobol_runner.RunResult
+        The completed CBTRN02C run (source of the return code and the DALYREJS path).
+    repo_root : pathlib.Path
+        Repository root, used to locate the golden directory.
+    scenario : str
+        The posting scenario name (selects ``tests/golden/posting/<scenario>/``).
+    update : bool or None, optional
+        Forwarded verbatim to :func:`assert_matches_golden`. ``None`` (default) compares;
+        an explicit ``True`` requests a guarded regeneration. Defaults to ``None``.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    tests.helpers.golden_compare.GoldenMismatchError
+        If any golden is missing (compare mode) or a normalized output differs from it.
+    tests.helpers.golden_compare.GoldenUpdateError
+        If ``update=True`` but the MA-12 safe-update guard blocks the write.
+    """
+    golden_dir = Path(repo_root) / "tests" / "golden" / _DOMAIN / scenario
+
+    for gname, assign, layout, kind in _GOLDEN_OUTPUTS:
+        golden_path = golden_dir / f"{gname}.expected"
+        if kind == "rc":
+            # RETURN-CODE (text mode): the AAP RC-rubric signal (0 post / 4 reject).
+            actual = str(result.returncode)
+            assert_matches_golden(actual, golden_path, update=update)
+        elif kind == "indexed":
+            # WHY guard on existence (Trade-off, mirrors _read_posted): TRANFILE is opened
+            # OUTPUT and auto-created, but a reject-only or empty-input run writes no
+            # records; whether the ISAM backend then leaves an empty physical file is
+            # implementation-defined, so a missing file means "no records" (matches the
+            # 0-byte golden) rather than an unload error.
+            if cobol_runner.assign_path(assign).exists():
+                records = cobol_runner.unload_output(assign, layout=layout)
+            else:
+                records = []
+            assert_matches_golden(
+                "\n".join(records), golden_path,
+                layout=layout, encoding="latin-1", update=update,
+            )
+        else:  # "seq"
+            # DALYREJS is SEQUENTIAL: read the raw bytes (empty string when the clean-post
+            # run wrote no reject), letting record mode frame it by width on both sides.
+            rej_path = result.output_path(assign)
+            raw = rej_path.read_text(encoding="latin-1") if rej_path.exists() else ""
+            assert_matches_golden(
+                raw, golden_path,
+                layout=layout, encoding="latin-1", update=update,
+            )
+
+
+# ===========================================================================
+# CEE3ABD abend shim (QA Issue 6 / F-D) -- make the terminal abend observable.
+# ===========================================================================
+# The abend code CardDemo uses. WHY 999 (Assumption, verified repo-wide): EVERY
+# ``CALL 'CEE3ABD'`` site in app/cbl (CBTRN02C 9999-ABEND-PROGRAM and its peers)
+# executes ``MOVE 999 TO ABCODE`` immediately before the call, so 999 is the single
+# canonical CardDemo user-abend code -- the shim can hard-code it faithfully rather
+# than reflect the (always-999) argument.
+_CEE3ABD_ABEND_CODE = 999
+
+# The exact stdout marker the shim DISPLAYs. WHY a named constant coupled to the
+# COBOL literal below (Trade-off): the marker is emitted by the COBOL ``DISPLAY``
+# in ``_CEE3ABD_SHIM_SRC`` and asserted by the Python test; declaring the expected
+# rendering once here keeps the two in lock-step. The trailing ``0999`` is how the
+# ``PIC 9(4)`` field ``WS-ABEND-CODE`` (value 999) renders -- a 4-digit zoned value.
+_CEE3ABD_MARKER = "CEE3ABD TEST SHIM - ABEND CODE 0999"
+
+# The CEE3ABD shim source: a minimal stand-in for the absent LE ``CEE3ABD`` abend
+# service. WHY this exists at all (Alternatives Considered): CardDemo's fail-fast
+# handler ``9999-ABEND-PROGRAM`` ends with ``CALL 'CEE3ABD' USING ABCODE, TIMING``;
+# GnuCOBOL ships no Language Environment, so at run time libcob emits
+# ``module 'CEE3ABD' not found`` and the terminal abend is never actually executed
+# (exactly the coverage gap QA Issue 6 flagged). A tiny resolvable ``CEE3ABD.so`` on
+# COB_LIBRARY_PATH closes the gap so the abend path is observable end-to-end.
+#
+# WHY NO ``PROCEDURE DIVISION USING`` (Trade-off, robustness across call sites):
+# CBTRN02C calls with two arguments (``ABCODE, TIMING``) but CBEXPORT / CBSTM03A call
+# ``CEE3ABD`` with NONE. A shim that declared ``USING LK-ABCODE LK-TIMING`` and then
+# dereferenced ``LK-ABCODE`` would read an unbound linkage item (undefined behaviour)
+# when invoked by the no-argument callers. GnuCOBOL lets a program with no USING
+# clause be CALLed WITH arguments (the extras are simply ignored), so omitting USING
+# makes ONE shim safe for every CEE3ABD caller in the codebase. The abend code is not
+# taken from the argument for the same reason -- and it need not be, since every site
+# passes 999 (see ``_CEE3ABD_ABEND_CODE``).
+#
+# WHY it terminates via ``MOVE 999 TO RETURN-CODE`` + ``STOP RUN`` and never GOBACKs
+# (Assumption): the real ``CEE3ABD`` is a *terminal* abend -- control never returns to
+# the caller. GnuCOBOL has no true abend/dump, so the faithful emulation is abnormal
+# process termination with a non-zero code; RETURN-CODE 999 surfaces as process exit
+# 231 (999 & 0xFF), which the suite's RC rubric reads as a hard failure (RC != 0).
+_CEE3ABD_SHIM_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. CEE3ABD.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01 WS-ABEND-CODE PIC 9(4) VALUE 999.\n"
+    "       PROCEDURE DIVISION.\n"
+    "           DISPLAY 'CEE3ABD TEST SHIM - ABEND CODE ' WS-ABEND-CODE\n"
+    "           MOVE 999 TO RETURN-CODE\n"
+    "           STOP RUN.\n"
+)
+
+
+def _ensure_cee3abd(build_dir: Path) -> None:
+    """Compile the ``CEE3ABD`` abend shim into ``build_dir`` on demand.
+
+    Purpose
+    -------
+    Guarantee that ``build_dir/CEE3ABD.so`` exists before the abend-path test runs
+    the compiled ``CBTRN02C``. ``build_dir`` is the directory ``cobol_runner`` places
+    on ``COB_LIBRARY_PATH``, so the dynamically-``CALL``'d ``CEE3ABD`` resolves to
+    this shim at run time and the terminal abend becomes observable (QA Issue 6).
+    If the shim already exists the call returns immediately, so the cost is paid at
+    most once per session.
+
+    Parameters
+    ----------
+    build_dir : pathlib.Path
+        Directory the compiled ``CEE3ABD.so`` is published into. Must be the same
+        directory ``cobol_runner`` exposes on ``COB_LIBRARY_PATH`` (the ``build_dir``
+        fixture guarantees this).
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    Skipped
+        Via :func:`_require_or_skip` when ``cobc`` is not on ``PATH`` and
+        ``CARDDEMO_REQUIRE_COBOL`` is unset. WHY skip (not fail) here: an absent
+        toolchain is an environment-capability condition, not a defect -- graded
+        exactly like the rest of the suite (Issue 4 / F-C policy).
+    Failed
+        Via :func:`pytest.fail` when ``cobc`` IS present but the shim source (which
+        this module fully controls and which is verified to compile under
+        ``--std=ibm-strict``) fails to compile. WHY hard-fail (not skip): a compile
+        failure of a controlled test artifact is a real defect and must never hide
+        behind a silent skip -- the same reasoning Issue 4 / F-C applied to
+        provisioning's ``_ensure_cobdatft`` stub build.
+    """
+    shim_so = build_dir / "CEE3ABD.so"
+    # WHY the existence guard (Trade-off, idempotence + xdist safety): a cheap check
+    # makes this near-free to call from the test body -- the first invocation compiles,
+    # any later one short-circuits -- and, paired with the atomic publish below, keeps
+    # concurrent pytest-xdist workers from doing redundant or racing work.
+    if shim_so.exists():
+        return
+
+    cobc = shutil.which("cobc")
+    if cobc is None:
+        # WHY route through the shared gate (Refactoring Rationale): in practice this
+        # branch is unreachable in the abend test because ``cobol_runner`` transitively
+        # depends on ``built_programs``, which already compiled CBTRN02C with ``cobc``.
+        # It is kept as a defensive, consistent guard for the edge case of a pre-built
+        # ``CARDDEMO_BUILD_DIR`` where the build step was short-circuited by its stamp.
+        _require_or_skip("GnuCOBOL 'cobc' not on PATH; cannot build the CEE3ABD abend shim")
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    # WHY compile in a private temp dir INSIDE build_dir, then atomically publish
+    # (Refactoring Rationale + parallel safety): all scratch work (writing the ``.cbl``
+    # and compiling) happens in a throwaway directory; only the finished ``.so`` is
+    # ``os.replace``-d into ``build_dir``. This (a) leaves no stray ``.cbl`` in
+    # ``build_dir`` (honouring the suite's "no stray sources" rule) and (b) makes
+    # publication atomic and same-filesystem, so a concurrent xdist worker can never
+    # observe or write a half-built shim. The temp dir lives INSIDE ``build_dir`` so the
+    # rename is same-device (``os.replace`` is only atomic within one filesystem; a
+    # system ``/tmp`` on another mount could otherwise raise EXDEV).
+    scratch = Path(tempfile.mkdtemp(prefix=".abend_build_", dir=str(build_dir)))
+    try:
+        shim_src = scratch / "CEE3ABD.cbl"
+        shim_src.write_text(_CEE3ABD_SHIM_SRC, encoding="ascii")
+        tmp_so = scratch / "CEE3ABD.so"
+
+        # Compile the shim as a dynamically-loadable module (``-m``) under the repo's
+        # production compile recipe.
+        # WHY ``-fixed --std=ibm-strict`` (Trade-off vs. the CEEDAYS shim): unlike the
+        # CEEDAYS shim -- which had to drop to ``-free -fintrinsics=ALL`` because it uses
+        # an intrinsic the strict dialect rejects -- this shim uses only plain COBOL, so
+        # it stays on the EXACT production dialect (``cobc -m -fixed --std=ibm-strict``,
+        # per scripts/build_test_programs.sh). Keeping the test shim on the production
+        # dialect is strictly preferable: it proves the shim is dialect-clean.
+        built = subprocess.run(
+            [cobc, "-m", "-fixed", "--std=ibm-strict", "-o", str(tmp_so), str(shim_src)],
+            cwd=str(scratch),
+            capture_output=True,
+            text=True,
+        )
+        # WHY check returncode AND the artifact (Assumption): cobc emits a benign
+        # ``_FORTIFY_SOURCE redefined`` warning from the gcc backend (the environment's
+        # default CFLAGS collide with cobc's own) that does NOT set a non-zero exit; a
+        # clean build is rc == 0 with the ``.so`` present, so we gate on both and treat
+        # the warning as noise, never as failure.
+        if built.returncode != 0 or not tmp_so.exists():
+            pytest.fail(
+                "CEE3ABD abend shim build failed (cobc present, so this is a defect in "
+                "the shim source, not an environment gap): "
+                + (built.stderr or built.stdout or "(no compiler output)").strip(),
+                pytrace=False,
+            )
+
+        # Publish atomically. WHY ``os.replace`` (Assumption): a POSIX rename within one
+        # filesystem is atomic, so a reader sees either no shim or the fully-written one
+        # -- never a truncated file -- which is what makes the concurrent-worker race
+        # benign.
+        os.replace(str(tmp_so), str(shim_so))
+    finally:
+        # Always remove the scratch dir (best-effort). The finished ``.so`` was moved out
+        # by ``os.replace``, so only the ``.cbl`` and any cobc intermediates remain;
+        # deleting them keeps ``build_dir`` clean.
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 # ===========================================================================
 # Tests -- happy path (post + exact fixed-point balance updates).
 # ===========================================================================
@@ -1062,6 +1364,11 @@ def test_happy_path_posts_and_updates_balances(cobol_runner, repo_root):
     assert len(matches) == 1, f"expected exactly one posted tran with id {tran_id!r}"
     assert matches[0]["TRAN-AMT"] == out.amount
 
+    # Golden oracle (QA Issue 5): after proving the math field-by-field, also assert all
+    # five observable outputs byte-for-byte against the committed goldens (whole-record
+    # layout the value-only checks above do not inspect).
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
+
 
 # ===========================================================================
 # Tests -- the four reject reasons (100-103). One explicit test each so a
@@ -1110,6 +1417,10 @@ def test_reject_100_card_missing(cobol_runner, repo_root):
     assert out.posted == []
     assert out.processed - out.rejected == 0
 
+    # Golden oracle (QA Issue 5): assert the reject stream (DALYREJS reason 0100 record),
+    # the empty TRANFILE, the untouched masters, and RETURN-CODE 4 byte-for-byte.
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
+
 
 def test_reject_101_acct_missing(cobol_runner, repo_root):
     """Reject reason 101 is raised when the resolved account is absent from ``ACCTFILE``.
@@ -1151,6 +1462,10 @@ def test_reject_101_acct_missing(cobol_runner, repo_root):
     assert _REJECT_DESCRIPTIONS[exp.reason] in out.first_desc
     assert out.posted == []
     assert out.processed - out.rejected == 0
+
+    # Golden oracle (QA Issue 5): assert DALYREJS reason 0101, empty TRANFILE, untouched
+    # masters, and RETURN-CODE 4 byte-for-byte against the committed goldens.
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
 
 
 def test_reject_102_overlimit(cobol_runner, repo_root):
@@ -1196,6 +1511,10 @@ def test_reject_102_overlimit(cobol_runner, repo_root):
     assert out.posted == []
     assert out.processed - out.rejected == 0
 
+    # Golden oracle (QA Issue 5): assert DALYREJS reason 0102, empty TRANFILE, untouched
+    # masters, and RETURN-CODE 4 byte-for-byte against the committed goldens.
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
+
 
 def test_reject_103_expired(cobol_runner, repo_root):
     """Reject reason 103 is raised when the transaction date is past account expiration.
@@ -1239,6 +1558,10 @@ def test_reject_103_expired(cobol_runner, repo_root):
     assert _REJECT_DESCRIPTIONS[exp.reason] in out.first_desc
     assert out.posted == []
     assert out.processed - out.rejected == 0
+
+    # Golden oracle (QA Issue 5): assert DALYREJS reason 0103, empty TRANFILE, untouched
+    # masters, and RETURN-CODE 4 byte-for-byte against the committed goldens.
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
 
 
 # ===========================================================================
@@ -1295,6 +1618,10 @@ def test_boundary_exact_limit_posts(cobol_runner, repo_root):
     )
     assert ws_temp_bal == out.orig_account["ACCT-CREDIT-LIMIT"]
 
+    # Golden oracle (QA Issue 5): the at-limit post must produce the same five outputs as
+    # the committed goldens (proves the `>=` boundary posts, not just the derived balance).
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
+
 
 def test_boundary_expiry_equal_posts(cobol_runner, repo_root):
     """A transaction dated EXACTLY on the expiration date POSTS (the ``>=`` boundary).
@@ -1341,6 +1668,10 @@ def test_boundary_expiry_equal_posts(cobol_runner, repo_root):
     # test mirrors exactly the sub-field the rule inspects.
     tran_date = out.tran["DALYTRAN-ORIG-TS"][:10]
     assert tran_date == out.orig_account["ACCT-EXPIRAION-DATE"]
+
+    # Golden oracle (QA Issue 5): the equal-to-expiry post must produce the same five
+    # outputs as the committed goldens (proves the date `>=` boundary posts).
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
 
 
 # ===========================================================================
@@ -1393,6 +1724,10 @@ def test_empty_input(cobol_runner, repo_root):
     assert rejects == []
     assert posted == []
 
+    # Golden oracle (QA Issue 5): empty input must yield empty TRANFILE and DALYREJS, the
+    # untouched seeded master, and RETURN-CODE 0 -- all five byte-for-byte vs the goldens.
+    _assert_posting_goldens(cobol_runner, result, repo_root, exp.scenario)
+
 
 def test_zero_balance(cobol_runner, repo_root):
     """A zero-amount transaction on a zero-balance account posts cleanly (CREATE branch).
@@ -1442,6 +1777,11 @@ def test_zero_balance(cobol_runner, repo_root):
     assert out.orig_cat_balance is None, "zero_balance fixture must seed no category row"
     assert out.new_cat is not None, "the CREATE branch must write a new category row"
     assert out.new_cat["TRAN-CAT-BAL"] == out.expected_cat_balance
+
+    # Golden oracle (QA Issue 5 + Issue 2): zero_balance is the scenario whose committed
+    # tranfile golden carried the stale space-filler; wiring it here makes the regenerated
+    # NUL-filler golden authoritative so the drift can never silently reappear.
+    _assert_posting_goldens(cobol_runner, out.result, repo_root, exp.scenario)
 
 
 # ===========================================================================
@@ -1494,4 +1834,114 @@ def test_tcatbal_create_vs_update(cobol_runner, repo_root):
     assert update.new_cat["TRAN-CAT-BAL"] == update.expected_cat_balance
     # Prove it was a true increment (orig + amount), i.e. the REWRITE, not a fresh WRITE.
     assert update.expected_cat_balance == update.orig_cat_balance + update.amount
+
+
+
+# ===========================================================================
+# Tests -- fail-fast abend path (QA Issue 6 / F-D): the terminal CEE3ABD call
+# is made OBSERVABLE by resolving a test-only CEE3ABD shim on COB_LIBRARY_PATH.
+# ===========================================================================
+def test_bad_input_open_triggers_observable_cee3abd_abend(cobol_runner, build_dir):
+    """A missing required input drives CBTRN02C's fail-fast abend through the CEE3ABD shim.
+
+    Purpose
+    -------
+    Close the coverage gap QA Issue 6 flagged: CardDemo's hard-error handler
+    ``9999-ABEND-PROGRAM`` ends with ``CALL 'CEE3ABD' USING ABCODE, TIMING`` (LE
+    user-abend code 999), but with no Language Environment on the runner libcob
+    could only report ``module 'CEE3ABD' not found`` -- so the *terminal abend call
+    itself was never executed in-suite*. This test installs a resolvable, test-only
+    ``CEE3ABD.so`` shim and then deliberately triggers the fail-fast path by running
+    ``CBTRN02C`` with **no inputs staged**. ``CBTRN02C``'s first file operation is
+    ``0000-DALYTRAN-OPEN`` (``OPEN INPUT`` on ``DALYTRAN``); an absent file yields
+    FILE STATUS 35, which routes through ``9910-DISPLAY-IO-STATUS`` into
+    ``9999-ABEND-PROGRAM`` and calls the shim. The whole abend path -- diagnostic,
+    abend banner, resolved terminal call, and abnormal exit -- is then asserted.
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        Per-test runner (``cobol_runner`` fixture) bound to a fresh, isolated,
+        EMPTY workspace. Because the test stages nothing, every ``ASSIGN`` name --
+        ``DALYTRAN`` first -- resolves to a non-existent file, which is exactly the
+        deterministic bad-``OPEN`` condition the fail-fast path handles.
+    build_dir : pathlib.Path
+        The session build directory (``build_dir`` fixture) -- the same directory
+        ``cobol_runner`` places on ``COB_LIBRARY_PATH`` -- into which the CEE3ABD
+        shim is compiled so the ``CALL 'CEE3ABD'`` resolves at run time.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+        If the CEE3ABD module is still unresolved (the QA symptom persists), if the
+        fail-fast diagnostic / abend banner / shim marker is absent from stdout, or
+        if the process does not terminate abnormally (non-zero return code).
+    Skipped
+        Via :func:`_require_or_skip` (from ``_ensure_cee3abd``) if ``cobc`` is not on
+        ``PATH`` and ``CARDDEMO_REQUIRE_COBOL`` is unset.
+    Failed
+        Via :func:`pytest.fail` (from ``_ensure_cee3abd``) if the shim source fails
+        to compile while ``cobc`` is present.
+    tests.helpers.cobol_runner.CobolRunError
+        If the program times out (propagated from ``cobol_runner.run``).
+    """
+    # Install the resolvable CEE3ABD shim BEFORE running the program. WHY here and not
+    # in a fixture (Trade-off): the shim is specific to this single abend test, so
+    # building it inline keeps the dependency visible and localized; the builder's own
+    # existence-guard + atomic publish already make it idempotent and xdist-safe.
+    _ensure_cee3abd(build_dir)
+
+    # WHY stage NOTHING (Alternatives Considered): the cleanest, most deterministic way
+    # to force the fail-fast path is to make the very FIRST OPEN fail. CBTRN02C opens
+    # DALYTRAN (INPUT) first; an absent file gives FILE STATUS 35 unconditionally. An
+    # alternative -- staging a valid DALYTRAN then a *corrupt* INDEXED XREFFILE (FILE
+    # STATUS 39) -- also abends, but requires more setup and couples the test to indexed
+    # file internals; the empty-workspace trigger is simpler and equally faithful to the
+    # "bad OPEN / I/O -> abend" rule (AAP 0.4.1). The runner does NOT auto-create input
+    # files, so an unstaged DALYTRAN is genuinely absent (verified empirically).
+    result = cobol_runner.run(_PROGRAM)
+
+    # (1) THE Issue-6 fix: the shim RESOLVED. Before the shim, stderr carried
+    # ``libcob: error: module 'CEE3ABD' not found``; its absence proves the terminal
+    # abend call was actually dispatched to a resolvable module. WHY assert on the
+    # stable substring ``not found`` (Assumption): it is the invariant part of libcob's
+    # message across quoting styles/versions, so the assertion is robust.
+    assert "not found" not in result.stderr, (
+        "CEE3ABD is still unresolved -- the abend shim did not load. stderr:\n"
+        + result.stderr
+    )
+
+    # (2) The fail-fast DIAGNOSTIC path executed: CBTRN02C reports the failing file and
+    # its FILE STATUS before abending. WHY assert the exact ``NNNN0035`` rendering
+    # (Assumption): ``9910-DISPLAY-IO-STATUS`` DISPLAYs the literal label ``FILE STATUS
+    # IS: NNNN`` immediately followed by the 4-digit status; ``0035`` (file-not-found)
+    # is the deterministic status for OPEN INPUT of an absent file under the pinned
+    # GnuCOBOL 3.2.0 toolchain (verified empirically, stable across reruns).
+    assert "ERROR OPENING DALYTRAN" in result.stdout, result.stdout
+    assert "FILE STATUS IS: NNNN0035" in result.stdout, result.stdout
+    assert "ABENDING PROGRAM" in result.stdout, result.stdout
+
+    # (3) The shim itself EXECUTED (not merely resolved): its auditable marker proves the
+    # CALL reached the shim body. WHY an explicit marker (Trade-off, auditability): a
+    # financial-enterprise abend path should be observable in the run log, so the shim
+    # emits a self-identifying line carrying the simulated abend code (0999) rather than
+    # terminating silently -- distinguishing "shim ran" from "program exited early".
+    assert _CEE3ABD_MARKER in result.stdout, (
+        f"expected the CEE3ABD shim marker {_CEE3ABD_MARKER!r} in stdout:\n"
+        + result.stdout
+    )
+
+    # (4) ABNORMAL termination: the abend must NOT look like a clean run. The shim sets
+    # RETURN-CODE to the abend code (999), which surfaces as a non-zero process exit
+    # (999 & 0xFF == 231). WHY assert ``!= 0`` rather than ``== 231`` (Trade-off,
+    # portability): the RC rubric only distinguishes zero (success) from non-zero
+    # (failure); pinning the exact 8-bit-wrapped value would couple the test to the
+    # OS's exit-code truncation without adding financial meaning.
+    assert result.returncode != 0, (
+        f"expected abnormal termination (non-zero RC), got {result.returncode}"
+    )
 

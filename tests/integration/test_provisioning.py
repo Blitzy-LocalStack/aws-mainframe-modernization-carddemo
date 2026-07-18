@@ -85,6 +85,29 @@ from pathlib import Path
 
 import pytest
 
+# WHY (QA Issue 5 / F-C -- committed goldens must be the authoritative oracle): the
+# fixture-derived count/key assertions below prove each read/print round-trip
+# independently, but the checkpoint/AAP (0.7.2) also requires the committed
+# tests/golden/provisioning/**/*.expected files to be *consumed* so any whole-output
+# drift (e.g. the QA Issue 3 zoned-decimal overpunch regression in acct_print) is
+# caught. ``assert_matches_golden`` is the suite's AAP-designated byte-exact comparator
+# (tests/helpers/golden_compare.py); a missing golden is a hard error, never a silent
+# pass. WHY both oracles coexist (Trade-off): the fixture-derived checks localise WHICH
+# record count / key set is wrong, while the golden pins EVERY observable stdout byte
+# (the labeled-field/whole-record dump), the record count, and the RETURN-CODE.
+from tests.helpers.golden_compare import assert_matches_golden
+
+# WHY import the shared strict-mode gate (QA Issue 4 / F-C -- no silent green): a
+# genuinely-absent COBOL toolchain must become a HARD, report-visible FAILURE under
+# ``CARDDEMO_REQUIRE_COBOL`` (and a clean skip otherwise) rather than an unconditional
+# ``pytest.skip`` that lets CI exit green while the required COBOL layer never ran.
+# Reusing conftest's single-sourced helper (rather than re-reading the env var here)
+# keeps the strict-mode semantics identical across every integration module.
+# WHY (Assumption): conftest.py sits at tests/ and is importable as ``tests.conftest``
+# because the suite runs with ``PYTHONPATH=<repo_root>`` (conftest bootstraps it), the
+# same mechanism the sibling modules rely on for ``tests.helpers.*``.
+from tests.conftest import _require_or_skip
+
 # Every test in this module is an integration test. WHY (Assumption): the suite
 # runs with ``--strict-markers`` (tests/pytest.ini), so this marker must be
 # registered there / in conftest -- it is -- and applying it module-wide via
@@ -146,6 +169,15 @@ _COBDATFT_MODULE = "COBDATFT.so"
 #       list (Trade-off): the fixtures agent chooses the final name; trying the
 #       seed-style name, the ASSIGN-style name, and record-type synonyms makes
 #       the test robust to that choice without any cross-agent coordination.
+#   golden_stem        : the file-name stem under tests/golden/provisioning/
+#       <scenario>/ for this program's committed goldens (QA Issue 5 / F-C). The
+#       program emits three observable artifacts that are pinned byte-for-byte:
+#       ``<stem>_print.expected`` (full stdout), ``<stem>_count.expected`` (record
+#       count) and the scenario-shared ``return_code.expected`` (process RC).
+#       WHY a distinct stem (Assumption, verified against the committed tree): the
+#       golden authors named the files by record DOMAIN (card/xref/cust/acct), not
+#       by program id, so the stem is single-sourced here rather than reconstructed
+#       from the program name at each call site.
 PROGRAM_SPECS: "dict[str, dict[str, object]]" = {
     "CBACT02C": {
         "assign": "CARDFILE",
@@ -153,6 +185,7 @@ PROGRAM_SPECS: "dict[str, dict[str, object]]" = {
         "key_length": 16,
         "display_multiplier": 1,
         "candidates": ("carddata.txt", "CARDFILE.txt", "card.txt", "cards.txt", "cardfile.txt"),
+        "golden_stem": "card",
     },
     "CBACT03C": {
         "assign": "XREFFILE",
@@ -160,6 +193,7 @@ PROGRAM_SPECS: "dict[str, dict[str, object]]" = {
         "key_length": 16,
         "display_multiplier": 2,
         "candidates": ("cardxref.txt", "XREFFILE.txt", "xref.txt", "xrefdata.txt", "cardxref.dat", "xreffile.txt"),
+        "golden_stem": "xref",
     },
     "CBCUS01C": {
         "assign": "CUSTFILE",
@@ -167,6 +201,7 @@ PROGRAM_SPECS: "dict[str, dict[str, object]]" = {
         "key_length": 9,
         "display_multiplier": 2,
         "candidates": ("custdata.txt", "CUSTFILE.txt", "cust.txt", "customer.txt", "customers.txt", "custfile.txt"),
+        "golden_stem": "cust",
     },
     "CBACT01C": {
         "assign": "ACCTFILE",
@@ -174,6 +209,7 @@ PROGRAM_SPECS: "dict[str, dict[str, object]]" = {
         "key_length": 11,
         "display_multiplier": 1,
         "candidates": ("acctdata.txt", "ACCTFILE.txt", "acct.txt", "account.txt", "accounts.txt", "acctfile.txt"),
+        "golden_stem": "acct",
     },
 }
 
@@ -448,11 +484,19 @@ def _ensure_cobdatft(build_dir: Path) -> Path:
 
     Raises
     ------
+    Failed
+        (via :func:`pytest.fail`) if ``cobc`` IS present but the trivial no-op
+        stub nevertheless fails to compile -- that is a real defect in this
+        test's own stub source / build invocation (not an environment limit), so
+        it is an unconditional HARD failure (QA Issue 4 / F-C). Also raised (via
+        :func:`tests.conftest._require_or_skip`) when ``cobc`` is absent AND
+        ``CARDDEMO_REQUIRE_COBOL`` is set -- a required COBOL layer that never
+        ran must never masquerade as a green skip.
     Skipped
-        Calls ``pytest.skip`` if ``cobc`` is not on ``PATH`` or the stub fails to
-        compile -- both are environment conditions specific to the CBACT01C /
-        COBDATFT (HLASM-unavailable) path, so only the requesting test skips
-        rather than failing the suite.
+        (via :func:`tests.conftest._require_or_skip`) when ``cobc`` is absent and
+        ``CARDDEMO_REQUIRE_COBOL`` is NOT set -- a runner genuinely without
+        GnuCOBOL is an environment limitation, so the CBACT01C test skips cleanly
+        in the non-strict/default profile only.
     """
     so_path = build_dir / _COBDATFT_MODULE
     # WHY existence-guard first (idempotency): the stub is identical every time,
@@ -461,11 +505,16 @@ def _ensure_cobdatft(build_dir: Path) -> Path:
     if so_path.exists():
         return so_path
 
-    # WHY skip (not fail) on a missing compiler (Assumption): a runner without
-    # ``cobc`` cannot build the stub OR the program under test; that is an
-    # environment limitation, not a defect, so the CBACT01C test skips cleanly.
+    # WHY strict-aware gate on a missing compiler (QA Issue 4 / F-C -- no silent
+    # green): a runner without ``cobc`` cannot build the stub OR the program under
+    # test. In the DEFAULT profile that is an environment limitation and skipping
+    # is correct; but under ``CARDDEMO_REQUIRE_COBOL`` the COBOL layer is REQUIRED,
+    # so an absent compiler must surface as a HARD, report-visible failure instead
+    # of a skip that would let CI exit green with the CBACT01C path never exercised.
+    # ``_require_or_skip`` encodes exactly that fail-strict / skip-default split in
+    # one shared place (Refactoring Rationale: identical semantics across modules).
     if shutil.which("cobc") is None:
-        pytest.skip(
+        _require_or_skip(
             "GnuCOBOL 'cobc' not on PATH; cannot build the COBDATFT stub that "
             "CBACT01C requires (its real COBDATFT is HLASM, un-buildable here)"
         )
@@ -492,21 +541,26 @@ def _ensure_cobdatft(build_dir: Path) -> Path:
             text=True,
         )
         if proc.returncode != 0 or not tmp_so.exists():
-            # WHY skip with the compiler tail (documented reason): if even the
-            # trivial stub will not build, the CBACT01C read/print path cannot be
-            # exercised in this environment; surface the compiler's own message so
-            # the skip is auditable, and skip ONLY this test.
+            # WHY HARD-fail (QA Issue 4 / F-C), not skip: we only reach here AFTER
+            # confirming ``cobc`` IS on PATH, so a failure to build the *trivial*
+            # no-op stub is a genuine defect in this test's own stub source or its
+            # build invocation -- NOT an environment limitation. Skipping it (the
+            # prior behaviour) would silently drop the CBACT01C read/print coverage
+            # and let the suite pass green while masking a broken stub. Surfacing
+            # the compiler's own tail keeps the failure self-diagnosing and
+            # actionable (Refactoring Rationale: fail where a human can fix it).
             tail = (proc.stderr or proc.stdout or "").splitlines()[-8:]
-            pytest.skip(
+            pytest.fail(
                 "COBDATFT stub failed to compile (rc="
-                f"{proc.returncode}); CBACT01C needs a COBDATFT module and its "
-                "real one is HLASM (un-buildable by cobc). Compiler tail:\n"
-                + "\n".join(tail)
+                f"{proc.returncode}) even though 'cobc' is present; this is a "
+                "defect in the test stub/build, not an environment limit. "
+                "Compiler tail:\n" + "\n".join(tail),
+                pytrace=False,
             )
         os.replace(str(tmp_so), str(so_path))
     finally:
         # Remove the private temp dir regardless of outcome; ignore_errors keeps
-        # cleanup from masking a compile/skip already in flight.
+        # cleanup from masking a compile failure/skip already in flight.
         shutil.rmtree(work, ignore_errors=True)
     return so_path
 
@@ -577,14 +631,129 @@ def _run_readprint(
     return result, records
 
 
+def _assert_provisioning_goldens(
+    result: object,
+    records: "list[bytes]",
+    repo_root: Path,
+    scenario: str,
+    program: str,
+    *,
+    update: "bool | None" = None,
+) -> None:
+    """Assert a provisioning run's observable outputs against the committed goldens.
+
+    Purpose
+    -------
+    Consume the committed ``tests/golden/provisioning/<scenario>/`` goldens for
+    ``program`` so they are the AUTHORITATIVE byte-exact oracle (QA Issue 5 / F-C),
+    catching any whole-output drift the fixture-derived checks in the test bodies
+    cannot -- notably the QA Issue 3 zoned-decimal sign-overpunch regression inside
+    ``acct_print``. Three artifacts are pinned:
+
+    * ``<stem>_print.expected``  -- the program's full ``stdout`` (both banners plus
+      the whole-record dump / labeled-field blocks), compared in TEXT mode.
+    * ``<stem>_count.expected``  -- the number of records the round-trip loaded
+      (== the number the program printed, asserted separately in each body), TEXT
+      mode.
+    * ``return_code.expected``   -- the process RETURN-CODE, TEXT mode. This golden
+      is shared by every program within a scenario (all four provisioning programs
+      return 0), so each test comparing against it is consistent.
+
+    Parameters
+    ----------
+    result : tests.helpers.cobol_runner.RunResult
+        The completed run; ``.stdout`` (str) and ``.returncode`` (int) are consumed.
+    records : list[bytes]
+        The fixture records that were loaded; ``len(records)`` is the count oracle.
+    repo_root : pathlib.Path
+        Repository root (from the ``repo_root`` fixture); locates the golden tree.
+    scenario : str
+        Golden scenario sub-directory (e.g. ``"happy_path"`` / ``"empty_input"``).
+    program : str
+        The program that was run; must be a key of :data:`PROGRAM_SPECS` (it supplies
+        the ``golden_stem``).
+    update : bool or None, optional
+        Forwarded verbatim to :func:`assert_matches_golden`. ``None`` (default)
+        COMPARES; ``True`` is honoured ONLY by the guarded regeneration harness under
+        the MA-12 protocol (explicit ``update=True`` AND ``CARDDEMO_UPDATE_GOLDENS=1``
+        AND not-CI). Production test code never passes ``True``.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    tests.helpers.golden_compare.GoldenMismatchError
+        If any observed artifact differs from its committed golden, or a golden file
+        is missing (a missing golden is a hard error here, never a silent pass).
+    tests.helpers.golden_compare.GoldenUpdateError
+        If ``update=True`` is requested but the MA-12 safe-update guards are not met.
+    """
+    golden_dir = repo_root / "tests" / "golden" / "provisioning" / scenario
+    stem = str(PROGRAM_SPECS[program]["golden_stem"])
+
+    # WHY TEXT mode (layout=None) for all three artifacts (Assumption): provisioning
+    # output is free-form console text (execution banners + DISPLAYed records /
+    # labeled-field blocks), NOT a fixed-width ORGANIZATION-SEQUENTIAL record file,
+    # so golden_compare's report/text normalizer is the correct mode. TEXT mode
+    # strips only per-line TRAILING whitespace (a DISPLAY padding artifact) and
+    # scrubs full ISO *date+time* stamps -- neither touches the mid-line zoned-
+    # decimal overpunch byte that QA Issue 3 is about, so that regression is still
+    # pinned byte-for-byte.
+    # WHY encoding="latin-1" (Trade-off / byte fidelity): CBACT01C's raw
+    # ``DISPLAY ACCOUNT-RECORD`` line carries the zoned-decimal sign OVERPUNCH byte
+    # (e.g. 0x7B '{' for a trailing positive zero) emitted under the authoritative
+    # ``-fsign=EBCDIC`` build. latin-1 is a total 1:1 byte<->codepoint codec, so the
+    # golden round-trips those bytes exactly. Every committed provisioning golden
+    # byte is < 0x80 (the overpunch set '{','}','A'..'R' is all ASCII), so latin-1
+    # and utf-8 coincide here -- latin-1 is chosen as the explicit, future-proof safe
+    # option and to match the sibling posting module's convention.
+    assert_matches_golden(
+        result.stdout,
+        golden_dir / f"{stem}_print.expected",
+        encoding="latin-1",
+        update=update,
+    )
+
+    # The record COUNT the round-trip processed. WHY str(len(records)) is the right
+    # value (Assumption, cross-checked in each body): every test asserts the program
+    # printed exactly ``len(records)`` records (by key set / label-line count), so the
+    # loaded-fixture count IS the program's processed count; pinning it against the
+    # committed golden guards against a silent count drift.
+    assert_matches_golden(
+        str(len(records)),
+        golden_dir / f"{stem}_count.expected",
+        encoding="latin-1",
+        update=update,
+    )
+
+    # The process RETURN-CODE. WHY the newline-free str(int) canonical form: TEXT-mode
+    # normalize does NOT canonicalise a trailing EOF newline, so "0" and "0\n" compare
+    # UNEQUAL; the committed return_code goldens are (re)generated to the newline-free
+    # ``str(returncode)`` form -- identical to the sibling posting/interest return_code
+    # goldens -- so this comparison is exact and consistent across the whole suite.
+    assert_matches_golden(
+        str(result.returncode),
+        golden_dir / "return_code.expected",
+        encoding="latin-1",
+        update=update,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase C -- tests.
 #
-# WHY the assertions live in each test body, not in a shared asserter
-# (Refactoring Rationale): _run_readprint centralises the load+run so each test
-# reads its own OUTPUT and asserts on it, which makes a failing assertion point
-# at the specific program/scenario (e.g. test_cbact03c_xref_roundtrip) rather
-# than at a shared helper -- exactly the failure-localisation the suite wants.
+# WHY the fixture-derived assertions live in each test body while the golden
+# oracle is centralised (Refactoring Rationale): _run_readprint centralises the
+# load+run and each test reads its own OUTPUT and makes the fixture-DERIVED
+# checks (key set, per-record line count, RC) inline, so a failing localised
+# assertion points at the specific program/scenario. The byte-exact GOLDEN
+# consumption (QA Issue 5 / F-C), by contrast, is identical boilerplate across
+# all programs, so it is single-sourced in :func:`_assert_provisioning_goldens`
+# -- exactly as the sibling posting module single-sources its golden asserter.
+# The two oracles are complementary: the inline checks localise WHICH count/key
+# is wrong; the golden pins EVERY observable stdout byte, the count, and the RC.
 # ---------------------------------------------------------------------------
 def test_cbact02c_card_roundtrip(cobol_runner, repo_root):
     """CBACT02C reads and prints every card record from a happy-path fixture.
@@ -611,6 +780,9 @@ def test_cbact02c_card_roundtrip(cobol_runner, repo_root):
     AssertionError
         If any observable output (RC, banners, record set, record count) differs
         from what the loaded fixture implies.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``happy_path`` CARDFILE fixture is absent or empty.
     """
@@ -652,6 +824,11 @@ def test_cbact02c_card_roundtrip(cobol_runner, repo_root):
         f"({len(records)} records x {multiplier}), got {len(display_lines)}"
     )
 
+    # QA Issue 5 / F-C: after the fixture-derived checks localise correctness, pin
+    # EVERY observable output byte-for-byte against the committed goldens (stdout +
+    # record count + RETURN-CODE) so any whole-output drift is caught.
+    _assert_provisioning_goldens(result, records, repo_root, "happy_path", program)
+
 
 def test_cbact02c_empty_input(cobol_runner, repo_root):
     """CBACT02C on an empty CARDFILE prints only the banners and exits RC=0.
@@ -678,6 +855,9 @@ def test_cbact02c_empty_input(cobol_runner, repo_root):
     AssertionError
         If the run is non-zero, a banner is missing, or any non-banner line is
         emitted.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``empty_input`` CARDFILE fixture is absent.
     """
@@ -697,6 +877,10 @@ def test_cbact02c_empty_input(cobol_runner, repo_root):
     banners = {_banner(program, "START"), _banner(program, "END")}
     extra = [line for line in nonblank if line not in banners]
     assert extra == [], f"{program} empty run emitted unexpected lines: {extra}"
+
+    # QA Issue 5 / F-C: pin the empty-input outputs (banner-only stdout, zero count,
+    # RC=0) against the committed empty_input goldens.
+    _assert_provisioning_goldens(result, records, repo_root, "empty_input", program)
 
 
 def test_cbact03c_xref_roundtrip(cobol_runner, repo_root):
@@ -723,6 +907,9 @@ def test_cbact03c_xref_roundtrip(cobol_runner, repo_root):
     ------
     AssertionError
         If any observable output differs from what the loaded fixture implies.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``happy_path`` XREFFILE fixture is absent or empty.
     """
@@ -760,6 +947,10 @@ def test_cbact03c_xref_roundtrip(cobol_runner, repo_root):
         f"({len(records)} records x {multiplier}), got {len(display_lines)}"
     )
 
+    # QA Issue 5 / F-C: byte-exact whole-output golden pin (see the CBACT02C
+    # round-trip for the rationale).
+    _assert_provisioning_goldens(result, records, repo_root, "happy_path", program)
+
 
 def test_cbact03c_empty_input(cobol_runner, repo_root):
     """CBACT03C on an empty XREFFILE prints only the banners and exits RC=0.
@@ -784,6 +975,9 @@ def test_cbact03c_empty_input(cobol_runner, repo_root):
     AssertionError
         If the run is non-zero, a banner is missing, or any non-banner line is
         emitted.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``empty_input`` XREFFILE fixture is absent.
     """
@@ -800,6 +994,9 @@ def test_cbact03c_empty_input(cobol_runner, repo_root):
     banners = {_banner(program, "START"), _banner(program, "END")}
     extra = [line for line in nonblank if line not in banners]
     assert extra == [], f"{program} empty run emitted unexpected lines: {extra}"
+
+    # QA Issue 5 / F-C: pin the empty-input outputs against the committed goldens.
+    _assert_provisioning_goldens(result, records, repo_root, "empty_input", program)
 
 
 def test_cbcus01c_customer_roundtrip(cobol_runner, repo_root):
@@ -826,6 +1023,9 @@ def test_cbcus01c_customer_roundtrip(cobol_runner, repo_root):
     ------
     AssertionError
         If any observable output differs from what the loaded fixture implies.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``happy_path`` CUSTFILE fixture is absent or empty.
     """
@@ -860,6 +1060,9 @@ def test_cbcus01c_customer_roundtrip(cobol_runner, repo_root):
         f"({len(records)} records x {multiplier}), got {len(display_lines)}"
     )
 
+    # QA Issue 5 / F-C: byte-exact whole-output golden pin.
+    _assert_provisioning_goldens(result, records, repo_root, "happy_path", program)
+
 
 def test_cbcus01c_empty_input(cobol_runner, repo_root):
     """CBCUS01C on an empty CUSTFILE prints only the banners and exits RC=0.
@@ -884,6 +1087,9 @@ def test_cbcus01c_empty_input(cobol_runner, repo_root):
     AssertionError
         If the run is non-zero, a banner is missing, or any non-banner line is
         emitted.
+    tests.helpers.golden_compare.GoldenMismatchError
+        If a consumed golden (stdout / count / return_code) differs from the
+        run, or a golden file is missing (via :func:`_assert_provisioning_goldens`).
     Skipped
         If the ``empty_input`` CUSTFILE fixture is absent.
     """
@@ -900,6 +1106,9 @@ def test_cbcus01c_empty_input(cobol_runner, repo_root):
     banners = {_banner(program, "START"), _banner(program, "END")}
     extra = [line for line in nonblank if line not in banners]
     assert extra == [], f"{program} empty run emitted unexpected lines: {extra}"
+
+    # QA Issue 5 / F-C: pin the empty-input outputs against the committed goldens.
+    _assert_provisioning_goldens(result, records, repo_root, "empty_input", program)
 
 
 def test_cbact01c_account_roundtrip_with_stub(cobol_runner, build_dir, repo_root):
@@ -930,12 +1139,18 @@ def test_cbact01c_account_roundtrip_with_stub(cobol_runner, build_dir, repo_root
     Raises
     ------
     AssertionError
-        If the account output (banners, ACCT-ID block count, account ids) differs
-        from the loaded fixture.
+        If ``CBACT01C`` returns a non-zero RETURN-CODE despite the resolvable
+        COBDATFT stub (a genuine functional failure, QA Issue 4 / F-C), or if the
+        account output (banners, ACCT-ID block count, account ids) or the consumed
+        golden (stdout / count / return_code) differs from the loaded fixture.
+    Failed
+        (via :func:`_ensure_cobdatft`) if ``cobc`` is present but the COBDATFT
+        stub fails to compile, or -- under ``CARDDEMO_REQUIRE_COBOL`` -- if ``cobc``
+        is absent.
     Skipped
-        If the COBDATFT stub cannot be built, if ``CBACT01C`` still returns
-        non-zero despite the stub (documented HLASM limitation -- this test only),
-        or if the ``happy_path`` ACCTFILE fixture is absent/empty.
+        Only if ``cobc`` is absent AND ``CARDDEMO_REQUIRE_COBOL`` is unset (via
+        :func:`_ensure_cobdatft`), or if the ``happy_path`` ACCTFILE fixture is
+        absent/empty.
     """
     program = "CBACT01C"
     key_length = int(PROGRAM_SPECS[program]["key_length"])
@@ -943,8 +1158,10 @@ def test_cbact01c_account_roundtrip_with_stub(cobol_runner, build_dir, repo_root
     # WHY build the stub BEFORE running (ordering): CBACT01C's 1300-POPUL-ACCT-
     # RECORD CALLs COBDATFT for every record; the module must be resolvable on
     # COB_LIBRARY_PATH (== build_dir) before the run, or the program abends after
-    # the first account. _ensure_cobdatft skips ONLY this test if it cannot build
-    # the stub, leaving the other three programs' tests unaffected.
+    # the first account. _ensure_cobdatft now HARD-fails if the stub cannot build
+    # while cobc is present, and is strict-aware (fail under CARDDEMO_REQUIRE_COBOL,
+    # skip otherwise) if cobc is absent -- so a required COBOL layer never silently
+    # drops to a green skip (QA Issue 4 / F-C).
     _ensure_cobdatft(build_dir)
 
     result, records = _run_readprint(cobol_runner, repo_root, program, "happy_path")
@@ -953,16 +1170,19 @@ def test_cbact01c_account_roundtrip_with_stub(cobol_runner, build_dir, repo_root
 
     keys = _key_texts(records, key_length)
 
-    # WHY skip-only-this-test on a non-zero RC (Trade-off): the remaining risk
-    # unique to CBACT01C is the HLASM COBDATFT dependency. If the stub workaround
-    # does not take in some environment, skip with a documented reason rather than
-    # fail the suite -- and never let it affect CBACT02C/03C/CBCUS01C.
-    if result.returncode != 0:
-        pytest.skip(
-            f"CBACT01C returned RC={result.returncode} despite the COBDATFT stub; "
-            "its production COBDATFT is HLASM (un-buildable by cobc). stderr tail: "
-            f"{result.stderr.splitlines()[-5:]}"
-        )
+    # WHY HARD-assert RC==0 (QA Issue 4 / F-C -- no silent green): _ensure_cobdatft
+    # above has already installed a resolvable COBDATFT module on COB_LIBRARY_PATH,
+    # so the sole documented reason CBACT01C could abend (the un-buildable HLASM
+    # COBDATFT) is now neutralised. With the stub in place a non-zero RETURN-CODE is
+    # a GENUINE functional failure of the read/print pass, not an environment limit,
+    # so skipping it (the prior behaviour) would silently hide a real regression and
+    # let the suite pass green. The stderr tail is surfaced so the failure is
+    # self-diagnosing (Refactoring Rationale: fail where the defect is actionable).
+    assert result.returncode == 0, (
+        f"CBACT01C returned RC={result.returncode} despite the resolvable COBDATFT "
+        "stub; with the stub installed this is a real functional failure of the "
+        f"read/print pass. stderr tail: {result.stderr.splitlines()[-5:]}"
+    )
 
     # Reaching the END banner proves the program did not abend mid-file.
     assert _banner(program, "START") in result.stdout, "missing START banner"
@@ -989,3 +1209,85 @@ def test_cbact01c_account_roundtrip_with_stub(cobol_runner, build_dir, repo_root
     # present rather than an exact line equality that the sign would break.
     for key in keys:
         assert key in result.stdout, f"{program}: account id {key!r} missing from output"
+
+    # QA Issue 5 / F-C AND QA Issue 3: the substring checks above tolerate the
+    # zoned-decimal sign overpunch, so they alone cannot catch a whole-record
+    # encoding drift. The byte-exact golden below DOES: it pins CBACT01C's full
+    # labeled-field stdout (including the raw ``DISPLAY ACCOUNT-RECORD`` line whose
+    # sign bytes are the '{'-style overpunch produced under the authoritative
+    # -fsign=EBCDIC build), so the QA Issue 3 acct_print overpunch regression is
+    # regression-locked here.
+    _assert_provisioning_goldens(result, records, repo_root, "happy_path", program)
+
+
+def test_cbact01c_empty_input(cobol_runner, build_dir, repo_root):
+    """CBACT01C on an empty ACCTFILE prints only the banners and exits RC=0.
+
+    Purpose
+    -------
+    Assert the empty-input edge case for the account master reader, completing the
+    4-programs x 2-scenarios provisioning matrix (every other program already has
+    both a happy-path and an empty-input test). This test also makes the committed
+    ``tests/golden/provisioning/empty_input/acct_*`` goldens AUTHORITATIVE by
+    consuming them (QA Issue 5 / F-C): before this test they had no consumer, so a
+    drift in them could never be caught.
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        Per-test runner fixture (isolated workspace + compiled programs).
+    build_dir : pathlib.Path
+        Session build-directory fixture; passed to :func:`_ensure_cobdatft` for
+        structural parity with the round-trip test (see the WHY below).
+    repo_root : pathlib.Path
+        Repository-root fixture; locates the provisioning fixtures and goldens.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+        If the run is non-zero, a banner is missing, any non-banner line is emitted,
+        or the consumed goldens (stdout / count / return_code) differ.
+    Failed
+        (via :func:`_ensure_cobdatft`) if ``cobc`` is present but the COBDATFT stub
+        fails to compile, or -- under ``CARDDEMO_REQUIRE_COBOL`` -- if ``cobc`` is
+        absent.
+    Skipped
+        Only if ``cobc`` is absent AND ``CARDDEMO_REQUIRE_COBOL`` is unset (via
+        :func:`_ensure_cobdatft`), or if the ``empty_input`` ACCTFILE fixture is
+        absent.
+    """
+    program = "CBACT01C"
+
+    # WHY still ensure the stub for the empty case (Trade-off / robustness): with a
+    # zero-record ACCTFILE, 1300-POPUL-ACCT-RECORD never runs, so ``CALL 'COBDATFT'``
+    # is never executed and the stub is not strictly required. We build it anyway to
+    # keep the two CBACT01C tests structurally identical and to be robust against any
+    # load-time (rather than first-call) module resolution -- and because the whole
+    # module already depends on ``cobc`` to build the program under test, so this
+    # adds no new environmental requirement.
+    _ensure_cobdatft(build_dir)
+
+    result, records = _run_readprint(cobol_runner, repo_root, program, "empty_input")
+
+    assert records == [], "empty_input ACCTFILE fixture should contain zero records"
+    assert result.returncode == 0, (
+        f"{program} empty run expected RETURN-CODE 0, got {result.returncode}; "
+        f"stderr tail: {result.stderr.splitlines()[-5:]}"
+    )
+    assert _banner(program, "START") in result.stdout, "missing START banner"
+    assert _banner(program, "END") in result.stdout, "missing END banner"
+    # WHY "only the banners" (stronger than "zero record lines"): with no records,
+    # a key-prefix check is vacuously empty, so instead we require that the ONLY
+    # non-blank lines are the two banners -- proving no account block was printed.
+    nonblank = [line for line in result.stdout.splitlines() if line.strip()]
+    banners = {_banner(program, "START"), _banner(program, "END")}
+    extra = [line for line in nonblank if line not in banners]
+    assert extra == [], f"{program} empty run emitted unexpected lines: {extra}"
+
+    # QA Issue 5 / F-C: pin the empty-input outputs against the committed goldens
+    # (this is the sole consumer of empty_input/acct_print + acct_count).
+    _assert_provisioning_goldens(result, records, repo_root, "empty_input", program)

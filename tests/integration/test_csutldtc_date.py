@@ -55,6 +55,26 @@ backend). The severity/result truth table matches the one documented for the
 binary length prefix, value 10 == ``0x000A``, into its display field, embedding
 a NUL + newline), so the result is parsed with ``re.DOTALL`` (see ``_RESULT_RE``).
 
+Fidelity scope of the CEEDAYS shim (what this test DOES and does NOT prove)
+--------------------------------------------------------------------------
+This is an explicit statement of the shim's verification boundary (QA finding
+CSUTLDTC-1). What is asserted here is CSUTLDTC's *calling contract* against a
+faithful reproduction of the LE ``CEEDAYS`` **linkage** -- i.e. that CSUTLDTC
+builds the two LE varying-string parameters correctly, invokes the date service,
+reads back the feedback token, maps its severity halfword through its
+``EVALUATE`` to the right result text, and propagates that severity to
+``RETURN-CODE``. What is deliberately NOT asserted is bit-for-bit numerical
+fidelity of IBM's real ``CEEDAYS`` (most visibly the ``S9(9)`` Lillian day count,
+which CardDemo never consumes -- see the parser WHY note). The shim decides
+validity with GnuCOBOL's ``FUNCTION TEST-DATE-YYYYMMDD`` intrinsic, whose
+valid/invalid verdict matches LE for every date in the truth table above; it is
+a validity oracle for the contract, not a re-implementation of LE internals.
+WHY this boundary is correct and sufficient (Trade-off): CardDemo's callers
+depend only on the severity + result-text contract, so pinning the Lillian value
+or LE's internal feedback layout would test the shim rather than CSUTLDTC and
+would couple the suite to LE implementation details it never uses. This scope is
+an intentional, disclosed design choice -- not a coverage gap.
+
 Explainability
 --------------
 Per the project's mandatory Explainability rule (AAP Section 0.10.1) every
@@ -200,11 +220,43 @@ _RESULT_RE = re.compile(r"RESULT=\[(.*)\]", re.DOTALL)
 _VALID_DATES = ("2023-06-15", "2024-02-29", "2000-02-29")
 
 # Dates CSUTLDTC must REJECT (severity 12, 'Date is invalid').
-# WHY this exact quintet (error-path coverage): a non-leap Feb 29, a century
+# WHY this exact set (error-path coverage): a non-leap Feb 29, a century
 # NON-leap Feb 29 (divisible by 100 but not 400), an out-of-range month, an
 # out-of-range day, and a wholly non-numeric string exercise every route into
 # CSUTLDTC's WHEN OTHER branch and confirm severity propagation.
-_INVALID_DATES = ("2023-02-29", "1900-02-29", "2023-13-01", "2023-02-30", "ABCD-EF-GH")
+#
+# WHY the trailing empty-string and whitespace-only entries (Refactoring
+# Rationale -- closes QA finding CSUTLDTC-2): the previously-committed set proved
+# rejection of malformed *content* but never exercised the degenerate inputs a
+# real caller can pass -- a completely empty date field and an all-blank one
+# (e.g. an online screen submitted with the date left blank, which arrives as
+# spaces in the fixed X(10) field). Adding them makes the adversarial matrix
+# explicit rather than implied.
+#   * ""            -- an empty TESTDATE; the DRVDATE ``ACCEPT FROM ENVIRONMENT``
+#                      leaves its X(10) field as spaces, so this and the blank
+#                      string below both reach CSUTLDTC as an all-space date.
+#   * "          "  -- ten explicit blanks (the full mask width).
+# WHY both must yield severity 12 (Assumption -- EMPIRICALLY VERIFIED on this
+# runner's GnuCOBOL 3.2.0 via the real DRVDATE->CSUTLDTC->CEEDAYS-shim chain):
+# the shim computes YYYYMMDD via ``FUNCTION NUMVAL`` over the (blank) text, which
+# yields 0; ``FUNCTION TEST-DATE-YYYYMMDD(0)`` is non-zero (0 is not a valid
+# Gregorian date), so the shim returns the 0x000C feedback and CSUTLDTC maps it
+# to severity 12 / 'Date is invalid' -- exactly the same rejection route the
+# other invalid strings take, with NO abort or crash. Both were confirmed to
+# return driver exit code 12 before being committed here.
+# WHY NOT assert a distinct "blank date" message (Trade-off): CSUTLDTC has a
+# single 'Date is invalid' rejection text (its EVALUATE has no dedicated
+# empty-input arm), so the honest contract to pin is severity 12 + that text --
+# inventing a finer assertion would test a message CSUTLDTC does not emit.
+_INVALID_DATES = (
+    "2023-02-29",
+    "1900-02-29",
+    "2023-13-01",
+    "2023-02-30",
+    "ABCD-EF-GH",
+    "",
+    "          ",
+)
 
 # The date mask CardDemo's callers use.
 # WHY assume ``YYYY-MM-DD`` (Assumption): the CardDemo online callers of CSUTLDTC
@@ -473,10 +525,12 @@ def test_invalid_dates(cobol_runner, build_dir, repo_root, testdate):
     Purpose
     -------
     For each date the utility must reject -- a non-leap Feb 29, a century
-    non-leap Feb 29, an out-of-range month, an out-of-range day, and a
-    non-numeric string -- assert the severity is 12 and the mapped result text
-    reads ``'Date is invalid'``. This exercises CSUTLDTC's error mapping and its
-    ``SEVERITY -> RETURN-CODE`` propagation for every rejection route.
+    non-leap Feb 29, an out-of-range month, an out-of-range day, a non-numeric
+    string, an empty date, and a whitespace-only date -- assert the severity is
+    12 and the mapped result text reads ``'Date is invalid'``. This exercises
+    CSUTLDTC's error mapping and its ``SEVERITY -> RETURN-CODE`` propagation for
+    every rejection route, including the degenerate empty/blank inputs added to
+    close QA finding CSUTLDTC-2 (see :data:`_INVALID_DATES`).
 
     Parameters
     ----------

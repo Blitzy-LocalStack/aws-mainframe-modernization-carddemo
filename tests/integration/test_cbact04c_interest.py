@@ -91,6 +91,16 @@ from tests.helpers.record_codec import (
     decode_zoned,
 )
 
+# WHY (QA Issue 5 / F-A -- committed goldens must be the authoritative oracle): the
+# derived-model assertions below prove the interest math independently, but the
+# checkpoint/AAP (0.7.2) also requires the committed tests/golden/**/*.expected files to
+# be *consumed* so any drift or regression is caught. assert_matches_golden is the suite's
+# AAP-designated byte-exact comparator (tests/helpers/golden_compare.py); a missing golden
+# is a hard error, never a silent pass. WHY the two oracles coexist (Trade-off): the Decimal
+# model localises WHICH field/amount is wrong, while the golden pins the WHOLE record layout
+# (id, type, category, description, card-via-alt-key, filler) byte-for-byte.
+from tests.helpers.golden_compare import assert_matches_golden
+
 # Every test in this module is an integration-layer test (registered marker; the
 # runner selects it with ``-m integration``). --strict-markers makes a typo fatal.
 pytestmark = pytest.mark.integration
@@ -171,7 +181,13 @@ _LOADX_SRC = """\
 # thin and read like assertions rather than plumbing.
 _Outcome = namedtuple(
     "_Outcome",
-    "res accts disc expected_bal final_acct tx_amts order",
+    # WHY expected_final_bal added (Issue 1 xfail): the account-break defect means the
+    # last distinct account is never flushed, so it is excluded from expected_bal. To turn
+    # the defect from a green "assert it stays stale" pass into a report-visible xfail, the
+    # test needs the value the final account WOULD hold if the loop flushed it
+    # (original balance + its accrued interest). Carrying it here keeps the derivation
+    # single-sourced in _expected_model rather than recomputed in the test body.
+    "res accts disc expected_bal final_acct expected_final_bal tx_amts order",
 )
 
 
@@ -636,15 +652,16 @@ def _expected_model(
     tcat: list[bytes],
     accts: "dict[str, tuple[str, Decimal]]",
     disc: "dict[tuple[str, str, int], Decimal]",
-) -> "tuple[dict[str, Decimal], str | None, list[Decimal], list[str]]":
+) -> "tuple[dict[str, Decimal], str | None, Decimal | None, list[Decimal], list[str]]":
     """Reproduce CBACT04C's interest math in Python to derive expected outputs.
 
     Mirrors the COBOL exactly: read ``TCATBALF`` in order; look up the rate by
     ``(group, type, cat)`` and fall back to the ``DEFAULT`` group when the direct key
     is absent (VSAM status 23); when the rate is non-zero, compute
     ``(bal * rate) / 1200`` **truncated** to two decimals and accumulate it per
-    account. The final distinct account is excluded from balance expectations because
-    of the account-break defect (see the module docstring).
+    account. The final distinct account is excluded from ``expected_bal`` because of
+    the account-break defect (see the module docstring), but its *would-be-correct*
+    balance is returned separately so the xfail test can assert the fixed behaviour.
 
     Parameters
     ----------
@@ -658,11 +675,13 @@ def _expected_model(
     Returns
     -------
     tuple
-        ``(expected_bal, final_acct, tx_amts, order)`` where ``expected_bal`` maps
-        each *non-final* account id to its expected post-run balance, ``final_acct``
-        is the last distinct account (never updated), ``tx_amts`` is the ordered list
-        of expected interest ``TRAN-AMT`` values, and ``order`` is the first-seen
-        account order.
+        ``(expected_bal, final_acct, expected_final_bal, tx_amts, order)`` where
+        ``expected_bal`` maps each *non-final* account id to its expected post-run
+        balance, ``final_acct`` is the last distinct account (never updated by the
+        buggy loop), ``expected_final_bal`` is the balance that final account WOULD
+        hold if ``1050-UPDATE-ACCOUNT`` flushed it (``original + accrued interest``) or
+        ``None`` when there is no account, ``tx_amts`` is the ordered list of expected
+        interest ``TRAN-AMT`` values, and ``order`` is the first-seen account order.
 
     Raises
     ------
@@ -708,7 +727,16 @@ def _expected_model(
         for acct in order
         if acct != final_acct and acct in accts
     }
-    return expected_bal, final_acct, tx_amts, order
+    # WHY (Issue 1 -- what the final account SHOULD be): the account-break defect
+    # leaves the last distinct account un-flushed, so it is deliberately absent from
+    # expected_bal above. The xfail test needs the value the loop WOULD have written
+    # if 1050-UPDATE-ACCOUNT ran at EOF: the original balance plus the interest that
+    # was accrued for it (total[final_acct]). Deriving it here -- next to the identical
+    # non-final formula -- keeps the "correct balance" contract single-sourced.
+    expected_final_bal: "Decimal | None" = None
+    if final_acct is not None and final_acct in accts:
+        expected_final_bal = accts[final_acct][1] + total[final_acct]
+    return expected_bal, final_acct, expected_final_bal, tx_amts, order
 
 
 def _updated_accounts(cobol_runner) -> "dict[str, Decimal]":
@@ -805,10 +833,102 @@ def _drive_scenario(cobol_runner, build_dir: Path, repo_root: Path, scenario: st
     accts = _read_accounts(acct_p)
     disc = _parse_disc(disc_p)
     tcat = _read_records(tcat_p, TCATBAL_LAYOUT.reclen)
-    expected_bal, final_acct, tx_amts, order = _expected_model(tcat, accts, disc)
+    # WHY unpack expected_final_bal here (Issue 1): _expected_model now also derives the
+    # would-be-correct balance of the un-flushed final account; carry it through the
+    # _Outcome bundle so the xfail test asserts the fixed value without recomputing it.
+    expected_bal, final_acct, expected_final_bal, tx_amts, order = _expected_model(
+        tcat, accts, disc
+    )
     return _Outcome(
         res=res, accts=accts, disc=disc, expected_bal=expected_bal,
-        final_acct=final_acct, tx_amts=tx_amts, order=order,
+        final_acct=final_acct, expected_final_bal=expected_final_bal,
+        tx_amts=tx_amts, order=order,
+    )
+
+
+def _assert_interest_happy_goldens(cobol_runner, res, repo_root, *, update=None):
+    """Compare (or, under the guarded protocol, regenerate) the interest happy_path goldens.
+
+    Purpose
+    -------
+    QA Issue 5 (MAJOR) found the interest module proved its math with a derived Decimal
+    model but never *consumed* the committed ``tests/golden/interest/**/*.expected`` files,
+    so drift in the whole-record layout (ids, type/category, description, filler) went
+    uncaught. This helper is the single place that wires the AAP-designated byte-exact
+    comparator (:func:`tests.helpers.golden_compare.assert_matches_golden`) over every
+    observable happy_path output: the condition code, the rewritten ``ACCTFILE`` master,
+    and the ``TRANSACT`` interest stream.
+
+    WHY one helper drives BOTH compare and regenerate (single source of truth): the
+    regeneration path (``update=True``) and the test's compare path (``update=None``) MUST
+    extract and frame exactly the same bytes, or a regenerated golden would not round-trip.
+    Factoring the three comparisons here guarantees that. The committed test call always
+    uses the ``update=None`` default (pure compare); only a deliberate, never-committed
+    regeneration run passes ``update=True`` -- and even then :func:`assert_matches_golden`
+    still enforces the full MA-12 two-step guard (``CARDDEMO_UPDATE_GOLDENS=1`` and not-CI).
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        The active runner (its workspace holds the rewritten indexed ``ACCTFILE``).
+    res : tests.helpers.cobol_runner.RunResult
+        The completed ``DRV04C`` run result (source of the return code and ``TRANSACT``).
+    repo_root : pathlib.Path
+        Repository root, used to locate the golden directory.
+    update : bool or None, optional
+        Forwarded verbatim to :func:`assert_matches_golden`. ``None`` (default) compares;
+        an explicit ``True`` requests a guarded regeneration. Defaults to ``None``.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    tests.helpers.golden_compare.GoldenMismatchError
+        If any golden is missing (compare mode) or a normalized output differs from it.
+    tests.helpers.golden_compare.GoldenUpdateError
+        If ``update=True`` but the MA-12 safe-update guard blocks the write.
+    """
+    golden_dir = Path(repo_root) / "tests" / "golden" / "interest" / "happy_path"
+
+    # RETURN-CODE (text mode): the top-level pass/warn/fail signal per the AAP RC rubric.
+    # WHY text mode (no layout): the code is a bare integer, not a fixed-width record; text
+    # normalization canonicalises the trailing newline so "0" and "0\n" compare equal.
+    assert_matches_golden(
+        str(res.returncode), golden_dir / "return_code.expected", update=update,
+    )
+
+    # ACCTFILE (record mode, ACCOUNT 300B): the whole rewritten master in primary-key
+    # order. WHY join with "\n" (Assumption): record mode frames by fixed WIDTH, so the
+    # newline-joined records compare equal to the width-framed golden regardless of joiner.
+    # WHY encoding="latin-1": account records are fixed-width bytes (zoned decimal + possible
+    # LOW-VALUES 0x00 filler); latin-1 is the identity byte<->codepoint map so the golden is
+    # read/written byte-for-byte with no re-encoding, keeping the comparison byte-exact.
+    acct_records = cobol_runner.unload_output("ACCTFILE", layout="ACCOUNT")
+    assert_matches_golden(
+        "\n".join(acct_records),
+        golden_dir / "acctdat.expected",
+        layout="ACCOUNT",
+        encoding="latin-1",
+        update=update,
+    )
+
+    # TRANSACT (record mode, INTTRAN 350B): the interest transaction stream, a raw
+    # SEQUENTIAL blob of N*350 concatenated bytes with no delimiters. WHY layout="INTTRAN"
+    # (not "TRAN"): CBACT04C sets BOTH TRAN-ORIG-TS and TRAN-PROC-TS from CURRENT-DATE, so
+    # both are non-deterministic; INTTRAN is record_codec's purpose-built clone of TRAN that
+    # marks BOTH timestamps normalize_ts, so record-mode blanks them on each side and the
+    # comparison is deterministic across runs. WHY encoding="latin-1": same byte-identity
+    # rationale as ACCTFILE -- the read_output str is latin-1 and the golden is read/written
+    # latin-1, so any 0x00 FILLER byte round-trips exactly.
+    transact = res.read_output("TRANSACT")
+    assert_matches_golden(
+        transact,
+        golden_dir / "transact.expected",
+        layout="INTTRAN",
+        encoding="latin-1",
+        update=update,
     )
 
 
@@ -871,6 +991,14 @@ def test_happy_path_interest_and_balances(cobol_runner, build_dir, repo_root):
         assert tran_id == expected_id, f"TRAN-ID {tran_id!r} != {expected_id!r}"
         assert typ == "01", f"interest TRAN-TYPE-CD should be '01', got {typ!r}"
         assert cat == 5, f"interest TRAN-CAT-CD should be 5 (0005), got {cat}"
+
+    # Golden oracle (QA Issue 5): after proving the math field-by-field above, also assert
+    # the WHOLE observable output byte-for-byte against the committed goldens. WHY both
+    # oracles (Trade-off): the Decimal model localises WHICH amount/balance is wrong, while
+    # the golden pins the ENTIRE record layout (id, type, category, description, alt-key
+    # card number, filler) that the field checks do not inspect -- catching layout drift a
+    # value-only assertion would miss.
+    _assert_interest_happy_goldens(cobol_runner, outcome.res, repo_root)
 
 
 def test_default_group_fallback(cobol_runner, build_dir, repo_root):
@@ -1030,15 +1158,40 @@ def test_no_fee_applied(cobol_runner, build_dir, repo_root):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN PRODUCTION DEFECT (CBACT04C account-break): the last distinct account "
+        "in TCATBALF order is never flushed because the main loop's outer "
+        "'ELSE PERFORM 1050-UPDATE-ACCOUNT' is unreachable at end-of-file, so its "
+        "accrued interest is silently dropped. This test asserts the CORRECT behaviour "
+        "(final account rewritten to original + accrued interest); it xfails until the "
+        "production loop is fixed in app/cbl/CBACT04C.cbl. app/cbl is REFERENCE-only per "
+        "AAP 0.8.2, so the fix is out of this suite's scope -- when it lands, xfail_strict "
+        "(pytest.ini) turns the resulting xpass into a hard failure, forcing this marker "
+        "to be removed."
+    ),
+)
 def test_final_account_not_updated(cobol_runner, build_dir, repo_root):
-    """Document the account-break defect: the final distinct account is never updated.
+    """Assert the final distinct account WOULD be updated once the account-break defect is fixed.
 
     Purpose
     -------
     The main loop's outer ``ELSE PERFORM 1050-UPDATE-ACCOUNT`` is unreachable at EOF,
     so the last distinct account in ``TCATBALF`` order keeps its original balance even
-    though its category rows accrued interest. This test pins that known gap as an
-    explicit, asserted behaviour (it encodes -- does not fix -- production).
+    though its category rows accrued interest. QA Issue 1 (CRITICAL) flagged that the
+    prior version of this test merely *asserted the buggy state* (balance unchanged),
+    which passed green and hid a real monetary defect from every report.
+
+    This rewrite instead asserts the *correct* post-run balance
+    (``original + accrued interest``) and is marked ``xfail(strict=True)``. WHY xfail
+    rather than a plain failing assert (Alternatives Considered): a bare failing assert
+    would turn the suite red and block CI on a defect this test-only suite is forbidden
+    to fix (``app/cbl`` is REFERENCE-only, AAP 0.8.2). ``xfail`` records the defect as a
+    first-class, report-visible expected failure while keeping the suite green; ``strict``
+    guarantees that if the production loop is ever repaired the resulting *xpass* becomes
+    a hard failure (``xfail_strict = True`` in ``pytest.ini``), which is the signal to
+    delete this marker and convert the assertion to a normal pass.
 
     Parameters
     ----------
@@ -1056,7 +1209,8 @@ def test_final_account_not_updated(cobol_runner, build_dir, repo_root):
     Raises
     ------
     AssertionError
-        If the final account's balance changed (defect unexpectedly absent).
+        Expected (xfail) while the defect is present: the final account's observed
+        balance still equals its original balance instead of the interest-adjusted value.
     """
     outcome = _drive_scenario(cobol_runner, build_dir, repo_root, "happy_path")
 
@@ -1064,13 +1218,28 @@ def test_final_account_not_updated(cobol_runner, build_dir, repo_root):
         f"CBACT04C returned {outcome.res.returncode}\nSTDERR:\n{outcome.res.stderr}"
     )
     assert outcome.final_acct is not None, "scenario must have at least one account"
+    assert outcome.expected_final_bal is not None, (
+        "scenario must accrue interest for the final account for this test to be meaningful"
+    )
 
     updated = _updated_accounts(cobol_runner)
     original_final = outcome.accts[outcome.final_acct][1]
-    # WHY (known gap): equality here is the DEFECT being documented; if this ever
-    # fails because the loop was fixed, update this test intentionally.
-    assert updated[outcome.final_acct] == original_final, (
-        f"final account {outcome.final_acct} unexpectedly updated: "
-        f"{updated[outcome.final_acct]} != {original_final}"
+    # WHY assert the accrual actually moves the balance (guards a vacuous xfail): if the
+    # final account happened to accrue zero interest, expected_final_bal would equal the
+    # original and the correctness assertion below could pass for the wrong reason. This
+    # scenario is chosen so the final account DOES accrue, so a strict difference must hold.
+    assert outcome.expected_final_bal != original_final, (
+        "happy_path must accrue non-zero interest for the final account so the "
+        "correctness assertion is not vacuously satisfied by the buggy no-op"
+    )
+    # WHY this is the CORRECTNESS assertion (Issue 1): with the defect present the final
+    # account is never rewritten, so updated[...] still equals original_final and this
+    # equality FAILS -> the test xfails (documented, report-visible). Once the loop flushes
+    # the final account, updated[...] becomes expected_final_bal, this passes, and strict
+    # xfail escalates the xpass to a failure prompting marker removal.
+    assert updated[outcome.final_acct] == outcome.expected_final_bal, (
+        f"final account {outcome.final_acct} balance {updated[outcome.final_acct]} "
+        f"!= interest-adjusted {outcome.expected_final_bal} "
+        f"(original {original_final}); the account-break defect drops its accrued interest"
     )
 

@@ -47,30 +47,57 @@ master outputs do NOT carry that envelope field; their own runtime timestamps (e
 ``TRAN-PROC-TS``) are the volatile fields normalised here via
 :func:`tests.helpers.record_codec.normalize_timestamps`.
 
-RUN STATUS -- documented conditional skip (the expected outcome on this runner)
-------------------------------------------------------------------------------
+RUN STATUS -- documented strict gate: skip in default mode, HARD-FAIL under strict
+----------------------------------------------------------------------------------
 ``CBEXPORT`` and ``CBIMPORT`` currently **do not compile** under any GnuCOBOL dialect
 (verified: default, cobol2014, cobol2002, mvs, ibm-strict)::
 
     app/cbl/CBEXPORT.cbl:68: error: 'EXPORT-SEQUENCE-NUM' is not defined
     app/cbl/CBIMPORT.cbl:40: error: 'EXPORT-SEQUENCE-NUM' is not defined
 
-Root cause: both declare ``SELECT ... ASSIGN EXPFILE ORGANIZATION INDEXED RECORD KEY
-IS EXPORT-SEQUENCE-NUM``, but the EXPFILE FD record is ``01 EXPORT-OUTPUT-RECORD PIC
-X(500)`` while ``EXPORT-SEQUENCE-NUM`` is defined in copybook ``CVEXPORT`` copied into
-WORKING-STORAGE, NOT into the file record. A ``RECORD KEY`` must name a field inside
-the file's own record, so ``cobc`` rejects the SELECT and emits no binary. This is a
-**production source defect**, and fixing production COBOL is explicitly OUT OF SCOPE
-(AAP Section 0.8.2 -- production code is REFERENCE only). The suite's build script
-``scripts/build_test_programs.sh`` already classifies both as "KNOWN-UNSUPPORTED" and
-does not fail the build.
+Root cause (QA finding **F-EXP-COMPILE**, CRITICAL): both declare ``SELECT ... ASSIGN
+EXPFILE ORGANIZATION INDEXED RECORD KEY IS EXPORT-SEQUENCE-NUM``, but the EXPFILE FD
+record is ``01 EXPORT-OUTPUT-RECORD PIC X(500)`` while ``EXPORT-SEQUENCE-NUM`` is
+defined in copybook ``CVEXPORT`` copied into WORKING-STORAGE, NOT into the file record.
+A ``RECORD KEY`` must name a field inside the file's own record, so ``cobc`` rejects the
+SELECT and emits no binary. This is a **production source defect**, and fixing production
+COBOL is explicitly OUT OF SCOPE (AAP Section 0.8.2 -- production code is REFERENCE
+only). The suite's build script ``scripts/build_test_programs.sh`` already classifies
+both as "KNOWN-UNSUPPORTED" and does not fail the build.
 
-Therefore this test's primary, expected behaviour is a **documented, explicit skip**
-(never a silent pass, never ``xfail``). Crucially, the full round-trip assertion path
-below is implemented correctly so the test **auto-upgrades to a real, asserting test**
-the moment buildable ``CBEXPORT``/``CBIMPORT`` binaries appear in ``build_dir`` (a
-future source fix, or an externally supplied prebuilt binary) -- with no further edits
-to this file.
+Because export/import is an **AAP-mandatory feature** that cannot be exercised on this
+runner, this test routes its unavailability through the local strict gate
+(:func:`_require_or_skip`) rather than an unconditional ``pytest.skip``:
+
+  * **Default mode** -- a **documented, explicit skip** citing F-EXP-COMPILE (never a
+    silent pass, never ``xfail``). This keeps local/dev CI green while the toolchain
+    genuinely cannot build the pair.
+  * **Under ``CARDDEMO_REQUIRE_COBOL=1``** -- a **HARD FAILURE**. WHY (closes QA finding
+    **F-EXP-SKIP**): the prior code always skipped, so a required-COBOL CI could exit
+    GREEN with this mandatory feature never run -- masking that it is un-runnable. The
+    honest hard-fail is the correct resolution; it is NOT green-washed and the
+    underlying compile defect is out of scope to fix.
+
+Crucially, the full round-trip assertion path below is implemented correctly so the
+test **auto-upgrades to a real, asserting test** the moment buildable
+``CBEXPORT``/``CBIMPORT`` binaries appear in ``build_dir`` (a future source fix, or an
+externally supplied prebuilt binary) -- with no further edits to this file.
+
+Additional out-of-scope production defect surfaced by this feature (reported, NOT fixed)
+---------------------------------------------------------------------------------------
+QA finding **F-EXP-NOOP** (CRITICAL): ``CBIMPORT`` paragraph ``3000-VALIDATE-IMPORT``
+(``app/cbl/CBIMPORT.cbl:449``) is a **no-op** -- two ``DISPLAY`` statements and no actual
+integrity checking -- despite the ``CBIMPORT.cbl:31`` comment "Validate data integrity
+using checksums". No checksum field exists anywhere in the 500-byte ``CVEXPORT``
+envelope, so checksum validation is impossible by construction. Consequently corrupt,
+out-of-sequence, duplicate, and truncated import records are **silently committed** to
+the master files (rc=0, ERROUT empty); only an unknown record-TYPE tag is caught. For a
+financial workload this is a silent data-integrity loss. This lives entirely in
+production COBOL and is therefore OUT OF SCOPE to fix (AAP Section 0.8.2, production is
+REFERENCE only); it is documented here and in the QA resolution report so the gap is
+auditable. It is NOT masked by this test -- this test asserts the byte-identical
+round-trip of *well-formed* records, and the no-op validation gap is a separate
+program-level assertion that cannot run until the pair builds.
 
 Determinism & isolation
 -----------------------
@@ -96,6 +123,7 @@ bootstrap ``tests/conftest.py`` injects and the runner scripts export).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections import namedtuple
@@ -173,17 +201,201 @@ _MASTERS: "tuple[_Master, ...]" = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Local strict-mode gate (mirrors tests/conftest.py's M1 contract).
+# ---------------------------------------------------------------------------
+
+def _is_truthy(value: "str | None") -> bool:
+    """Interpret an environment-variable string as a boolean flag.
+
+    Purpose
+    -------
+    Provide the same case-insensitive reading of the strict-mode flag that the
+    root ``tests/conftest.py`` uses, so this module's local strict gate agrees
+    exactly with the suite-wide policy.
+
+    Parameters
+    ----------
+    value : str | None
+        The raw environment value (``os.environ.get(...)`` result), possibly
+        ``None`` when the variable is unset.
+
+    Returns
+    -------
+    bool
+        ``True`` iff ``value`` -- lower-cased and stripped -- is one of
+        ``{"1", "true", "yes", "on"}``; ``False`` otherwise (including ``None``).
+
+    Raises
+    ------
+    None
+    """
+    # WHY duplicate conftest's tiny predicate here rather than import it
+    # (Trade-off): ``conftest`` is shared infrastructure other, out-of-scope
+    # checkpoints depend on, and its helpers are private (underscore-prefixed)
+    # and not part of a stable import surface. Re-stating this three-line
+    # contract locally confines the fix to this in-scope file and cannot perturb
+    # the shared module, at the cost of a small, deliberate, documented duplication.
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strict_cobol_required() -> bool:
+    """Return whether an un-buildable COBOL layer must HARD-FAIL rather than skip.
+
+    Purpose
+    -------
+    Centralise this module's read of ``CARDDEMO_REQUIRE_COBOL`` so the
+    required-layer policy (conftest's QA finding M1 contract) is evaluated
+    identically here -- which is what makes the export/import compile defect a
+    HARD failure under a required-COBOL CI instead of a silently-green skip
+    (QA finding F-EXP-SKIP).
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when the operator/CI demands the COBOL toolchain be present and
+        the programs buildable (un-buildable -> failure); ``False`` for the
+        default developer-friendly mode (un-buildable -> clean skip).
+
+    Raises
+    ------
+    None
+    """
+    return _is_truthy(os.environ.get("CARDDEMO_REQUIRE_COBOL"))
+
+
+def _require_or_skip(reason: str) -> "NoReturn":  # type: ignore[valid-type]  # noqa: F821
+    """Fail (strict mode) or skip (default) when the export/import pair is unavailable.
+
+    Purpose
+    -------
+    Implement the conftest M1 contract locally: an un-buildable or absent
+    ``CBEXPORT``/``CBIMPORT`` pair becomes a HARD, report-visible FAILURE when
+    ``CARDDEMO_REQUIRE_COBOL`` is set, and a clean, documented skip otherwise.
+    This is the honest replacement for the OLD unconditional ``pytest.skip``
+    (QA finding F-EXP-SKIP), which let a required-COBOL CI exit green while the
+    mandatory export/import feature never ran.
+
+    Parameters
+    ----------
+    reason : str
+        Human-readable explanation of why the pair is unavailable; surfaced
+        verbatim in the pytest failure/skip message.
+
+    Returns
+    -------
+    NoReturn
+        Never returns normally -- always raises ``Failed`` (strict) or
+        ``Skipped`` (default) via pytest.
+
+    Raises
+    ------
+    Failed
+        (via :func:`pytest.fail`) when strict mode is active.
+    Skipped
+        (via :func:`pytest.skip`) when strict mode is inactive.
+    """
+    if _strict_cobol_required():
+        # WHY pytrace=False (Trade-off): the actionable signal is the
+        # missing-dependency reason (the EXPORT-SEQUENCE-NUM production defect),
+        # not a traceback into this helper; suppressing the trace keeps the JUnit
+        # failure readable while still recording it as a hard, non-green result.
+        pytest.fail(
+            f"{reason} (required because CARDDEMO_REQUIRE_COBOL is set).",
+            pytrace=False,
+        )
+    pytest.skip(f"{reason}; skipping (set CARDDEMO_REQUIRE_COBOL=1 to require it).")
+
+
+def _normalize_trailing_filler(record: str, layout) -> str:
+    """Blank a record's trailing ``FILLER`` field so pad-byte choice cannot fail equality.
+
+    Purpose
+    -------
+    Neutralise QA finding **F-EXP-FILLER** in the fallback round-trip comparison:
+    the original master fixtures pad their trailing ``FILLER`` region with ASCII
+    blanks (0x20), whereas ``CBIMPORT`` re-materialises records padding that same
+    region with NUL (0x00) low-values. Those bytes are not business data, but a
+    raw byte comparison would treat ``"   "`` and ``"\\x00\\x00\\x00"`` as unequal
+    and fail a round-trip that is in fact correct on every meaningful field. This
+    helper overwrites just the layout's trailing ``FILLER`` span with a single
+    constant fill on BOTH sides of the comparison, so the equality turns on the
+    business payload alone.
+
+    Parameters
+    ----------
+    record : str
+        One fixed-width record, already exactly ``layout.reclen`` characters (the
+        caller frames records before calling this).
+    layout : tests.helpers.record_codec.RecordLayout
+        The record layout whose ``fields`` are scanned for a trailing ``FILLER``.
+
+    Returns
+    -------
+    str
+        The record with its trailing ``FILLER`` span (if any) replaced by blanks.
+        If the layout declares no trailing ``FILLER`` the record is returned
+        unchanged.
+
+    Raises
+    ------
+    None
+    """
+    # WHY only the TRAILING filler, located from the layout rather than hard-coded
+    # (Assumption + Refactoring Rationale): the pad-convention mismatch affects the
+    # unused tail padding a copybook reserves after the last business field; the
+    # layout's own ``FILLER`` field records exactly that span (start+length), so
+    # deriving it from the layout keeps this correct if a copybook's filler geometry
+    # ever changes and avoids inventing a magic offset. Interior fillers (none exist
+    # in these five layouts) are intentionally out of view -- only the tail is at issue.
+    #
+    # WHY ``f.start`` (not ``f.offset``): record_codec.Field names the zero-based byte
+    # offset ``start`` (see the Field dataclass); using the wrong attribute would raise
+    # AttributeError at runtime, so we bind to the actual field contract here.
+    filler_spans = [
+        (f.start, f.length)
+        for f in layout.fields
+        if getattr(f, "name", "") == "FILLER"
+    ]
+    if not filler_spans:
+        return record
+    # Use the last (right-most) FILLER span -- the trailing pad region.
+    offset, length = max(filler_spans, key=lambda span: span[0])
+    end = offset + length
+    # WHY rebuild by slicing rather than str.replace (Assumption): the filler bytes
+    # can be spaces OR NULs (the very mismatch we are erasing), so a value-based
+    # replace would be unreliable; a positional overwrite is exact and length-preserving.
+    return record[:offset] + (" " * length) + record[end:]
+
+
 def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
-    """Ensure runnable CBEXPORT/CBIMPORT binaries exist, else skip with the defect reason.
+    """Ensure runnable CBEXPORT/CBIMPORT binaries exist, else gate (skip / hard-fail).
 
     Purpose
     -------
     Gate the round-trip on the availability of buildable ``CBEXPORT`` and ``CBIMPORT``
     programs. Prefer binaries already produced by ``scripts/build_test_programs.sh``;
     if either is missing, attempt an on-demand GnuCOBOL compile. If the compile fails
-    (the expected outcome, because of the documented ``EXPORT-SEQUENCE-NUM`` source
-    defect) the whole test is skipped with an auditable message rather than failing or
-    erroring.
+    (the expected outcome, because of the documented ``EXPORT-SEQUENCE-NUM`` production
+    source defect) the pair is unavailable, so this routes through the local strict gate
+    (:func:`_require_or_skip`) -- a documented skip in default mode, and a HARD failure
+    under ``CARDDEMO_REQUIRE_COBOL``.
+
+    WHY the strict gate rather than an unconditional skip (Refactoring Rationale --
+    closes QA finding F-EXP-SKIP): export/import is a MANDATORY feature. The prior code
+    always ``pytest.skip``-ped when the pair would not build, which meant a
+    required-COBOL CI (``CARDDEMO_REQUIRE_COBOL=1``) could still exit GREEN with the
+    feature never exercised -- masking that it is genuinely un-runnable. Routing through
+    :func:`_require_or_skip` keeps the developer-friendly skip by default but makes a
+    required-COBOL run FAIL honestly, so the un-buildable production defect is
+    surfaced, never green-washed. Fixing the underlying COBOL is out of scope (production
+    is REFERENCE only, AAP Section 0.8.2); the honest signal is the correct resolution.
 
     Parameters
     ----------
@@ -204,10 +416,13 @@ def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
     Raises
     ------
     Skipped
-        (via :func:`pytest.skip`) when ``cobc`` is not on ``PATH``, a compile times
-        out, or either program fails to compile. The skip message cites the production
-        ``EXPORT-SEQUENCE-NUM`` defect and includes the captured ``cobc`` stderr so the
-        reason is self-explanatory in a CI report.
+        (via :func:`_require_or_skip`) in DEFAULT mode when ``cobc`` is not on ``PATH``,
+        a compile times out, or either program fails to compile. The reason cites the
+        production ``EXPORT-SEQUENCE-NUM`` defect and includes the captured ``cobc``
+        stderr so it is self-explanatory in a CI report.
+    Failed
+        (via :func:`_require_or_skip`) under ``CARDDEMO_REQUIRE_COBOL`` for the same
+        conditions -- the mandatory feature is required but un-runnable.
     """
     # Prefer already-built binaries. WHY (Trade-off): scripts/build_test_programs.sh is
     # the authoritative, cached build for the whole suite; if it (or a future source
@@ -217,12 +432,14 @@ def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
     if not missing:
         return
 
-    # A missing compiler is an ENVIRONMENT condition, not a test defect, so skip
-    # (matching conftest's built_programs policy) rather than erroring the test.
+    # A missing compiler is an ENVIRONMENT condition, not a test defect. WHY route it
+    # through the strict gate (not an unconditional skip): under CARDDEMO_REQUIRE_COBOL
+    # the operator has declared the COBOL toolchain a hard prerequisite, so its absence
+    # must FAIL, not silently skip; in default mode it remains a friendly skip.
     if shutil.which("cobc") is None:
-        pytest.skip(
+        _require_or_skip(
             "GnuCOBOL 'cobc' not on PATH and prebuilt CBEXPORT/CBIMPORT are absent; "
-            "cannot exercise the export/import round-trip."
+            "cannot exercise the export/import round-trip"
         )
 
     cpy_dir = repo_root / "app" / "cpy"
@@ -249,8 +466,10 @@ def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
                 command, capture_output=True, text=True, timeout=120,
             )
         except subprocess.TimeoutExpired as exc:  # pragma: no cover - defensive
-            # A hung compiler is an environment fault, not a product assertion; skip.
-            pytest.skip(f"compiling {name} timed out after 120s: {exc}")
+            # A hung compiler is an environment fault, not a product assertion. Route
+            # through the strict gate for the same reason as the missing-compiler case:
+            # strict mode requires a working toolchain and must fail if it stalls.
+            _require_or_skip(f"compiling {name} timed out after 120s: {exc}")
 
         if completed.returncode != 0 or not target.is_file():
             # Capture a bounded stderr tail so the skip reason is actionable without
@@ -259,15 +478,21 @@ def _ensure_export_import(build_dir: Path, repo_root: Path) -> None:
             failures.append(f"{name} (cobc rc={completed.returncode}):\n{stderr_tail}")
 
     if failures:
-        # WHY skip and NOT xfail (Alternatives Considered): the programs are
-        # un-buildable because of a production source defect that is out of scope to
-        # fix, so there is no product behaviour to assert. An xfail would still try to
-        # RUN a non-existent binary (muddying the failure) and, under this suite's
-        # xfail_strict=True, would flip to a HARD failure the day the source is fixed.
-        # A precise, documented skip is auditable today and cleanly auto-upgrades to a
-        # real pass/fail the moment the binaries build.
+        # WHY the strict gate and NOT an unconditional skip (Alternatives Considered --
+        # closes F-EXP-SKIP): the programs are un-buildable because of a production
+        # source defect that is OUT OF SCOPE to fix (production is REFERENCE only, AAP
+        # Section 0.8.2), so there is no product behaviour we can assert today. The old
+        # code always skipped, letting a required-COBOL CI pass green with this MANDATORY
+        # feature never run. Routing through _require_or_skip keeps the auditable,
+        # developer-friendly skip in default mode but makes CARDDEMO_REQUIRE_COBOL FAIL
+        # honestly -- the correct signal that a mandatory feature is genuinely
+        # un-runnable, never green-washed. It also auto-upgrades to a real pass/fail the
+        # moment the binaries build (e.g. an externally supplied/fixed binary appears).
+        # WHY not xfail: xfail would still try to RUN a non-existent binary (muddying the
+        # failure) and, under this suite's xfail_strict=True, would flip to a hard failure
+        # the day the source is fixed -- a documented gate is cleaner and self-upgrading.
         detail = "\n\n".join(failures)
-        pytest.skip(
+        _require_or_skip(
             "CBEXPORT/CBIMPORT do not compile under GnuCOBOL, so the export/import "
             "round-trip cannot run. This is a DOCUMENTED production source defect "
             "(out of scope to fix per AAP Section 0.8.2): both declare "
@@ -549,11 +774,26 @@ def test_export_import_roundtrip(cobol_runner, build_dir, repo_root) -> None:
         #    after that width check. This is the concrete "blank the volatile field
         #    before comparing" step for the re-materialised master payloads.
         layout_obj = LAYOUTS[master.layout]
+        # WHY chain _normalize_trailing_filler onto normalize_timestamps (closes
+        # F-EXP-FILLER): after the volatile timestamp is blanked, the only remaining
+        # non-business difference between a fixture record and its round-tripped twin is
+        # the pad convention of the trailing FILLER -- the fixtures pad with 0x20 spaces
+        # while CBIMPORT re-materialises with 0x00 NULs. Blanking that tail span on BOTH
+        # sides (length-preserving) makes the sorted-multiset equality turn on the
+        # business payload alone; every meaningful field is still compared byte-exactly.
+        # normalize_timestamps guarantees each record is exactly reclen wide, which is the
+        # precondition _normalize_trailing_filler relies on.
         expected_norm = sorted(
-            normalize_timestamps(record, layout_obj) for record in originals[master.name]
+            _normalize_trailing_filler(
+                normalize_timestamps(record, layout_obj), layout_obj
+            )
+            for record in originals[master.name]
         )
         actual_norm = sorted(
-            normalize_timestamps(record, layout_obj) for record in actual_records
+            _normalize_trailing_filler(
+                normalize_timestamps(record, layout_obj), layout_obj
+            )
+            for record in actual_records
         )
         # WHY assert on a pre-computed bool, not `actual_norm == expected_norm` directly
         # (Privacy / MA-13): pytest's assertion rewriting would otherwise dump BOTH full
