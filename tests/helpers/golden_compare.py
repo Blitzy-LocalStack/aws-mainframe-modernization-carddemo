@@ -52,8 +52,10 @@ Other design decisions (WHY)
 * **Privacy: masked, bounded diagnostics (MA-13).** Mismatch diffs never emit complete
   sensitive records. In record mode each line is passed through
   :func:`record_codec.mask_record` (which redacts PAN, CVV, embossed name, SSN, DOB,
-  government id, …) before the diff is rendered; in text mode a best-effort PAN/SSN masker
-  is applied. Diffs are also capped at :data:`_DIFF_MAX_LINES`.
+  government id, …) before the diff is rendered; in text mode a best-effort masker redacts
+  PAN- and SSN-shaped tokens plus any concatenated run of >=9 digits -- the shape of a
+  fixed-width SSN+gov-id+DOB field that the anchored PAN/SSN rules alone miss (F-SEC-01).
+  Diffs are also capped at :data:`_DIFF_MAX_LINES`.
 * **No binary floating point (Financial correctness).** This module performs only text
   normalization and comparison and deliberately uses **no** ``float`` anywhere; monetary
   values are compared as their exact textual (zoned-decimal) representation, which a
@@ -178,14 +180,29 @@ _DIFF_MAX_LINES = 200
 # where -- unlike record mode -- there is no layout to drive field-aware masking. WHY
 # (MA-13 / Trade-off): a statement body can embed a full PAN or SSN in rendered text; a
 # structural mask is impossible without field offsets, so we redact by shape. The patterns
-# are deliberately conservative (long digit runs / dashed SSN) to avoid mangling ordinary
-# monetary figures, and they run ONLY on the already-truncated diff text, never on the
-# compared content itself (so they cannot affect pass/fail, only what a failure prints).
+# run ONLY on the already-truncated diff text, never on the compared content itself (so they
+# cannot affect pass/fail, only what a failure prints).
 #
 # PAN: 13-19 consecutive digits (ISO/IEC 7812 account-number length range).
 _PAN_TEXT_RE = re.compile(r"\b\d{13,19}\b")
 # SSN: 9 digits, optionally dashed as 3-2-4.
 _SSN_TEXT_RE = re.compile(r"\b\d{3}-?\d{2}-?\d{4}\b")
+# Bare digit run of 9 or more characters, WITHOUT the word-boundary anchors the PAN/SSN
+# patterns above rely on. WHY (F-SEC-01 / Refactoring Rationale): a fixed-width customer record
+# dumped in TEXT mode concatenates SSN(9) + government-id(20) + DOB-year(4) into a single
+# unbroken 33+ digit run. That run is too long for the 13-19 anchored PAN rule, and it has no
+# trailing word boundary for the SSN rule, so BOTH anchored patterns skip it and the SSN,
+# gov-id, and DOB leak verbatim into the diff (the confirmed F-SEC-01 defect). This unanchored
+# catch-all closes that gap. WHY (Alternatives Considered): threading a ``layout=`` (field-aware
+# mask_record) into every text-mode provisioning comparison was rejected because the provisioning
+# artifact is free-form console output -- banners interleaved with DISPLAYed records -- which has
+# no single record layout to apply, so a shape-based catch-all applied last is the complete,
+# self-contained fix. WHY (Assumption): 9 is the shortest financial-PII token width present in
+# these records (a bare SSN), so a >=9 threshold cannot leave any identifier intact; formatted
+# monetary figures carry decimal points / thousands separators that break them well below 9
+# contiguous digits and so stay readable -- only unbroken >=9-digit runs (the shape of
+# concatenated raw identifiers) are redacted.
+_LONG_DIGIT_RUN_TEXT_RE = re.compile(r"\d{9,}")
 
 
 class GoldenMismatchError(AssertionError):
@@ -424,18 +441,25 @@ def _mask_text_diagnostic(text: str) -> str:
     Returns
     -------
     str
-        ``text`` with long digit runs (candidate PANs) and SSN-shaped tokens replaced by a
-        fixed redaction marker.
+        ``text`` with SSN-shaped tokens replaced by ``<REDACTED-SSN>``, 13-19 digit PAN-shaped
+        tokens by ``<REDACTED-PAN>``, and any residual unbroken run of >=9 digits (e.g. a
+        concatenated fixed-width SSN+gov-id+DOB field) by ``<REDACTED-DIGITS>``.
 
     Raises
     ------
     None
     """
-    # SSN first (it is the more specific pattern), then PAN, so a dashed SSN is not partly
-    # consumed by the PAN rule. WHY (Assumption): masking the SSN shape before the long-digit
-    # rule avoids leaving a partial identifier behind.
+    # Apply the two ANCHORED, shape-SPECIFIC rules first (SSN, then PAN), then the unanchored
+    # >=9-digit catch-all LAST. WHY (F-SEC-01 / Refactoring Rationale): running SSN before PAN
+    # keeps a dashed 3-2-4 SSN from being partly consumed by the PAN rule so it earns its precise
+    # <REDACTED-SSN> label; running the long-digit rule last then redacts any residual
+    # concatenated run (SSN+gov-id+DOB fused into one fixed-width field) that the boundary-anchored
+    # rules cannot see, closing the text-mode gap WITHOUT overwriting the more descriptive markers
+    # the specific rules already produced (the markers contain no digits, so the catch-all leaves
+    # them intact and the transform stays idempotent).
     text = _SSN_TEXT_RE.sub("<REDACTED-SSN>", text)
     text = _PAN_TEXT_RE.sub("<REDACTED-PAN>", text)
+    text = _LONG_DIGIT_RUN_TEXT_RE.sub("<REDACTED-DIGITS>", text)
     return text
 
 

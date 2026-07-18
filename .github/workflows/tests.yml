@@ -86,11 +86,14 @@ jobs:
     # (cp313) reference platform, so the interpreter and the wheel hashes MUST
     # agree or `--require-hashes` (added in the install step) fails closed (F8).
     runs-on: ubuntu-24.04
-    env:
-      # WHY: optional LocalStack auth token, read from a repo secret when
-      # configured. It is intentionally allowed to be empty -- setup_localstack.sh
-      # then degrades to WARN, so unconfigured runners still pass the core suite.
-      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+    # WHY (F-SEC-02 -- blast-radius reduction / least privilege): the LocalStack
+    # auth token is deliberately NOT declared at job scope. A job-level env: would
+    # place the secret in the environment of EVERY step -- including actions/
+    # checkout, the dependency installers, actions/upload-artifact, and the
+    # third-party mikepenz/action-junit-report step -- none of which need it. It is
+    # instead step-scoped below onto the ONE step that consumes it (the suite
+    # runner, which forwards it to scripts/setup_localstack.sh), so a compromise of
+    # any other step or action cannot read the token from its process environment.
     steps:
       # Step 1: check out the repository so scripts/ and tests/ are available.
       - name: Check out the repository
@@ -183,6 +186,16 @@ jobs:
       # the RC rubric (see WHY note 3 in the header). `--with-localstack` is
       # appended only when the optional AWS layer was requested on dispatch.
       - name: Run the full CardDemo test suite
+        # WHY (F-SEC-02): step-scope the optional LocalStack auth token to ONLY
+        # this step -- the sole consumer, which forwards it via scripts/
+        # run_tests.sh -> scripts/setup_localstack.sh (read from the environment at
+        # setup_localstack.sh:478). It is intentionally allowed to be empty:
+        # setup_localstack.sh then degrades to WARN, so unconfigured runners still
+        # pass the core suite. Keeping it off job scope means it is absent from the
+        # environment of every other step (checkout, installers, upload-artifact,
+        # and the third-party junit-report action).
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
         run: |
           rc=0
           if [ "${{ github.event.inputs.with_localstack }}" = "true" ]; then
@@ -233,7 +246,17 @@ jobs:
       - name: Publish JUnit test results to the CI UI
         if: always()
         continue-on-error: true
-        uses: mikepenz/action-junit-report@v5
+        # WHY (F-SEC-02 -- supply-chain hardening / CWE-1357): pin this third-party
+        # action to an IMMUTABLE full commit SHA instead of the mutable major tag
+        # `@v5`. A bare `@v5` can be silently repointed by a tag move or a
+        # maintainer-account takeover (cf. the tj-actions/changed-files incident) to
+        # execute attacker code in this job on trusted push/workflow_dispatch runs.
+        # The pinned commit is exactly what `@v5` resolved to when pinned -- verified
+        # with `git ls-remote`: refs/tags/v5 and refs/tags/v5.6.2 both point to this
+        # SHA (lightweight tags, so the SHA is the commit itself) -- so behaviour is
+        # unchanged; the trailing `# v5.6.2` keeps it human-readable and lets
+        # Dependabot/Renovate bump it.
+        uses: mikepenz/action-junit-report@3585e9575db828022551b4231f165eb59a0e74e3 # v5.6.2
         with:
           report_paths: "reports/*.xml"
           check_name: CardDemo Test Results
