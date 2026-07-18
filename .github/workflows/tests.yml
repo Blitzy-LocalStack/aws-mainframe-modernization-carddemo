@@ -1,0 +1,177 @@
+# =============================================================================
+# .github/workflows/tests.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Continuous-integration workflow for the AWS CardDemo automated test suite.
+#   On every push and pull request to the default branch (and on manual
+#   dispatch) it installs the verified toolchain, compiles the COBOL programs
+#   under test, runs the ENTIRE three-layer suite (COBOL unit -> pytest
+#   integration -> pytest end-to-end) through the single master runner
+#   scripts/run_tests.sh, and publishes machine-readable JUnit XML so pass/fail
+#   is auditable in the CI UI -- satisfying the financial-enterprise requirement
+#   for CI-consumable, auditable reporting.
+#
+#   This workflow is ADDITIVE and TEST-ONLY: it never modifies production COBOL,
+#   copybooks, JCL, BMS maps, the CICS CSD, or seed data. It only orchestrates
+#   the new test artifacts under scripts/ and tests/.
+#
+# WHY (non-obvious design decisions):
+#   - Assumption: the GitHub-hosted runner has NO Docker daemon, so the optional
+#     AWS layer uses LocalStack's headless `localstack ephemeral create` path
+#     (inside scripts/setup_localstack.sh), NOT a docker-compose/service
+#     container. See https://blog.localstack.cloud/ai/agents.md
+#   - Trade-off: the COBOL is compiled with `--std=ibm-strict` (inside
+#     scripts/build_test_programs.sh, mirroring scripts/local_compile.sh), NOT
+#     `-std=cobol85`, because ibm-strict accepts the COMP-3 packed-decimal money
+#     fields that cobol85 rejects. This is the single most important dialect
+#     decision for these financial programs.
+#   - Trade-off: the job maps the suite's aggregate condition-code rubric
+#     (0 pass / 4 warn / >=8 fail; 16 fatal) to the process exit status of
+#     scripts/run_tests.sh and lets that ONE status stand as the CI result,
+#     rather than parsing individual reports -- one deterministic, fail-closed
+#     status for a financial-grade suite.
+#   - Assumption: runner scripts are invoked via `bash <path>` because a fresh
+#     checkout may not preserve the executable bit.
+#   - Trade-off: the LocalStack layer is opt-in (workflow_dispatch input /
+#     `--with-localstack`) and every LocalStack failure degrades to WARN inside
+#     the scripts, so the absence of AWS credentials never fails the core suite.
+# =============================================================================
+
+name: CardDemo Test Suite
+
+# WHY: CONTRIBUTING.md instructs contributors to watch automated CI on pull
+# requests, so the suite must run on push AND pull_request to the default
+# branch `main`; workflow_dispatch adds a manual entry point plus the opt-in
+# toggle for the optional AWS/LocalStack layer.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      with_localstack:
+        description: "Also run the optional LocalStack S3 dataset-staging layer"
+        type: boolean
+        default: false
+
+# WHY (least privilege): the job only needs to read the repository. `checks` and
+# `pull-requests` write scopes are granted solely so the JUnit reporter can
+# surface results as check annotations on the pull request.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+# WHY (efficiency/determinism): cancel superseded in-flight runs on the same ref
+# so rapid pushes do not pile up redundant CI or race on shared resources.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-suite:
+    name: Build and run the full CardDemo test suite
+    # WHY (determinism): pin to ubuntu-24.04 so the toolchain matches the
+    # versions verified in the plan (GnuCOBOL 3.1.2 line on a gcc 13 backend,
+    # Python 3.12) rather than drifting silently with `ubuntu-latest`.
+    runs-on: ubuntu-24.04
+    env:
+      # WHY: optional LocalStack auth token, read from a repo secret when
+      # configured. It is intentionally allowed to be empty -- setup_localstack.sh
+      # then degrades to WARN, so unconfigured runners still pass the core suite.
+      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+    steps:
+      # Step 1: check out the repository so scripts/ and tests/ are available.
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Step 2a: GnuCOBOL (cobc) is the compiler the WHOLE suite depends on; jq
+      # is used by the LocalStack S3-manifest seeding. `apt-get update` first so
+      # the package index is fresh on the pinned image; `cobc --version` fails
+      # the step early and visibly if the compiler is somehow unavailable.
+      - name: Install GnuCOBOL (cobc) and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnucobol jq
+          cobc --version
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Step 2b: install the pinned pytest/coverage/awscli test dependencies.
+      # WHY: `localstack` is deliberately NOT in requirements-test.txt -- it is a
+      # CLI installed separately (Step 2d) only for the opt-in AWS layer, not a
+      # pytest import dependency.
+      - name: Install Python test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r tests/requirements-test.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Step 2c: cobolget vendors GCBLUnit for provenance only -- the framework
+      # is ALSO committed as tests/cobol-unit/gcblunit.cbl and compiled by the
+      # build script, so this install is best-effort and must never fail the
+      # build (hence continue-on-error).
+      - name: Install cobolget (GCBLUnit provenance, best-effort)
+        continue-on-error: true
+        run: npm install -g cobolget@3.13.26
+
+      # Step 2d (optional): the LocalStack CLI is installed ONLY when the AWS
+      # layer is explicitly requested via workflow_dispatch, keeping the default
+      # push/PR runs lean and free of AWS prerequisites.
+      - name: Install LocalStack CLI (optional AWS layer)
+        if: ${{ github.event.inputs.with_localstack == 'true' }}
+        run: |
+          python3 -m pip install "localstack==2026.6.1"
+          localstack --version || true
+
+      # Step 3: explicit, up-front compile of the units under test + the COBOL
+      # test programs. This is intentionally redundant (run_tests.sh also builds)
+      # but surfaces a broken compile as its own clearly-labelled step. Invoked
+      # via `bash` so it does not depend on the file's executable bit.
+      - name: Build programs under test and COBOL test programs
+        run: bash scripts/build_test_programs.sh --with-tests
+
+      # Step 4: the single-command master runner. It sources scripts/test_env.sh
+      # internally, then runs build -> unit -> integration -> e2e and exits with
+      # the WORST aggregated condition code. We let that exit status stand as the
+      # authoritative CI result (see WHY note 3 in the header). `--with-localstack`
+      # is appended only when the optional AWS layer was requested on dispatch.
+      - name: Run the full CardDemo test suite
+        run: |
+          if [ "${{ github.event.inputs.with_localstack }}" = "true" ]; then
+            bash scripts/run_tests.sh --with-localstack
+          else
+            bash scripts/run_tests.sh
+          fi
+
+      # Step 5: publish results even when a previous step failed (`if: always()`).
+      # The JUnit XML lives in reports/ (unit.xml, integration.xml, e2e.xml, and
+      # optionally coverage.xml), written by the runner scripts.
+      - name: Upload JUnit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carddemo-test-reports
+          path: reports/
+          if-no-files-found: warn
+
+      # Step 5b: surface pass/fail in the CI UI as check annotations. WHY
+      # continue-on-error + fail_on_failure=false: this step is purely additive
+      # visibility and must NEVER override the authoritative status set by the
+      # run step above (that status already encodes the RC rubric).
+      - name: Publish JUnit test results to the CI UI
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: "reports/*.xml"
+          check_name: CardDemo Test Results
+          fail_on_failure: false
