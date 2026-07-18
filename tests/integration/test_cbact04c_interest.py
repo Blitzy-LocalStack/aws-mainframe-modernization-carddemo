@@ -846,18 +846,23 @@ def _drive_scenario(cobol_runner, build_dir: Path, repo_root: Path, scenario: st
     )
 
 
-def _assert_interest_happy_goldens(cobol_runner, res, repo_root, *, update=None):
-    """Compare (or, under the guarded protocol, regenerate) the interest happy_path goldens.
+def _assert_interest_goldens(cobol_runner, res, repo_root, scenario, *, update=None):
+    """Compare (or, under the guarded protocol, regenerate) one interest scenario's goldens.
 
     Purpose
     -------
-    QA Issue 5 (MAJOR) found the interest module proved its math with a derived Decimal
-    model but never *consumed* the committed ``tests/golden/interest/**/*.expected`` files,
-    so drift in the whole-record layout (ids, type/category, description, filler) went
-    uncaught. This helper is the single place that wires the AAP-designated byte-exact
-    comparator (:func:`tests.helpers.golden_compare.assert_matches_golden`) over every
-    observable happy_path output: the condition code, the rewritten ``ACCTFILE`` master,
-    and the ``TRANSACT`` interest stream.
+    QA Issue 5 / MA-04 (MAJOR, Oracle Integrity) found the interest module proved its math
+    with a derived Decimal model but never *consumed* the committed
+    ``tests/golden/interest/**/*.expected`` files, so drift in the whole-record layout
+    (ids, type/category, description, filler) went uncaught -- and while ``happy_path`` was
+    later wired in, the ``default_fallback`` and ``zero_balance`` oracle families stayed
+    committed-but-dead. This helper is now the single, ``scenario``-parameterized place that
+    wires the AAP-designated byte-exact comparator
+    (:func:`tests.helpers.golden_compare.assert_matches_golden`) over every observable output
+    of the named ``scenario``: the condition code, the rewritten ``ACCTFILE`` master, and the
+    ``TRANSACT`` interest stream. Keying the golden directory on ``scenario`` is exactly what
+    lets ALL three interest oracle families be consumed by one reviewed implementation,
+    closing MA-04 (no oracle is left un-diffed).
 
     WHY one helper drives BOTH compare and regenerate (single source of truth): the
     regeneration path (``update=True``) and the test's compare path (``update=None``) MUST
@@ -875,6 +880,11 @@ def _assert_interest_happy_goldens(cobol_runner, res, repo_root, *, update=None)
         The completed ``DRV04C`` run result (source of the return code and ``TRANSACT``).
     repo_root : pathlib.Path
         Repository root, used to locate the golden directory.
+    scenario : str
+        Interest scenario folder name under ``tests/golden/interest/`` -- one of
+        ``"happy_path"``, ``"default_fallback"``, or ``"zero_balance"``. Selects which
+        committed oracle family (the ``return_code``/``acctdat``/``transact`` ``.expected``
+        trilogy in that folder) the three comparisons below are diffed against.
     update : bool or None, optional
         Forwarded verbatim to :func:`assert_matches_golden`. ``None`` (default) compares;
         an explicit ``True`` requests a guarded regeneration. Defaults to ``None``.
@@ -890,7 +900,15 @@ def _assert_interest_happy_goldens(cobol_runner, res, repo_root, *, update=None)
     tests.helpers.golden_compare.GoldenUpdateError
         If ``update=True`` but the MA-12 safe-update guard blocks the write.
     """
-    golden_dir = Path(repo_root) / "tests" / "golden" / "interest" / "happy_path"
+    # WHY scenario-keyed (Refactoring Rationale, MA-04): the three sibling oracle files
+    # (return_code/acctdat/transact .expected) live in one directory per scenario, so keying
+    # golden_dir on the caller-supplied `scenario` lets this single helper consume EVERY
+    # committed interest oracle family instead of only happy_path -- which is the concrete
+    # fix for the "committed but never consumed" dead-oracle finding. Alternatives Considered:
+    # three near-identical per-scenario helpers -- rejected, because duplicating the compare
+    # /regenerate byte-framing invites it to drift apart between scenarios (the exact class of
+    # divergence MA-02/MA-08 flagged elsewhere), whereas one parameterized helper cannot.
+    golden_dir = Path(repo_root) / "tests" / "golden" / "interest" / scenario
 
     # RETURN-CODE (text mode): the top-level pass/warn/fail signal per the AAP RC rubric.
     # WHY text mode (no layout): the code is a bare integer, not a fixed-width record; text
@@ -998,7 +1016,7 @@ def test_happy_path_interest_and_balances(cobol_runner, build_dir, repo_root):
     # the golden pins the ENTIRE record layout (id, type, category, description, alt-key
     # card number, filler) that the field checks do not inspect -- catching layout drift a
     # value-only assertion would miss.
-    _assert_interest_happy_goldens(cobol_runner, outcome.res, repo_root)
+    _assert_interest_goldens(cobol_runner, outcome.res, repo_root, "happy_path")
 
 
 def test_default_group_fallback(cobol_runner, build_dir, repo_root):
@@ -1055,6 +1073,17 @@ def test_default_group_fallback(cobol_runner, build_dir, repo_root):
         f"{updated[nonfinal]} !> {original}"
     )
 
+    # Golden oracle (MA-04): consume the committed default_fallback oracle family so the
+    # WHOLE observable output (RETURN-CODE, rewritten ACCTFILE, TRANSACT stream) is pinned
+    # byte-for-byte -- not merely the derived balances and the two diagnostic stdout lines
+    # asserted above. WHY both oracles (Trade-off): the Decimal/stdout checks localise WHICH
+    # balance is wrong or WHETHER the status-23 fallback branch fired, while the golden pins
+    # the ENTIRE record layout (TRAN-ID, type/category, description, alt-key card number,
+    # 0x00 filler, and the 206.50 accrued balance) that the value/branch assertions never
+    # inspect. Before MA-04 these .expected files were committed but never diffed (a dead
+    # oracle), so fallback-path layout drift could regress silently.
+    _assert_interest_goldens(cobol_runner, outcome.res, repo_root, "default_fallback")
+
 
 def test_zero_balance_yields_zero_interest(cobol_runner, build_dir, repo_root):
     """A zero category balance yields zero interest and an unchanged account balance.
@@ -1107,6 +1136,17 @@ def test_zero_balance_yields_zero_interest(cobol_runner, build_dir, repo_root):
     )
     # Model must agree that every computed monthly amount is zero.
     assert outcome.tx_amts == [Decimal("0.00")] * len(outcome.tx_amts)
+
+    # Golden oracle (MA-04): consume the committed zero_balance oracle family. WHY it matters
+    # HERE specifically (Assumption made explicit): zero interest means the ACCTFILE is
+    # rewritten with BYTE-IDENTICAL content to the input fixture, and each TRANSACT record
+    # carries TRAN-AMT = +0.00 encoded as the zoned-decimal overpunch `0000000000{` (ten
+    # zeros then `{`), NOT eleven plain zeros -- a distinction the value-only Decimal
+    # assertions above are blind to (they see 0.00 either way). The byte-exact golden is the
+    # only oracle that proves the +0.00 sign overpunch and that all 300-byte account records
+    # round-trip unchanged. Before MA-04 these .expected files were committed but never
+    # diffed (a dead oracle).
+    _assert_interest_goldens(cobol_runner, outcome.res, repo_root, "zero_balance")
 
 
 def test_no_fee_applied(cobol_runner, build_dir, repo_root):
