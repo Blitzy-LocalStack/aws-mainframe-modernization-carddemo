@@ -44,6 +44,13 @@
 #     framework's own reporting; finer per-assertion locality is sacrificed.
 #   - Refactoring rationale: completion is detected by each test process exiting
 #     (a synchronous wait on its status), never a fixed `sleep`.
+#   - Report fidelity (QA-F1): the emitted <testsuite>/<testcase> elements carry a
+#     REAL ISO-8601 `timestamp` and REAL wall-clock `time` durations, measured
+#     from `date` readings around each program's execution -- never a hard-coded
+#     `time="0"`. Trade-off: this makes the unit report self-attest its
+#     generation time and true per-program durations exactly like the pytest
+#     integration/e2e layers (reports/integration.xml, reports/e2e.xml), at the
+#     cost of two extra `date` calls per program (negligible vs. compile+run).
 # =============================================================================
 
 set -euo pipefail
@@ -156,6 +163,46 @@ carddemo_xml_escape() {
     printf '%s' "$s"
 }
 
+carddemo_unit_timestamp() {
+    # Purpose : emit the current instant as an ISO-8601 dateTime with microsecond
+    #           precision and an explicit +00:00 offset, for the JUnit
+    #           `timestamp` attribute on the <testsuite> element.
+    # Parameters: none.
+    # Returns : always 0; the timestamp string is written to stdout, e.g.
+    #           "2026-07-18T15:02:04.493982+00:00".
+    # Errors  : none (a `date` failure is not expected on the supported runner;
+    #           GNU coreutils `date` is a hard prerequisite of this suite).
+    # WHY (Trade-off): the format is deliberately byte-shape-identical to the
+    # pytest-generated reports/integration.xml and reports/e2e.xml (microseconds
+    # + "+00:00"), so all three layer reports self-attest their generation time
+    # in ONE uniform shape for any downstream JUnit/audit consumer -- this is the
+    # QA-F1 fix (the unit report previously omitted `timestamp` entirely).
+    # WHY (Assumption): `-u` pins UTC, so the offset is ALWAYS +00:00 and the
+    # value is directly comparable across CI hosts regardless of their local TZ.
+    date -u +%Y-%m-%dT%H:%M:%S.%6N+00:00
+}
+
+carddemo_unit_duration() {
+    # Purpose : compute a wall-clock duration, in fractional seconds, between two
+    #           `date +%s.%N` epoch readings, formatted for the JUnit `time`
+    #           attribute on the <testsuite> and each <testcase>.
+    # Parameters:
+    #   $1 (string) - start reading from `date +%s.%N` (epoch seconds.nanos).
+    #   $2 (string) - end reading from `date +%s.%N` (normally >= $1).
+    # Returns : always 0; the non-negative delta is written to stdout as a fixed
+    #           3-decimal value (e.g. "0.057"), matching the pytest layers'
+    #           `time` precision.
+    # Errors  : none; a missing/empty argument is coerced to 0 by awk, and a
+    #           negative result (e.g. a mid-run wall-clock adjustment) is clamped
+    #           to 0.000 so a nonsensical negative JUnit time can never be emitted.
+    # WHY (Alternatives Considered): `bc` is NOT installed on the runner and bash
+    # has no native floating-point arithmetic, so awk -- which IS guaranteed
+    # present (it is already used elsewhere in this suite) -- performs the
+    # subtraction. This is the QA-F1 fix for the hard-coded `time="0"`: durations
+    # are now REAL, measured from `date` readings taken around each program's run.
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { d = b - a; if (d < 0) d = 0; printf "%.3f", d }'
+}
+
 # ---------------------------------------------------------------------------
 # 1. Ensure the units-under-test AND the COBOL test programs are compiled.
 # WHY (Trade-off): a warn-level build result (e.g. no test programs yet) must
@@ -166,7 +213,15 @@ echo "[unit] ============================================================"
 echo "[unit] COBOL unit-test layer (GCBLUnit)"
 echo "[unit] ============================================================"
 echo "[unit] building units-under-test and test programs ..."
-if bash "$_unit_script_dir/build_test_programs.sh" --with-tests; then
+if [ "${CARDDEMO_SKIP_BUILD:-0}" = "1" ]; then
+    # WHY (F-P5 -- reuse the master's one build): run_tests.sh has already compiled
+    # every unit-under-test AND every COBOL test program (--with-tests) and exported
+    # CARDDEMO_SKIP_BUILD=1, so a second identical compile here is pure waste.
+    # Standalone invocation never sees the flag, so recompile-always is preserved and
+    # this runner stays independently runnable (Trade-off: safety+standalone vs cost).
+    echo "[unit] CARDDEMO_SKIP_BUILD=1: reusing master build artifacts (skip rebuild)"
+    build_rc=0
+elif bash "$_unit_script_dir/build_test_programs.sh" --with-tests; then
     build_rc=0
 else
     build_rc=$?
@@ -194,10 +249,16 @@ mkdir -p "$CARDDEMO_REPORTS_DIR"
 
 if [ "${#test_srcs[@]}" -eq 0 ]; then
     echo "[unit] no *_test.cbl found under $_tdir - nothing to run (warn)"
+    # WHY (QA-F1): even the empty report self-attests its generation time. time is
+    # an ACCURATE "0.000" here (zero programs executed, so zero wall-clock test
+    # time) rather than a hard-coded placeholder, and timestamp is a real instant
+    # -- keeping BOTH emission paths (empty and populated) consistent with the
+    # pytest layers so no run ever produces a timeless unit report.
+    _empty_ts="$(carddemo_unit_timestamp)"
     {
         echo '<?xml version="1.0" encoding="UTF-8"?>'
         echo '<testsuites>'
-        echo '  <testsuite name="carddemo-cobol-unit" tests="0" failures="0" errors="0" skipped="0" time="0"/>'
+        echo "  <testsuite name=\"carddemo-cobol-unit\" tests=\"0\" failures=\"0\" errors=\"0\" skipped=\"0\" time=\"0.000\" timestamp=\"$_empty_ts\"/>"
         echo '</testsuites>'
     } > "$CARDDEMO_UNIT_REPORT"
     overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_WARN}")"
@@ -211,15 +272,29 @@ fi
 _total=0
 _failures=0
 _cases=""
+# WHY (QA-F1): capture the suite-start instant (ISO-8601) and a high-resolution
+# start epoch BEFORE the loop. `timestamp` uses suite-start semantics -- the same
+# convention pytest applies to its <testsuite timestamp="...">. `_suite_start`
+# feeds the aggregate <testsuite time="..."> computed after the loop, so the
+# report shows the real total wall-clock time spent running the unit programs.
+_suite_ts="$(carddemo_unit_timestamp)"
+_suite_start="$(date +%s.%N)"
 for _src in "${test_srcs[@]}"; do
     _name="$(basename "${_src%.*}")"
     _exe="$CARDDEMO_BUILD_DIR/$_name"
     _total=$((_total + 1))
     echo "[unit] running $_name ..."
+    # WHY (QA-F1): stamp the per-program start here so `_case_time` reflects the
+    # real duration of THIS program (dominated by its own execution); the cheap
+    # `-x` existence check below is included but negligible. Placing it before the
+    # branch means every <testcase> -- missing, pass, or fail -- carries a genuine
+    # measured `time`, never a hard-coded value.
+    _case_start="$(date +%s.%N)"
     if [ ! -x "$_exe" ]; then
+        _case_time="$(carddemo_unit_duration "$_case_start" "$(date +%s.%N)")"
         echo "[unit]   MISSING executable $_exe (build did not produce it)" >&2
         _failures=$((_failures + 1))
-        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\">"
+        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\" time=\"$_case_time\">"
         _cases+="<error message=\"missing executable\">expected $(carddemo_xml_escape "$_exe")</error></testcase>"$'\n'
         overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_FAIL}")"
         continue
@@ -230,13 +305,17 @@ for _src in "${test_srcs[@]}"; do
     _out="$("$_exe" 2>&1)"
     _trc=$?
     set -e
+    # WHY (QA-F1): measure the per-program duration the instant the process exits
+    # (completion-aware, no fixed sleep) so the emitted `time` is the true
+    # wall-clock cost of running this test program.
+    _case_time="$(carddemo_unit_duration "$_case_start" "$(date +%s.%N)")"
     if [ "$_trc" -eq 0 ]; then
         echo "[unit]   PASS $_name"
-        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\"/>"$'\n'
+        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\" time=\"$_case_time\"/>"$'\n'
     else
         echo "[unit]   FAIL $_name (rc=$_trc)"
         _failures=$((_failures + 1))
-        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\">"
+        _cases+="  <testcase name=\"$(carddemo_xml_escape "$_name")\" classname=\"cobol-unit\" time=\"$_case_time\">"
         _cases+="<failure message=\"exit $_trc\">$(carddemo_xml_escape "$_out")</failure></testcase>"$'\n'
         overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_FAIL}")"
     fi
@@ -244,11 +323,18 @@ done
 
 # ---------------------------------------------------------------------------
 # 4. Emit the aggregated JUnit report.
+# WHY (QA-F1): the aggregate <testsuite> now advertises a REAL total `time`
+# (sum of all per-program wall clocks, measured as one delta across the whole
+# loop) and the suite-start `timestamp` captured above -- replacing the former
+# hard-coded time="0" with no timestamp, so the unit report is auditable and
+# uniform with reports/integration.xml and reports/e2e.xml.
 # ---------------------------------------------------------------------------
+_suite_end="$(date +%s.%N)"
+_suite_time="$(carddemo_unit_duration "$_suite_start" "$_suite_end")"
 {
     echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo '<testsuites>'
-    echo "  <testsuite name=\"carddemo-cobol-unit\" tests=\"$_total\" failures=\"$_failures\" errors=\"0\" skipped=\"0\" time=\"0\">"
+    echo "  <testsuite name=\"carddemo-cobol-unit\" tests=\"$_total\" failures=\"$_failures\" errors=\"0\" skipped=\"0\" time=\"$_suite_time\" timestamp=\"$_suite_ts\">"
     printf '%s' "$_cases"
     echo '  </testsuite>'
     echo '</testsuites>'

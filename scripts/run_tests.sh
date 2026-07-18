@@ -80,8 +80,32 @@
 set -uo pipefail
 
 _master_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# WHY (F-P3 -- one workspace shared by this master and every child stage, then
+# reclaimed in a single sweep): scripts/test_env.sh keys its per-run workspace on
+# CARDDEMO_RUN_ID (falling back to the sourcing shell's PID) and EXPORTS
+# CARDDEMO_TEST_WORKSPACE. Exporting a stable run id HERE -- before sourcing --
+# makes this master and all four child stages (build + unit + integration + e2e)
+# agree on ONE run-<id> directory, which the EXIT trap below removes exactly once.
+# Without it the master's own run-<PID> workspace shell leaked on every invocation
+# (unbounded count over repeated CI runs). Assumption: an outer orchestrator that
+# already exported CARDDEMO_RUN_ID still wins via the ${VAR:-default} form.
+export CARDDEMO_RUN_ID="${CARDDEMO_RUN_ID:-$$}"
+
 # shellcheck source=scripts/test_env.sh
 source "$_master_script_dir/test_env.sh"
+
+# WHY (F-P3 -- no orphaned workspaces): reclaim the per-run workspace on EVERY exit
+# path so repeated CI invocations do not accumulate empty
+# $TMPDIR/carddemo-test-<uid>/run-* shells. carddemo_cleanup_workspace is
+# containment-guarded (it deletes ONLY a path under our own CARDDEMO_WS_BASE, never
+# build/ or reports/, which live in the repo, not the workspace). Trade-off: a bash
+# EXIT trap runs its body but does NOT change the script's exit status unless it
+# calls `exit`, so the aggregate RC returned below is preserved. Alternatives
+# Considered: installing the trap inside test_env.sh was rejected (a trap set by a
+# *sourced* file fires on the CALLER's lifecycle) -- the runner owns the run, so the
+# runner owns teardown (mirrors run_unit_tests.sh).
+trap 'carddemo_cleanup_workspace' EXIT
 
 carddemo_master_usage() {
     # Purpose : print the master runner's usage synopsis.
@@ -266,6 +290,20 @@ carddemo_stage() {
 # ---------------------------------------------------------------------------
 while :; do
     carddemo_stage "build"       bash "$_master_script_dir/build_test_programs.sh" --with-tests || break
+    # WHY (F-P5 -- build once, reuse across layers): the master has now compiled
+    # every unit-under-test AND every COBOL test program (--with-tests is a SUPERSET
+    # of what each layer needs), so signalling the three layer runners to skip their
+    # own rebuild elides 3 identical recompiles (~74% of master runtime) while
+    # keeping recompile-always for a STANDALONE layer-runner invocation (which never
+    # sees this flag). Guard: only set the flag when the build actually SUCCEEDED
+    # (rc < FAIL); the build is the FIRST stage, so overall_rc == the build rc here.
+    # A failed build must NOT set the flag, or a layer runner would run against
+    # stale/absent binaries instead of re-detecting the failure itself. Trade-off
+    # (safety + standalone-runnability vs duplicate cost): the flag preserves both
+    # properties and removes the cost.
+    if [ "$overall_rc" -lt "${CARDDEMO_RC_FAIL}" ]; then
+        export CARDDEMO_SKIP_BUILD=1
+    fi
     carddemo_stage "unit"        bash "$_master_script_dir/run_unit_tests.sh"                   || break
     carddemo_stage "integration" bash "$_master_script_dir/run_integration_tests.sh"           || break
     carddemo_stage "e2e"         bash "$_master_script_dir/run_e2e_tests.sh" ${_e2e_args[@]+"${_e2e_args[@]}"} || break

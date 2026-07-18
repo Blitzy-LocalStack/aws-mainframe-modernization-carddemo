@@ -117,6 +117,19 @@ _carddemo_ws_base="${TMPDIR:-/tmp}"
 _carddemo_uid="$(id -u 2>/dev/null || echo 0)"
 export CARDDEMO_WS_BASE="${_carddemo_ws_base%/}/carddemo-test-$_carddemo_uid"
 _carddemo_run_id="${CARDDEMO_RUN_ID:-$$}"
+# WHY (F-ENV1 -- containment at the source): CARDDEMO_RUN_ID is an ENVIRONMENT
+# input (an outer orchestrator exports it so several cooperating processes share
+# ONE workspace), so a crafted value such as '../../evil' would otherwise embed a
+# path-traversal component into CARDDEMO_TEST_WORKSPACE below and let BOTH the
+# provisioning (mkdir -p) and the recursive cleanup (rm -rf) escape the contained
+# per-UID base. We sanitise it with the SAME idiom already applied to
+# PYTEST_XDIST_WORKER just below -- only [A-Za-z0-9_-] survive -- so no '.'/'/'
+# can traverse out of the base. Assumption: the default ($$, a pure integer) and
+# the documented shared-RUN_ID PID pattern pass through unchanged, so normal runs
+# are unaffected. Trade-off: two different hostile ids can collapse to the same
+# sanitised token, but that is a benign workspace-name collision, never an
+# escape -- identical to the worker-token property relied on immediately below.
+_carddemo_run_id="${_carddemo_run_id//[^A-Za-z0-9_-]/}"
 # WHY (Assumption/defensive): the xdist worker token comes from the environment,
 # so it is sanitised to a safe path component -- only [A-Za-z0-9_-] survive -- to
 # prevent a crafted PYTEST_XDIST_WORKER from escaping the workspace path.
@@ -418,12 +431,37 @@ carddemo_cleanup_workspace() {
     # path outside the base. This guarantees an accidental CARDDEMO_TEST_WORKSPACE
     # override to a sensitive location can never trigger a destructive recursive
     # remove -- the containment check is the safety interlock.
+    # WHY (F-ENV1 -- canonicalise BEFORE the containment test): a naive
+    # string-prefix `case "$ws" in "$base"/*)` is DEFEATED by traversal -- a value
+    # like "$base/run-../../evil" textually starts with "$base/" yet the kernel
+    # resolves the '..' segments to a path OUTSIDE the base, so `rm -rf "$ws"`
+    # would escape and delete evil/. We therefore resolve BOTH paths with
+    # `readlink -m` (which collapses '..'/symlinks/'//' WITHOUT requiring the path
+    # to exist), compare the RESOLVED forms, and remove the RESOLVED path -- so
+    # containment is decided on the real target the OS would act on, not on its
+    # spelling. This makes the safety claim above TRUE at runtime for every
+    # traversal input and closes the sibling traversal-bearing
+    # CARDDEMO_TEST_WORKSPACE variant, not just the sanitised-RUN_ID vector.
+    # Assumption/fail-safe: if `readlink -m` (coreutils) were somehow unavailable
+    # the substitution yields an empty canonical path that fails the '/'-anchored
+    # match and is REFUSED -- it fails safe (never a wider delete).
     local ws="${CARDDEMO_TEST_WORKSPACE:-}" base="${CARDDEMO_WS_BASE:-}"
     if [ -z "$ws" ] || [ -z "$base" ]; then
         return 0
     fi
-    case "$ws" in
-        "$base"/*) rm -rf "$ws" 2>/dev/null || true ;;
+    local ws_c base_c
+    ws_c="$(readlink -m -- "$ws" 2>/dev/null)"
+    base_c="$(readlink -m -- "$base" 2>/dev/null)"
+    if [ -z "$ws_c" ] || [ -z "$base_c" ]; then
+        echo "[carddemo] not cleaning workspace: unresolvable path '$ws'" >&2
+        return 0
+    fi
+    # WHY: the trailing '/' on the subject plus the '/'-anchored pattern rejects
+    # both (a) ws_c == base_c exactly (never nuke the base itself, only a child)
+    # and (b) a shared-prefix sibling base (e.g. .../carddemo-test-0-evil) that
+    # would spoof a bare prefix match.
+    case "$ws_c/" in
+        "$base_c"/*) rm -rf "$ws_c" 2>/dev/null || true ;;
         *) echo "[carddemo] not cleaning workspace outside contained base: $ws" >&2 ;;
     esac
     return 0

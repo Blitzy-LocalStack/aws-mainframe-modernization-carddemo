@@ -1,5 +1,7 @@
 # Golden master — posting / reject_100_card_missing
 
+> **Consumer test.** These goldens are read and asserted by the pytest integration test [`tests/integration/test_cbtrn02c_posting.py`](../../../integration/test_cbtrn02c_posting.py), which runs the compiled `CBTRN02C` against the paired fixtures and diffs its output against these `.expected` files via `assert_matches_golden`.
+
 ## 1. What this folder is (scenario intent)
 
 This folder holds the **EXPECTED outputs** (the "golden master") for one posting

@@ -1,5 +1,7 @@
 # Posting golden master — boundary: transaction date == account expiration date
 
+> **Consumer test.** These goldens are read and asserted by the pytest integration test [`tests/integration/test_cbtrn02c_posting.py`](../../../integration/test_cbtrn02c_posting.py), which runs the compiled `CBTRN02C` against the paired fixtures and diffs its output against these `.expected` files via `assert_matches_golden`.
+
 Byte-deterministic **expected outputs** that [`tests/helpers/golden_compare.py`](../../../helpers/golden_compare.py) diffs the compiled `app/cbl/CBTRN02C.cbl` output against, for the case where the daily transaction's origination date **equals** the account's expiration date and therefore **POSTS** with `RETURN-CODE = 0`. It is the positive / inclusive counterpart to the sibling scenario `reject_103_expired`, and the five `.expected` files here are paired 1:1 with the inputs at `tests/fixtures/posting/boundary_expiry_equal/` — the folder name is byte-identical by design so the input and output halves move in lockstep.
 
 > **Why this README exists.** The static fixed-width `.expected` files cannot carry docstrings, so — per the Explainability rule (AAP §0.10.1) — this file is the mandated *why* for the goldens in this folder. The authoritative byte-encoding contract (widths, offsets, the zoned-decimal sign-overpunch table, and full record layouts) lives in [`tests/fixtures/README.md`](../../../fixtures/README.md) and is **not** restated here.

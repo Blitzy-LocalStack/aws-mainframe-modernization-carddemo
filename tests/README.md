@@ -30,17 +30,46 @@ precisely and the full daily batch cycle is exercised deterministically:
 
 **Test‑only / minimal‑change principle.** Production code under `app/**`
 (COBOL programs, copybooks, JCL, BMS maps, CICS CSD) and the seed data under
-`app/data/**` are **REFERENCE ONLY and are never modified** by the suite. The
-twelve batch programs already compile under GnuCOBOL with `--std=ibm-strict`,
-so no source change is required for testability — the tests *encode* the
-documented business rules, they do not redefine them.
+`app/data/**` are **REFERENCE ONLY and are never modified** by the suite. Ten of
+the twelve batch programs already compile under GnuCOBOL with `--std=ibm-strict`,
+so no source change is required for their testability — the tests *encode* the
+documented business rules, they do not redefine them. The remaining two
+(`CBEXPORT`/`CBIMPORT`) do **not** compile under GnuCOBOL and are excluded from
+the runnable layers — see [§1.1 Known limitations](#11-known-limitations) below.
 
 **Scope note.** The twelve batch programs (`app/cbl/CB*.cbl`) contain zero
-`EXEC CICS` verbs and run standalone under GnuCOBOL, so they are fully
-automatable. The eighteen online `CO*` programs use the CICS command‑level API;
-their fully‑automated end‑to‑end testing is environment‑bounded (no CICS
-runtime on the runner), so only their extractable field‑validation logic is
-unit‑tested.
+`EXEC CICS` verbs and run standalone under GnuCOBOL, so **ten of them** are fully
+automatable; the two exceptions (`CBEXPORT`/`CBIMPORT`) do not compile under
+GnuCOBOL and are excluded (see §1.1). The eighteen online `CO*` programs use the
+CICS command‑level API; their fully‑automated end‑to‑end testing is
+environment‑bounded (no CICS runtime on the runner), so only their extractable
+field‑validation logic is unit‑tested.
+
+### 1.1 Known limitations
+
+Documented honestly here so that no runnable claim above hides a blocked feature
+(a financial-enterprise auditability requirement):
+
+- **`CBEXPORT` / `CBIMPORT` do not compile under GnuCOBOL** — so only **ten of
+  the twelve** batch programs build and run. Both declare
+  `RECORD KEY IS EXPORT-SEQUENCE-NUM` on their FD, but that field is defined only
+  in `WORKING-STORAGE` (via `CVEXPORT.cpy`), **not** in the FD record — a genuine
+  semantic defect in the immutable baseline source (`app/cbl/CBEXPORT.cbl:68` /
+  `app/cbl/CBIMPORT.cbl:40`) that **no compiler flag can fix** and that the
+  test-only / minimal-change principle forbids editing (production `app/**` is
+  REFERENCE-only per AAP §0.8.2). `scripts/build_test_programs.sh` classifies the
+  pair as *known-unsupported*: it **attempts** them, **expects** the documented
+  failure, emits **no** `build/CBEXPORT` / `build/CBIMPORT` main, and aggregates a
+  soft **WARN (RC = 4)** rather than poisoning the aggregate result. Consequently
+  the export/import integration test (`tests/integration/test_export_import.py`)
+  is **skipped** with that exact reason (mirrored in `tests/conftest.py`). WHY
+  (Trade-off): reporting the blocker as a visible WARN is truthful and CI-safe,
+  whereas hiding it — or hard-failing an otherwise-green run over an unfixable
+  baseline defect — would violate both auditability and the minimal-change
+  principle.
+- **Online `CO*` CICS programs** cannot run end-to-end without a CICS runtime
+  (absent on the runner); only their extractable field-validation logic is
+  unit-tested (AAP §0.8.2).
 
 ---
 
@@ -92,9 +121,13 @@ tests/
 ```
 
 - **`fixtures/<domain>/<scenario>/`** — `domain ∈ {posting, interest, statement,
-  provisioning}`; `scenario ∈ {happy_path, reject_100_card_missing,
+  provisioning, export}`; `scenario ∈ {happy_path, reject_100_card_missing,
   reject_101_acct_missing, reject_102_overlimit, reject_103_expired,
-  boundary_exact_limit, boundary_expiry_equal, empty_input, zero_balance}`.
+  boundary_exact_limit, boundary_expiry_equal, empty_input, zero_balance,
+  default_fallback}`. The `export` domain drives a byte-identical export/import
+  round-trip, so it ships fixtures but **no** `golden/` directory (internally
+  consistent); `default_fallback` is the interest DEFAULT disclosure-group
+  scenario.
 - **`golden/<domain>/<scenario>/*.expected`** — the expected outputs for each
   fixture, compared byte‑deterministically after timestamp normalisation.
 
@@ -109,27 +142,48 @@ tests/
 
 | Tool | Version (validated) | Needed for |
 |------|---------------------|------------|
-| GnuCOBOL `cobc` | **3.1.2.0** (gcc 13.3.0 backend) | Compiling programs‑under‑test and COBOL unit tests |
-| Python | **3.12.3** | The pytest integration/E2E harness |
+| GnuCOBOL `cobc` | **3.2.0** (gcc 15.2.0 backend) | Compiling programs‑under‑test and COBOL unit tests |
+| Python | **3.13.7** | The pytest integration/E2E harness |
 | pytest | **9.1.1** | Integration + E2E orchestration, JUnit‑XML reporting |
-| pytest‑xdist | **3.8.0** | Parallel execution (`-n auto`) to prove test isolation |
+| pytest‑xdist | **3.8.0** | Parallel execution to prove test isolation (use `-n "$(nproc)"` in containers — see §11) |
 | coverage | **7.15.2** | Python‑harness line/branch coverage |
 | pytest‑golden | **1.0.1** *(optional)* | Convenience golden‑file plugin |
 | awscli‑local | **0.22.2** | `awslocal` wrapper targeting LocalStack |
-| awscli | **1.45.49** | S3 dataset staging against LocalStack |
+| awscli | **1.45.50** | S3 dataset staging against LocalStack |
 | LocalStack CLI | **2026.6.1** *(optional)* | Headless AWS (S3) emulation |
 | cobolget | **3.13.26** | COBOL package manager used to pin/vendor GCBLUnit |
 | GCBLUnit | **1.22.6** | COBOL unit‑test framework (JUnit‑XML output) |
 
-Install the Python test dependencies once:
+Install the Python test dependencies once, **into a virtual environment**
+(required on any modern PEP 668 "externally‑managed" system Python — see the
+note below):
 
 ```bash
-# WHAT: installs the pinned pytest/coverage/aws-shim stack into your environment.
-# WHY : exact '==' pins guarantee reproducible CI runs — a hard financial-grade
-#       requirement, because a floating dependency could silently break the
-#       byte-deterministic golden comparisons.
-python3 -m pip install -r tests/requirements-test.txt
+# WHAT: activate the repo-root venv, then install the pinned pytest/coverage/
+#       aws-shim stack into it (hash-verified, deterministic).
+# WHY : (1) exact '==' pins + --require-hashes guarantee reproducible CI runs —
+#       a hard financial-grade requirement, because a floating dependency could
+#       silently break the byte-deterministic golden comparisons; (2) a venv is
+#       REQUIRED because a modern system Python is PEP 668 externally-managed and
+#       will reject a direct `pip install` with "externally-managed-environment".
+source .venv/bin/activate            # repo-root venv (Python 3.13)
+pip install --require-hashes -r tests/requirements-test.txt
 ```
+
+> **No `.venv` yet, or `pip install` still blocked?** `python3 -m venv` can fail
+> on images whose apt pip seed was removed; recreate the venv, then re-run the
+> install above:
+>
+> ```bash
+> python3 -m venv .venv --without-pip
+> curl -fsSL https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
+> ```
+>
+> Installing **without** a venv on a PEP 668 system requires an explicit opt‑in
+> (`python3 -m pip install --break-system-packages -r tests/requirements-test.txt`)
+> — **not** recommended, since it mutates the system interpreter. In CI this is a
+> non‑issue: `actions/setup-python` provides a non‑managed interpreter, so the
+> plain `pip install` succeeds there.
 
 > **Dialect matters.** COBOL is compiled with **`--std=ibm-strict`**, *not*
 > `-std=cobol85`. `cobol85` rejects the `COMP-3` packed‑decimal money fields
@@ -195,10 +249,13 @@ source scripts/test_env.sh
 
 ```bash
 # WHAT: compiles the batch programs under test from app/cbl/ into build/ using
-#       the repository's `cobc -fixed --std=ibm-strict -I app/cpy` convention.
-# WHY : ten main programs build as executables (`cobc -x`); the three
+#       the repository's `cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy`
+#       convention (CBSTM03A additionally needs `-ftab-width=4`).
+# WHY : eight main programs build as executables (`cobc -x`); the three
 #       dynamically-CALL'd subprograms (CBACT04C, CSUTLDTC, CBSTM03B) build as
 #       shared modules (`cobc -m`) resolved at run time via COB_LIBRARY_PATH.
+#       `-fsign=EBCDIC` is REQUIRED — the default `-fsign=ASCII` misreads the
+#       zoned-decimal sign overpunch and silently corrupts negative balances.
 bash scripts/build_test_programs.sh              # programs under test only
 bash scripts/build_test_programs.sh --with-tests # also compile tests/cobol-unit/*_test.cbl
 bash scripts/build_test_programs.sh --coverage   # add gcov instrumentation for COBOL line coverage
@@ -285,6 +342,17 @@ coverage report --rcfile=tests/.coveragerc
 # (equivalently: export COVERAGE_RCFILE=tests/.coveragerc)
 ```
 
+> **Coverage‑gate caveat.** `tests/.coveragerc` sets `fail_under = 85`, but two
+> of the modules it measures — `tests/helpers/localstack_setup.py` and
+> `tests/mocks/mq_request_stub.py` — are exercised **only** when the **optional**
+> AWS/MQ layers run. Measuring coverage **without** those layers therefore
+> reports well below 85% and prints "Coverage failure", even when every
+> non‑optional test passes. Exercise the optional layers (e.g. bring up
+> LocalStack for the S3 staging tests) before treating the 85% gate as
+> authoritative, or scope `source`/`omit` in `.coveragerc` to the packages
+> actually exercised.
+
+
 **COBOL** coverage is produced **separately** via `gcov` on the
 GnuCOBOL‑transpiled C — GnuCOBOL compiles COBOL to C and then to a native
 executable, so instrumenting that intermediate C yields line coverage:
@@ -313,7 +381,7 @@ least one test.
 
 ---
 
-## 8. Return‑code rubric
+## 8. Return-code rubric
 
 The suite follows the mainframe condition‑code convention so CI receives one
 deterministic status. Runners **aggregate the worst (highest) code** seen.
@@ -391,11 +459,27 @@ Financial‑grade tests must be reproducible and independently runnable:
   golden comparison so byte‑diffs stay stable across runs.
 - **Injected dates.** Business dates are injected via `PARM-DATE` rather than
   read from the wall clock, so reruns produce identical output.
-- **Parallel‑safe.** Because tests share nothing, they run under
-  `pytest -n auto` (`pytest-xdist`); a green parallel run *proves* isolation.
+- **Parallel‑safe.** Because tests share nothing, they run in parallel under
+  `pytest-xdist`; a green parallel run *proves* isolation. **In a container,
+  prefer `-n "$(nproc)"` over `-n auto`.** `pytest-xdist`'s `auto` sizes the
+  worker pool from the *host* CPU count (`os.cpu_count()` / `sched_getaffinity`),
+  which ignores the cgroup CPU quota: on a 4‑CPU‑quota container running on a
+  128‑CPU host it spawns **128** workers that oversubscribe 4 effective cores and
+  run ~5× slower — with byte‑identical results, so correctness/isolation are
+  unaffected. `nproc` honours the cgroup quota, so `-n "$(nproc)"` scales to the
+  cores you can actually use.
 
 ```bash
 # WHAT: run the whole suite in parallel to validate isolation.
+# WHY: `-n "$(nproc)"` is cgroup‑aware (uses the container's EFFECTIVE core
+# count); prefer it over `-n auto`, which counts HOST CPUs and oversubscribes a
+# CPU‑quota‑limited CI container (see the note above). Trade-off: on a dedicated
+# runner where effective == host CPUs the two are equivalent.
+PYTHONPATH=$(pwd) pytest tests -n "$(nproc)"
+
+# `-n auto` remains valid and isolation‑equivalent, but on a CPU‑quota‑limited
+# container it over‑spawns workers and runs slower; use it only where the
+# effective and host CPU counts match (e.g. a dedicated/bare‑metal runner).
 PYTHONPATH=$(pwd) pytest tests -n auto
 ```
 
@@ -410,7 +494,13 @@ To add a new scenario (illustrated for the `posting` domain):
    copybook layouts exactly — e.g. 350‑byte daily‑tran, 300‑byte account — with
    correct zoned‑decimal sign overpunch).
 2. **Golden** — add the expected output(s) under
-   `tests/golden/posting/<new_scenario>/*.expected`.
+   `tests/golden/posting/<new_scenario>/*.expected`. Author them by hand, or
+   regenerate them from a verified run with the guarded golden‑update gate
+   `CARDDEMO_UPDATE_GOLDENS=1` (equivalently `assert_matches_golden(..., update=True)`),
+   which rewrites the `*.expected` files; then **review the diff before
+   committing** — the gate is multiply‑guarded so it cannot silently bless a
+   regression. Each golden‑scenario README documents this switch at its point of
+   use.
 3. **Test case** — add a parametrised case to the relevant
    `tests/integration/` (or `tests/e2e/`) module; reuse the shared helpers:
 

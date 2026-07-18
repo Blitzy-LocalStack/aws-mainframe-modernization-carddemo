@@ -1,5 +1,7 @@
 # posting / empty_input — CBTRN02C expected outputs (golden master)
 
+> **Consumer test.** These goldens are read and asserted by the pytest integration test [`tests/integration/test_cbtrn02c_posting.py`](../../../integration/test_cbtrn02c_posting.py), which runs the compiled `CBTRN02C` against the paired fixtures and diffs its output against these `.expected` files via `assert_matches_golden`.
+
 ## 2. Intent
 
 This directory holds the **expected "data-out"** for the `empty_input` posting scenario — the golden half that `tests/helpers/golden_compare.py` diffs against the actual output of the compiled `app/cbl/CBTRN02C.cbl`. It is paired **1:1** with the input fixtures at `tests/fixtures/posting/empty_input/`. The scenario proves that an **empty `DALYTRAN` daily-transaction file** drives a **clean no-op batch**: nothing is posted, nothing is rejected, `RETURN-CODE = 0`, and the program does not abend — i.e. the runner/harness survive a zero-work cycle and emit no spurious output.

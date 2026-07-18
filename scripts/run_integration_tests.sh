@@ -53,8 +53,29 @@
 set -euo pipefail
 
 _int_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# WHY (F-P3 -- one workspace shared by this runner and its child build, then
+# reclaimed): scripts/test_env.sh keys its per-run workspace on CARDDEMO_RUN_ID
+# (else the sourcing shell's PID). Exporting a stable run id HERE -- before sourcing
+# and before spawning build_test_programs.sh -- makes this runner and that child
+# agree on ONE run-<id> directory that the EXIT trap below reclaims in a single
+# sweep; otherwise a STANDALONE integration run left an empty run-<PID> shell behind
+# on every invocation. Assumption: an outer orchestrator (run_tests.sh) that already
+# exported CARDDEMO_RUN_ID still wins via the ${VAR:-default} form.
+export CARDDEMO_RUN_ID="${CARDDEMO_RUN_ID:-$$}"
+
 # shellcheck source=scripts/test_env.sh
 source "$_int_script_dir/test_env.sh"
+
+# WHY (F-P3 -- no orphaned workspaces): reclaim the per-run workspace on EVERY exit
+# path (normal, warn, build-fail, usage-error, --help). carddemo_cleanup_workspace
+# is containment-guarded (deletes ONLY a path under our own CARDDEMO_WS_BASE, never
+# build/ or reports/). Trade-off: a bash EXIT trap does NOT alter the script's exit
+# status unless it calls `exit`, so the RC rubric returned by the explicit
+# `exit "$overall_rc"` calls below is preserved. Alternatives Considered: the trap
+# belongs in the runner, not the sourced test_env.sh (a sourced trap fires on the
+# caller's lifecycle) -- mirrors run_unit_tests.sh.
+trap 'carddemo_cleanup_workspace' EXIT
 
 # WHY (Assumption): the Python test modules import `from tests.helpers ...` and
 # `from tests.mocks ...`; putting the repo root on PYTHONPATH makes the `tests`
@@ -250,7 +271,16 @@ echo "[integration] ============================================================
 # ---------------------------------------------------------------------------
 overall_rc=0
 echo "[integration] building units under test ..."
-if bash "$_int_script_dir/build_test_programs.sh"; then
+if [ "${CARDDEMO_SKIP_BUILD:-0}" = "1" ]; then
+    # WHY (F-P5 -- reuse the master's one build): run_tests.sh has already compiled
+    # every unit-under-test (its --with-tests build is a SUPERSET of what this layer
+    # needs) and exported CARDDEMO_SKIP_BUILD=1, so a second identical compile here is
+    # pure waste. Standalone invocation never sees the flag, so recompile-always is
+    # preserved and this runner stays independently runnable (Trade-off: safety +
+    # standalone-runnability vs duplicate cost).
+    echo "[integration] CARDDEMO_SKIP_BUILD=1: reusing master build artifacts (skip rebuild)"
+    build_rc=0
+elif bash "$_int_script_dir/build_test_programs.sh"; then
     build_rc=0
 else
     build_rc=$?

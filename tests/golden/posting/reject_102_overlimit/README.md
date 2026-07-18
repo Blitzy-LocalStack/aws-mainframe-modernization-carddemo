@@ -1,5 +1,7 @@
 # Posting golden-master — reject reason 102 (OVERLIMIT TRANSACTION)
 
+> **Consumer test.** These goldens are read and asserted by the pytest integration test [`tests/integration/test_cbtrn02c_posting.py`](../../../integration/test_cbtrn02c_posting.py), which runs the compiled `CBTRN02C` against the paired fixtures and diffs its output against these `.expected` files via `assert_matches_golden`.
+
 These are the byte-exact expected outputs of `app/cbl/CBTRN02C.cbl` when the paired
 `reject_102_overlimit` fixtures drive a single transaction **one cent over the account
 credit limit**, so it is rejected with **reason 102** and **nothing is posted**.

@@ -27,9 +27,15 @@
 #     decision for these financial programs.
 #   - Trade-off: the job maps the suite's aggregate condition-code rubric
 #     (0 pass / 4 warn / >=8 fail; 16 fatal) to the process exit status of
-#     scripts/run_tests.sh and lets that ONE status stand as the CI result,
-#     rather than parsing individual reports -- one deterministic, fail-closed
-#     status for a financial-grade suite.
+#     scripts/run_tests.sh, then applies that rubric EXPLICITLY in the build and
+#     run steps (F-WF1): an rc <= 4 (pass, or the documented NON-BLOCKING WARN)
+#     lets the job succeed, while rc >= 8 fails it. This is one deterministic,
+#     fail-closed mapping -- a real failure (>=8) or a fatal/abend (16) always
+#     reddens CI -- WITHOUT letting the known, immutable RC=4 baseline defect
+#     (unbuildable CBEXPORT/CBIMPORT, REFERENCE-only per AAP 0.8.2) block the
+#     suite from ever running or publishing reports. A bare `bash <runner>`
+#     under GitHub's default `-eo pipefail` step shell would instead fail the
+#     step on that WARN, which is exactly the F-WF1 defect this workflow avoids.
 #   - Assumption: runner scripts are invoked via `bash <path>` because a fresh
 #     checkout may not preserve the executable bit.
 #   - Trade-off: the LocalStack layer is opt-in (workflow_dispatch input /
@@ -150,16 +156,35 @@ jobs:
       # test programs. This is intentionally redundant (run_tests.sh also builds)
       # but surfaces a broken compile as its own clearly-labelled step. Invoked
       # via `bash` so it does not depend on the file's executable bit.
+      #
+      # WHY (F-WF1 -- honour the RC rubric; do not fail-closed on the documented
+      # WARN): GitHub's default step shell is `bash --noprofile --norc -eo
+      # pipefail`, under which ANY non-zero exit -- INCLUDING the non-blocking
+      # WARN=4 -- fails the step. The build permanently returns RC=4 because the
+      # IMMUTABLE, REFERENCE-only baseline defect in CBEXPORT.cbl / CBIMPORT.cbl
+      # (an FD RECORD KEY absent from the FD record) makes those two programs
+      # unbuildable, and build_test_programs.sh correctly downgrades that to WARN
+      # so the rest of the suite can still build and run (AAP 0.8.2 forbids
+      # editing that production source). Capturing the rc and asserting `-le 4`
+      # therefore lets the suite proceed on the KNOWN WARN while still failing
+      # this step loudly on a REAL build error (RC>=8) or fatal (RC=16).
+      # Trade-off: we tolerate the one documented WARN rather than parse which
+      # program warned, because the build script already classifies every real
+      # failure as RC>=8 keyed off the cobc exit code.
       - name: Build programs under test and COBOL test programs
-        run: bash scripts/build_test_programs.sh --with-tests
+        run: |
+          rc=0
+          bash scripts/build_test_programs.sh --with-tests || rc=$?
+          [ "$rc" -le 4 ]
 
       # Step 4: the single-command master runner. It sources scripts/test_env.sh
       # internally, then runs build -> unit -> integration -> e2e and exits with
-      # the WORST aggregated condition code. We let that exit status stand as the
-      # authoritative CI result (see WHY note 3 in the header). `--with-localstack`
-      # is appended only when the optional AWS layer was requested on dispatch.
+      # the WORST aggregated condition code, which we map to the job result per
+      # the RC rubric (see WHY note 3 in the header). `--with-localstack` is
+      # appended only when the optional AWS layer was requested on dispatch.
       - name: Run the full CardDemo test suite
         run: |
+          rc=0
           if [ "${{ github.event.inputs.with_localstack }}" = "true" ]; then
             # WHY (F4): when the operator EXPLICITLY opts into the AWS layer, an
             # absent/unreachable emulator must NOT masquerade as a green
@@ -170,10 +195,20 @@ jobs:
             # so the opt-in run tells the truth. It is set ONLY in this branch;
             # the default push/PR path leaves the AWS layer optional (skip/WARN).
             export CARDDEMO_REQUIRE_LOCALSTACK=1
-            bash scripts/run_tests.sh --with-localstack
+            bash scripts/run_tests.sh --with-localstack || rc=$?
           else
-            bash scripts/run_tests.sh
+            bash scripts/run_tests.sh || rc=$?
           fi
+          # WHY (F-WF1 -- same RC-rubric mapping as the build step above):
+          # run_tests.sh aggregates the worst layer condition code and, on the
+          # known immutable CBEXPORT/CBIMPORT baseline defect, exits WARN=4 even
+          # when EVERY test passes. Under `-eo pipefail` a bare invocation would
+          # fail the step on that WARN and thereby hide the fact that the suite
+          # DID run and DID publish reports/*.xml. Capturing rc and asserting
+          # `-le 4` lets the documented WARN pass (green-with-warning) while a
+          # real test failure (RC>=8) or a fatal/abend (RC=16) still fails the
+          # job. The subsequent upload step then always finds fresh reports/.
+          [ "$rc" -le 4 ]
 
       # Step 5: publish results even when a previous step failed (`if: always()`).
       # The JUnit XML lives in reports/ (unit.xml, integration.xml, e2e.xml, and

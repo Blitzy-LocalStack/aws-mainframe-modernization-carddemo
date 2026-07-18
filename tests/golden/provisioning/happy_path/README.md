@@ -95,7 +95,7 @@ included:
 | `card_print.expected` | CBACT02C | 7 | 831 | `e4e0199d09e6afefb6162d97d660b612` |
 | `xref_print.expected` | CBACT03C | 12 | 586 | `7941c490256d05e8bdce173dabd2ee0f` |
 | `cust_print.expected` | CBCUS01C | 12 | 5086 | `5404c30056b83c26060e6609ccc7a192` |
-| `acct_print.expected` | CBACT01C | 77 | 4211 | `d297069a4755a404ac7ac98b1e52d765` |
+| `acct_print.expected` | CBACT01C | 77 | 3221 | `9eb8dd44b40769a06d3119f61d145bbd` |
 
 **Return code:**
 
@@ -289,7 +289,7 @@ trailing-whitespace stripping disabled, per §8).
 
 ```
 md5sum *.expected
-# acct_print.expected  d297069a4755a404ac7ac98b1e52d765   (4211 bytes, 77 lines)
+# acct_print.expected  9eb8dd44b40769a06d3119f61d145bbd   (3221 bytes, 77 lines)
 # card_print.expected  e4e0199d09e6afefb6162d97d660b612   ( 831 bytes,  7 lines)
 # xref_print.expected  7941c490256d05e8bdce173dabd2ee0f   ( 586 bytes, 12 lines)
 # cust_print.expected  5404c30056b83c26060e6609ccc7a192   (5086 bytes, 12 lines)

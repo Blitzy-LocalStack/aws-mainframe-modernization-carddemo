@@ -237,13 +237,21 @@ def _provision_alt_key_xref(runner, seed_cardxref: Path) -> Path:
     if not exe.exists():
         src = runner.build_dir / "LDXREFA.cbl"
         src.write_text(_XREF_PROVISIONER_SRC)
+        # WHY (F-P4 bounded wait): cap the compile so a wedged ``cobc`` cannot block
+        # a CI job indefinitely. 120s matches ``cobol_runner.run_program``'s default,
+        # keeping every subprocess wait in this module deadline-bounded. Trade-off:
+        # an outer CI-job timeout is the only alternative net and is far coarser than
+        # this per-call bound.
         subprocess.run(
             ["cobc", "-x", "-free", "-o", str(exe), str(src)],
-            check=True, capture_output=True,
+            check=True, capture_output=True, timeout=120,
         )
     out = runner.assign_path("XREFFILE")
     env = {**os.environ, "INFLAT": str(seed_cardxref), "OUTIDX": str(out)}
-    subprocess.run([str(exe)], env=env, check=True, capture_output=True)
+    # WHY (F-P4 bounded wait): mirror the compile bound above so a hung provisioner
+    # binary cannot stall the suite; 120s is ample for this tiny deterministic
+    # loader yet still finite.
+    subprocess.run([str(exe)], env=env, check=True, capture_output=True, timeout=120)
     return out
 
 

@@ -105,8 +105,34 @@ set -euo pipefail
 # rubric and ASSIGN bindings are defined in exactly one place.
 # ---------------------------------------------------------------------------
 _build_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# WHY (F-P3 -- teardown ownership): a parent runner that already exported
+# CARDDEMO_RUN_ID owns the shared per-run workspace and its cleanup; reclaiming it
+# from inside this child would pull the workspace out from under a parent that is
+# still running (e.g. a standalone layer runner that calls us BEFORE its pytest
+# stage). So we OWN teardown only when invoked STANDALONE -- detected by
+# CARDDEMO_RUN_ID being unset at entry. In that case we mint a stable id and install
+# the EXIT trap below, so a direct `bash build_test_programs.sh` leaves no empty
+# run-<pid> workspace shell behind. Alternatives Considered: an unconditional trap
+# was rejected precisely because it would delete a parent's live workspace mid-run.
+# Mirrors run_unit_tests.sh's "the runner owns teardown".
+if [ -z "${CARDDEMO_RUN_ID:-}" ]; then
+    export CARDDEMO_RUN_ID=$$
+    _carddemo_build_owns_ws=1
+else
+    _carddemo_build_owns_ws=0
+fi
+
 # shellcheck source=scripts/test_env.sh
 source "$_build_script_dir/test_env.sh"
+
+# WHY (F-P3): install the reclaim trap ONLY when we minted the run id above, so a
+# standalone build cleans up after itself while a child build defers to its parent.
+# carddemo_cleanup_workspace is containment-guarded (deletes ONLY a path under our
+# own CARDDEMO_WS_BASE, never the repo build/ or reports/).
+if [ "${_carddemo_build_owns_ws}" = "1" ]; then
+    trap 'carddemo_cleanup_workspace' EXIT
+fi
 
 # ---------------------------------------------------------------------------
 # Program inventory (by PROGRAM NAME; extension resolved at compile time).
@@ -193,7 +219,7 @@ done
 # WHY (Trade-off): without cobc no layer can run, so a missing compiler is a
 # hard FAIL (8), not a soft skip.
 # ---------------------------------------------------------------------------
-if ! carddemo_require_cmd cobc "Install GnuCOBOL (cobc >= 2.2; repo verified on 3.1.2)."; then
+if ! carddemo_require_cmd cobc "Install GnuCOBOL (cobc >= 2.2; repo verified on 3.2.0)."; then
     exit "${CARDDEMO_RC_FAIL}"
 fi
 
