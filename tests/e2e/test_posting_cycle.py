@@ -63,6 +63,14 @@ from pathlib import Path
 
 import pytest
 
+# WHY import the session-locked builder from conftest (F-XDIST-LDXREFA-RACE): the
+# alternate-key XREF provisioner below is a SHARED build artifact; delegating its
+# compile to ``compile_helper_program`` serialises it across ``pytest-xdist`` workers
+# so the one shared binary is built exactly once and published atomically -- never
+# observed half-written. Imported from ``tests.conftest`` per the same pattern the
+# integration suites use for ``_require_or_skip``.
+from tests.conftest import compile_helper_program
+
 # §0.6.2 import contract: the golden comparator MUST be importable from this path.
 from tests.helpers.golden_compare import assert_matches_golden
 
@@ -233,19 +241,15 @@ def _provision_alt_key_xref(runner, seed_cardxref: Path) -> Path:
     yields VSAM status 35 and an abend downstream. Provisioning one alternate-key
     file here lets the identical dataset serve the whole chain.
     """
-    exe = runner.build_dir / "LDXREFA"
-    if not exe.exists():
-        src = runner.build_dir / "LDXREFA.cbl"
-        src.write_text(_XREF_PROVISIONER_SRC)
-        # WHY (F-P4 bounded wait): cap the compile so a wedged ``cobc`` cannot block
-        # a CI job indefinitely. 120s matches ``cobol_runner.run_program``'s default,
-        # keeping every subprocess wait in this module deadline-bounded. Trade-off:
-        # an outer CI-job timeout is the only alternative net and is far coarser than
-        # this per-call bound.
-        subprocess.run(
-            ["cobc", "-x", "-free", "-o", str(exe), str(src)],
-            check=True, capture_output=True, timeout=120,
-        )
+    # WHY (F-XDIST-LDXREFA-RACE): delegate the build to the session-locked,
+    # atomic-publish helper. The previous inline check-then-compile onto the ONE
+    # shared ``build_dir/LDXREFA`` path let concurrent ``pytest-xdist`` workers race
+    # -- two workers writing the same ``.cbl`` and compiling onto the same binary at
+    # once produced ETXTBSY / PermissionError / a half-written executable. The helper
+    # serialises the build behind an flock and publishes via atomic rename, so the
+    # program is compiled exactly once and never observed partial. Its default 120s
+    # compile bound preserves the previous wedged-``cobc`` protection.
+    exe = compile_helper_program(runner.build_dir, "LDXREFA", _XREF_PROVISIONER_SRC)
     out = runner.assign_path("XREFFILE")
     env = {**os.environ, "INFLAT": str(seed_cardxref), "OUTIDX": str(out)}
     # WHY (F-P4 bounded wait): mirror the compile bound above so a hung provisioner
@@ -271,6 +275,13 @@ def _flatten_daily(src: Path, dst: Path, reclen: int = 350) -> int:
     -------
     int
         Number of records written.
+
+    Raises
+    ------
+    OSError
+        If the seed cannot be read or the flattened image cannot be written
+        (propagated from :meth:`pathlib.Path.read_bytes` /
+        :meth:`pathlib.Path.write_bytes`).
 
     Notes
     -----
@@ -320,6 +331,16 @@ def _acct_balances(records: "list[str]") -> "dict[str, Decimal]":
     -------
     dict[str, decimal.Decimal]
         Mapping of stripped ``ACCT-ID`` to exact ``ACCT-CURR-BAL``.
+
+    Raises
+    ------
+    KeyError
+        If a required field is absent from its layout (propagated from
+        :func:`tests.helpers.e2e_records.field_geometry` via the
+        ``_text_field``/``_money_field`` accessors).
+    tests.helpers.record_codec.ZonedDecimalError
+        If a monetary slice is not a valid zoned-decimal image (propagated from
+        ``_money_field``).
 
     Notes
     -----
@@ -473,6 +494,12 @@ def test_posting_cycle_invariants(cobol_runner, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If any posting-cycle invariant (input/reject/posted reconciliation, id
+        ordering, or value conservation) does not hold.
+
     Notes
     -----
     WHY a set-based reconciliation, not ``posted = processed - rejected`` (F-P2-1): the
@@ -570,6 +597,12 @@ def test_posting_reject_stream_matches_golden(cobol_runner, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If the seed produces no rejects, or the framed reject stream does not match
+        its golden master (the latter raised by ``assert_matches_golden``).
+
     Notes
     -----
     WHY raw record mode (F-P2-2): the ``DALYREJS`` bytes are framed into 430-byte records
@@ -602,6 +635,12 @@ def test_posting_transactions_match_golden(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the posted ledger does not match its golden master (raised by
+        ``assert_matches_golden``).
 
     Notes
     -----
@@ -637,6 +676,12 @@ def test_posting_account_and_category_effects(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the per-account balance deltas or the TCATBAL category effects do not
+        match the expected monetary outcome.
 
     Notes
     -----

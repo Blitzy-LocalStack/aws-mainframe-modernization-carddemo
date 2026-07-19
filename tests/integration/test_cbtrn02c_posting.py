@@ -1945,3 +1945,340 @@ def test_bad_input_open_triggers_observable_cee3abd_abend(cobol_runner, build_di
         f"expected abnormal termination (non-zero RC), got {result.returncode}"
     )
 
+
+# ===========================================================================
+# Test -- multi-transaction run (main read-loop iteration coverage).
+# WHY this test exists (finding F-COVERAGE-FINANCIAL-TARGETS): every other
+# posting scenario seeds EXACTLY ONE daily transaction, so CBTRN02C's main
+# driver loop (1000-DALYTRAN-GET-NEXT -> validate -> post -> loop back) is only
+# ever entered once and its "read a SECOND record, it is not EOF, process it,
+# then hit EOF" continuation branch is never exercised on the build-dir binary.
+# The gcov numbers the COBOL coverage report measures come solely from these
+# integration runs (the GCBLUnit *_test programs COPY the source into a SEPARATE
+# compilation unit whose data lands in <NAME>_test.gcda, and the CBACT04C/abend
+# drivers are separately linked), so adding a run that posts TWO transactions is
+# the single highest-value FEASIBLE increment to CBTRN02C's build-dir line/branch
+# coverage. The two TCATBAL branches (2700-A create / 2700-B update) already have
+# a dedicated test; here the NEW coverage is the loop continuation plus a second
+# 2000/2700-B/2800/2900 posting cycle within one process.
+# ===========================================================================
+def test_multiple_transactions_post_in_one_run(cobol_runner, repo_root):
+    """Two valid transactions in one DALYTRAN both post, exercising the read loop twice.
+
+    Purpose
+    -------
+    Drive CBTRN02C with a DALYTRAN holding TWO valid transactions for the same card,
+    account, and category (the second is the ``happy_path`` transaction with a distinct
+    ``DALYTRAN-ID`` so it does not collide on the ``TRANFILE`` primary key). This forces
+    the main driver loop to iterate a second time -- the "read next record, not EOF,
+    process, then detect EOF" continuation branch that no single-transaction scenario
+    reaches -- and applies two full 2000/2700-B/2800/2900 posting cycles in one process.
+    Both amounts are proven to remain within the account's credit limit (193.00 + 2 x
+    504.77 = 1202.54 <= 2065.00), so both must POST rather than the second rejecting.
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        Per-test runner (``cobol_runner`` fixture) bound to a fresh isolated workspace.
+    repo_root : pathlib.Path
+        Repository root (``repo_root`` fixture) used to locate the ``happy_path`` fixtures.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+        If either transaction fails to post, if the processed/rejected counters or
+        RETURN-CODE diverge from "2 processed, 0 rejected, RC=0", or if the exact
+        fixed-point account/category balances (original + TWICE the amount) or the two
+        posted ``TRANFILE`` records are not observed.
+    Skipped
+        (via :func:`pytest.skip`) if the ``happy_path`` fixtures or the compiled program
+        are unavailable.
+    """
+    scenario_dir = _posting_fixture_dir(repo_root, "happy_path")
+    dailytran = _resolve_fixture(
+        scenario_dir, "dailytran.txt", "DALYTRAN.txt", "DALYTRAN", "dailytran"
+    )
+    cardxref = _resolve_fixture(
+        scenario_dir, "cardxref.txt", "XREFFILE.txt", "cardxref", "xref.txt"
+    )
+    acctdata = _resolve_fixture(
+        scenario_dir, "acctdata.txt", "ACCTFILE.txt", "acctdat.txt", "acctdata"
+    )
+    tcatbal = _resolve_fixture(
+        scenario_dir, "tcatbal.txt", "TCATBALF.txt", "tcatbalf.txt", "tcatbal"
+    )
+
+    # ---- Derive the single seeded transaction + build a distinct-ID duplicate. ----
+    tran_records = _read_fixture_records(dailytran, DALYTRAN_LAYOUT.reclen)
+    assert len(tran_records) == 1, (
+        f"happy_path is expected to seed exactly one transaction, got {len(tran_records)}"
+    )
+    rec1 = tran_records[0]
+    # WHY mutate ONLY the 16-char DALYTRAN-ID prefix (Assumption + Trade-off): CVTRA06Y
+    # puts DALYTRAN-ID at offset 0, width 16 (record_codec: "key = DALYTRAN-ID(16) @
+    # offset 0"). 2000-POST-TRANSACTION moves DALYTRAN-ID verbatim into the indexed
+    # TRANFILE's TRAN-ID key, so a DUPLICATE id would make the second WRITE collide
+    # (a different, non-posting path). Giving the copy a distinct id (…3580 -> …3581)
+    # while leaving every other byte identical keeps it a fully valid, same-account,
+    # same-category transaction -- so the ONLY behavioural difference under test is the
+    # loop iterating twice, not any change in validation/posting logic.
+    orig_id = rec1[:16]
+    dup_id = orig_id[:-1] + ("1" if orig_id[-1] != "1" else "2")
+    rec2 = dup_id + rec1[16:]
+    assert len(rec2) == DALYTRAN_LAYOUT.reclen, "duplicate record must stay 350 bytes"
+
+    # Stage the 2-record DALYTRAN through a throwaway temp file (load_sequential COPIES
+    # the content into the workspace, so the source can be removed immediately after).
+    # WHY one terminator per row: load_sequential strips exactly one trailing terminator
+    # per row (fixture-format law #1), so "rec1\nrec2\n" stages as a clean 2 x 350 blob.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".dailytran", encoding="latin-1", delete=False
+    )
+    try:
+        tmp.write(rec1 + "\n" + rec2 + "\n")
+        tmp.close()
+        # INDEXED inputs (same geometry rationale as _stage_inputs_and_run).
+        cobol_runner.load_input("XREFFILE", cardxref, layout="XREF", alternate_keys=())
+        cobol_runner.load_input("ACCTFILE", acctdata, layout="ACCOUNT")
+        cobol_runner.load_input("TCATBALF", tcatbal, layout="TCATBAL")
+        cobol_runner.load_sequential("DALYTRAN", Path(tmp.name), reclen=DALYTRAN_LAYOUT.reclen)
+        result = cobol_runner.run(_PROGRAM)
+    finally:
+        # WHY unlink in finally (Assumption): the workspace copy is authoritative once
+        # staged, so the source temp file is pure scratch; removing it unconditionally
+        # avoids leaking a file per test run without affecting the staged input.
+        os.unlink(tmp.name)
+
+    # ---- Both transactions must POST (RC=0, 2 processed, 0 rejected). ----
+    assert result.returncode == 0, (
+        f"expected RC=0 (both post), got {result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert _parse_counter(result.stdout, _COUNTER_PROCESSED) == 2, (
+        "the driver loop must read and process BOTH transactions\n" + result.stdout
+    )
+    assert _parse_counter(result.stdout, _COUNTER_REJECTED) == 0, (
+        "neither transaction is over-limit/expired, so none may reject\n" + result.stdout
+    )
+
+    # ---- Exact fixed-point balances: original + TWICE the amount (Decimal). ----
+    acct_records = _read_fixture_records(acctdata, ACCOUNT_LAYOUT.reclen)
+    orig_account = ACCOUNT_LAYOUT.decode(acct_records[0])
+    account_key = ACCOUNT_LAYOUT.key_of(acct_records[0])
+    acct_id = int(orig_account["ACCT-ID"])
+    tran = DALYTRAN_LAYOUT.decode(rec1)
+    amount = tran["DALYTRAN-AMT"]  # Decimal, never float
+    # WHY 2 * amount (Refactoring Rationale): the two staged transactions are byte-identical
+    # apart from the id, so each applies the SAME DALYTRAN-AMT; posting both must move the
+    # account master (2800) and the category balance (2700-B) by exactly twice the amount.
+    expected_balance = orig_account["ACCT-CURR-BAL"] + amount + amount
+
+    new_acct_records = cobol_runner.unload_output("ACCTFILE", layout="ACCOUNT")
+    new_account = _find_record(new_acct_records, ACCOUNT_LAYOUT, account_key)
+    assert new_account is not None, "updated ACCTFILE record not found on read-back"
+    assert new_account["ACCT-CURR-BAL"] == expected_balance, (
+        f"account balance must be orig + 2 x amount ({expected_balance}), "
+        f"got {new_account['ACCT-CURR-BAL']}"
+    )
+
+    cat_key = _category_key(acct_id, tran)
+    orig_cat_records = _read_fixture_records(tcatbal, TCATBAL_LAYOUT.reclen)
+    orig_cat_record = _find_record(orig_cat_records, TCATBAL_LAYOUT, cat_key)
+    base_cat = (
+        orig_cat_record["TRAN-CAT-BAL"] if orig_cat_record is not None else Decimal("0.00")
+    )
+    expected_cat_balance = base_cat + amount + amount
+    new_cat_records = cobol_runner.unload_output("TCATBALF", layout="TCATBAL")
+    new_cat = _find_record(new_cat_records, TCATBAL_LAYOUT, cat_key)
+    assert new_cat is not None, "TCATBALF category row not found on read-back"
+    assert new_cat["TRAN-CAT-BAL"] == expected_cat_balance, (
+        f"category balance must be orig + 2 x amount ({expected_cat_balance}), "
+        f"got {new_cat['TRAN-CAT-BAL']}"
+    )
+
+    # ---- Both transactions posted to TRANFILE under their distinct ids. ----
+    posted = _read_posted(cobol_runner)
+    posted_ids = {rec["TRAN-ID"] for rec in posted}
+    assert orig_id in posted_ids and dup_id in posted_ids, (
+        f"expected both ids {orig_id!r} and {dup_id!r} in TRANFILE, got {sorted(posted_ids)}"
+    )
+    for rec in posted:
+        if rec["TRAN-ID"] in (orig_id, dup_id):
+            assert rec["TRAN-AMT"] == amount, (
+                f"posted tran {rec['TRAN-ID']!r} amount {rec['TRAN-AMT']} != {amount}"
+            )
+
+
+def test_reject_then_post_continues_processing(cobol_runner, repo_root):
+    """A rejected transaction does NOT halt the run: a later valid one still posts.
+
+    Purpose
+    -------
+    Prove the mainframe-batch invariant that CBTRN02C's driver loop keeps processing
+    after a soft reject -- it writes the bad record to ``DALYREJS``, sets
+    ``RETURN-CODE`` 4, and *continues* to the next transaction rather than aborting.
+    The DALYTRAN is staged with the REJECT first (an over-limit copy of the
+    ``happy_path`` transaction, amount 5000.00 > the 2065.00 credit limit) followed by
+    the original valid transaction, so the assertion that the valid one still posts can
+    only hold if the loop advanced *past* the reject. This exercises the
+    reject-then-continue branch that every single-transaction reject scenario (reject
+    immediately followed by EOF) leaves uncovered, and is the strict counterpart to
+    :func:`test_multiple_transactions_post_in_one_run` (which proves continue-after-post).
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        Per-test runner (``cobol_runner`` fixture) bound to a fresh isolated workspace.
+    repo_root : pathlib.Path
+        Repository root (``repo_root`` fixture) used to locate the ``happy_path`` fixtures.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+        If the run does not report exactly "2 processed, 1 rejected, RC=4", if the
+        reject is not reason ``0102`` / ``OVERLIMIT TRANSACTION``, if the valid
+        transaction fails to post (or the over-limit copy posts), or if the account /
+        category balances are not moved by EXACTLY the one posted amount (proving the
+        reject neither posted nor corrupted the masters).
+    Skipped
+        (via :func:`pytest.skip`) if the ``happy_path`` fixtures or the compiled program
+        are unavailable.
+    """
+    scenario_dir = _posting_fixture_dir(repo_root, "happy_path")
+    dailytran = _resolve_fixture(
+        scenario_dir, "dailytran.txt", "DALYTRAN.txt", "DALYTRAN", "dailytran"
+    )
+    cardxref = _resolve_fixture(
+        scenario_dir, "cardxref.txt", "XREFFILE.txt", "cardxref", "xref.txt"
+    )
+    acctdata = _resolve_fixture(
+        scenario_dir, "acctdata.txt", "ACCTFILE.txt", "acctdat.txt", "acctdata"
+    )
+    tcatbal = _resolve_fixture(
+        scenario_dir, "tcatbal.txt", "TCATBALF.txt", "tcatbalf.txt", "tcatbal"
+    )
+
+    # ---- Derive the valid transaction + build an over-limit copy that must reject. ----
+    tran_records = _read_fixture_records(dailytran, DALYTRAN_LAYOUT.reclen)
+    assert len(tran_records) == 1, (
+        f"happy_path is expected to seed exactly one transaction, got {len(tran_records)}"
+    )
+    rec_post = tran_records[0]
+    # WHY reject via amount, not a bad card/date (Alternatives Considered): reason 102 is
+    # the only reject that leaves the record otherwise fully valid (real card in XREF,
+    # real account, not expired), so it isolates the over-limit branch WITHOUT also
+    # tripping 100/101/103. WHY 5000.00 (Assumption): the happy_path account has
+    # ACCT-CURR-CYC-CREDIT = ACCT-CURR-CYC-DEBIT = 0.00, so 1500-B computes
+    # WS-TEMP-BAL = 0 - 0 + amount = amount; 5000.00 > ACCT-CREDIT-LIMIT (2065.00) makes
+    # the `ACCT-CREDIT-LIMIT >= WS-TEMP-BAL` guard FALSE with a wide, robust margin that
+    # survives any cycle-field bookkeeping change. Mutating ONLY the id + amount (via the
+    # single-sourced record_codec, proven byte-faithful) keeps the copy a genuine
+    # over-limit transaction rather than a malformed record.
+    decoded = dict(DALYTRAN_LAYOUT.decode(rec_post))
+    orig_id = rec_post[:16]
+    rej_id = orig_id[:-1] + ("1" if orig_id[-1] != "1" else "2")
+    decoded["DALYTRAN-ID"] = rej_id
+    decoded["DALYTRAN-AMT"] = Decimal("5000.00")
+    rec_reject = DALYTRAN_LAYOUT.encode(decoded)
+    assert len(rec_reject) == DALYTRAN_LAYOUT.reclen, "reject record must stay 350 bytes"
+    assert rej_id != orig_id, "reject copy must carry a distinct DALYTRAN-ID"
+
+    # Stage DALYTRAN with the REJECT FIRST so a subsequent post proves loop continuation.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".dailytran", encoding="latin-1", delete=False
+    )
+    try:
+        # WHY reject-first ordering (Refactoring Rationale): placing the reject at
+        # iteration 1 and the valid post at iteration 2 means "post observed" is a direct
+        # witness that the driver did NOT stop at the reject -- the ordering IS the test.
+        tmp.write(rec_reject + "\n" + rec_post + "\n")
+        tmp.close()
+        cobol_runner.load_input("XREFFILE", cardxref, layout="XREF", alternate_keys=())
+        cobol_runner.load_input("ACCTFILE", acctdata, layout="ACCOUNT")
+        cobol_runner.load_input("TCATBALF", tcatbal, layout="TCATBAL")
+        cobol_runner.load_sequential(
+            "DALYTRAN", Path(tmp.name), reclen=DALYTRAN_LAYOUT.reclen
+        )
+        result = cobol_runner.run(_PROGRAM)
+    finally:
+        # WHY unlink in finally (Assumption): load_sequential copies content into the
+        # workspace, so the source temp file is pure scratch and is removed unconditionally
+        # to avoid leaking one file per run without affecting the staged input.
+        os.unlink(tmp.name)
+
+    # ---- Both records are read (processed=2); exactly one rejects; RC=4 (soft reject). ----
+    assert result.returncode == 4, (
+        f"a soft reject must set RETURN-CODE=4, got {result.returncode}\n"
+        f"stdout:\n{result.stdout}"
+    )
+    assert _parse_counter(result.stdout, _COUNTER_PROCESSED) == 2, (
+        "the driver must READ both records even though the first rejects\n" + result.stdout
+    )
+    assert _parse_counter(result.stdout, _COUNTER_REJECTED) == 1, (
+        "exactly the over-limit record must reject; the valid one must not\n"
+        + result.stdout
+    )
+
+    # ---- The reject is reason 102 / OVERLIMIT and nothing else. ----
+    rejects = _read_rejects(result)
+    assert len(rejects) == 1, f"expected exactly one DALYREJS record, got {len(rejects)}"
+    reason, desc = _decode_reject(rejects[0])
+    assert reason == 102, f"expected reject reason 102, got {reason}"
+    assert _REJECT_DESCRIPTIONS[102] in desc, (
+        f"reject description {desc!r} must contain {_REJECT_DESCRIPTIONS[102]!r}"
+    )
+
+    # ---- Only the VALID transaction posted (the over-limit copy did not). ----
+    posted = _read_posted(cobol_runner)
+    posted_ids = {rec["TRAN-ID"] for rec in posted}
+    assert orig_id in posted_ids, (
+        f"the valid transaction {orig_id!r} must post after the earlier reject, "
+        f"got {sorted(posted_ids)}"
+    )
+    assert rej_id not in posted_ids, (
+        f"the over-limit transaction {rej_id!r} must NOT post, got {sorted(posted_ids)}"
+    )
+
+    # ---- Masters moved by EXACTLY the one posted amount (reject neither posts nor rolls
+    #      back the good post). ----
+    acct_records = _read_fixture_records(acctdata, ACCOUNT_LAYOUT.reclen)
+    orig_account = ACCOUNT_LAYOUT.decode(acct_records[0])
+    account_key = ACCOUNT_LAYOUT.key_of(acct_records[0])
+    acct_id = int(orig_account["ACCT-ID"])
+    tran = DALYTRAN_LAYOUT.decode(rec_post)
+    amount = tran["DALYTRAN-AMT"]  # Decimal, never float
+    # WHY orig + amount (Refactoring Rationale): only ONE transaction posted, so the
+    # account master (2800) and category balance (2700) must each move by exactly one
+    # amount -- proving the reject contributed nothing to the balances.
+    expected_balance = orig_account["ACCT-CURR-BAL"] + amount
+
+    new_acct_records = cobol_runner.unload_output("ACCTFILE", layout="ACCOUNT")
+    new_account = _find_record(new_acct_records, ACCOUNT_LAYOUT, account_key)
+    assert new_account is not None, "updated ACCTFILE record not found on read-back"
+    assert new_account["ACCT-CURR-BAL"] == expected_balance, (
+        f"account balance must be orig + ONE amount ({expected_balance}), "
+        f"got {new_account['ACCT-CURR-BAL']}"
+    )
+
+    cat_key = _category_key(acct_id, tran)
+    orig_cat_records = _read_fixture_records(tcatbal, TCATBAL_LAYOUT.reclen)
+    orig_cat_record = _find_record(orig_cat_records, TCATBAL_LAYOUT, cat_key)
+    base_cat = (
+        orig_cat_record["TRAN-CAT-BAL"] if orig_cat_record is not None else Decimal("0.00")
+    )
+    expected_cat_balance = base_cat + amount
+    new_cat_records = cobol_runner.unload_output("TCATBALF", layout="TCATBAL")
+    new_cat = _find_record(new_cat_records, TCATBAL_LAYOUT, cat_key)
+    assert new_cat is not None, "TCATBALF category row not found on read-back"
+    assert new_cat["TRAN-CAT-BAL"] == expected_cat_balance, (
+        f"category balance must be orig + ONE amount ({expected_cat_balance}), "
+        f"got {new_cat['TRAN-CAT-BAL']}"
+    )
+

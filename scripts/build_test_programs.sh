@@ -263,8 +263,23 @@ carddemo_cobc_flags() {
     if [ "$CARDDEMO_COVERAGE" = "1" ]; then
         # WHY (Assumption): GnuCOBOL transpiles to C, so gcov coverage is obtained
         # by passing --coverage through to the C compiler (-A) and linker (-Q),
-        # and keeping the generated C (-save-temps) alongside the .gcno files.
-        printf '%s\n' -g "-save-temps=$CARDDEMO_BUILD_DIR" -A --coverage -Q --coverage
+        # and keeping the generated C (-save-temps) alongside the .gcno files so
+        # gcov can annotate it.
+        # WHY plain `-save-temps` (NOT `-save-temps=$CARDDEMO_BUILD_DIR`) paired
+        # with the cd-to-build-dir wrapper below (finding GCOV-STRAY-ARTIFACTS):
+        # `-save-temps=<dir>` was verified to redirect the transpiled .c into the
+        # build dir but STILL emit the coverage NOTES (.gcno) into the current
+        # working directory (the repo root), and the instrumented binary then
+        # writes its runtime .gcda beside that .gcno at RUN time -- littering the
+        # repo root with 19 .gcno + 18 .gcda files. Emitting the temps to the CWD
+        # (plain `-save-temps`) and running cobc FROM the build dir (see
+        # carddemo_invoke_cobc) instead keeps the .c, .gcno AND (via the absolute
+        # path baked into the binary) the runtime .gcda all inside the build dir,
+        # leaving the repo root clean. Alternatives Considered: relocating .gcda at
+        # run time via GCOV_PREFIX/GCOV_PREFIX_STRIP was rejected because it does
+        # not move the compile-time .gcno and would need every runner to export the
+        # vars; a single compile-CWD change fixes both artifact kinds at once.
+        printf '%s\n' -g -save-temps -A --coverage -Q --coverage
     fi
 }
 
@@ -288,6 +303,32 @@ carddemo_program_extra_flags() {
     esac
 }
 
+carddemo_invoke_cobc() {
+    # Purpose : run `cobc` with the given (all-absolute) argument list, choosing
+    #           the working directory so gcov byproducts never litter the repo root.
+    # Parameters:
+    #   $@ (strings) - the FULL cobc argument list (flags, -o <abs out>, <abs
+    #                  source>). Every path MUST be absolute so the choice of CWD
+    #                  cannot change how any argument resolves.
+    # Returns : cobc's own exit status.
+    # Errors  : none of its own; propagates cobc's exit status unchanged.
+    # WHY (finding GCOV-STRAY-ARTIFACTS): in coverage mode the transpiled C, its
+    # compile-time .gcno notes and (at run time) its .gcda data are all emitted
+    # RELATIVE to the compile-time CWD. Running cobc from inside
+    # $CARDDEMO_BUILD_DIR (with plain `-save-temps`, see carddemo_cobc_flags) parks
+    # every one of those byproducts in the build dir -- which is .gitignored --
+    # instead of the repo root. The normal (non-coverage) build produces no such
+    # byproducts, so it keeps the historical CWD (the repo root) to avoid
+    # perturbing a proven path. Trade-off: a subshell `cd` per compile costs a
+    # negligible fork but is far simpler and less error-prone than post-hoc moving
+    # of .gcno files plus GCOV_PREFIX gymnastics for the runtime .gcda.
+    if [ "$CARDDEMO_COVERAGE" = "1" ]; then
+        ( cd "$CARDDEMO_BUILD_DIR" && cobc "$@" )
+    else
+        cobc "$@"
+    fi
+}
+
 carddemo_compile() {
     # Purpose : compile a single program as a main executable or shared module.
     # Parameters:
@@ -309,11 +350,11 @@ carddemo_compile() {
     fi
     if [ "$mode" = "main" ]; then
         out="$CARDDEMO_BUILD_DIR/$name"
-        cobc -x "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
+        carddemo_invoke_cobc -x "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
             || return "${CARDDEMO_RC_FAIL}"
     else
         out="$CARDDEMO_BUILD_DIR/$name.so"
-        cobc -m "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
+        carddemo_invoke_cobc -m "${flags[@]}" "${extra[@]}" -o "$out" "$src" \
             || return "${CARDDEMO_RC_FAIL}"
     fi
     return 0
@@ -359,7 +400,10 @@ carddemo_compile_unsupported() {
         return "${CARDDEMO_RC_FAIL}"
     fi
     out="$CARDDEMO_BUILD_DIR/$name"
-    if log="$(cobc -x "${flags[@]}" -o "$out" "$src" 2>&1)"; then
+    # carddemo_invoke_cobc runs from the build dir in coverage mode so any partial
+    # transpile temp of these known-unsupported sources stays in build/ rather than
+    # the repo root (finding GCOV-STRAY-ARTIFACTS).
+    if log="$(carddemo_invoke_cobc -x "${flags[@]}" -o "$out" "$src" 2>&1)"; then
         echo "[build]   UNEXPECTED SUCCESS: '$name' compiled." >&2
         echo "[build]   The immutable baseline may have changed; reconcile" >&2
         echo "[build]   CARDDEMO_UNSUPPORTED_PROGRAMS in this script." >&2
@@ -471,7 +515,7 @@ echo "[build] driver : $CARDDEMO_DRIVER_NAME (for CBACT04C)"
 if [ -f "$CARDDEMO_REPO_ROOT/$CARDDEMO_DRIVER_SOURCE" ]; then
     _drv_flags=()
     mapfile -t _drv_flags < <(carddemo_cobc_flags)
-    if cobc -x "${_drv_flags[@]}" \
+    if carddemo_invoke_cobc -x "${_drv_flags[@]}" \
             -o "$CARDDEMO_BUILD_DIR/$CARDDEMO_DRIVER_NAME" \
             "$CARDDEMO_REPO_ROOT/$CARDDEMO_DRIVER_SOURCE"; then
         echo "[build]   OK -> $CARDDEMO_BUILD_DIR/$CARDDEMO_DRIVER_NAME"
@@ -558,7 +602,11 @@ if [ "$CARDDEMO_WITH_TESTS" = "1" ]; then
                 # -I "$_tdir" resolves test-local copybooks; app/cpy comes from
                 # carddemo_cobc_flags.
                 _tlog="$CARDDEMO_BUILD_DIR/$_tname.buildlog"
-                if cobc -x "${local_flags[@]}" "${_textra[@]}" \
+                # carddemo_invoke_cobc runs from the build dir in coverage mode so
+                # the test programs' gcov notes/data land in build/ (finding
+                # GCOV-STRAY-ARTIFACTS); the COPY of the UUT still resolves via the
+                # absolute `-I "$CARDDEMO_REPO_ROOT"`, which is cwd-independent.
+                if carddemo_invoke_cobc -x "${local_flags[@]}" "${_textra[@]}" \
                         -Wall -Wextra \
                         -I "$CARDDEMO_REPO_ROOT" -I "$_tdir" \
                         -o "$CARDDEMO_BUILD_DIR/$_tname" "$_tf" 2>"$_tlog"; then

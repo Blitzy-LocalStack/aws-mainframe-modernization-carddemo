@@ -105,7 +105,7 @@ source "$_master_script_dir/test_env.sh"
 # Considered: installing the trap inside test_env.sh was rejected (a trap set by a
 # *sourced* file fires on the CALLER's lifecycle) -- the runner owns the run, so the
 # runner owns teardown (mirrors run_unit_tests.sh).
-trap 'carddemo_cleanup_workspace' EXIT
+trap 'carddemo_sweep_stray_coverage; carddemo_cleanup_workspace' EXIT
 
 carddemo_master_usage() {
     # Purpose : print the master runner's usage synopsis.
@@ -115,7 +115,7 @@ carddemo_master_usage() {
     cat <<USAGE
 Usage: scripts/run_tests.sh [--fail-fast|-x]
                             [--with-localstack|--require-localstack]
-                            [--require-cobol] [--coverage] [-h|--help]
+                            [--require-cobol] [--coverage] [--audit] [-h|--help]
 
 Runs the full CardDemo test suite (build -> unit -> integration -> e2e) and
 exits with the worst condition code (0 pass / 4 warn / 8 fail / 16 fatal).
@@ -129,6 +129,10 @@ Options:
                          hard failure (rc>=8); opt-in, the .cbl is unfixable here
       --coverage         instrument the suite and write reports/coverage.xml (+ a
                          console summary) from this single command
+      --audit            run the Python dependency supply-chain audit gate
+                         (pip-audit vs tests/requirements-test.txt, adjudicated by
+                         tests/audit-allowlist.json) and write reports/audit-python.json;
+                         offline/tool-absent degrades to WARN, never a hard fail
   -h, --help             show this help and exit
 USAGE
 }
@@ -142,6 +146,7 @@ _fail_fast=0
 _with_localstack=0
 _require_cobol=0
 _coverage=0
+_audit=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -x|--fail-fast) _fail_fast=1 ;;
@@ -160,6 +165,13 @@ while [ "$#" -gt 0 ]; do
         # coverage report -- it instruments the COBOL build (gcov) and runs the
         # Python layers under coverage.py, then combines + writes reports/coverage.xml.
         --coverage) _coverage=1 ;;
+        # WHY (finding F-SUPPLY-NO-AUDIT-GATE): --audit is an OPT-IN supply-chain
+        # gate that audits the pinned Python test dependencies against the published
+        # advisory DB. It is opt-in (not default) because it needs network access to
+        # the advisory DB; on an offline developer box or air-gapped CI it degrades
+        # to WARN rather than blocking, so the default `run_tests.sh` stays
+        # deterministic and network-free. CI arms it in a dedicated enforcing step.
+        --audit) _audit=1 ;;
         -h|--help) carddemo_master_usage; exit 0 ;;
         *)
             echo "[run_tests] ERROR: unknown option '$1'" >&2
@@ -355,6 +367,61 @@ if [ "$_coverage" = "1" ]; then
         overall_rc="$(carddemo_rc_worst "$overall_rc" "${CARDDEMO_RC_WARN}")"
         _summary+=("$(printf '  %-12s %s' "coverage" "unavailable (warn)")")
     fi
+
+    # -----------------------------------------------------------------------
+    # COBOL coverage (finding F-COVERAGE-NO-COBOL-REPORT) -- publish the gcov
+    # report for the transpiled C of every instrumented unit-under-test.
+    # WHY separate from the coverage.py branch above (Refactoring Rationale):
+    # the .gcno/.gcda were produced by the instrumented COBOL BUILD
+    # (CARDDEMO_COVERAGE=1) and accumulated as the layers executed the compiled
+    # programs, so a COBOL report can be published even when the Python
+    # `coverage` tool was absent. WHY fold its result WARN-only: a coverage
+    # measurement/tooling gap must not turn the suite red -- the AAP 0.7.1 90/85
+    # figures are a non-contractual recommendation and the mandatory
+    # business-rule branch coverage is asserted by the tests themselves -- which
+    # mirrors the Python-side philosophy documented above. carddemo_cobol_coverage_report
+    # returns 0 on a complete report and CARDDEMO_RC_WARN on any gap.
+    # -----------------------------------------------------------------------
+    carddemo_cobol_coverage_report "$CARDDEMO_BUILD_DIR" "$CARDDEMO_REPORTS_DIR"
+    _cobol_cov_rc=$?
+    if [ -s "$CARDDEMO_REPORTS_DIR/cobol-coverage.xml" ]; then
+        _summary+=("$(printf '  %-12s %s' "cobol-cov" "reports/cobol-coverage.xml")")
+    else
+        _summary+=("$(printf '  %-12s %s' "cobol-cov" "MISSING (warn)")")
+    fi
+    if [ "$_cobol_cov_rc" -ne 0 ]; then
+        overall_rc="$(carddemo_rc_worst "$overall_rc" "$_cobol_cov_rc")"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Python dependency supply-chain audit gate (finding F-SUPPLY-NO-AUDIT-GATE)
+# -- POST-STAGE. WHY run it here: after the test layers so a network probe to
+# the advisory DB never delays test feedback, and so its JSON report joins the
+# other reports/ artifacts for CI upload. carddemo_audit_python_deps returns
+# 0 (clean) / 4 (WARN: pip-audit or jq absent, or advisory DB unreachable
+# offline) / 8 (FAIL: an unadjudicated advisory is present). Its rc is folded
+# into the aggregate with the SAME worst-rc rule as every test stage, so a
+# genuine advisory becomes a real failure WHEN the audit can run, while the
+# offline / tool-absent path is only a WARN and can never hard-fail a
+# network-free run (satisfying "degrade to WARN offline"). Trade-off: opt-in
+# (--audit) not always-on, so the default suite stays deterministic + offline.
+# ---------------------------------------------------------------------------
+if [ "$_audit" = "1" ]; then
+    echo ""
+    echo "[run_tests] ===================== STAGE: audit ====================="
+    _audit_rc=0
+    carddemo_audit_python_deps \
+        "$CARDDEMO_REPO_ROOT/tests/requirements-test.txt" \
+        "$CARDDEMO_REPO_ROOT/tests/audit-allowlist.json" \
+        "$CARDDEMO_REPORTS_DIR/audit-python.json" || _audit_rc=$?
+    if [ -s "$CARDDEMO_REPORTS_DIR/audit-python.json" ]; then
+        _summary+=("$(printf '  %-12s rc=%s (%s)' "audit" "$_audit_rc" "reports/audit-python.json")")
+    else
+        _summary+=("$(printf '  %-12s rc=%s (%s)' "audit" "$_audit_rc" "no report")")
+    fi
+    overall_rc="$(carddemo_rc_worst "$overall_rc" "$_audit_rc")"
+    echo "[run_tests] stage 'audit' rc=$_audit_rc ; running aggregate=$overall_rc"
 fi
 
 echo ""

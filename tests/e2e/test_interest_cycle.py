@@ -69,6 +69,14 @@ from pathlib import Path
 
 import pytest
 
+# WHY import the session-locked builder from conftest (F-XDIST-LDXREFA-RACE): the
+# alternate-key XREF provisioner below is a SHARED build artifact; delegating its
+# compile to ``compile_helper_program`` serialises it across ``pytest-xdist`` workers
+# so the one shared binary is built exactly once and published atomically -- never
+# observed half-written. Imported from ``tests.conftest`` per the same pattern the
+# integration suites use for ``_require_or_skip``.
+from tests.conftest import compile_helper_program
+
 # §0.6.2 import contract.
 from tests.helpers.golden_compare import assert_matches_golden
 
@@ -244,19 +252,15 @@ def _provision_alt_key_xref(runner, seed_cardxref: Path) -> Path:
     WHY: ``CBACT04C`` opens XREF for random reads on its ALTERNATE key (ACCT-ID);
     without the alternate index the OPEN yields status 35 and the program abends.
     """
-    exe = runner.build_dir / "LDXREFA"
-    if not exe.exists():
-        src = runner.build_dir / "LDXREFA.cbl"
-        src.write_text(_XREF_PROVISIONER_SRC)
-        # WHY (F-P4 bounded wait): cap the compile so a wedged ``cobc`` cannot block
-        # a CI job indefinitely. 120s matches ``cobol_runner.run_program``'s default,
-        # keeping every subprocess wait in this module deadline-bounded. Trade-off:
-        # an outer CI-job timeout is the only alternative net and is far coarser than
-        # this per-call bound.
-        subprocess.run(
-            ["cobc", "-x", "-free", "-o", str(exe), str(src)],
-            check=True, capture_output=True, timeout=120,
-        )
+    # WHY (F-XDIST-LDXREFA-RACE): delegate the build to the session-locked,
+    # atomic-publish helper. The previous inline check-then-compile onto the ONE
+    # shared ``build_dir/LDXREFA`` path let concurrent ``pytest-xdist`` workers race
+    # -- two workers writing the same ``.cbl`` and compiling onto the same binary at
+    # once produced ETXTBSY / PermissionError / a half-written executable. The helper
+    # serialises the build behind an flock and publishes via atomic rename, so the
+    # program is compiled exactly once and never observed partial. Its default 120s
+    # compile bound preserves the previous wedged-``cobc`` protection.
+    exe = compile_helper_program(runner.build_dir, "LDXREFA", _XREF_PROVISIONER_SRC)
     out = runner.assign_path("XREFFILE")
     env = {**os.environ, "INFLAT": str(seed_cardxref), "OUTIDX": str(out)}
     # WHY (F-P4 bounded wait): mirror the compile bound above so a hung provisioner
@@ -282,6 +286,13 @@ def _flatten_daily(src: Path, dst: Path, reclen: int = 350) -> int:
     -------
     int
         Number of records written.
+
+    Raises
+    ------
+    OSError
+        If the seed cannot be read or the flattened image cannot be written
+        (propagated from :meth:`pathlib.Path.read_bytes` /
+        :meth:`pathlib.Path.write_bytes`).
 
     Notes
     -----
@@ -329,6 +340,16 @@ def _acct_state(records: "list[str]") -> "dict[str, tuple]":
     dict[str, tuple]
         Mapping ``ACCT-ID -> (ACCT-CURR-BAL, ACCT-CURR-CYC-CREDIT, ACCT-CURR-CYC-DEBIT)``,
         every value an exact ``Decimal``.
+
+    Raises
+    ------
+    KeyError
+        If a required field is absent from its layout (propagated from
+        :func:`tests.helpers.e2e_records.field_geometry` via the
+        ``_text_field``/``_money_field`` accessors).
+    tests.helpers.record_codec.ZonedDecimalError
+        If a monetary slice is not a valid zoned-decimal image (propagated from
+        ``_money_field``).
 
     Notes
     -----
@@ -480,6 +501,16 @@ def _recompute_interest_by_account(run: InterestRun) -> "dict[str, Decimal]":
     dict[str, decimal.Decimal]
         ACCT-ID -> recomputed total interest, summed over the account's category rows.
 
+    Raises
+    ------
+    KeyError
+        If a required field is absent from its layout (propagated from
+        :func:`tests.helpers.e2e_records.field_geometry` via the
+        ``_text_field``/``_money_field`` accessors).
+    tests.helpers.record_codec.ZonedDecimalError
+        If a monetary slice is not a valid zoned-decimal image (propagated from
+        ``_money_field``).
+
     Notes
     -----
     WHY recompute independently (F-P3-3): rather than trust the program's emitted amounts,
@@ -541,6 +572,12 @@ def test_interest_cycle_invariants(cobol_runner, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If any interest-cycle invariant (record counts, emitted-interest presence, or
+        the deterministic aggregate) does not hold.
+
     Notes
     -----
     Assertion density: posting precondition + clean interest RC, exact emitted-record
@@ -601,6 +638,12 @@ def test_interest_transactions_match_golden(cobol_runner, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If the emitted interest transactions do not match their golden master (raised
+        by ``assert_matches_golden``).
+
     Notes
     -----
     WHY raw record mode (F-P3-2): every 350-byte interest record is compared with
@@ -632,6 +675,12 @@ def test_interest_account_effects(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the per-account balance increment or cycle-counter clear does not match
+        the expected post-interest master state.
 
     Notes
     -----
@@ -707,6 +756,13 @@ def test_final_account_flush_defect(cobol_runner, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If the known final-account flush defect does not reproduce exactly as
+        documented (this xfail(strict) body asserts the CORRECT behaviour, so a
+        future fix turns the XPASS into a hard failure).
+
     Notes
     -----
     WHY xfail(strict) (Alternatives Considered): the alternative -- asserting the buggy
@@ -745,6 +801,12 @@ def test_interest_amounts_match_independent_recompute(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the program's emitted interest amounts diverge from the independent
+        ``(TRAN-CAT-BAL * rate) / 1200`` recompute.
 
     Notes
     -----
@@ -788,6 +850,12 @@ def test_no_fee_records_and_default_fallback(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If any fee record is emitted, or the DEFAULT disclosure-group fallback does
+        not produce the expected interest.
 
     Notes
     -----

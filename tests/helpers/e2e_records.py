@@ -81,6 +81,12 @@ def text_field(record: str, layout_name: str, field_name: str) -> str:
     str
         The field's whitespace-stripped text value.
 
+    Raises
+    ------
+    KeyError
+        If ``layout_name`` is not registered or ``field_name`` is absent from it
+        (propagated from :func:`field_geometry`).
+
     Notes
     -----
     WHY strip (Assumption): identifiers such as ``TRAN-ID`` are right-padded to their fixed

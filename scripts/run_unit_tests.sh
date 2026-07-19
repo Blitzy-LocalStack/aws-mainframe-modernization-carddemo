@@ -89,7 +89,15 @@ source "$_unit_script_dir/test_env.sh"
 # Alternatives Considered: installing this trap inside test_env.sh was rejected
 # because a trap set by a *sourced* file fires on the CALLER's lifecycle -- the
 # runner owns the run, so the runner must own teardown.
-trap 'carddemo_cleanup_workspace' EXIT
+# WHY also normalize on exit (F-JUNIT-NONDETERMINISTIC-METADATA): the SAME EXIT
+# trap that reclaims the workspace also publishes a deterministic copy of the
+# hand-emitted unit report to reports/normalized/unit.xml. The RAW reports/unit.xml
+# deliberately keeps its REAL timestamp/time (the QA-F1 truthfulness fix that
+# replaced the old hard-coded time="0"); normalization is delivered as a SEPARATE
+# byte-stable sibling so both goals hold. carddemo_normalize_junit is a no-op when
+# no raw report exists, so the -h/--help and usage-error exits (before
+# CARDDEMO_UNIT_REPORT is set) are safe under `set -u` via the ${..:-} guard.
+trap 'carddemo_normalize_junit "${CARDDEMO_UNIT_REPORT:-}" "$CARDDEMO_REPORTS_DIR/normalized/unit.xml"; carddemo_cleanup_workspace' EXIT
 
 CARDDEMO_UNIT_REPORT="${CARDDEMO_REPORTS_DIR}/unit.xml"
 

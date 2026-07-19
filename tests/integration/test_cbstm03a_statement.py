@@ -84,12 +84,17 @@ endorsement:
 
 A third product defect is deliberately NOT exercised here:
 
-* **F-STMT-OVERFLOW** -- ``CBSTM03A`` stores transactions in an ``OCCURS 51`` table
-  with no bound check, so an account with more than ~51 transactions overruns it
-  and SIGSEGVs. The happy-path fixture holds only 3 transactions, well under the
-  bound, so this test never triggers it. Exercising the overflow would require a
-  production fix (bounds checking) that is out of scope; it is recorded here so a
-  future maintainer does not enlarge the fixture past the limit unaware.
+* **F-STMT-OVERFLOW** -- ``CBSTM03A`` has TWO independent unchecked tables, so the
+  overflow threshold is NOT a single "~51 transactions" figure (that wording
+  conflates the two distinct tables). The measured boundaries are: a single card
+  renders up to **512 transactions** but **513** overruns the inner same-card table
+  and SIGSEGVs (``F-STMT-INNER-OVERFLOW``); and up to **51 distinct cards** render
+  but **52** overrun the ``OCCURS 51`` outer card table and SIGSEGV
+  (``F-STMT-OUTER-OVERFLOW``). The happy-path fixture holds only 3 transactions
+  across a handful of cards, well under BOTH bounds, so this test never triggers
+  either. A bounds-check fix is a production change and out of scope (``app/**`` is
+  REFERENCE-only per AAP §0.8.2); the two boundaries are recorded here so a future
+  maintainer does not enlarge the fixture past either limit unaware.
 
 Explainability
 --------------

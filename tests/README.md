@@ -67,6 +67,19 @@ Documented honestly here so that no runnable claim above hides a blocked feature
   whereas hiding it — or hard-failing an otherwise-green run over an unfixable
   baseline defect — would violate both auditability and the minimal-change
   principle.
+- **`CBSTM03A` statement tables overflow without bounds checks** — the statement
+  generator has **two independent** unchecked tables, so there is **no single
+  "~51 transactions" limit** (that figure conflates the two). The measured
+  boundaries are: a single card renders up to **512** transactions but the **513th**
+  overruns the inner same-card table and **SIGSEGVs** (`F-STMT-INNER-OVERFLOW`);
+  and up to **51 distinct cards** render but the **52nd** overruns the `OCCURS 51`
+  outer card table and **SIGSEGVs** (`F-STMT-OUTER-OVERFLOW`). These are defects in
+  the immutable baseline `app/cbl/CBSTM03A.CBL` (REFERENCE-only per AAP §0.8.2), so
+  they are **documented, not fixed**: the statement tests keep every fixture safely
+  under **both** bounds and record the thresholds so a maintainer does not enlarge a
+  fixture past either limit unaware. WHY document both (auditability): stating a
+  lone "~51" threshold would hide the far larger same-card limit and mislabel the
+  crash as a transaction-count issue when it is really two separate table overruns.
 - **Online `CO*` CICS programs** cannot run end-to-end without a CICS runtime
   (absent on the runner); only their extractable field-validation logic is
   unit-tested (AAP §0.8.2).
@@ -321,8 +334,20 @@ than a silent no‑op that could let a whole layer go unrun.
 | `slow` | Long‑running tests (may be deselected for fast local iteration). |
 
 ```bash
-# WHAT: run only the LocalStack-backed tests, or exclude the slow ones.
-pytest tests -m localstack
+# WHAT: run the LocalStack-backed AWS layer. It is OPT-IN and needs a running
+#       emulator; a run that verifies NOTHING must not read as green.
+# WHY : a bare `pytest tests -m localstack` with no emulator used to exit 0 with
+#       all three AWS tests merely SKIPPED -- a misleading "green" that proved
+#       nothing. conftest.py now applies a zero-executed gate: a localstack-targeted
+#       run in which every AWS test was skipped FAILS instead of passing. Use one of
+#       the two supported ways to actually exercise the layer:
+#   (1) let the e2e runner bring LocalStack up for you (recommended):
+scripts/run_e2e_tests.sh --with-localstack
+#   (2) require it explicitly, so an absent/unreachable emulator HARD-FAILS rather
+#       than skipping (needs AWS_ENDPOINT_URL / a reachable emulator):
+CARDDEMO_REQUIRE_LOCALSTACK=1 pytest tests -m localstack
+
+# WHAT: exclude the slow tests for fast local iteration.
 pytest tests -m "not slow"
 ```
 

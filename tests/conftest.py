@@ -109,6 +109,8 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -255,6 +257,37 @@ _SKIP_ALLOWLIST = (
 # store. Under ``pytest-xdist`` the CONTROLLER process receives every worker's forwarded
 # report here, so the controller accumulates the complete picture for the whole run.
 _UNEXPECTED_SKIPS: "dict[str, str]" = {}
+
+# ---------------------------------------------------------------------------
+# F-DOC-LOCALSTACK-COMMAND-GREEN-SKIP -- zero-executed LocalStack layer gate.
+# ---------------------------------------------------------------------------
+# WHY (Refactoring rationale -- closes "a bare `pytest -m localstack` exits 0 with
+# every AWS test merely SKIPPED"): selecting a layer explicitly (``-m localstack``)
+# is an INTENT to verify it, so a run in which the emulator is absent and all three
+# AWS tests skip must NOT read as green -- "nothing ran" is not "everything passed".
+# The per-test F4 gate (_require_localstack_or_skip) already turns an absent-but-
+# REQUIRED emulator into hard failures; this SESSION-level backstop additionally
+# fails the DEFAULT (non-required) localstack-targeted run when zero AWS test bodies
+# actually executed, so the documented command can never present an all-skipped run
+# as success.
+#
+# WHY key on the EXACT ``-m`` token "localstack" (Alternatives Considered): matching
+# only the precise documented selection keeps the gate surgical. Compound or negated
+# expressions (``-m "e2e or localstack"``, ``-m "not localstack"``) and the layer
+# runners (``-m e2e`` / ``-m integration``, where a skipped optional AWS test is a
+# normal, allowlisted outcome) are deliberately NOT matched, so this gate can never
+# turn those supported runs red. A substring/regex match was rejected as too broad.
+#
+# WHY a call-phase execution counter rather than "were 3 skipped?" (Assumption): the
+# module's endpoint precondition is enforced in a FIXTURE (setup phase), so a
+# skipped OR failed AWS test produces no call-phase report at all. Counting only
+# call-phase, non-skipped reports therefore cleanly distinguishes "green because the
+# bodies ran and passed" (counter > 0 -> no gate) from "green because every body was
+# skipped" (counter == 0 -> gate). Under pytest-xdist the controller receives every
+# worker's report in pytest_runtest_logreport, so the controller's counter reflects
+# the whole run.
+_LOCALSTACK_MARKEXPR_TARGETED = False
+_LOCALSTACK_EXECUTED = 0
 
 # ---------------------------------------------------------------------------
 # M3 -- bounded build stage.
@@ -789,6 +822,117 @@ def _build_lock(lock_path: Path, timeout: float) -> "Iterator[None]":
             os.close(fd)
 
 
+def compile_helper_program(
+    build_dir: "str | os.PathLike[str]",
+    name: str,
+    source_text: str,
+    *,
+    compile_timeout: float = 120.0,
+    lock_timeout: float = _DEFAULT_BUILD_TIMEOUT,
+) -> Path:
+    """Compile an inline COBOL helper program ONCE per run, race-free under xdist.
+
+    Purpose
+    -------
+    Build a small, test-owned COBOL helper (e.g. the ``LDXREFA`` alternate-key
+    XREF loader the e2e cycle tests need) into the SHARED session build directory
+    without the ``pytest-xdist`` workers racing on it. Each e2e cycle test used to
+    run an unlocked ``if not exe.exists(): write <name>.cbl; cobc -o exe`` against
+    the ONE shared ``build_dir/<name>`` path; under ``-n`` that check-then-build
+    (TOCTOU) let two workers write the same source and compile onto the same binary
+    at once, yielding ``ETXTBSY`` ("text file busy"), a ``PermissionError``, or a
+    half-written executable a third worker then tried to run (QA finding
+    F-XDIST-LDXREFA-RACE). This helper serialises the build behind the same kind of
+    cross-process lock the app-program build uses and publishes the result
+    atomically, so the program is compiled exactly once and never observed partial.
+
+    Parameters
+    ----------
+    build_dir : str | os.PathLike[str]
+        The shared session build directory. The published binary lands at
+        ``build_dir/<name>``; a dedicated lock file lives at
+        ``build_dir/.<name>.build.lock``.
+    name : str
+        Program name, also used as the published executable's filename.
+    source_text : str
+        Complete free-format (``-free``) COBOL source for the helper program.
+    compile_timeout : float, optional
+        Maximum seconds for the ``cobc`` compile (default ``120.0``), so a wedged
+        compiler surfaces as a bounded failure instead of hanging CI.
+    lock_timeout : float, optional
+        Maximum seconds to wait for the shared build lock (default
+        ``_DEFAULT_BUILD_TIMEOUT`` == 600.0).
+
+    Returns
+    -------
+    pathlib.Path
+        Path of the compiled, ready-to-run executable (``build_dir/<name>``).
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        If ``cobc`` fails; its captured ``stdout``/``stderr`` is attached, exactly
+        as the previous inline ``check=True`` compile did.
+    subprocess.TimeoutExpired
+        If the compile exceeds ``compile_timeout`` seconds.
+    TimeoutError
+        If the build lock cannot be acquired within ``lock_timeout`` seconds.
+    """
+    # WHY reuse the same flock discipline the app-program build uses (Refactoring
+    # rationale): serialising through a dedicated lock file makes the
+    # check-then-build atomic across workers, so ``<name>`` is compiled exactly ONCE
+    # per run and every other worker simply reuses the finished binary. A SEPARATE
+    # lock file (not the app-build lock) is used deliberately so this never contends
+    # with ``built_programs`` -- which has already released its lock before these
+    # e2e tests run -- keeping the two build stages independent.
+    bdir = Path(build_dir)
+    exe = bdir / name
+    lock_path = bdir / f".{name}.build.lock"
+    with _build_lock(lock_path, lock_timeout):
+        if exe.exists():
+            # Built earlier this run (by us, or by another worker that won the lock
+            # first); reuse it rather than recompiling.
+            return exe
+        # WHY compile to a UNIQUE temp then ``os.replace`` (atomic publish,
+        # Trade-off): even with the lock held, publishing via an atomic rename means
+        # no reader/executor can EVER observe a partially written binary, and because
+        # we never write directly onto ``exe`` a concurrently-executing stale copy
+        # from a crashed prior run cannot trigger ``ETXTBSY``. The unique token keeps
+        # a previous aborted attempt's leftovers from colliding with this one.
+        #
+        # WHY the SOURCE keeps a STABLE, clean base name while only the OUTPUT is
+        # uniquified (Assumption, verified empirically): ``cobc`` derives the module
+        # name from the SOURCE file's base name and rejects names that are over-long
+        # or dot-prefixed ("invalid file base name ... length exceeds maximum"), so a
+        # ``uuid``-laden ``.cbl`` name will not compile. Writing the source as the
+        # plain ``<name>.cbl`` is safe here precisely because we hold the exclusive
+        # build lock -- no other worker can be writing the same source concurrently --
+        # so a unique source name is neither needed nor accepted by the compiler. The
+        # output path carries no such constraint, so uniqueness lives there.
+        token = f"{os.getpid()}-{uuid.uuid4().hex}"
+        src_path = bdir / f"{name}.cbl"
+        tmp_exe = bdir / f".{name}.{token}.tmp"
+        src_path.write_text(source_text)
+        try:
+            subprocess.run(
+                ["cobc", "-x", "-free", "-o", str(tmp_exe), str(src_path)],
+                check=True,
+                capture_output=True,
+                timeout=compile_timeout,
+            )
+            os.replace(tmp_exe, exe)
+        finally:
+            # Best-effort temp cleanup that never masks a compile error: the ``.cbl``
+            # is always removable, and ``tmp_exe`` no longer exists after a successful
+            # ``os.replace`` (hence FileNotFoundError, an OSError, is tolerated).
+            for leftover in (src_path, tmp_exe):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+    return exe
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register the suite's markers as a defensive backup to ``tests/pytest.ini``.
 
@@ -829,6 +973,18 @@ def pytest_configure(config: pytest.Config) -> None:
     # session. Clearing at configure time makes the gate correct even in that reuse
     # case, at zero cost to the common one-process-per-run path.
     _UNEXPECTED_SKIPS.clear()
+
+    # WHY (F-DOC-LOCALSTACK-COMMAND-GREEN-SKIP): capture, once per session, whether
+    # THIS run explicitly targets ONLY the LocalStack layer (the documented
+    # ``pytest -m localstack``), and reset the per-session execution counter. Reading
+    # the ``-m`` expression here (configure time) makes the later sessionfinish gate a
+    # pure check of already-captured state, and the reset keeps the module-globals
+    # correct even if a caller drives ``pytest.main()`` more than once in one
+    # interpreter. The empty-string default is belt-and-suspenders: ``markexpr`` is a
+    # core pytest option that always exists, defaulting to "" when no ``-m`` is given.
+    global _LOCALSTACK_MARKEXPR_TARGETED, _LOCALSTACK_EXECUTED
+    _LOCALSTACK_MARKEXPR_TARGETED = (config.getoption("markexpr", "") or "").strip() == "localstack"
+    _LOCALSTACK_EXECUTED = 0
 
 
 def _skip_reason_text(report: "pytest.TestReport") -> str:
@@ -939,6 +1095,17 @@ def pytest_runtest_logreport(report: "pytest.TestReport") -> None:
     ------
     None
     """
+    # WHY count BEFORE the cobc guard below (Assumption): the LocalStack layer is
+    # pure-Python and does not need the COBOL toolchain, so its zero-executed gate
+    # must work even on a box without ``cobc``. We tally executed AWS test bodies
+    # here, ahead of the compiler-gated no-hidden-skips logic. Only call-phase,
+    # non-skipped reports count as an executed body (setup-phase skips/failures from
+    # the endpoint fixture never reach the call phase), and only when this run
+    # explicitly targets the localstack layer -- so the counter is zero-cost otherwise.
+    global _LOCALSTACK_EXECUTED
+    if _LOCALSTACK_MARKEXPR_TARGETED and report.when == "call" and not report.skipped:
+        _LOCALSTACK_EXECUTED += 1
+
     # WHY enforce only when the toolchain is PRESENT (Assumption + Trade-off): when
     # ``cobc`` is absent this suite is in its documented developer-friendly degraded
     # mode, where COBOL-dependent tests skip and a green run is intentional (the M1
@@ -961,6 +1128,117 @@ def pytest_runtest_logreport(report: "pytest.TestReport") -> None:
     # Keyed by nodeid so a test that skips (one skipped report) is recorded once; a
     # later phase's report for the same test cannot inflate the count.
     _UNEXPECTED_SKIPS[report.nodeid] = reason
+
+
+def _augment_junit_with_skip_failures(
+    xml_path: "str | os.PathLike[str]", skips: "dict[str, str]"
+) -> bool:
+    """Inject a synthetic failing ``<testcase>`` into a JUnit report for hidden skips.
+
+    Purpose
+    -------
+    Make the machine-readable JUnit XML itself agree with the no-hidden-skips
+    verdict. :func:`pytest_sessionfinish` escalates the *process* exit code when an
+    unexpected skip is found, but pytest's own JUnit writer records those tests as
+    ``<skipped>`` -- leaving ``failures=0 errors=0`` in the file. A CI publisher that
+    keys ONLY on the XML (ignoring the exit code) would therefore read an aborted
+    run as green. This helper rewrites the report so it carries a real
+    ``<failure>``, closing that "skipped-only green" gap for every pure-XML consumer.
+
+    Parameters
+    ----------
+    xml_path : str | os.PathLike[str]
+        Filesystem path of the JUnit report pytest already wrote (the value of
+        ``--junitxml``). A missing/unparseable file is a no-op.
+    skips : dict[str, str]
+        Mapping of ``nodeid -> skip-reason`` for every unexpected skip; used to
+        build a deterministic, auditable failure message naming each offender.
+
+    Returns
+    -------
+    bool
+        ``True`` if the report was augmented and rewritten; ``False`` on any no-op
+        (no path, file absent, unparseable, or no ``<testsuite>`` present).
+
+    Raises
+    ------
+    None
+        All I/O and parse errors are swallowed and reported as ``False`` so this
+        never turns a real test verdict into a harness crash at unconfigure time.
+    """
+    if not xml_path or not skips:
+        return False
+    path = Path(xml_path)
+    if not path.is_file():
+        return False
+    # WHY parse-and-rewrite with the stdlib ElementTree rather than a text/regex
+    # splice (Alternatives Considered): the counts on <testsuite> must stay
+    # internally consistent with the node we add, and a structural edit guarantees
+    # that far more safely than string surgery on attribute lists. ElementTree is
+    # stdlib (no new dependency) and pytest's JUnit is small, so the parse cost is
+    # negligible. A malformed report (should never happen for a pytest-written
+    # file) degrades to a no-op rather than raising.
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError:
+        return False
+    root = tree.getroot()
+    # pytest emits <testsuites><testsuite .../></testsuites>; tolerate a bare
+    # <testsuite> root defensively so the helper is robust to writer variations.
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    if not suites:
+        return False
+    suite = suites[0]
+    # WHY a single fixed testcase carrying ALL offenders (Trade-off): one node with
+    # a sorted, newline-joined body keeps the message deterministic and the count
+    # bookkeeping trivial, while still naming every hidden skip for the audit trail.
+    detail = "\n".join(
+        f"{nodeid}: {(reason or '').strip() or '(no reason given)'}"
+        for nodeid, reason in sorted(skips.items())
+    )
+    message = (
+        f"{len(skips)} unexpected skip(s) outside the documented allowlist; "
+        "a genuine pytest.skip() in a required test must not pass CI green"
+    )
+    # ``time="0"`` (not a wall-clock value) so the injected node is itself
+    # deterministic and survives normalization unchanged.
+    testcase = ET.SubElement(
+        suite,
+        "testcase",
+        {
+            "classname": "carddemo.no_hidden_skips_gate",
+            "name": "no_unexpected_skips",
+            "time": "0",
+        },
+    )
+    failure = ET.SubElement(testcase, "failure", {"message": message})
+    failure.text = detail
+    # Keep the suite header counts truthful: one more test, one more failure. A
+    # non-numeric attribute (never produced by pytest) falls back to a safe value
+    # rather than raising.
+    for attr, base in (("tests", suite.get("tests")), ("failures", suite.get("failures"))):
+        try:
+            suite.set(attr, str(int(base) + 1))
+        except (TypeError, ValueError):
+            suite.set(attr, "1")
+    # If the <testsuites> wrapper carries aggregate counts (some writers do), keep
+    # them consistent too; pytest's wrapper usually omits them, hence the guard.
+    if root is not suite and root.tag == "testsuites":
+        for attr in ("tests", "failures"):
+            if root.get(attr) is not None:
+                try:
+                    root.set(attr, str(int(root.get(attr)) + 1))
+                except (TypeError, ValueError):
+                    pass
+    # WHY re-emit the declaration by hand (Trade-off): ElementTree.write's
+    # xml_declaration uses single quotes; matching pytest's double-quoted UTF-8
+    # declaration keeps the file visually consistent with the untouched-report case.
+    try:
+        body = ET.tostring(root, encoding="unicode")
+        path.write_text('<?xml version="1.0" encoding="utf-8"?>\n' + body, encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
@@ -1002,6 +1280,44 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
     # once, in-process.
     if hasattr(session.config, "workerinput"):
         return
+
+    # --- Zero-executed LocalStack gate (F-DOC-LOCALSTACK-COMMAND-GREEN-SKIP) ------
+    # WHY fire ONLY from an otherwise-green status (Trade-off): the gate's sole job is
+    # to stop a localstack-targeted run presenting "nothing ran" as success. If the
+    # status is already non-OK (e.g. CARDDEMO_REQUIRE_LOCALSTACK=1 turned the absent
+    # emulator into hard setup failures) the run is red for a stronger, correctly-named
+    # reason -- we must neither mask nor duplicate it. The executed-body counter then
+    # distinguishes a genuine green (bodies ran and passed -> counter > 0) from the
+    # trap (every body skipped -> counter == 0). NO_TESTS_COLLECTED (a marker typo that
+    # collected zero AWS tests) is green-equivalent here and is likewise escalated.
+    # WHY exclude --collect-only (Assumption): a collection-only invocation runs no
+    # bodies by design, so a zero counter there is expected, not a hidden skip.
+    if (
+        _LOCALSTACK_MARKEXPR_TARGETED
+        and _LOCALSTACK_EXECUTED == 0
+        and not session.config.getoption("collectonly", False)
+        and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED)
+    ):
+        print(
+            "\n".join(
+                [
+                    "",
+                    "=============== ZERO-EXECUTED LOCALSTACK GATE FAILED ===============",
+                    "A localstack-targeted run (`-m localstack`) executed ZERO AWS test",
+                    "bodies -- every LocalStack test was skipped because the emulator was",
+                    "absent/unreachable. 'Nothing ran' must not read as green.",
+                    "To actually exercise the layer, either:",
+                    "  * scripts/run_e2e_tests.sh --with-localstack   (brings the emulator up), or",
+                    "  * CARDDEMO_REQUIRE_LOCALSTACK=1 pytest tests -m localstack   (needs an endpoint).",
+                    "===================================================================",
+                ]
+            ),
+            file=sys.stderr,
+        )
+        # TESTS_FAILED (1) maps to the runner FAIL(8) rubric via
+        # scripts/test_env.sh's carddemo_rc_from_pytest, so the process is RED.
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
     if not _UNEXPECTED_SKIPS:
         return
     # Emit a prominent, reproducible diagnostic to stderr so the failure is
@@ -1027,6 +1343,67 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
     # ``scripts/test_env.sh``'s ``carddemo_rc_from_pytest``.
     if session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    # NB: the *process* exit code is now correct, but the JUnit file pytest already
+    # wrote still records the offenders as <skipped>. The companion
+    # ``pytest_unconfigure`` hook below rewrites that file so the XML is red too --
+    # it runs LATER than this hook, after pytest's own JUnit writer has flushed.
+
+
+def pytest_unconfigure(config: "pytest.Config") -> None:
+    """Rewrite the JUnit report so hidden skips also show as a failure IN the XML.
+
+    Purpose
+    -------
+    Second half of the no-hidden-skips gate. :func:`pytest_sessionfinish` fixes the
+    exit *code*; this hook fixes the exit *report*. It fires during config teardown
+    -- strictly AFTER pytest's ``LogXML.pytest_sessionfinish`` has written the
+    ``--junitxml`` file -- which is the earliest point the finished report exists on
+    disk and can be safely augmented with a synthetic failing ``<testcase>``.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        The finishing session's config. Supplies ``option.xmlpath`` (the
+        ``--junitxml`` destination, or ``None`` when unset) and, under
+        ``pytest-xdist``, the ``workerinput`` marker used to run only on the
+        controller.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    None
+        Delegates to :func:`_augment_junit_with_skip_failures`, which never raises.
+    """
+    # WHY unconfigure rather than converting pytest_sessionfinish into a
+    # hookwrapper (Alternatives Considered): the JUnit file is written by pytest's
+    # own sessionfinish hook, whose ordering relative to a plain sibling hook is not
+    # guaranteed. ``pytest_unconfigure`` is guaranteed to run after the whole
+    # session (including the JUnit flush) has finished, so it is the simplest place
+    # that is reliably "after the file exists" -- and it leaves the existing,
+    # audited exit-code escalation in pytest_sessionfinish completely untouched.
+    # WHY controller-only (Assumption): mirrors pytest_sessionfinish -- the
+    # controller both owns the single real JUnit file and accumulates every
+    # worker's skips in ``_UNEXPECTED_SKIPS`` (workers write no JUnit and see only
+    # their own subset), so augmenting anywhere else would be wrong or a no-op.
+    if hasattr(config, "workerinput"):
+        return
+    if not _UNEXPECTED_SKIPS:
+        return
+    xml_path = getattr(config.option, "xmlpath", None)
+    if not xml_path:
+        # No --junitxml was requested (e.g. an ad-hoc `pytest` run): the process
+        # exit code already carries the failure and there is no report to correct.
+        return
+    if _augment_junit_with_skip_failures(xml_path, _UNEXPECTED_SKIPS):
+        print(
+            f"[carddemo] injected a synthetic failing <testcase> into {xml_path} "
+            f"for {len(_UNEXPECTED_SKIPS)} unexpected skip(s) so the JUnit report "
+            "is not misread as green.",
+            file=sys.stderr,
+        )
 
 
 @pytest.fixture(scope="session")

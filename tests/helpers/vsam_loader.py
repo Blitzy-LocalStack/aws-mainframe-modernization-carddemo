@@ -103,6 +103,7 @@ __all__ = [
     "VsamLoadError",
     "load_indexed",
     "unload_indexed",
+    "unload_indexed_bytes",
     "geometry_for",
     "alternate_keys_for",
 ]
@@ -1227,7 +1228,9 @@ def _compiled_unloader(
     )
 
 
-def _validated_blob(flat_path: "str | os.PathLike[str]", reclen: int) -> bytes:
+def _validated_blob(
+    flat_path: "str | os.PathLike[str]", reclen: int, *, binary: bool = False
+) -> bytes:
     """Read a flat fixture and return a headerless fixed-width blob, rejecting bad rows.
 
     Purpose
@@ -1241,25 +1244,75 @@ def _validated_blob(flat_path: "str | os.PathLike[str]", reclen: int) -> bytes:
     every downstream field. A genuinely empty file (zero bytes, or only a trailing
     newline) is the one legitimate "zero records" case and yields an empty blob.
 
+    Two framing modes are supported (F-VSAM-BINARY-LOAD):
+
+    * **Textual** (``binary=False``, the default) -- the fixture is a newline-delimited
+      flat file, one logical record per physical line; a single trailing CR/LF is
+      stripped and every line must be exactly ``reclen`` wide. This is the shape of every
+      committed CardDemo ``*.txt`` fixture (pure ASCII zoned decimal), so it is the
+      default and every existing caller keeps its behaviour unchanged.
+    * **Binary** (``binary=True``) -- the fixture is a raw ``reclen * N`` byte image with
+      NO separators, so record boundaries are determined **solely by the declared record
+      length**, never by payload bytes. This is required for records that legitimately
+      contain 0x0A (e.g. a 4-byte ``COMP`` key whose value happens to include a linefeed
+      byte); splitting such a record on newline would corrupt its framing.
+
     Parameters
     ----------
     flat_path : str | os.PathLike
         Path to the flat fixture to read.
     reclen : int
         The exact width every record must have.
+    binary : bool, optional
+        Keyword-only. When ``True``, frame the fixture by fixed record length over the
+        raw bytes and perform NO newline parsing or text decoding (binary-safe). When
+        ``False`` (default), use the legacy newline-delimited textual framing. WHY a flag
+        rather than autodetection (Trade-off): a binary payload can contain any byte,
+        including newlines, so there is no reliable content sniff that distinguishes a
+        binary image from a textual file -- the caller, which knows the fixture's nature,
+        states it explicitly. This also keeps the default behaviour (and every existing
+        caller) byte-for-byte identical.
 
     Returns
     -------
     bytes
         ``reclen * N`` bytes where ``N`` is the number of conforming records (possibly
-        zero), encoded Latin-1.
+        zero). In textual mode the bytes are the Latin-1 encoding of the validated lines;
+        in binary mode they are the fixture bytes verbatim.
 
     Raises
     ------
     VsamLoadError
-        If the fixture cannot be read, or if any physical row's width (after stripping a
-        single trailing line terminator) is not exactly ``reclen``.
+        If the fixture cannot be read; in textual mode, if any physical row's width
+        (after stripping a single trailing line terminator) is not exactly ``reclen``; in
+        binary mode, if the total byte length is not a whole multiple of ``reclen``.
     """
+    # --- Binary fixed-length framing (F-VSAM-BINARY-LOAD) -----------------------
+    # WHY read_bytes + modulo check rather than the textual split below (Assumption):
+    # a binary fixed image has exactly ``reclen`` bytes per record and no separators, so
+    # the only well-formedness check is that the total length divides evenly by reclen.
+    # Any newline in the payload is DATA, never a boundary -- which is the whole point of
+    # the finding: a COMP key containing 0x0A must survive as one record.
+    if binary:
+        try:
+            data = Path(os.fspath(flat_path)).read_bytes()
+        except OSError as exc:
+            raise VsamLoadError(
+                f"cannot read binary fixture {os.fspath(flat_path)!r}: {exc}"
+            ) from exc
+        # A genuinely empty file -> zero records (mirrors the textual empty case), which
+        # the loader opens and reads to EOF immediately.
+        if data == b"":
+            return b""
+        if len(data) % reclen != 0:
+            raise VsamLoadError(
+                f"binary fixture {os.fspath(flat_path)!r} is {len(data)} bytes, not a "
+                f"whole multiple of the declared record length {reclen}; record "
+                "boundaries are framed by reclen only (no newline parsing in binary "
+                "mode), so a non-multiple length means the fixture geometry is wrong."
+            )
+        return data
+
     try:
         # WHY encoding="latin-1": it is the identity byte<->codepoint map for 0..255, so
         # every byte in the fixture round-trips exactly; the space pad byte is 0x20. We
@@ -1468,6 +1521,7 @@ def load_indexed(
     key_offset: int = 0,
     *,
     alternate_keys: "object" = (),
+    binary: bool = False,
     cobc: str = "cobc",
     std: str = "ibm-strict",
     cache_dir: "str | os.PathLike[str] | None" = None,
@@ -1512,6 +1566,13 @@ def load_indexed(
         ``(offset, length, with_duplicates)`` tuples (keyword-only). Each becomes an
         ``ALTERNATE RECORD KEY`` clause so programs that read by a secondary key (e.g.
         ``CBACT04C`` reading XREF by account id) work. Defaults to none.
+    binary : bool, optional
+        Keyword-only. When ``True``, the flat fixture is framed by fixed record length
+        only (raw ``reclen * N`` bytes, no newline parsing, no text decode) so records
+        that legitimately contain 0x0A survive intact (F-VSAM-BINARY-LOAD). When
+        ``False`` (default) the fixture is parsed as newline-delimited text, which is the
+        shape of every committed CardDemo ``*.txt`` fixture. Defaults to ``False`` so
+        every existing caller is unaffected.
     cobc : str, optional
         ``cobc`` command name or explicit path used to build the loader (keyword-only).
         Defaults to ``"cobc"``. **Must be the same compiler that builds the programs
@@ -1571,7 +1632,11 @@ def load_indexed(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Validate the fixture into a headerless fixed-width blob (CR-03) ----------
-    blob = _validated_blob(flat, reclen)
+    # WHY thread ``binary`` (F-VSAM-BINARY-LOAD): a binary fixture is framed by record
+    # length only, so newline parsing must be suppressed; the generated loader already
+    # declares ORGANIZATION SEQUENTIAL with RECORD CONTAINS reclen CHARACTERS, so a blob
+    # of reclen*N raw bytes (with any embedded 0x0A treated as data) loads correctly.
+    blob = _validated_blob(flat, reclen, binary=binary)
 
     # --- DEFINE + REPRO analog: build (or reuse) the loader -----------------------
     loader_bin = _compiled_loader(
@@ -1638,7 +1703,7 @@ def load_indexed(
     return indexed
 
 
-def unload_indexed(
+def unload_indexed_bytes(
     indexed_path: "str | os.PathLike[str]",
     reclen: int,
     key_length: int,
@@ -1650,11 +1715,23 @@ def unload_indexed(
     cache_dir: "str | os.PathLike[str] | None" = None,
     compile_timeout: float = _COMPILE_TIMEOUT_S,
     run_timeout: float = _RUN_TIMEOUT_S,
-) -> "list[str]":
-    """Read a GnuCOBOL indexed file back into flat logical records in primary-key order.
+) -> "list[bytes]":
+    """Read a GnuCOBOL indexed file back into flat logical records as raw ``bytes``.
 
     Purpose
     -------
+    The **binary-safe** read-back primitive (F-VSAM-BINARY-UNLOAD): it returns each
+    logical record as a ``reclen``-byte ``bytes`` object in ascending primary-key order,
+    performing NO text decoding, so records containing arbitrary bytes (e.g. a high byte
+    such as 0x8f, or an embedded 0x0A) round-trip byte-for-byte. :func:`unload_indexed`
+    is the thin text layer built on top of this primitive; callers that need bytes (raw
+    binary verification) use this function directly, and callers that want decoded
+    strings use :func:`unload_indexed`. WHY split them (Refactoring Rationale): the
+    previous single function decoded strict UTF-8 unconditionally and raised
+    ``UnicodeDecodeError`` on any non-UTF-8 byte, which made faithful binary verification
+    impossible; separating the byte-exact read from the optional decode makes text
+    decoding an explicit, opt-in codec layer rather than a hidden, lossy step.
+
     The public read-back companion of :func:`load_indexed`, and the automated analog of an
     ``IDCAMS REPRO`` that dumps an indexed cluster to a flat sequential dataset. Given the
     path of a native GnuCOBOL ``ORGANIZATION IS INDEXED`` file, it returns the file's
@@ -1707,13 +1784,11 @@ def unload_indexed(
 
     Returns
     -------
-    list[str]
-        The logical records as fixed ``reclen``-character strings, in ascending primary-key
-        order. An empty indexed file yields an empty list. Joining the result with ``"\\n"``
-        (or concatenating it) and passing it to
-        :func:`golden_compare.assert_matches_golden` with the matching ``layout`` verifies
-        the output byte-exactly (that comparator frames fixed-width records by width, so
-        either joiner compares equal to the committed golden).
+    list[bytes]
+        The logical records as fixed ``reclen``-byte ``bytes`` objects, in ascending
+        primary-key order, byte-for-byte as stored (no decoding). An empty indexed file
+        yields an empty list. Concatenating the result (``b"".join(...)``) reproduces the
+        raw record image, which is what makes byte-exact binary verification possible.
 
     Raises
     ------
@@ -1816,14 +1891,119 @@ def unload_indexed(
             f"unloaded blob length {len(data)} is not a whole multiple of reclen "
             f"{reclen} for {indexed!r} (declared geometry disagrees with the file)."
         )
-    # Decode as UTF-8. WHY (Assumptions): CardDemo records are pure ASCII (zoned decimal,
-    # packed-as-display, text, and blank/low-value fill), a strict subset of UTF-8, so each
-    # byte maps to exactly one character and the reclen slicing below stays byte-aligned. A
-    # genuinely non-ASCII byte would raise here, surfacing an unexpected encoding rather
-    # than silently corrupting the record framing -- consistent with the rest of the
-    # harness, which also treats program output as UTF-8.
-    text = data.decode("utf-8")
-    return [text[off:off + reclen] for off in range(0, len(text), reclen)]
+    # Frame into byte-exact records. WHY no decode here (F-VSAM-BINARY-UNLOAD): this is
+    # the binary-safe primitive, so it returns the raw record bytes verbatim and leaves
+    # any text interpretation to :func:`unload_indexed`. Slicing ``bytes`` by reclen is
+    # already byte-aligned (each record is exactly reclen bytes), so no encoding
+    # assumption is made and a high byte such as 0x8f round-trips unchanged.
+    return [data[off:off + reclen] for off in range(0, len(data), reclen)]
+
+
+def unload_indexed(
+    indexed_path: "str | os.PathLike[str]",
+    reclen: int,
+    key_length: int,
+    key_offset: int = 0,
+    *,
+    alternate_keys: "object" = (),
+    encoding: str = "utf-8",
+    cobc: str = "cobc",
+    std: str = "ibm-strict",
+    cache_dir: "str | os.PathLike[str] | None" = None,
+    compile_timeout: float = _COMPILE_TIMEOUT_S,
+    run_timeout: float = _RUN_TIMEOUT_S,
+) -> "list[str]":
+    """Read a GnuCOBOL indexed file back into flat logical records as decoded ``str``.
+
+    Purpose
+    -------
+    The **text** read-back layer over :func:`unload_indexed_bytes`, and the automated
+    analog of an ``IDCAMS REPRO`` that dumps an indexed cluster to a flat sequential
+    dataset. It returns each logical record as a fixed ``reclen``-character string in
+    ascending primary-key order, which is what the golden-master comparator consumes for
+    the three indexed program outputs (ACCTFILE, TCATBAL, TRANFILE). This is the
+    backward-compatible public entry point every existing caller uses; it delegates the
+    byte-exact read to :func:`unload_indexed_bytes` and then decodes each record with
+    ``encoding`` (default UTF-8, matching the prior behaviour).
+
+    WHY a thin wrapper rather than a ``binary=`` flag on one function (Alternatives
+    Considered): a single function returning ``list[str] | list[bytes]`` depending on a
+    flag would give callers a union return type that static analysers and readers must
+    disambiguate at every call site. Two functions with distinct, honest return types
+    (``list[bytes]`` vs ``list[str]``) make the codec boundary explicit and keep the
+    common decoded-string path -- and its exact prior semantics -- unchanged.
+
+    Parameters
+    ----------
+    indexed_path : str | os.PathLike
+        Path to the native GnuCOBOL indexed file to read. Must exist; refused if the path
+        itself is a symbolic link (MA-04, matching :func:`load_indexed`).
+    reclen : int
+        Fixed record length in characters. Must be a positive integer and match the
+        geometry the file was built with.
+    key_length : int
+        Length in characters of the primary key.
+    key_offset : int, optional
+        Zero-based offset of the primary key within the record. Defaults to ``0``.
+    alternate_keys : object, optional
+        Alternate keys (keyword-only); supply the same set the file was built with.
+        Defaults to none.
+    encoding : str, optional
+        Keyword-only text codec used to decode each record. Defaults to ``"utf-8"`` to
+        preserve the historical behaviour (CardDemo records are pure ASCII, a strict UTF-8
+        subset, so a genuinely non-ASCII byte surfaces loudly as a ``UnicodeDecodeError``
+        rather than silently corrupting a record). Callers verifying genuinely binary
+        records should use :func:`unload_indexed_bytes` instead of forcing a codec here.
+    cobc : str, optional
+        ``cobc`` command name or path used to build the unloader (keyword-only). Must be
+        the same compiler that built the indexed file. Defaults to ``"cobc"``.
+    std : str, optional
+        Compiler dialect passed to ``cobc --std=`` (keyword-only). Defaults to
+        ``"ibm-strict"``.
+    cache_dir : str | os.PathLike | None, optional
+        Directory in which the compiled unloader binary is cached (keyword-only).
+    compile_timeout : float, optional
+        Wall-clock ceiling (seconds) for the unloader compile (keyword-only).
+    run_timeout : float, optional
+        Wall-clock ceiling (seconds) for the unloader run (keyword-only).
+
+    Returns
+    -------
+    list[str]
+        The logical records as fixed ``reclen``-character strings, in ascending
+        primary-key order. An empty indexed file yields an empty list. Joining the result
+        with ``"\\n"`` (or concatenating it) and passing it to
+        :func:`golden_compare.assert_matches_golden` with the matching ``layout`` verifies
+        the output byte-exactly.
+
+    Raises
+    ------
+    VsamLoadError
+        Any error propagated from :func:`unload_indexed_bytes` (geometry contract
+        violation, missing/symlinked file, compile/run failure or timeout, or a blob
+        length that is not a whole multiple of ``reclen``).
+    UnicodeDecodeError
+        If a record contains a byte that ``encoding`` cannot decode (e.g. a non-ASCII
+        byte under the default UTF-8 codec). This is intentional: it surfaces an
+        unexpected encoding rather than silently corrupting a record. Callers that expect
+        genuinely binary content should use :func:`unload_indexed_bytes`.
+    """
+    # WHY delegate then decode (Refactoring Rationale): the byte-exact read, geometry
+    # validation, symlink guard, compile, and run all live once in unload_indexed_bytes;
+    # this layer adds only the optional text decode, so the two functions can never drift.
+    records = unload_indexed_bytes(
+        indexed_path,
+        reclen,
+        key_length,
+        key_offset,
+        alternate_keys=alternate_keys,
+        cobc=cobc,
+        std=std,
+        cache_dir=cache_dir,
+        compile_timeout=compile_timeout,
+        run_timeout=run_timeout,
+    )
+    return [record.decode(encoding) for record in records]
 
 
 def geometry_for(layout_name: str) -> "tuple[int, int]":

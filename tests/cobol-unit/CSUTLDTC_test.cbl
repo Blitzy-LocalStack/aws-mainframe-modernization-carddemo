@@ -42,15 +42,23 @@
       *   (1) The mask passed is always 'YYYY-MM-DD' (the CardDemo
       *       standard), so year=1-4, month=6-7, day=9-10.
       *   (2) The human-readable verdict lives at LS-RESULT(21:15), per
-      *       the WS-MESSAGE layout inside CSUTLDTC.
-      *   (3) Invalid tokens carry severity 3 (leading X'0003'); valid
-      *       dates carry severity 0 (token X'00..00').
+      *       the WS-MESSAGE layout inside CSUTLDTC.  The separate
+      *       "TstDate:" echo (offset 46) may carry LE varying-length
+      *       metadata; the verdict slice must NOT (asserted below).
+      *   (3) Invalid tokens carry severity 3 (leading X'0003') and valid
+      *       dates carry severity 0 (token X'00..00').  Out-of-range
+      *       (pre-Gregorian) dates carry FC-UNSUPP-RANGE
+      *       (X'000309D1...', severity 3, 'Unsupp. Range  ').
       *
       * WHY - Trade-offs :
       *   A minimal emulated CEEDAYS lets this test validate CSUTLDTC's
       *   feedback-to-verdict mapping and severity handling in isolation
-      *   and deterministically.  Exhaustive Gregorian correctness is
-      *   deferred to the real Language Environment at integration time.
+      *   and deterministically.  The stub models the FULL supported
+      *   Gregorian domain -- accepting 1582-10-15 onward and reporting
+      *   pre-Gregorian dates as unsupported-range (F-DATE-SHIM-RANGE) --
+      *   using an explicit calendar rule rather than a full LE date
+      *   library, which is all the scenarios require while remaining
+      *   deterministic and free of any epoch assumption.
       ******************************************************************
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CSUTLDTC-test.
@@ -87,6 +95,11 @@
       * matches the gcblunit-result LINKAGE contract; a mismatched
       * PICTURE here would misread the binary count as zoned digits.
        01 WS-FAILS           PIC S9(9) COMP.
+      * Byte-cleanliness counters for the F-DATE-RESULT-BUFFER guard in
+      * RUN-ONE-CASE.  PIC S9(9) COMP matches the assert-equals contract
+      * (equal PICTURE => a value comparison is a valid byte comparison).
+       01 WS-META-CT         PIC S9(9) COMP.
+       01 WS-EXP-META        PIC S9(9) COMP.
        PROCEDURE DIVISION.
       * Reset the shared GCBLUnit counters up front.  WHY (Assumption):
       * EXTERNAL storage is zero-initialised by GnuCOBOL, so this is
@@ -162,6 +175,42 @@
            MOVE "Nonnumeric data" TO WS-EXP-MSG
            PERFORM RUN-ONE-CASE
 
+      * ---- Scenario 12: Gregorian floor, first supported date --------
+      * WHY (F-DATE-SHIM-RANGE): 1582-10-15 is the inclusive lower bound
+      * of the IBM LE date domain, so it must be accepted as valid.  The
+      * previous shim (FUNCTION TEST-DATE-YYYYMMDD, 1601 epoch) would
+      * have wrongly rejected it; this scenario pins the corrected floor.
+           MOVE "1582-10-15"      TO LS-DATE
+           MOVE 0                 TO WS-EXP-SEV
+           MOVE "Date is valid"   TO WS-EXP-MSG
+           PERFORM RUN-ONE-CASE
+
+      * ---- Scenario 13: historical 400-year leap day (1600-02-29) ----
+      * 1600 is divisible by 400, so Feb has 29 days even below the old
+      * 1601 epoch; confirms the leap rule holds across the whole domain.
+           MOVE "1600-02-29"      TO LS-DATE
+           MOVE 0                 TO WS-EXP-SEV
+           MOVE "Date is valid"   TO WS-EXP-MSG
+           PERFORM RUN-ONE-CASE
+
+      * ---- Scenario 14: top of the previously-rejected window --------
+           MOVE "1600-12-31"      TO LS-DATE
+           MOVE 0                 TO WS-EXP-SEV
+           MOVE "Date is valid"   TO WS-EXP-MSG
+           PERFORM RUN-ONE-CASE
+
+      * ---- Scenario 15: pre-Gregorian date one day below the floor ---
+      * WHY (F-DATE-SHIM-RANGE): 1582-10-14 is a well-formed calendar
+      * date (October has 31 days) yet lies below the Gregorian floor, so
+      * CEEDAYS returns FC-UNSUPP-RANGE (severity 3, 'Unsupp. Range  ').
+      * This exercises CSUTLDTC's unsupported-range EVALUATE arm, which
+      * no other scenario reaches, and proves the floor is ENFORCED (not
+      * merely that malformed strings fail).
+           MOVE "1582-10-14"      TO LS-DATE
+           MOVE 3                 TO WS-EXP-SEV
+           MOVE "Unsupp. Range"   TO WS-EXP-MSG
+           PERFORM RUN-ONE-CASE
+
       * Emit a readable tally, publish the failure count, and turn it
       * into the process exit code (the sole CI pass/fail signal).
            CALL "gcblunit-summary"
@@ -195,6 +244,21 @@
            DISPLAY "  case " LS-DATE " sev=" WS-SEV-DISP
                " verdict=<" WS-OBS-MSG ">"
            CALL "assert-equals" USING WS-EXP-SEV WS-OBS-SEV
+           END-CALL
+      * F-DATE-RESULT-BUFFER guard: the PUBLIC verdict slice the test
+      * consumes (LS-RESULT 21:15) must be pure printable text.  WHY: the
+      * LE varying-length prefix (bytes 0x00,0x0A) that CSUTLDTC copies
+      * into its SEPARATE "TstDate:" echo (offset 46) must never bleed
+      * into the verdict, so we assert the verdict carries zero 0x00/0x0A
+      * metadata bytes.  Checking every scenario proves the property is
+      * invariant across valid, invalid, and out-of-range verdicts alike.
+           MOVE 0 TO WS-META-CT
+           INSPECT LS-RESULT(21:15) TALLYING WS-META-CT
+               FOR ALL X"00"
+           INSPECT LS-RESULT(21:15) TALLYING WS-META-CT
+               FOR ALL X"0A"
+           MOVE 0 TO WS-EXP-META
+           CALL "assert-equals" USING WS-EXP-META WS-META-CT
            END-CALL
            CALL "assert-equals" USING WS-EXP-MSG WS-OBS-MSG
 
@@ -335,7 +399,28 @@
                    IF WS-DY < 1 OR WS-DY > WS-DIM
                        MOVE X"000309CC59C3C5C5" TO LK-FBTOK
                    ELSE
-                       MOVE X"0000000000000000" TO LK-FBTOK
+      * A well-formed calendar date must still fall within the supported
+      * Gregorian domain.  WHY (F-DATE-SHIM-RANGE): IBM LE date services
+      * begin at 1582-10-15; below that CEEDAYS returns the unsupported-
+      * range feedback FC-UNSUPP-RANGE (severity 3, X'0003'), which
+      * CSUTLDTC maps to 'Unsupp. Range  ', NOT a valid verdict.  This is
+      * the ONE branch no other scenario reaches, so modelling it here
+      * keeps the stub faithful to the real service's lower bound.
+      * WHY compare COMPONENTS rather than a composed YYYYMMDD integer
+      * (Refactoring Rationale): a single "WS-YR * 10000 + WS-MO * 100 +
+      * WS-DY" multiply trips -Warithmetic-osvs, which the build's
+      * warnings-fatal gate treats as an error for this test's own code.
+      * Testing year, then month, then day against the 1582-10-15 floor
+      * uses only comparisons, so it is provably warning-clean and needs
+      * no scratch field.
+                       IF WS-YR < 1582
+                          OR (WS-YR = 1582 AND WS-MO < 10)
+                          OR (WS-YR = 1582 AND WS-MO = 10
+                              AND WS-DY < 15)
+                           MOVE X"000309D159C3C5C5" TO LK-FBTOK
+                       ELSE
+                           MOVE X"0000000000000000" TO LK-FBTOK
+                       END-IF
                    END-IF
                END-IF
            END-IF

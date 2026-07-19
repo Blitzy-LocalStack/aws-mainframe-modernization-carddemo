@@ -34,11 +34,17 @@ deliberately no ``__init__.py`` and no checked-in ``.cbl``:
    not on disk); at run time it would fail with
    ``libcob: error: module 'CEEDAYS' not found``. We therefore build a tiny
    ``CEEDAYS.so`` *shim* that reproduces the exact LE linkage ``CSUTLDTC``
-   expects and computes validity with GnuCOBOL's ``FUNCTION
-   TEST-DATE-YYYYMMDD`` intrinsic. AAP Sections 0.3.1 / 0.10.2 explicitly
-   endorse stubbing an unavailable external dependency for test purposes.
+   expects and computes validity with an explicit Gregorian calendar rule
+   (class-test the digits, range-check the month, derive days-in-month via the
+   full leap rule, range-check the day, and enforce the 1582-10-15 Gregorian
+   floor). AAP Sections 0.3.1 / 0.10.2 explicitly endorse stubbing an
+   unavailable external dependency for test purposes.
    (Alternatives Considered: a Java-based zUnit stub is impossible -- no JVM is
-   installed on the runner; a real LE ``CEEDAYS`` is simply unavailable.)
+   installed on the runner; a real LE ``CEEDAYS`` is simply unavailable. An
+   earlier revision computed validity with GnuCOBOL's ``FUNCTION
+   TEST-DATE-YYYYMMDD`` intrinsic, but its 1601-01-01 epoch wrongly rejected the
+   1582-10-15..1600-12-31 historical window, so it was replaced by the explicit
+   rule above -- see F-DATE-SHIM-RANGE.)
 2. ``CSUTLDTC`` is a ``PROCEDURE DIVISION USING`` *subprogram*, which the
    suite's ``cobol_runner`` (a main-program launcher) cannot invoke directly.
    We build a small ``DRVDATE`` *driver main* that reads the date/format from
@@ -50,10 +56,13 @@ Toolchain note (empirical)
 --------------------------
 All behaviour below was validated on this runner's GnuCOBOL 3.2.0 (gcc
 backend). The severity/result truth table matches the one documented for the
-3.1.x line. The one empirically-forced difference on 3.2.0 is that the driver's
-``RESULT=[...]`` output spans two physical lines (CSUTLDTC copies a 2-byte
-binary length prefix, value 10 == ``0x000A``, into its display field, embedding
-a NUL + newline), so the result is parsed with ``re.DOTALL`` (see ``_RESULT_RE``).
+3.1.x line. On 3.2.0 CSUTLDTC copies a 2-byte binary length prefix (value
+10 == ``0x000A``, a NUL + newline) into its display field, which would embed
+raw control bytes in the surfaced result. The ``DRVDATE`` driver now neutralises
+every ``0x00``/``0x0A`` to a SPACE before it prints ``RESULT=[...]`` (see
+``DRVDATE_SRC`` and ``test_result_buffer_is_clean``), so the buffer callers
+observe is clean, printable, single-line text; ``re.DOTALL`` is nonetheless
+retained on ``_RESULT_RE`` as a defensive superset (F-DATE-RESULT-BUFFER).
 
 Fidelity scope of the CEEDAYS shim (what this test DOES and does NOT prove)
 --------------------------------------------------------------------------
@@ -66,9 +75,11 @@ reads back the feedback token, maps its severity halfword through its
 ``RETURN-CODE``. What is deliberately NOT asserted is bit-for-bit numerical
 fidelity of IBM's real ``CEEDAYS`` (most visibly the ``S9(9)`` Lillian day count,
 which CardDemo never consumes -- see the parser WHY note). The shim decides
-validity with GnuCOBOL's ``FUNCTION TEST-DATE-YYYYMMDD`` intrinsic, whose
-valid/invalid verdict matches LE for every date in the truth table above; it is
-a validity oracle for the contract, not a re-implementation of LE internals.
+validity with an explicit Gregorian calendar rule that honours the full IBM LE
+date domain (1582-10-15 onward, including the historical window an intrinsic-
+based epoch would miss); its valid/invalid verdict matches LE for every date in
+the truth table above. It is a validity oracle for the contract, not a
+re-implementation of LE internals.
 WHY this boundary is correct and sufficient (Trade-off): CardDemo's callers
 depend only on the severity + result-text contract, so pinning the Lillian value
 or LE's internal feedback layout would test the shim rather than CSUTLDTC and
@@ -122,15 +133,53 @@ pytestmark = pytest.mark.integration
 # 88-level ``FC-INVALID-DATE`` recognises as "valid"; an invalid date sets the
 # severity halfword to 0x000C (== 12) so CSUTLDTC falls into its WHEN OTHER
 # ("Date is invalid") branch.
+#
+# WHY explicit Gregorian arithmetic rather than an intrinsic (Refactoring
+# Rationale -- resolves F-DATE-SHIM-RANGE): the previous shim delegated to
+# GnuCOBOL's ``FUNCTION TEST-DATE-YYYYMMDD``, whose valid domain begins at its
+# 1601-01-01 integer-date epoch. That silently rejected the *lower* portion of
+# the IBM LE / CEEDAYS Gregorian domain (1582-10-15 .. 1600-12-31) as invalid,
+# so historical dates the real CSUTLDTC would accept failed here -- a false
+# negative that made the shim, not CSUTLDTC, the thing under test. The shim now
+# validates the date directly: class-test the Y/M/D digits, range-check the
+# month (1-12), derive days-in-month (with the full Gregorian leap rule
+# div-by-4 AND (not-div-by-100 OR div-by-400)), range-check the day, and finally
+# enforce the Gregorian *lower bound* by requiring YYYYMMDD >= 15821015 (the
+# 1582-10-15 start of the Gregorian calendar, the documented floor of the IBM LE
+# date domain). This reproduces the exact valid domain CSUTLDTC's callers rely
+# on -- accepting 1582-10-15..present and rejecting pre-Gregorian dates -- using
+# only standard COBOL (no intrinsic, no epoch assumption).
+# WHY the shim's invalid token stays coarse 0x000C 'Date is invalid' (Trade-off):
+# this integration shim intentionally distinguishes only valid (severity 0) vs
+# invalid (severity 12); a pre-Gregorian or malformed date both map to the single
+# invalid token so the DRVDATE contract asserted below stays a clean two-way
+# valid/invalid decision. The finer LE feedback codes (e.g. FC-UNSUPP-RANGE for
+# out-of-range) are exercised at the COBOL-unit layer (CSUTLDTC_test.cbl), which
+# emits the semantically-precise token; splitting that concern keeps each layer's
+# assertions focused.
 # WHY free format here (Assumption): the shim is compiled with ``-free`` so the
 # fixed-column rules do not apply to it; the leading indentation is cosmetic.
+# The rewrite uses only standard COBOL verbs (class test, EVALUATE, DIVIDE,
+# COMPUTE), so ``-fintrinsics=ALL`` is no longer strictly required for it, though
+# the build below retains that flag harmlessly (see ``_ensure_date_programs``).
 CEEDAYS_SHIM_SRC = """\
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CEEDAYS.
        DATA DIVISION.
        WORKING-STORAGE SECTION.
-       01 WS-YYYYMMDD    PIC 9(8).
-       01 WS-RC          PIC S9(9) BINARY.
+       01 WS-YR-X        PIC X(4).
+       01 WS-MO-X        PIC X(2).
+       01 WS-DY-X        PIC X(2).
+       01 WS-YR          PIC 9(4).
+       01 WS-MO          PIC 9(2).
+       01 WS-DY          PIC 9(2).
+       01 WS-DIM         PIC 9(2).
+       01 WS-Q           PIC 9(6).
+       01 WS-R4          PIC 9(4).
+       01 WS-R100        PIC 9(4).
+       01 WS-R400        PIC 9(4).
+       01 WS-YMD         PIC 9(8).
+       01 WS-OK          PIC 9.
        LINKAGE SECTION.
        01 LK-DATE.
           05 LK-DATE-LEN   PIC S9(4) BINARY.
@@ -141,12 +190,51 @@ CEEDAYS_SHIM_SRC = """\
        01 LK-LILLIAN     PIC S9(9) BINARY.
        01 LK-FEEDBACK    PIC X(12).
        PROCEDURE DIVISION USING LK-DATE LK-FMT LK-LILLIAN LK-FEEDBACK.
-           COMPUTE WS-YYYYMMDD =
-               (FUNCTION NUMVAL(LK-DATE-TEXT(1:4)) * 10000)
-             + (FUNCTION NUMVAL(LK-DATE-TEXT(6:2)) * 100)
-             + (FUNCTION NUMVAL(LK-DATE-TEXT(9:2)))
-           MOVE FUNCTION TEST-DATE-YYYYMMDD(WS-YYYYMMDD) TO WS-RC
-           IF WS-RC = 0
+           MOVE 0 TO LK-LILLIAN
+           MOVE 0 TO WS-OK
+           MOVE LK-DATE-TEXT(1:4) TO WS-YR-X
+           MOVE LK-DATE-TEXT(6:2) TO WS-MO-X
+           MOVE LK-DATE-TEXT(9:2) TO WS-DY-X
+           IF WS-YR-X IS NUMERIC AND WS-MO-X IS NUMERIC
+              AND WS-DY-X IS NUMERIC
+               MOVE WS-YR-X TO WS-YR
+               MOVE WS-MO-X TO WS-MO
+               MOVE WS-DY-X TO WS-DY
+               IF WS-MO >= 1 AND WS-MO <= 12
+                   EVALUATE WS-MO
+                     WHEN 1
+                     WHEN 3
+                     WHEN 5
+                     WHEN 7
+                     WHEN 8
+                     WHEN 10
+                     WHEN 12
+                       MOVE 31 TO WS-DIM
+                     WHEN 4
+                     WHEN 6
+                     WHEN 9
+                     WHEN 11
+                       MOVE 30 TO WS-DIM
+                     WHEN OTHER
+                       DIVIDE WS-YR BY 4 GIVING WS-Q REMAINDER WS-R4
+                       DIVIDE WS-YR BY 100 GIVING WS-Q REMAINDER WS-R100
+                       DIVIDE WS-YR BY 400 GIVING WS-Q REMAINDER WS-R400
+                       IF WS-R4 = 0 AND (WS-R100 NOT = 0 OR WS-R400 = 0)
+                           MOVE 29 TO WS-DIM
+                       ELSE
+                           MOVE 28 TO WS-DIM
+                       END-IF
+                   END-EVALUATE
+                   IF WS-DY >= 1 AND WS-DY <= WS-DIM
+                       COMPUTE WS-YMD =
+                           WS-YR * 10000 + WS-MO * 100 + WS-DY
+                       IF WS-YMD >= 15821015
+                           MOVE 1 TO WS-OK
+                       END-IF
+                   END-IF
+               END-IF
+           END-IF
+           IF WS-OK = 1
               MOVE LOW-VALUES TO LK-FEEDBACK
            ELSE
               MOVE X'000C000059C3C5C5' TO LK-FEEDBACK(1:8)
@@ -157,6 +245,25 @@ CEEDAYS_SHIM_SRC = """\
 # The DRVDATE driver: a fixed-format main that reads TESTDATE/TESTFMT from the
 # environment, calls the real CSUTLDTC, and prints the severity (RETURN-CODE)
 # and the 80-byte result on stdout in a machine-parsable form.
+# WHY the two INSPECT ... REPLACING statements (resolves F-DATE-RESULT-BUFFER):
+# CSUTLDTC builds its 80-byte WS-MESSAGE result and, at its line 122, does
+# ``MOVE WS-DATE-TO-TEST TO WS-DATE`` -- copying the LE varying-string's 2-byte
+# binary length prefix (value 10 == bytes 0x00,0x0A) into the "TstDate:" echo
+# field of the message. That leaks raw control bytes (a NUL and a line-feed) into
+# the buffer this driver surfaces, so the exposed RESULT was neither pure text nor
+# single-line. Because those two byte values (0x00, 0x0A) never occur in any
+# legitimate part of the message (the severity text, the message number, the
+# verdict phrase, the date digits, and the field labels are all printable ASCII),
+# neutralising every 0x00 and 0x0A to a SPACE is a safe, offset-independent way to
+# expose ONLY clean text. WHY neutralise-in-place rather than reference-modify the
+# echo at a fixed offset (Alternatives Considered / Trade-off): overwriting a
+# hard-coded ``WS-RESULT(46:10)`` slice would re-encode CSUTLDTC's internal
+# message geometry into this test and break silently if that layout shifted;
+# replacing the two known metadata byte values is robust to layout and provably
+# cannot touch the printable content callers consume. CSUTLDTC itself is REFERENCE
+# / out-of-scope production source (AAP 0.8.2), so the fix lives here in the test
+# driver, exactly as the finding's "decode before returning/asserting" remediation
+# directs.
 # WHY fixed format + the exact 7/11-column indentation (Assumption): DRVDATE is
 # compiled with ``-fixed`` and ``--std=ibm-strict`` (the repo's production
 # convention), so division headers / 01-levels sit in Area A (column 8) and
@@ -173,6 +280,8 @@ DRVDATE_SRC = """\
            ACCEPT WS-DATE FROM ENVIRONMENT 'TESTDATE'
            ACCEPT WS-FMT  FROM ENVIRONMENT 'TESTFMT'
            CALL 'CSUTLDTC' USING WS-DATE WS-FMT WS-RESULT
+           INSPECT WS-RESULT REPLACING ALL X'00' BY SPACE
+           INSPECT WS-RESULT REPLACING ALL X'0A' BY SPACE
            DISPLAY 'SEV=[' RETURN-CODE ']'
            DISPLAY 'RESULT=[' WS-RESULT ']'
            GOBACK.
@@ -196,16 +305,18 @@ DRVDATE_SRC = """\
 # COBOL's DISPLAY of the signed ``RETURN-CODE`` special register.
 _SEV_RE = re.compile(r"SEV=\[\s*([+-]?\d+)\s*\]")
 
-# Result marker: ``RESULT=[<80 bytes of WS-MESSAGE>]``.
-# WHY re.DOTALL (empirical Trade-off): on GnuCOBOL 3.2.0 CSUTLDTC's WS-MESSAGE
-# embeds a NUL + newline (the 2-byte binary length prefix, value 10 == 0x000A,
-# that ``MOVE WS-DATE-TO-TEST TO WS-DATE`` copies into the display field), so the
-# ``RESULT=[...]`` text straddles two physical lines and its closing ``]`` is on
-# the second line. Without DOTALL ``.`` would stop at the first newline and the
-# pattern would never match. DOTALL is a strict superset of the single-line
-# behaviour, so it is also correct on toolchains (e.g. 3.1.x) that keep it on one
-# line. The result *text* CSUTLDTC maps ('Date is valid' / 'Date is invalid')
-# precedes the embedded newline, so the substring assertions below are unaffected.
+# Result marker: ``RESULT=[<80 bytes of sanitized WS-MESSAGE>]``.
+# WHY re.DOTALL is retained even though the driver now sanitizes the buffer
+# (Refactoring Rationale + defensive Trade-off): historically CSUTLDTC's
+# WS-MESSAGE embedded a NUL + newline (the 2-byte binary length prefix, value
+# 10 == 0x000A, that ``MOVE WS-DATE-TO-TEST TO WS-DATE`` copied into the display
+# field), so ``RESULT=[...]`` straddled two physical lines. DRVDATE now replaces
+# every 0x00/0x0A with a SPACE before DISPLAY (see DRVDATE_SRC above), so on this
+# runner the marker is single-line and metadata-free. DOTALL is kept because it is
+# a strict superset of single-line matching: it still matches the now-clean
+# single-line form AND remains correct if any future toolchain reintroduces an
+# embedded newline, so the parser cannot silently fail to match. The
+# ``test_result_buffer_is_clean`` test below asserts the sanitisation held.
 _RESULT_RE = re.compile(r"RESULT=\[(.*)\]", re.DOTALL)
 
 
@@ -214,10 +325,28 @@ _RESULT_RE = re.compile(r"RESULT=\[(.*)\]", re.DOTALL)
 # ---------------------------------------------------------------------------
 
 # Dates CSUTLDTC must ACCEPT (severity 0, 'Date is valid').
-# WHY this exact trio (boundary coverage): an ordinary in-month date, a 4-year
-# leap day, and a 400-year century leap day together exercise the ordinary path
-# plus both leap-year rules the utility must honour.
-_VALID_DATES = ("2023-06-15", "2024-02-29", "2000-02-29")
+# WHY this exact set (boundary coverage): an ordinary in-month date, a 4-year
+# leap day, and a 400-year century leap day exercise the ordinary path plus both
+# leap-year rules the utility must honour.
+# WHY the three historical entries (Refactoring Rationale -- closes
+# F-DATE-SHIM-RANGE): the IBM LE / CEEDAYS Gregorian date domain begins at
+# 1582-10-15 (the first day of the Gregorian calendar), so CSUTLDTC must accept
+# dates from that floor onward. The previous shim delegated to
+# ``FUNCTION TEST-DATE-YYYYMMDD``, whose 1601-01-01 epoch silently rejected the
+# 1582-10-15..1600-12-31 window, so these dates were never validated. They are
+# added now to lock in the *lower boundary* of the supported domain:
+#   * "1582-10-15" -- the exact Gregorian start date (inclusive floor).
+#   * "1600-02-29" -- a 400-year leap day inside the historical window (1600 is
+#                     divisible by 400), exercising the leap rule below the epoch.
+#   * "1600-12-31" -- the top of the previously-rejected window.
+_VALID_DATES = (
+    "2023-06-15",
+    "2024-02-29",
+    "2000-02-29",
+    "1582-10-15",
+    "1600-02-29",
+    "1600-12-31",
+)
 
 # Dates CSUTLDTC must REJECT (severity 12, 'Date is invalid').
 # WHY this exact set (error-path coverage): a non-leap Feb 29, a century
@@ -238,16 +367,26 @@ _VALID_DATES = ("2023-06-15", "2024-02-29", "2000-02-29")
 #   * "          "  -- ten explicit blanks (the full mask width).
 # WHY both must yield severity 12 (Assumption -- EMPIRICALLY VERIFIED on this
 # runner's GnuCOBOL 3.2.0 via the real DRVDATE->CSUTLDTC->CEEDAYS-shim chain):
-# the shim computes YYYYMMDD via ``FUNCTION NUMVAL`` over the (blank) text, which
-# yields 0; ``FUNCTION TEST-DATE-YYYYMMDD(0)`` is non-zero (0 is not a valid
-# Gregorian date), so the shim returns the 0x000C feedback and CSUTLDTC maps it
-# to severity 12 / 'Date is invalid' -- exactly the same rejection route the
-# other invalid strings take, with NO abort or crash. Both were confirmed to
-# return driver exit code 12 before being committed here.
+# the shim class-tests the Y/M/D digit slices; an all-blank date fails the
+# ``IS NUMERIC`` test, so the shim leaves its OK flag clear and returns the 0x000C
+# feedback, which CSUTLDTC maps to severity 12 / 'Date is invalid' -- exactly the
+# same rejection route the other invalid strings take, with NO abort or crash.
+# Both were confirmed to return driver exit code 12.
 # WHY NOT assert a distinct "blank date" message (Trade-off): CSUTLDTC has a
 # single 'Date is invalid' rejection text (its EVALUATE has no dedicated
 # empty-input arm), so the honest contract to pin is severity 12 + that text --
 # inventing a finer assertion would test a message CSUTLDTC does not emit.
+# WHY the trailing "1582-10-14" entry (Refactoring Rationale -- the lower-bound
+# companion to F-DATE-SHIM-RANGE): having added the Gregorian floor (1582-10-15)
+# to the ACCEPT set, this asserts the shim also REJECTS the day immediately below
+# it. 1582-10-14 is a well-formed, in-range calendar date (October has 31 days),
+# so the only reason to reject it is the Gregorian lower bound -- this pins that
+# the domain floor is enforced, not merely that malformed strings fail. WHY it
+# yields severity 12 here rather than the finer LE 'Unsupp. Range' (Trade-off):
+# this integration shim is a coarse valid/invalid stand-in (see CEEDAYS_SHIM_SRC),
+# so any out-of-domain date maps to the single 0x000C invalid token; the precise
+# FC-UNSUPP-RANGE severity-3 feedback for pre-Gregorian dates is asserted at the
+# COBOL-unit layer (CSUTLDTC_test.cbl), which models the real LE token set.
 _INVALID_DATES = (
     "2023-02-29",
     "1900-02-29",
@@ -256,6 +395,7 @@ _INVALID_DATES = (
     "ABCD-EF-GH",
     "",
     "          ",
+    "1582-10-14",
 )
 
 # The date mask CardDemo's callers use.
@@ -343,12 +483,19 @@ def _ensure_date_programs(build_dir: Path, repo_root: Path) -> None:
         tmp_drvdate = scratch / "DRVDATE"
 
         # Compile the CEEDAYS shim as a dynamically-loadable module (``-m``).
-        # WHY ``-fintrinsics=ALL`` and NOT ``--std=ibm-strict`` (Trade-off): the
-        # shim uses the GnuCOBOL intrinsic ``FUNCTION TEST-DATE-YYYYMMDD``, which
-        # the strict IBM dialect REJECTS. The shim is a pure test artifact that
-        # only stands in for an absent LE service, so it is intentionally not
-        # bound to the repo's production dialect; the unit under test (CSUTLDTC)
-        # below is still compiled under production ``--std=ibm-strict``.
+        # WHY ``-free`` and NOT ``--std=ibm-strict`` (Trade-off): the shim is
+        # authored in free format (its indentation is cosmetic, not Area A/B), so
+        # it is built ``-free``; it is a pure test stand-in for the absent LE
+        # service and is intentionally not bound to the repo's production fixed
+        # dialect. The unit under test (CSUTLDTC) below is still compiled under
+        # production ``--std=ibm-strict``.
+        # WHY ``-fintrinsics=ALL`` is retained though no longer required
+        # (Refactoring Rationale -- F-DATE-SHIM-RANGE): the earlier shim delegated
+        # to ``FUNCTION TEST-DATE-YYYYMMDD`` and genuinely needed this flag. The
+        # rewritten shim validates the date with only standard COBOL (class test,
+        # EVALUATE, DIVIDE, COMPUTE) and no intrinsic, so the flag is now a benign
+        # no-op; it is kept to avoid churning the build invocation and to remain
+        # tolerant if the shim ever reintroduces an intrinsic helper.
         built = subprocess.run(
             [cobc, "-m", "-free", "-fintrinsics=ALL", "-o", str(tmp_ceedays), str(ceedays_src)],
             cwd=str(scratch),
@@ -468,13 +615,16 @@ def _run_date(cobol_runner, testdate: str, testfmt: str = _DATE_MASK) -> tuple[i
 
 @pytest.mark.parametrize("testdate", _VALID_DATES)
 def test_valid_dates(cobol_runner, build_dir, repo_root, testdate):
-    """Assert ``CSUTLDTC`` accepts well-formed, leap-year, and century dates.
+    """Assert ``CSUTLDTC`` accepts well-formed, leap-year, century, and
+    historical-Gregorian dates.
 
     Purpose
     -------
-    For each date the utility must treat as valid, assert the severity it
-    propagates is 0 and the mapped result text reads ``'Date is valid'`` (and,
-    defensively, that the ``'Date is invalid'`` text is absent).
+    For each date the utility must treat as valid -- including the
+    1582-10-15..1600-12-31 lower boundary of the IBM LE Gregorian domain added to
+    close F-DATE-SHIM-RANGE -- assert the severity it propagates is 0 and the
+    mapped result text reads ``'Date is valid'`` (and, defensively, that the
+    ``'Date is invalid'`` text is absent).
 
     Parameters
     ----------
@@ -526,11 +676,13 @@ def test_invalid_dates(cobol_runner, build_dir, repo_root, testdate):
     -------
     For each date the utility must reject -- a non-leap Feb 29, a century
     non-leap Feb 29, an out-of-range month, an out-of-range day, a non-numeric
-    string, an empty date, and a whitespace-only date -- assert the severity is
-    12 and the mapped result text reads ``'Date is invalid'``. This exercises
-    CSUTLDTC's error mapping and its ``SEVERITY -> RETURN-CODE`` propagation for
-    every rejection route, including the degenerate empty/blank inputs added to
-    close QA finding CSUTLDTC-2 (see :data:`_INVALID_DATES`).
+    string, an empty date, a whitespace-only date, and a pre-Gregorian date one
+    day below the 1582-10-15 domain floor -- assert the severity is 12 and the
+    mapped result text reads ``'Date is invalid'``. This exercises CSUTLDTC's
+    error mapping and its ``SEVERITY -> RETURN-CODE`` propagation for every
+    rejection route, including the degenerate empty/blank inputs added to close
+    QA finding CSUTLDTC-2 and the lower-bound reject added to close
+    F-DATE-SHIM-RANGE (see :data:`_INVALID_DATES`).
 
     Parameters
     ----------
@@ -606,4 +758,72 @@ def test_severity_matches_return_code(cobol_runner, build_dir, repo_root):
     assert returncode == severity, (
         f"driver exit code {returncode} does not equal the reported severity "
         f"{severity}; the RETURN-CODE propagation contract is broken"
+    )
+
+
+def test_result_buffer_is_clean(cobol_runner, build_dir, repo_root):
+    """Assert the exposed CSUTLDTC result buffer carries no LE metadata bytes.
+
+    Purpose
+    -------
+    Regression guard for F-DATE-RESULT-BUFFER. CSUTLDTC's raw 80-byte
+    ``WS-MESSAGE`` leaks the LE varying-string's 2-byte binary length prefix
+    (bytes ``0x00`` and ``0x0A``) into its "TstDate:" echo field, because its
+    ``MOVE WS-DATE-TO-TEST TO WS-DATE`` copies the prefix along with the text.
+    The ``DRVDATE`` driver now neutralises every ``0x00``/``0x0A`` to a SPACE
+    before it surfaces the buffer (see :data:`DRVDATE_SRC`). This test proves the
+    buffer a caller observes is therefore pure, printable text: it contains no NUL
+    and no embedded newline, while still carrying the documented verdict phrase.
+
+    Parameters
+    ----------
+    cobol_runner : tests.helpers.cobol_runner.CobolRunner
+        Suite runner fixture (see the module docstring for its role).
+    build_dir : pathlib.Path
+        Shared build-directory fixture; where the driver/shim are compiled.
+    repo_root : pathlib.Path
+        Repository-root fixture; locates the ``CSUTLDTC`` source for the build.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    AssertionError
+        If the surfaced result text still contains a ``0x00`` or ``0x0A`` byte,
+        or if the expected verdict phrase is missing (which would mean the
+        sanitisation destroyed legitimate content rather than only the metadata).
+    """
+    # WHY a KNOWN-VALID date (Trade-off): the buffer-pollution defect is present
+    # on every CSUTLDTC call regardless of verdict, but exercising the valid path
+    # lets the same assertion double-check that sanitisation preserved the
+    # 'Date is valid' phrase -- i.e. it removed ONLY the metadata, not real text.
+    _ensure_date_programs(build_dir, repo_root)
+    severity, result_text, _returncode = _run_date(cobol_runner, "2023-06-15")
+
+    # Sanity: the run itself must have succeeded and produced the verdict, else a
+    # "clean" buffer would be vacuously clean (e.g. an empty capture).
+    assert severity == 0, (
+        f"precondition: expected a valid date to yield severity 0; got {severity} "
+        f"(result={result_text!r})"
+    )
+    assert "Date is valid" in result_text, (
+        "precondition: the surfaced buffer must still contain the verdict phrase; "
+        f"got {result_text!r}"
+    )
+
+    # WHY assert on the exact metadata byte values (Assumption): the finding
+    # names the polluting bytes as the varying-length prefix 0x000A -- i.e. a NUL
+    # (0x00) followed by a line-feed (0x0A). ``cobol_runner`` captures stdout as
+    # decoded text, so a surviving 0x00 appears as the character ``"\x00"`` and a
+    # surviving 0x0A as ``"\n"`` inside the parsed RESULT group. Their absence is
+    # the precise, byte-level proof the remediation holds.
+    assert "\x00" not in result_text, (
+        "result buffer still contains a NUL (0x00) byte -- the LE varying-length "
+        f"metadata leaked into the surfaced text: {result_text!r}"
+    )
+    assert "\n" not in result_text, (
+        "result buffer still contains an embedded newline (0x0A) -- the LE "
+        f"varying-length metadata leaked into the surfaced text: {result_text!r}"
     )

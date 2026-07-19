@@ -76,7 +76,17 @@ source "$_e2e_script_dir/test_env.sh"
 # `exit "$overall_rc"` calls below is preserved. Alternatives Considered: the trap
 # belongs in the runner, not the sourced test_env.sh (a sourced trap fires on the
 # caller's lifecycle) -- mirrors run_unit_tests.sh.
-trap 'carddemo_cleanup_workspace' EXIT
+# WHY also normalize on exit (F-JUNIT-NONDETERMINISTIC-METADATA): the SAME EXIT
+# trap that reclaims the workspace also publishes a deterministic copy of this
+# layer's JUnit report to reports/normalized/e2e.xml. Doing it in the trap (rather
+# than inline before each `exit`) guarantees it happens on EVERY report-writing
+# path -- normal, warn, build-fail, missing-pytest -- from ONE registration.
+# carddemo_normalize_junit is a no-op when no raw report exists, so the early
+# usage-error/--help exits (before CARDDEMO_E2E_REPORT is set) are safe under
+# `set -u` via the ${..:-} guard. Normalize runs BEFORE cleanup purely for
+# readability; the two touch disjoint trees (reports/ vs the workspace), so order
+# is immaterial.
+trap 'carddemo_normalize_junit "${CARDDEMO_E2E_REPORT:-}" "$CARDDEMO_REPORTS_DIR/normalized/e2e.xml"; carddemo_cleanup_workspace' EXIT
 
 # WHY (Assumption): the Python test modules import `from tests.helpers ...` and
 # `from tests.mocks ...`; putting the repo root on PYTHONPATH makes the `tests`
@@ -240,6 +250,17 @@ elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pytest' >/dev/null
     CARDDEMO_PYTEST=(python3 -m pytest)
 else
     echo "[e2e] ERROR: pytest not available (need 'pytest' or python3 with pytest)." >&2
+    # WHY (F-RUNNER-MISSING-PYTEST-NO-JUNIT): this prerequisite failure must leave a
+    # truthful machine-readable report, exactly like every other failure path in
+    # this runner. Previously it exited RC8 with NO report, so a pure-XML CI
+    # consumer saw only an absent file (or, worse, a stale green report from a
+    # prior run in a re-used workspace). We create the reports dir HERE because the
+    # usual `mkdir -p "$CARDDEMO_REPORTS_DIR"` sits BELOW this early-exit branch,
+    # then write an ERROR-MARKED junit (errors=1 + a failing <testcase>) so the
+    # missing-toolchain failure is visible in the XML, not just in the exit code.
+    mkdir -p "$CARDDEMO_REPORTS_DIR"
+    carddemo_write_empty_junit "carddemo-e2e" "$CARDDEMO_E2E_REPORT" \
+        "pytest not available (need 'pytest' or python3 with pytest); e2e layer could not run"
     exit "${CARDDEMO_RC_FAIL}"
 fi
 

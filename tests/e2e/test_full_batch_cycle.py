@@ -67,6 +67,13 @@ from pathlib import Path
 
 import pytest
 
+# WHY import the session-locked builder from conftest (F-XDIST-LDXREFA-RACE): the
+# alternate-key XREF provisioner below is a SHARED build artifact; delegating its
+# compile to ``compile_helper_program`` serialises it across ``pytest-xdist`` workers
+# so the one shared binary is built exactly once and published atomically -- never
+# observed half-written. Imported from ``tests.conftest`` per the same pattern the
+# integration suites use for ``_require_or_skip``.
+from tests.conftest import compile_helper_program
 from tests.helpers.cobol_runner import CobolRunner
 from tests.helpers.golden_compare import assert_matches_golden
 from tests.helpers.e2e_records import (
@@ -254,19 +261,15 @@ def _provision_alt_key_xref(runner, seed_cardxref: Path) -> Path:
     WHY: ``CBACT04C`` reads XREF on the ALTERNATE key (ACCT-ID); a primary-key-only
     load abends (status 35). One alt-key file serves posting and interest alike.
     """
-    exe = runner.build_dir / "LDXREFA"
-    if not exe.exists():
-        src = runner.build_dir / "LDXREFA.cbl"
-        src.write_text(_XREF_PROVISIONER_SRC)
-        # WHY (F-P4 bounded wait): cap the compile so a wedged ``cobc`` cannot block
-        # a CI job indefinitely. 120s matches ``cobol_runner.run_program``'s default
-        # and the ``-fsyntax-only`` compile later in this module, keeping every
-        # subprocess wait here deadline-bounded. Trade-off: an outer CI-job timeout
-        # is the only alternative net and is far coarser than this per-call bound.
-        subprocess.run(
-            ["cobc", "-x", "-free", "-o", str(exe), str(src)],
-            check=True, capture_output=True, timeout=120,
-        )
+    # WHY (F-XDIST-LDXREFA-RACE): delegate the build to the session-locked,
+    # atomic-publish helper. The previous inline check-then-compile onto the ONE
+    # shared ``build_dir/LDXREFA`` path let concurrent ``pytest-xdist`` workers race
+    # -- two workers writing the same ``.cbl`` and compiling onto the same binary at
+    # once produced ETXTBSY / PermissionError / a half-written executable. The helper
+    # serialises the build behind an flock and publishes via atomic rename, so the
+    # program is compiled exactly once and never observed partial. Its default 120s
+    # compile bound preserves the previous wedged-``cobc`` protection.
+    exe = compile_helper_program(runner.build_dir, "LDXREFA", _XREF_PROVISIONER_SRC)
     out = runner.assign_path("XREFFILE")
     env = {**os.environ, "INFLAT": str(seed_cardxref), "OUTIDX": str(out)}
     # WHY (F-P4 bounded wait): mirror the compile bound above so a hung provisioner
@@ -292,6 +295,13 @@ def _flatten_daily(src: Path, dst: Path, reclen: int = 350) -> int:
     -------
     int
         Number of records written.
+
+    Raises
+    ------
+    OSError
+        If the seed cannot be read or the flattened image cannot be written
+        (propagated from :meth:`pathlib.Path.read_bytes` /
+        :meth:`pathlib.Path.write_bytes`).
 
     Notes
     -----
@@ -828,6 +838,12 @@ def test_full_batch_cycle_end_state(full_cycle):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If any end-state invariant (record counts, master snapshots, or the aggregated
+        balance) does not match the deterministic expectation.
+
     Notes
     -----
     Resolves F-P4-4 / F-P5-1: replaces the former lossy projections and the
@@ -930,6 +946,12 @@ def test_full_batch_reporting_matches_golden(full_cycle):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If the transaction-report output does not match its golden master (raised by
+        ``assert_matches_golden``).
+
     Notes
     -----
     Resolves F-P4-2 (reporting half): the report is provisioned with real inputs (the
@@ -967,6 +989,12 @@ def test_full_batch_statement_matches_golden(full_cycle):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the statement text/HTML output does not match its golden master (raised by
+        ``assert_matches_golden``).
 
     Notes
     -----
@@ -1009,6 +1037,14 @@ def test_full_batch_export_import_not_ready(built_programs, repo_root):
     -------
     None
 
+    Raises
+    ------
+    AssertionError
+        If the export source is missing, or the compile unexpectedly SUCCEEDS (an
+        XPASS under ``xfail_strict`` that forces removal of this marker).
+    subprocess.TimeoutExpired
+        If the ``cobc -fsyntax-only`` probe exceeds its 120s bound.
+
     Notes
     -----
     Resolves F-P4-2 / F-P4-1 (export-import half): rather than silently degrading the
@@ -1046,6 +1082,12 @@ def test_full_batch_condition_code_rubric(full_cycle):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If the aggregate condition code does not equal the rubric expectation for the
+        full deterministic cycle.
 
     Notes
     -----
@@ -1087,6 +1129,12 @@ def test_full_batch_fault_injection_fails_honestly(cobol_runner, repo_root):
     Returns
     -------
     None
+
+    Raises
+    ------
+    AssertionError
+        If an injected fault does not surface as the expected non-zero / fatal severity
+        (i.e. the rubric masks a crash).
 
     Notes
     -----

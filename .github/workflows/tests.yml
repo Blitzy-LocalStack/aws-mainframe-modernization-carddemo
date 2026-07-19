@@ -96,8 +96,16 @@ jobs:
     # any other step or action cannot read the token from its process environment.
     steps:
       # Step 1: check out the repository so scripts/ and tests/ are available.
+      # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357 -- supply-chain hardening): pin
+      # even FIRST-party GitHub-authored actions to an IMMUTABLE full commit SHA
+      # rather than the mutable major tag `@v4`. A floating tag can be silently
+      # repointed (tag move / branch-protection lapse / account compromise) to run
+      # attacker code with this job's token on trusted push/workflow_dispatch runs;
+      # a 40-char SHA is content-addressed and cannot be moved. The trailing
+      # `# v4.2.2` keeps it human-readable and lets Dependabot/Renovate bump it.
+      # SHA cross-verified against multiple independent SHA-pinned public workflows.
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Step 2a: GnuCOBOL (cobc) is the compiler the WHOLE suite depends on; jq
       # is used by the LocalStack S3-manifest seeding. `apt-get update` first so
@@ -113,8 +121,15 @@ jobs:
       # hashes in tests/requirements-test.txt were resolved on; a 3.12 runner
       # would fetch cp312 wheels whose hashes are absent from the lock, making
       # the hash-verified install below fail.
+      # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357): pinned to an immutable full
+      # commit SHA for the same supply-chain reason as checkout above. v5.3.0 is
+      # deliberately kept on the SAME major line the workflow already used (`@v5`),
+      # so the pin hardens provenance WITHOUT introducing a v6 behavioural change
+      # (v6 raises the minimum runner + Node24 runtime); the trailing `# v5.3.0`
+      # lets Dependabot bump it forward. SHA cross-verified against the nodejs/node
+      # dependabot bump commit and an independent public SHA-pinned workflow.
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.13"
 
@@ -133,18 +148,20 @@ jobs:
           # pinned to 3.13 above.
           python3 -m pip install --require-hashes -r tests/requirements-test.txt
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      # Step 2c: cobolget vendors GCBLUnit for provenance only -- the framework
-      # is ALSO committed as tests/cobol-unit/gcblunit.cbl and compiled by the
-      # build script, so this install is best-effort and must never fail the
-      # build (hence continue-on-error).
-      - name: Install cobolget (GCBLUnit provenance, best-effort)
-        continue-on-error: true
-        run: npm install -g cobolget@3.13.26
+      # Step 2c (REMOVED -- F-SUPPLY-COBOLGET-VULNS): the Node.js setup and the
+      # `npm install -g cobolget@3.13.26` step were deleted. WHY (root-cause fix,
+      # not a pin): cobolget@3.13.26 carries known npm advisories (3 critical + 1
+      # moderate) yet was NEVER actually used by the build -- the GCBLUnit framework
+      # is VENDORED in-tree as tests/cobol-unit/gcblunit.cbl (an immutable,
+      # SHA-256-locked copy recorded in tests/import.json) and compiled directly by
+      # scripts/build_test_programs.sh's glob loop; no runner or script invokes
+      # `cobolget`, `npm`, or `node`. Removing the install eliminates the vulnerable
+      # dependency AT SOURCE (strictly better than SHA-pinning a package we do not
+      # need), and deleting the now-dead actions/setup-node step categorically
+      # removes that action's supply-chain surface too. Alternatives Considered:
+      # pinning cobolget to a patched release -- rejected because the correct fix is
+      # to not install an unused, vulnerable tool at all. Provenance is preserved by
+      # the vendored file + tests/cobolget.json / tests/import.json manifests.
 
       # Step 2d (optional): the LocalStack CLI is installed ONLY when the AWS
       # layer is explicitly requested via workflow_dispatch, keeping the default
@@ -223,12 +240,40 @@ jobs:
           # job. The subsequent upload step then always finds fresh reports/.
           [ "$rc" -le 4 ]
 
+      # Step 4b (finding F-SUPPLY-NO-AUDIT-GATE): supply-chain audit gate for the
+      # pinned Python test dependencies. WHY a DEDICATED step (not folded into the
+      # run step): it needs network access to the OSV/PyPI advisory DB, which the
+      # test suite itself must never require, so isolating it keeps the suite
+      # network-free while still enforcing the gate in CI. It runs `if: always()`
+      # and BEFORE the upload step so reports/audit-python.json is captured as an
+      # artifact even when tests failed. pip-audit is installed best-effort
+      # (|| true, a CI-only security tool outside the hash-locked runtime closure);
+      # jq is already present from Step 2a. Severity policy / RC rubric handled by
+      # carddemo_audit_python_deps: 0 clean / 4 WARN (pip-audit or advisory DB
+      # unavailable -> non-blocking so a transient outage cannot red the build) /
+      # 8 FAIL (an advisory NOT adjudicated in tests/audit-allowlist.json), which
+      # fails the step via `[ "$rc" -le 4 ]`. npm is intentionally NOT audited:
+      # after F-SUPPLY-COBOLGET-VULNS removed cobolget the repo declares no
+      # package.json / node_modules surface to scan.
+      - name: Audit Python dependencies (supply-chain gate)
+        if: always()
+        run: |
+          python3 -m pip install pip-audit || true
+          rc=0
+          bash -c 'source scripts/test_env.sh >/dev/null 2>&1; carddemo_audit_python_deps' || rc=$?
+          echo "[ci-audit] carddemo_audit_python_deps rc=$rc (0 clean / 4 warn / 8 fail)"
+          [ "$rc" -le 4 ]
+
       # Step 5: publish results even when a previous step failed (`if: always()`).
       # The JUnit XML lives in reports/ (unit.xml, integration.xml, e2e.xml, and
       # optionally coverage.xml), written by the runner scripts.
       - name: Upload JUnit test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357): immutable full-SHA pin, same
+        # supply-chain rationale as checkout/setup-python above; `# v4.4.3` keeps it
+        # readable and Dependabot-bumpable. SHA cross-verified against the
+        # nodejs/node dependabot bump commit diff.
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: carddemo-test-reports
           path: reports/
@@ -246,17 +291,23 @@ jobs:
       - name: Publish JUnit test results to the CI UI
         if: always()
         continue-on-error: true
-        # WHY (F-SEC-02 -- supply-chain hardening / CWE-1357): pin this third-party
-        # action to an IMMUTABLE full commit SHA instead of the mutable major tag
-        # `@v5`. A bare `@v5` can be silently repointed by a tag move or a
-        # maintainer-account takeover (cf. the tj-actions/changed-files incident) to
-        # execute attacker code in this job on trusted push/workflow_dispatch runs.
-        # The pinned commit is exactly what `@v5` resolved to when pinned -- verified
-        # with `git ls-remote`: refs/tags/v5 and refs/tags/v5.6.2 both point to this
-        # SHA (lightweight tags, so the SHA is the commit itself) -- so behaviour is
-        # unchanged; the trailing `# v5.6.2` keeps it human-readable and lets
-        # Dependabot/Renovate bump it.
-        uses: mikepenz/action-junit-report@3585e9575db828022551b4231f165eb59a0e74e3 # v5.6.2
+        # WHY (F-SUPPLY-JUNIT-ACTION-VULNS + CWE-1357): this third-party action is
+        # pinned to an IMMUTABLE full commit SHA (never a floating tag) so a tag
+        # move or maintainer-account takeover (cf. the tj-actions/changed-files
+        # incident) cannot execute attacker code in this job on trusted
+        # push/workflow_dispatch runs. It was UPGRADED off the previous pin
+        # (3585e957… = v5.6.2), whose bundled npm dependencies carry known
+        # advisories (2 high + 3 moderate), to the clean v6.x line. The v5->v6 major
+        # bump is compatibility-safe for THIS usage: report_paths / check_name /
+        # fail_on_failure are unchanged inputs, and the GitHub-hosted ubuntu-24.04
+        # runner satisfies v6's Node24 runtime + minimum-runner requirement. Version
+        # pinned to v6.4.1 (the latest release whose FULL 40-char commit SHA was
+        # authoritatively verifiable from the GitHub releases page: the v6.4.1
+        # heading short-token 3a81627 matches this commit); v6.4.2 exists but its
+        # full SHA was not offline-verifiable and differs only by lock-file/dep
+        # maintenance. The trailing `# v6.4.1` keeps it readable and lets
+        # Dependabot/Renovate bump it to v6.4.2+.
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
         with:
           report_paths: "reports/*.xml"
           check_name: CardDemo Test Results
