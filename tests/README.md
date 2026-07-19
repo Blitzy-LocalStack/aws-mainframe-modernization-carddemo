@@ -103,12 +103,15 @@ tests/
 │   └── gcblunit.cbl          # vendored GCBLUnit runner framework (network-free)
 │
 ├── integration/              # Layer 2 — pytest single-program tests
+│   ├── test_cbtrn01c_prepost.py
 │   ├── test_cbtrn02c_posting.py
 │   ├── test_cbact04c_interest.py
 │   ├── test_cbstm03a_statement.py
 │   ├── test_provisioning.py
 │   ├── test_csutldtc_date.py
-│   └── test_export_import.py
+│   ├── test_export_import.py
+│   ├── test_mq_request_stub.py       # optional MQ authorization-producer stub contract
+│   └── test_vsam_binary_safety.py    # harness: binary-safe flat→indexed VSAM load
 │
 ├── e2e/                      # Layer 3 — full-pipeline golden-master tests
 │   ├── test_full_batch_cycle.py
