@@ -1,0 +1,72 @@
+# =============================================================================
+# tests/.coveragerc
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Configure coverage.py measurement of the CardDemo test suite's PYTHON
+#   harness code (the reusable tests/helpers and tests/mocks packages). COBOL
+#   line coverage is produced SEPARATELY via gcov on the GnuCOBOL-transpiled C
+#   and is NOT measured here.
+#
+# Invocation (IMPORTANT):
+#   This rcfile lives under tests/, so run coverage from the repo root pointing
+#   at it explicitly. Because parallel mode is enabled (see WHY below), the
+#   per-worker data files MUST be combined before reporting:
+#       coverage run --rcfile=tests/.coveragerc -m pytest tests/integration tests/e2e
+#       coverage combine --rcfile=tests/.coveragerc
+#       coverage report --rcfile=tests/.coveragerc
+#   (or export COVERAGE_RCFILE=tests/.coveragerc). The 'source' paths below are
+#   repo-root-relative because coverage runs from the repo root.
+#
+# WHY:
+#   - Assumption: the artifacts worth measuring on the Python side are the
+#     reusable helper/mock packages (the harness); the compiled COBOL programs
+#     are the real units-under-test and are covered by gcov.
+#   - Trade-off: branch coverage is enabled for stricter (financial-grade)
+#     measurement even though it is noisier and slightly slower than line-only.
+#   - Refactoring Rationale (review finding MA-25): parallel measurement and a
+#     fail_under gate were added. pytest-xdist ('-n auto', per the AAP) runs
+#     each test in a separate worker PROCESS; without parallel mode those
+#     workers race on a single .coverage file and undercount. parallel=True
+#     makes every process write a uniquely-suffixed .coverage.<host>.<pid>.<n>
+#     file that 'coverage combine' merges, so parallel runs measure the same
+#     as a serial run. sigterm=True flushes a worker's data if the harness is
+#     terminated by SIGTERM (CI timeouts), so partial runs still report.
+# =============================================================================
+[run]
+branch = True
+relative_files = True
+# WHY MA-25: see Refactoring Rationale above - required for correct coverage
+# under pytest-xdist workers; the runner MUST 'coverage combine' before report.
+parallel = True
+sigterm = True
+source =
+    tests/helpers
+    tests/mocks
+
+omit =
+    */__pycache__/*
+    */.pytest_cache/*
+
+[report]
+show_missing = True
+skip_empty = False
+precision = 1
+# WHY MA-25: a coverage gate makes an under-tested harness a HARD CI failure
+# (financial-grade rigor) rather than a silent regression. This gate applies to
+# the PYTHON harness (tests/helpers + tests/mocks) measured here; the AAP 0.7.1
+# targets for the money-critical COBOL programs (CBTRN02C, CBACT04C: >=90% line,
+# >=85% branch) are enforced SEPARATELY via gcov on the transpiled C. 85 matches
+# the AAP branch floor and is a standard enterprise line floor for harness code.
+# Trade-off: set at the harness's exercised floor - raise it as helper coverage
+# grows; lowering it to pass an under-tested change is forbidden by review.
+fail_under = 85
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+
+[html]
+directory = reports/coverage-html
+
+[xml]
+output = reports/coverage.xml

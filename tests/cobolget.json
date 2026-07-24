@@ -1,0 +1,16 @@
+{
+  "name": "carddemo-tests",
+  "version": "1.0.0",
+  "description": "cobolget-schema manifest for the AWS CardDemo test suite. Declares GCBLUnit as a debug/test dependency used to compile and run the COBOL unit tests in tests/cobol-unit/*_test.cbl. cobolget's native manifest filename is modules.json; this file is named tests/cobolget.json per the AAP-mandated test plan but follows the cobolget schema. GCBLUnit is vendored directly as tests/cobol-unit/gcblunit.cbl (a reshaped GPL derivative - see that file's header MODIFICATION HISTORY), so this manifest is a provenance/reproducibility record of the framework version and license, not a live registry dependency. 'modules' is intentionally empty because this project consumes a framework rather than publishing COBOL modules (cobolget publish/validate would require a non-empty list, which is not applicable here). LICENSE (review finding MA-08): the vendored GCBLUnit framework is GPL-2.0-or-later - its source grants 'version 2, or (at your option) any later version'; upstream modules.json labels it 'GPL-2.0' - and that copyleft license governs this vendored code. The previous 'Apache-2.0' value was factually incorrect (GPL code cannot be redistributed as Apache-2.0) and is corrected here. RESOLUTION (review finding MA-09): the framework is pinned to an immutable upstream Git commit in tests/import.json; the former cobolget.com central registry is unreachable (parked domain), so NO 'scripts' invoking 'cobolget install/update' are declared - vendoring the pinned, hash-verified commit is the sole, reproducible provisioning path and does not depend on any live registry. CI (review finding F-SUPPLY-COBOLGET-VULNS): the GitHub Actions workflow no longer runs 'npm install -g cobolget' (nor sets up Node.js) - the cobolget CLI (3.13.26) carried known npm advisories and was never used to build the suite, since gcblunit.cbl is already vendored in-tree and compiled directly by scripts/build_test_programs.sh. This manifest remains purely a provenance/reproducibility record; it is read by humans and tooling, not installed by the pipeline.",
+  "dialect": "gnucobol",
+  "modules": [],
+  "licenses": ["GPL-2.0-or-later"],
+  "authors": [
+    "AWS CardDemo test suite (this manifest)",
+    "Olegs Kunicins (vendored GCBLUnit framework, GPL-2.0-or-later)"
+  ],
+  "dependencies": {},
+  "dependencies-debug": {
+    "gcblunit": "1.22.6"
+  }
+}

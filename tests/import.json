@@ -1,0 +1,21 @@
+{
+  "_comment": "cobolget-schema lock/import manifest for the AWS CardDemo test suite. cobolget's native lockfile is modules-lock.json; this file is named tests/import.json per the AAP-mandated test plan but follows the cobolget lock schema. It pins the EXACT GCBLUnit source so every checkout vendors byte-identical framework code (a reproducibility guarantee for a financial-grade suite). Companion to tests/cobolget.json. RESOLUTION (review finding MA-09): the former 'https://cobolget.com/gcblunit' registry URL was unreachable (parked domain) and non-immutable; it is replaced by the immutable upstream Git commit recorded below. The vendored file tests/cobol-unit/gcblunit.cbl is a REWRITTEN GPL derivative of that upstream source (see its header MODIFICATION HISTORY), so TWO hashes are recorded for full auditability: 'upstreamSha256' is the SHA-256 of the pristine upstream gcblunit.cbl at the pinned commit (verifiable by re-fetching 'resolved' and hashing it), and 'vendoredSha256' is the SHA-256 of our committed derivative (verifiable with: sha256sum tests/cobol-unit/gcblunit.cbl). The two hashes intentionally DIFFER because the derivative is a deliberate rewrite, not a verbatim copy. LICENSE: GPL-2.0-or-later. UPDATE (review finding MA-19): explicit scope terminators (END-ADD/END-WRITE/END-COMPUTE) were added to the vendored derivative so it compiles warning-clean under -Wall -Wextra, under which the test build treats -Wterminator as fatal; this changed vendoredSha256 to the value recorded below (re-verify with: sha256sum tests/cobol-unit/gcblunit.cbl).",
+  "lockfileVersion": 1,
+  "dialect": "gnucobol",
+  "dependencies-debug": {
+    "gcblunit": {
+      "version": "1.22.6",
+      "dependency": "debug",
+      "license": "GPL-2.0-or-later",
+      "source": "git",
+      "repository": "https://github.com/OlegKunitsyn/gcblunit",
+      "tag": "1.22.6",
+      "commit": "f40c65df7ab834b9acf03fa17657167362cfdf23",
+      "resolved": "https://raw.githubusercontent.com/OlegKunitsyn/gcblunit/f40c65df7ab834b9acf03fa17657167362cfdf23/gcblunit.cbl",
+      "upstreamSha256": "55a096cede232ade01bbcb894cb91fbf1b1d8308b5fac7950970b2127257c2ef",
+      "vendored": "tests/cobol-unit/gcblunit.cbl",
+      "vendoredSha256": "62dd302efd98ba02688630bae6336b607a292d7bd403b88a9afc126c265d37fa",
+      "derivative": true
+    }
+  }
+}

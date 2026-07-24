@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTML Table Layout</title>
+</head>
+<body style="margin:0px;">
+<table  align="center" frame="box" style="width:70%; font:12px Segoe UI,sans-serif;">
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#1d1d96b3;">
+<h3>Statement for Account Number: 00000000050         </h3>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#FFAF33;">
+<p style="font-size:16px">Bank of XYZ</p>
+<p>410 Terry Ave N</p>
+<p>Seattle WA 99999</p>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#f2f2f2;">
+<p style="font-size:16px">Aniya Alba Von  </p>
+<p>1588 Nienow Cape  </p>
+<p>Suite 187  </p>
+<p>New OR USA 04257  </p>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#33FFD1; text-align:center;">
+<p style="font-size:16px">Basic Details</p>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#f2f2f2;">
+<p>Account ID         : 00000000050         </p>
+<p>Current Balance    : 000000492.00 </p>
+<p>FICO Score         : 623                 </p>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#33FFD1; text-align:center;">
+<p style="font-size:16px">Transaction Summary</p>
+</td>
+</tr>
+<tr>
+<td style="width:25%; padding:0px 5px; background-color:#33FF5E; text-align:left;">
+<p style="font-size:16px">Tran ID</p>
+</td>
+<td style="width:55%; padding:0px 5px; background-color:#33FF5E; text-align:left;">
+<p style="font-size:16px">Tran Details</p>
+</td>
+<td style="width:20%; padding:0px 5px; background-color:#33FF5E; text-align:right;">
+<p style="font-size:16px">Amount</p>
+</td>
+</tr>
+<tr>
+<td style="width:25%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>0000000058866561</p>
+</td>
+<td style="width:55%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>Purchase at Blick-Rippin                         </p>
+</td>
+<td style="width:20%; padding:0px 5px; background-color:#f2f2f2; text-align:right;">
+<p>      183.88 </p>
+</td>
+</tr>
+<tr>
+<td style="width:25%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>0000000329724245</p>
+</td>
+<td style="width:55%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>Purchase at Reichel Group                        </p>
+</td>
+<td style="width:20%; padding:0px 5px; background-color:#f2f2f2; text-align:right;">
+<p>       14.00 </p>
+</td>
+</tr>
+<tr>
+<td style="width:25%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>0000000577826814</p>
+</td>
+<td style="width:55%; padding:0px 5px; background-color:#f2f2f2; text-align:left;">
+<p>Return item at DuBuque, Wuckert and Mraz         </p>
+</td>
+<td style="width:20%; padding:0px 5px; background-color:#f2f2f2; text-align:right;">
+<p>       47.88-</p>
+</td>
+</tr>
+<tr>
+<td colspan="3" style="padding:0px 5px;background-color:#1d1d96b3;">
+<h3>End of Statement</h3>
+</td>
+</tr>
+</table>
+</body>
+</html>

@@ -6,3 +6,33 @@ batch-app/markers/*
 /.idea/
 .DS_Store
 **/.DS_Store
+
+# ---------------------------------------------------------------------------
+# CardDemo test-suite generated outputs (finding MI-06).
+# WHY: these paths are PRODUCED by the runner scripts (scripts/build_test_*.sh,
+# scripts/run_*.sh) and must never be committed. The policy is intentionally
+# NARROW -- it names only generated artifacts, so it cannot mask a real source
+# file. The mutable per-run test WORKSPACE and its loaded VSAM INDEX files are
+# already created OUTSIDE the repo (under $TMPDIR by scripts/test_env.sh, per
+# finding MA-04), so no workspace/index rule is needed here.
+# ---------------------------------------------------------------------------
+# Compiled COBOL programs / shared modules (CARDDEMO_BUILD_DIR default).
+/build/
+# JUnit XML + coverage reports (CARDDEMO_REPORTS_DIR default).
+/reports/
+# gcov line-coverage artifacts from the GnuCOBOL-transpiled C (--coverage build).
+# Kept global (not just under /build/) so a manual gcov run in a source tree is
+# also covered; the GnuCOBOL --save-temps intermediates themselves are written
+# into CARDDEMO_BUILD_DIR (/build/, already ignored above), so no separate .c
+# rule is needed here.
+*.gcno
+*.gcda
+*.gcov
+# Python-harness coverage data (coverage.py; parallel mode writes .coverage.*).
+.coverage
+.coverage.*
+htmlcov/
+# pytest / Python bytecode caches.
+.pytest_cache/
+__pycache__/
+*.py[cod]

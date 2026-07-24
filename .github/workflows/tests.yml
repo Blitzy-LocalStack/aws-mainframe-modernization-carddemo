@@ -1,0 +1,314 @@
+# =============================================================================
+# .github/workflows/tests.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Continuous-integration workflow for the AWS CardDemo automated test suite.
+#   On every push and pull request to the default branch (and on manual
+#   dispatch) it installs the verified toolchain, compiles the COBOL programs
+#   under test, runs the ENTIRE three-layer suite (COBOL unit -> pytest
+#   integration -> pytest end-to-end) through the single master runner
+#   scripts/run_tests.sh, and publishes machine-readable JUnit XML so pass/fail
+#   is auditable in the CI UI -- satisfying the financial-enterprise requirement
+#   for CI-consumable, auditable reporting.
+#
+#   This workflow is ADDITIVE and TEST-ONLY: it never modifies production COBOL,
+#   copybooks, JCL, BMS maps, the CICS CSD, or seed data. It only orchestrates
+#   the new test artifacts under scripts/ and tests/.
+#
+# WHY (non-obvious design decisions):
+#   - Assumption: the GitHub-hosted runner has NO Docker daemon, so the optional
+#     AWS layer uses LocalStack's headless `localstack ephemeral create` path
+#     (inside scripts/setup_localstack.sh), NOT a docker-compose/service
+#     container. See https://blog.localstack.cloud/ai/agents.md
+#   - Trade-off: the COBOL is compiled with `--std=ibm-strict` (inside
+#     scripts/build_test_programs.sh, mirroring scripts/local_compile.sh), NOT
+#     `-std=cobol85`, because ibm-strict accepts the COMP-3 packed-decimal money
+#     fields that cobol85 rejects. This is the single most important dialect
+#     decision for these financial programs.
+#   - Trade-off: the job maps the suite's aggregate condition-code rubric
+#     (0 pass / 4 warn / >=8 fail; 16 fatal) to the process exit status of
+#     scripts/run_tests.sh, then applies that rubric EXPLICITLY in the build and
+#     run steps (F-WF1): an rc <= 4 (pass, or the documented NON-BLOCKING WARN)
+#     lets the job succeed, while rc >= 8 fails it. This is one deterministic,
+#     fail-closed mapping -- a real failure (>=8) or a fatal/abend (16) always
+#     reddens CI -- WITHOUT letting the known, immutable RC=4 baseline defect
+#     (unbuildable CBEXPORT/CBIMPORT, REFERENCE-only per AAP 0.8.2) block the
+#     suite from ever running or publishing reports. A bare `bash <runner>`
+#     under GitHub's default `-eo pipefail` step shell would instead fail the
+#     step on that WARN, which is exactly the F-WF1 defect this workflow avoids.
+#   - Assumption: runner scripts are invoked via `bash <path>` because a fresh
+#     checkout may not preserve the executable bit.
+#   - Trade-off: the LocalStack layer is opt-in (workflow_dispatch input /
+#     `--with-localstack`) and every LocalStack failure degrades to WARN inside
+#     the scripts, so the absence of AWS credentials never fails the core suite.
+# =============================================================================
+
+name: CardDemo Test Suite
+
+# WHY: CONTRIBUTING.md instructs contributors to watch automated CI on pull
+# requests, so the suite must run on push AND pull_request to the default
+# branch `main`; workflow_dispatch adds a manual entry point plus the opt-in
+# toggle for the optional AWS/LocalStack layer.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      with_localstack:
+        description: "Also run the optional LocalStack S3 dataset-staging layer"
+        type: boolean
+        default: false
+
+# WHY (least privilege): the job only needs to read the repository. `checks` and
+# `pull-requests` write scopes are granted solely so the JUnit reporter can
+# surface results as check annotations on the pull request.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+# WHY (efficiency/determinism): cancel superseded in-flight runs on the same ref
+# so rapid pushes do not pile up redundant CI or race on shared resources.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-suite:
+    name: Build and run the full CardDemo test suite
+    # WHY (determinism): pin to ubuntu-24.04 so the toolchain matches the
+    # versions verified in the plan (GnuCOBOL 3.1.2 line on a gcc 13 backend)
+    # rather than drifting silently with `ubuntu-latest`. Python is pinned to
+    # 3.13 via actions/setup-python below -- NOT the image's default 3.12 --
+    # because tests/requirements-test.txt is hash-locked on the CPython 3.13
+    # (cp313) reference platform, so the interpreter and the wheel hashes MUST
+    # agree or `--require-hashes` (added in the install step) fails closed (F8).
+    runs-on: ubuntu-24.04
+    # WHY (F-SEC-02 -- blast-radius reduction / least privilege): the LocalStack
+    # auth token is deliberately NOT declared at job scope. A job-level env: would
+    # place the secret in the environment of EVERY step -- including actions/
+    # checkout, the dependency installers, actions/upload-artifact, and the
+    # third-party mikepenz/action-junit-report step -- none of which need it. It is
+    # instead step-scoped below onto the ONE step that consumes it (the suite
+    # runner, which forwards it to scripts/setup_localstack.sh), so a compromise of
+    # any other step or action cannot read the token from its process environment.
+    steps:
+      # Step 1: check out the repository so scripts/ and tests/ are available.
+      # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357 -- supply-chain hardening): pin
+      # even FIRST-party GitHub-authored actions to an IMMUTABLE full commit SHA
+      # rather than the mutable major tag `@v4`. A floating tag can be silently
+      # repointed (tag move / branch-protection lapse / account compromise) to run
+      # attacker code with this job's token on trusted push/workflow_dispatch runs;
+      # a 40-char SHA is content-addressed and cannot be moved. The trailing
+      # `# v4.2.2` keeps it human-readable and lets Dependabot/Renovate bump it.
+      # SHA cross-verified against multiple independent SHA-pinned public workflows.
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Step 2a: GnuCOBOL (cobc) is the compiler the WHOLE suite depends on; jq
+      # is used by the LocalStack S3-manifest seeding. `apt-get update` first so
+      # the package index is fresh on the pinned image; `cobc --version` fails
+      # the step early and visibly if the compiler is somehow unavailable.
+      - name: Install GnuCOBOL (cobc) and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnucobol jq
+          cobc --version
+
+      # WHY (F8): 3.13 matches the cp313 reference platform the pinned wheel
+      # hashes in tests/requirements-test.txt were resolved on; a 3.12 runner
+      # would fetch cp312 wheels whose hashes are absent from the lock, making
+      # the hash-verified install below fail.
+      # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357): pinned to an immutable full
+      # commit SHA for the same supply-chain reason as checkout above. v5.3.0 is
+      # deliberately kept on the SAME major line the workflow already used (`@v5`),
+      # so the pin hardens provenance WITHOUT introducing a v6 behavioural change
+      # (v6 raises the minimum runner + Node24 runtime); the trailing `# v5.3.0`
+      # lets Dependabot bump it forward. SHA cross-verified against the nodejs/node
+      # dependabot bump commit and an independent public SHA-pinned workflow.
+      - name: Set up Python 3.13
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      # Step 2b: install the pinned pytest/coverage/awscli test dependencies.
+      # WHY: `localstack` is deliberately NOT in requirements-test.txt -- it is a
+      # CLI installed separately (Step 2d) only for the opt-in AWS layer, not a
+      # pytest import dependency.
+      - name: Install Python test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          # WHY (F8 -- supply-chain integrity): --require-hashes forces pip to
+          # verify every wheel against the SHA-256 pinned in the manifest and to
+          # reject any unpinned/unhashed (including transitive) artifact, so a
+          # tampered or substituted dependency fails the install closed. The lock
+          # is a complete cp313 closure, which is exactly why the interpreter is
+          # pinned to 3.13 above.
+          python3 -m pip install --require-hashes -r tests/requirements-test.txt
+
+      # Step 2c (REMOVED -- F-SUPPLY-COBOLGET-VULNS): the Node.js setup and the
+      # `npm install -g cobolget@3.13.26` step were deleted. WHY (root-cause fix,
+      # not a pin): cobolget@3.13.26 carries known npm advisories (3 critical + 1
+      # moderate) yet was NEVER actually used by the build -- the GCBLUnit framework
+      # is VENDORED in-tree as tests/cobol-unit/gcblunit.cbl (an immutable,
+      # SHA-256-locked copy recorded in tests/import.json) and compiled directly by
+      # scripts/build_test_programs.sh's glob loop; no runner or script invokes
+      # `cobolget`, `npm`, or `node`. Removing the install eliminates the vulnerable
+      # dependency AT SOURCE (strictly better than SHA-pinning a package we do not
+      # need), and deleting the now-dead actions/setup-node step categorically
+      # removes that action's supply-chain surface too. Alternatives Considered:
+      # pinning cobolget to a patched release -- rejected because the correct fix is
+      # to not install an unused, vulnerable tool at all. Provenance is preserved by
+      # the vendored file + tests/cobolget.json / tests/import.json manifests.
+
+      # Step 2d (optional): the LocalStack CLI is installed ONLY when the AWS
+      # layer is explicitly requested via workflow_dispatch, keeping the default
+      # push/PR runs lean and free of AWS prerequisites.
+      - name: Install LocalStack CLI (optional AWS layer)
+        if: ${{ github.event.inputs.with_localstack == 'true' }}
+        run: |
+          python3 -m pip install "localstack==2026.6.1"
+          localstack --version || true
+
+      # Step 3: explicit, up-front compile of the units under test + the COBOL
+      # test programs. This is intentionally redundant (run_tests.sh also builds)
+      # but surfaces a broken compile as its own clearly-labelled step. Invoked
+      # via `bash` so it does not depend on the file's executable bit.
+      #
+      # WHY (F-WF1 -- honour the RC rubric; do not fail-closed on the documented
+      # WARN): GitHub's default step shell is `bash --noprofile --norc -eo
+      # pipefail`, under which ANY non-zero exit -- INCLUDING the non-blocking
+      # WARN=4 -- fails the step. The build permanently returns RC=4 because the
+      # IMMUTABLE, REFERENCE-only baseline defect in CBEXPORT.cbl / CBIMPORT.cbl
+      # (an FD RECORD KEY absent from the FD record) makes those two programs
+      # unbuildable, and build_test_programs.sh correctly downgrades that to WARN
+      # so the rest of the suite can still build and run (AAP 0.8.2 forbids
+      # editing that production source). Capturing the rc and asserting `-le 4`
+      # therefore lets the suite proceed on the KNOWN WARN while still failing
+      # this step loudly on a REAL build error (RC>=8) or fatal (RC=16).
+      # Trade-off: we tolerate the one documented WARN rather than parse which
+      # program warned, because the build script already classifies every real
+      # failure as RC>=8 keyed off the cobc exit code.
+      - name: Build programs under test and COBOL test programs
+        run: |
+          rc=0
+          bash scripts/build_test_programs.sh --with-tests || rc=$?
+          [ "$rc" -le 4 ]
+
+      # Step 4: the single-command master runner. It sources scripts/test_env.sh
+      # internally, then runs build -> unit -> integration -> e2e and exits with
+      # the WORST aggregated condition code, which we map to the job result per
+      # the RC rubric (see WHY note 3 in the header). `--with-localstack` is
+      # appended only when the optional AWS layer was requested on dispatch.
+      - name: Run the full CardDemo test suite
+        # WHY (F-SEC-02): step-scope the optional LocalStack auth token to ONLY
+        # this step -- the sole consumer, which forwards it via scripts/
+        # run_tests.sh -> scripts/setup_localstack.sh (read from the environment at
+        # setup_localstack.sh:478). It is intentionally allowed to be empty:
+        # setup_localstack.sh then degrades to WARN, so unconfigured runners still
+        # pass the core suite. Keeping it off job scope means it is absent from the
+        # environment of every other step (checkout, installers, upload-artifact,
+        # and the third-party junit-report action).
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+        run: |
+          rc=0
+          if [ "${{ github.event.inputs.with_localstack }}" = "true" ]; then
+            # WHY (F4): when the operator EXPLICITLY opts into the AWS layer, an
+            # absent/unreachable emulator must NOT masquerade as a green
+            # all-skipped report. Exporting CARDDEMO_REQUIRE_LOCALSTACK=1 flips
+            # BOTH gates that honour it -- the bash bring-up (scripts/
+            # setup_localstack.sh) and the pytest layer (tests/conftest.py
+            # localstack_gate) -- from "skip/WARN when missing" to "hard FAIL",
+            # so the opt-in run tells the truth. It is set ONLY in this branch;
+            # the default push/PR path leaves the AWS layer optional (skip/WARN).
+            export CARDDEMO_REQUIRE_LOCALSTACK=1
+            bash scripts/run_tests.sh --with-localstack || rc=$?
+          else
+            bash scripts/run_tests.sh || rc=$?
+          fi
+          # WHY (F-WF1 -- same RC-rubric mapping as the build step above):
+          # run_tests.sh aggregates the worst layer condition code and, on the
+          # known immutable CBEXPORT/CBIMPORT baseline defect, exits WARN=4 even
+          # when EVERY test passes. Under `-eo pipefail` a bare invocation would
+          # fail the step on that WARN and thereby hide the fact that the suite
+          # DID run and DID publish reports/*.xml. Capturing rc and asserting
+          # `-le 4` lets the documented WARN pass (green-with-warning) while a
+          # real test failure (RC>=8) or a fatal/abend (RC=16) still fails the
+          # job. The subsequent upload step then always finds fresh reports/.
+          [ "$rc" -le 4 ]
+
+      # Step 4b (finding F-SUPPLY-NO-AUDIT-GATE): supply-chain audit gate for the
+      # pinned Python test dependencies. WHY a DEDICATED step (not folded into the
+      # run step): it needs network access to the OSV/PyPI advisory DB, which the
+      # test suite itself must never require, so isolating it keeps the suite
+      # network-free while still enforcing the gate in CI. It runs `if: always()`
+      # and BEFORE the upload step so reports/audit-python.json is captured as an
+      # artifact even when tests failed. pip-audit is installed best-effort
+      # (|| true, a CI-only security tool outside the hash-locked runtime closure);
+      # jq is already present from Step 2a. Severity policy / RC rubric handled by
+      # carddemo_audit_python_deps: 0 clean / 4 WARN (pip-audit or advisory DB
+      # unavailable -> non-blocking so a transient outage cannot red the build) /
+      # 8 FAIL (an advisory NOT adjudicated in tests/audit-allowlist.json), which
+      # fails the step via `[ "$rc" -le 4 ]`. npm is intentionally NOT audited:
+      # after F-SUPPLY-COBOLGET-VULNS removed cobolget the repo declares no
+      # package.json / node_modules surface to scan.
+      - name: Audit Python dependencies (supply-chain gate)
+        if: always()
+        run: |
+          python3 -m pip install pip-audit || true
+          rc=0
+          bash -c 'source scripts/test_env.sh >/dev/null 2>&1; carddemo_audit_python_deps' || rc=$?
+          echo "[ci-audit] carddemo_audit_python_deps rc=$rc (0 clean / 4 warn / 8 fail)"
+          [ "$rc" -le 4 ]
+
+      # Step 5: publish results even when a previous step failed (`if: always()`).
+      # The JUnit XML lives in reports/ (unit.xml, integration.xml, e2e.xml, and
+      # optionally coverage.xml), written by the runner scripts.
+      - name: Upload JUnit test reports
+        if: always()
+        # WHY (F-SUPPLY-OFFICIAL-ACTIONS / CWE-1357): immutable full-SHA pin, same
+        # supply-chain rationale as checkout/setup-python above; `# v4.4.3` keeps it
+        # readable and Dependabot-bumpable. SHA cross-verified against the
+        # nodejs/node dependabot bump commit diff.
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-test-reports
+          path: reports/
+          # WHY (F9): the runner scripts ALWAYS write JUnit XML into reports/, so
+          # an EMPTY reports/ means the suite never produced auditable results --
+          # a real failure of the CI contract, not a benign condition. `error`
+          # (not `warn`) makes that absence fail the upload step loudly instead
+          # of hiding a missing-report regression behind a green run.
+          if-no-files-found: error
+
+      # Step 5b: surface pass/fail in the CI UI as check annotations. WHY
+      # continue-on-error + fail_on_failure=false: this step is purely additive
+      # visibility and must NEVER override the authoritative status set by the
+      # run step above (that status already encodes the RC rubric).
+      - name: Publish JUnit test results to the CI UI
+        if: always()
+        continue-on-error: true
+        # WHY (F-SUPPLY-JUNIT-ACTION-VULNS + CWE-1357): this third-party action is
+        # pinned to an IMMUTABLE full commit SHA (never a floating tag) so a tag
+        # move or maintainer-account takeover (cf. the tj-actions/changed-files
+        # incident) cannot execute attacker code in this job on trusted
+        # push/workflow_dispatch runs. It was UPGRADED off the previous pin
+        # (3585e957… = v5.6.2), whose bundled npm dependencies carry known
+        # advisories (2 high + 3 moderate), to the clean v6.x line. The v5->v6 major
+        # bump is compatibility-safe for THIS usage: report_paths / check_name /
+        # fail_on_failure are unchanged inputs, and the GitHub-hosted ubuntu-24.04
+        # runner satisfies v6's Node24 runtime + minimum-runner requirement. Version
+        # pinned to v6.4.1 (the latest release whose FULL 40-char commit SHA was
+        # authoritatively verifiable from the GitHub releases page: the v6.4.1
+        # heading short-token 3a81627 matches this commit); v6.4.2 exists but its
+        # full SHA was not offline-verifiable and differs only by lock-file/dep
+        # maintenance. The trailing `# v6.4.1` keeps it readable and lets
+        # Dependabot/Renovate bump it to v6.4.2+.
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
+        with:
+          report_paths: "reports/*.xml"
+          check_name: CardDemo Test Results
+          fail_on_failure: false

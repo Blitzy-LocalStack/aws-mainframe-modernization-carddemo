@@ -1,0 +1,16 @@
+{
+  "_purpose": "Adjudication allowlist for the CardDemo Python dependency supply-chain audit gate (QA finding F-SUPPLY-NO-AUDIT-GATE). Consumed by scripts/test_env.sh:carddemo_audit_python_deps, which runs pip-audit against tests/requirements-test.txt and FAILS the gate (RC=8) on any advisory whose identifier is NOT listed under 'adjudications' below.",
+  "_policy": "FAIL-CLOSED. The default state is an EMPTY adjudications list, meaning every advisory pip-audit reports fails the gate until a human explicitly and durably accepts it here. A numeric CVSS threshold was deliberately NOT used because pip-audit's OSV/PyPI feed does not emit a uniform, reliable severity for every advisory; requiring a written, owned adjudication per ID makes each suppression an auditable decision instead of an opaque cutoff.",
+  "_id_format": "Vulnerability identifiers are exactly as emitted by pip-audit (OSV/PYSEC identifiers such as 'PYSEC-2024-1234', and/or GHSA/CVE aliases such as 'GHSA-xxxx-xxxx-xxxx' / 'CVE-2024-12345'). Match is on the 'id' field; list every id that must be suppressed.",
+  "_example": {
+    "id": "PYSEC-0000-EXAMPLE",
+    "package": "localstack",
+    "version": "2026.6.1",
+    "reason": "EXAMPLE ONLY (not active — this id is not real). Illustrates how to adjudicate a dev-only advisory: e.g. an advisory in the LocalStack emulator, which is a TEST-ONLY AWS stand-in that is never deployed to any production or internet-facing environment, so the advisory is not exploitable in this project's threat model.",
+    "adjudicated_by": "carddemo-test-suite maintainers",
+    "date": "2026-07-19",
+    "review_by": "2026-10-19"
+  },
+  "_how_to_add": "Copy the shape of '_example' into the 'adjudications' array with a REAL pip-audit id, the affected package/version, a concrete non-exploitability or accepted-risk justification, an owner, the adjudication date, and a review-by date. Never add an entry without a real justification.",
+  "adjudications": []
+}
