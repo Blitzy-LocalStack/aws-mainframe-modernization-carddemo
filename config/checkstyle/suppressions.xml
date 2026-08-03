@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suppressions PUBLIC
+    "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+    "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<!--
+=============================================================================
+config/checkstyle/suppressions.xml
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Purpose:
+  The companion file to config/checkstyle/checkstyle.xml, and the single place
+  in this repository where an exemption from the Java documentation gate may be
+  recorded. It is read by the SuppressionFilter that checkstyle.xml declares,
+  addressed as ${config_loc}/suppressions.xml so that it resolves identically
+  from the services/ aggregator and from each of the nine module directories one
+  level deeper.
+
+  It currently declares NO exemption. Every Java source under services/ is
+  audited at full strength.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Why this file must exist even while it exempts nothing.
+  Assumptions: it is NOT optional and it is not a placeholder. checkstyle.xml
+    declares its SuppressionFilter with optional="false", which makes a missing
+    companion an initialisation error rather than a silent pass: Checkstyle
+    stops with "cannot initialize module SuppressionFilter - Unable to find:
+    .../config/checkstyle/suppressions.xml", and because services/pom.xml binds
+    the gate to the Maven validate phase, that error fails the whole nine-module
+    reactor before a single class is compiled. The ruleset documents that
+    fail-closed choice as deliberate, on the grounds the house states as "a run
+    that verifies NOTHING must not read as green", and services/pom.xml states
+    from its side that the flag "is relied upon and must not be worked around".
+    An empty-but-present companion is therefore the only resolution that honours
+    both files: the gate keeps failing closed, and it can actually run.
+
+  Alternatives Considered: three other ways to make the reactor build were
+    available and each was rejected for a specific reason.
+      1. Flip optional to "true" in checkstyle.xml. Rejected because it removes
+         the property both sibling files rely on: an absent or misspelled
+         companion would then read as "accept all audit events", so the gate
+         would report success having checked nothing.
+      2. Set the plugin's own suppressions-location in services/pom.xml.
+         Rejected for the reason recorded in both siblings: it splits one
+         behaviour across two files, leaving the ruleset naming one companion
+         while the POM names another and no way to tell which one won.
+      3. Delete the SuppressionFilter module. Rejected because it is the ONLY
+         suppression mechanism the ruleset configures. SuppressWarningsFilter,
+         SuppressionCommentFilter and SuppressWithNearbyCommentFilter were all
+         deliberately left out so that no exemption can be written into a Java
+         source and hidden there; removing the file-based filter would leave a
+         future exemption nowhere legitimate to live.
+
+  Trade-offs: the empty form is chosen over pre-loading the exemptions the
+    architecture can already be predicted to want — generated sources, test
+    fixtures, Testcontainers boilerplate. Pre-loading would be shorter later and
+    is rejected now because a suppression that exempts a path holding no files
+    is unverifiable: nobody can tell whether it is still needed, whether its
+    pattern is scoped as tightly as it should be, or whether it silently began
+    matching hand-authored code. The accepted cost is that whoever first needs
+    an exemption also adds the entry, which is the point at which its
+    justification can actually be written truthfully.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+How to add an entry, and what it must carry.
+  Each <suppress> element takes a "files" regular expression, optionally a
+  "checks" or "id" regular expression, and optionally a line or column range.
+  Omitting "checks" exempts the matched files from EVERY check in the ruleset,
+  which is almost never what is wanted; name the narrowest check that is
+  actually firing.
+
+  Per the contract stated at the foot of checkstyle.xml, every entry added here
+  carries three justifications of its own, in a comment immediately above it:
+  why the exemption exists at all, how tightly its "files" pattern is scoped
+  (and why it cannot match hand-authored source), and why each named check is
+  the right one to relax rather than a wider family. That per-entry rationale is
+  the whole reason exemptions are kept in one reviewable file instead of being
+  scattered through the Java sources as annotations or magic comments.
+
+  Two scopes are known NOT to need an entry, recorded so that a future reader
+  does not add one defensively:
+    - Non-Java files, including the fixed-width test fixtures under
+      services/*/src/test/resources/fixtures/. checkstyle.xml sets
+      fileExtensions="java", so nothing else is ever audited.
+    - Maven build output under services/*/target/. The plugin audits the
+      configured source roots only, so generated and compiled artifacts are
+      already outside the audit set.
+=============================================================================
+  -->
+
+<suppressions>
+
+  <!--
+    Deliberately empty. Add entries above this comment, newest last, each with
+    the three justifications described in the header. Do not delete this element
+    when the last entry is removed: the file must remain present and parseable,
+    because the filter that reads it fails closed.
+  -->
+
+</suppressions>

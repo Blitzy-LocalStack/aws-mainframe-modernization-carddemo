@@ -1,0 +1,571 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+=============================================================================
+config/checkstyle/checkstyle.xml
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Purpose:
+  The shared Checkstyle rule set that mechanically enforces this project's
+  single user-specified rule, Rule 1 (Explainability), for Java. It is the
+  normative artifact for Java documentation in this repository: where the
+  prose standard in docs/CODE_DOCUMENTATION_STANDARD.md and this
+  configuration disagree, this configuration is authoritative and the
+  standard is corrected to match it, not diverged from.
+
+  Two consumers read this file. Both are named here, with what they do,
+  so that this file can be understood without opening either of them.
+    1. services/pom.xml binds maven-checkstyle-plugin to the Maven
+       validate phase with this file as its configuration. It pins the
+       Checkstyle engine to 13.8.0, overriding the plugin's older bundled
+       engine, and it supplies config_loc as the directory that holds this
+       file. Consequently the gate runs on every local build and not only
+       in CI, and it audits main and test sources alike.
+    2. .github/workflows/services-ci.yml runs that same binding as a
+       required, build-failing step.
+
+  One copy of this rule set governs all nine Maven modules under
+  services/: common-lib, plus the auth, account, card, transaction,
+  reference, batch, authorization and reporting services.
+
+  config/checkstyle/suppressions.xml is the companion file. This rule set
+  names it, and only it, as the single place a suppression may be recorded.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Scope:
+  This file enforces Javadoc presence, Javadoc completeness and comment
+  adjacency. It configures nothing else. There are deliberately no naming,
+  whitespace, import-order, line-length, metrics or header modules here.
+  Every module left out is listed, with the reason it was left out, in the
+  EXCLUDED MODULES section at the foot of this file.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Honest limits: this file does NOT enforce all of Rule 1.
+  Rule 1 has two halves. Checkstyle mechanises the docstring half. It
+  cannot mechanise the inline-comment half, because judging a comment
+  means reading what it means. Specifically, this configuration cannot:
+    1. judge Rule 1's requirement that comments "must explain WHY a
+       decision was made, not WHAT the code does";
+    2. detect a comment that merely restates the code it sits beside;
+    3. verify that "at least one of" the four justification categories
+       (Alternatives Considered, Refactoring Rationale, Assumptions,
+       Trade-offs) has actually been documented;
+    4. identify which implementation choices are non-obvious, and so it
+       cannot detect a non-obvious choice that was left undocumented;
+    5. detect a vague rationale anywhere outside a Javadoc summary. The
+       forbiddenSummaryFragments pattern on SummaryJavadoc below gives a
+       partial grip on that one, and only on summary text.
+
+  Three things carry the half this file cannot carry:
+    a. docs/CODE_DOCUMENTATION_STANDARD.md, the prose standard this file
+       mechanises, which is subordinate to this file wherever the two
+       disagree;
+    b. human code review. Rule 1's own Validation Gate puts it there, in
+       these words: "Code missing either fails review.";
+    c. CONTRIBUTING.md, which points contributors at both.
+
+  Nothing here should be read as claiming that a passing Checkstyle run
+  means Rule 1 is satisfied. It means the docstring half is satisfied.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+WHY (non-obvious design decisions):
+  - Trade-off: severity is error, declared once at Checker level, so a
+    missing @param stops the build instead of printing a line nobody
+    reads. Rule 1's Validation Gate is written in blocking terms, "Code
+    missing either fails review.", and a warning-level documentation gate
+    is indistinguishable from no gate at all in a build log that already
+    carries other warnings. The cost accepted is real and is worth stating
+    plainly: an otherwise-compiling change is blocked by a missing tag.
+    The house grants warning-level degradation only where it has declared
+    a layer OPTIONAL, as tests/README.md does for the emulated AWS layer;
+    documentation here is not optional, so it is not granted that.
+  - Alternatives Considered: the binding is on the Maven validate phase,
+    not on CI alone. CI-only was rejected because the earliest a
+    contributor would then hear about a missing @return is after a push,
+    while CONTRIBUTING.md already asks them to "Ensure local tests pass."
+    beforehand. Binding to validate puts this gate inside that same local
+    step, so the feedback arrives before the push rather than after it.
+  - Assumption: this rule set is written against the module and property
+    surface of Checkstyle 13.8.0 specifically. Letting the engine version
+    float would not merely risk a new rule appearing; it would silently
+    change what this gate means, because module names, property names and
+    property defaults do move between releases. JavadocMethod's access
+    filter was renamed from scope to accessModifiers at 8.42;
+    MissingJavadocType's default token set gained RECORD_DEF; the
+    SummaryJavadoc property set changed within the 13.x line. A
+    configuration that loads cleanly against one engine can therefore
+    fail to load against another, or quietly enforce something different.
+  - Trade-off: pinning costs flexibility. An engine upgrade becomes a
+    deliberate, reviewed change instead of something that arrives on its
+    own. The house already accepts that same cost for its test toolchain,
+    which pins every dependency to an exact version and verifies hashes
+    at install time so that runs stay reproducible.
+  - Refactoring Rationale: one rule set lives here, outside services/,
+    rather than as nine copies inside the nine modules. Nine copies would
+    be nine competing sources of truth: a rule tightened in one module and
+    forgotten in the other eight drifts apart silently, and no build log
+    would ever reveal the divergence. That is the reason the
+    config/checkstyle directory exists at all, instead of a file sitting
+    under services/. tests/README.md states the same principle for record
+    layouts: "never duplicate a layout; keep it single-sourced from
+    app/cpy/".
+  - Trade-off: the module set is confined to the Javadoc family plus one
+    comment-placement check. Adding naming, whitespace, import-order,
+    line-length, metrics or header modules was considered and rejected,
+    because the build would then fail on style noise that Rule 1 never
+    asks about, and CONTRIBUTING.md asks for the opposite: "Modify the
+    source; please focus on the specific change you are contributing. If
+    you also reformat all the code, it will be hard for us to focus on
+    your change."
+  - Assumption: the house comment idiom used in
+    .github/workflows/tests.yml cannot be reproduced literally in XML, and
+    the adaptation below is deliberate rather than careless. XML 1.0
+    section 2.5 forbids two consecutive hyphens anywhere inside a comment.
+    The hyphen mid-rule used in that file is therefore a tilde mid-rule
+    here, and the spaced double hyphen it uses as an em-dash is a single
+    hyphen, a colon or a semicolon here. Restoring either one does not
+    merely look different: it makes this file unparseable, so every build
+    that reads it fails before a single Java file has been audited. The
+    equals rulers need no adaptation and are kept at the house width.
+=============================================================================
+-->
+
+<module name="Checker">
+
+  <!--
+    Trade-off: severity is declared once, here, and propagates to every
+      child module, so no child restates it and no child can disagree with
+      it. The alternative of setting severity per module was rejected: it
+      is where a single relaxed entry hides, and a reader would have to
+      check all eleven modules to learn whether the gate actually blocks.
+      The cost is that this file cannot express a two-tier rule set, which
+      is intended. There is deliberately no second, relaxed profile.
+    Assumption: services/pom.xml pairs this with a violation threshold of
+      warning and a fail-on-violation flag, so error-severity findings
+      fail the build. The two settings agree today; declaring error here is
+      what keeps them agreeing.
+  -->
+  <property name="severity" value="error"/>
+
+  <!--
+    Assumption: only Java carries Javadoc, so fileExtensions narrows the
+      audit to the .java extension and keeps Checkstyle from reading the
+      .yml, .sql and .md files that also live under services/. Left unset,
+      a FileSetCheck such as JavadocPackage inspects every file handed to
+      it, and the failures it then reports name files that have no Javadoc
+      construct to fix. The other languages in this repository are gated by
+      their own tools, each of which discovers its own configuration by
+      convention, so none of them needs a rule from this file.
+  -->
+  <property name="fileExtensions" value="java"/>
+
+  <!--
+    Assumption: sources are UTF-8, which is also the encoding this build
+      compiles with. Checkstyle reads each file using the charset named
+      here, so a mismatch does not fail loudly: it mis-decodes bytes, and a
+      Javadoc summary or a message string containing a non-ASCII character
+      is then audited as something other than what javac will compile.
+  -->
+  <property name="charset" value="UTF-8"/>
+
+  <!--
+    Assumption: the file is addressed through ${config_loc}, which
+      Checkstyle expands to the directory holding this rule set, and
+      services/pom.xml supplies that value. This matters because the build
+      is a nine-module reactor: a bare relative path is resolved against
+      whichever directory the build happens to be running in, so it would
+      resolve from the services/ aggregator and then fail from each module
+      directory one level deeper. Addressing the companion relative to this
+      file makes it resolve identically from all ten starting points. The
+      house documents an equivalent path-resolution trap at its point of
+      use, where tests/README.md records that the coverage rcfile must be
+      named explicitly because "the rcfile lives under tests/ (not the repo
+      root), so coverage.py will not auto-discover it. Omitting the flag
+      silently measures nothing useful."
+    Trade-off: optional is false, so a missing companion file is an error
+      that stops the build. Left true, Checkstyle's documented behaviour is
+      that the filter "accept all audit events" when the file is absent:
+      the build would go green having suppressed nothing and having also
+      verified nothing about which suppressions were meant to apply. The
+      house names that failure mode directly, in tests/README.md, as "a run
+      that verifies NOTHING must not read as green." Failing closed is the
+      accepted cost.
+    Alternatives Considered: maven-checkstyle-plugin can point at a
+      suppressions file itself, through its own suppressions-location
+      parameter. That was rejected because it splits one behaviour across
+      two files: this rule set would still name a suppressions file while
+      the POM named another, and neither file would reveal which one won.
+      Keeping the reference here leaves this rule set the sole owner of
+      which filters exist and which file each one reads.
+  -->
+  <module name="SuppressionFilter">
+    <property name="file" value="${config_loc}/suppressions.xml"/>
+    <property name="optional" value="false"/>
+  </module>
+
+  <!--
+    Assumption: this check is a FileSetCheck, not a tree check, so it
+      belongs at Checker level. Nesting it inside TreeWalker below is not a
+      style preference but a configuration error, and it surfaces as a
+      failure to initialise the module rather than as a missing audit.
+    Assumption: it is paired with MissingJavadocPackage inside TreeWalker,
+      and the pairing is what satisfies Rule 1's "module entry point"
+      clause. This module asserts only that a package-info.java file
+      EXISTS; it does not read what is in it. On its own it would pass a
+      package-info.java holding nothing but an ordinary block comment,
+      which meets the letter of the clause and defeats its intent. The
+      companion module asserts that the file carries Javadoc. Removing
+      either one leaves the clause half-enforced.
+  -->
+  <module name="JavadocPackage"/>
+
+  <!--
+    Assumption: TreeWalker is a required container rather than a choice. The
+      nine checks inside it all read the parsed syntax tree of a Java file,
+      and Checkstyle only builds that tree inside TreeWalker, so none of them
+      can be hoisted to Checker level. That constraint is also the whole
+      explanation for the placement asymmetry a reader will otherwise stumble
+      over: JavadocPackage sits ABOVE this element because it inspects the
+      file system for a package-info.java file, while MissingJavadocPackage
+      sits INSIDE it because it inspects the Javadoc tree of that file. The
+      two are a deliberate pair, split across the boundary for that reason
+      and not by oversight.
+  -->
+  <module name="TreeWalker">
+
+    <!--
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Presence AND completeness, never presence alone.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      Assumption: the modules below deliberately form two layers. The three
+        MissingJavadoc checks ask whether a docstring EXISTS. JavadocType,
+        JavadocMethod, NonEmptyAtclauseDescription and SummaryJavadoc then
+        ask whether it says anything. Rule 1 lists "Adding docstrings that
+        omit parameters, return values, or purpose" among its forbidden
+        patterns, so a presence-only rule set would pass, silently and at
+        scale, the exact artifact the rule singles out as a violation.
+      Trade-off: the second layer is what makes this gate costly to satisfy,
+        and that cost is accepted. A block that exists but documents nothing
+        would otherwise register as compliance, which is worse than an
+        obviously missing block because it looks finished and so is never
+        revisited.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -->
+
+    <!--
+      Assumption: scope is widened from the default of public to package, so
+        package-private types are governed too. A mapper or a repository
+        fragment here is often package-private precisely because it is
+        internal, and internal is where an undocumented type costs a future
+        reader most.
+      Assumption: the tokens value below is ALREADY this module's default in
+        13.8.0, so declaring it changes nothing today. It is written out for
+        two reasons that are not about behaviour: it records that the Java 21
+        record DTOs carried across the services are governed as types, and it
+        pins the set so a later engine with a different default cannot
+        quietly narrow what this gate covers. It is not filling a gap in the
+        defaults and must not be described as doing so.
+      Alternatives Considered: skipAnnotations is deliberately NOT set here,
+        and the omission is called out because the upstream documentation's
+        own example for this module sets it to SpringBootApplication and
+        Configuration. Copying that example would exempt every service's
+        Application entry point and every class under a service's config
+        package: exactly the module entry points and configuration types that
+        Rule 1's presence clause names. The default, which exempts only
+        generated code, is kept.
+    -->
+    <module name="MissingJavadocType">
+      <property name="scope" value="package"/>
+      <property name="tokens"
+                value="INTERFACE_DEF, CLASS_DEF, ENUM_DEF, ANNOTATION_DEF, RECORD_DEF"/>
+    </module>
+
+    <!--
+      Assumption: the visibility property on THIS module is named scope. Its
+        sibling JavadocMethod below filters with a property named
+        accessModifiers instead, and the two are not interchangeable: scope
+        does not exist on JavadocMethod, and accessModifiers does not exist
+        here. Harmonising the names in either direction does not produce a
+        laxer or a stricter gate, it produces a configuration that fails to
+        initialise, so the build stops before one file has been audited.
+        Both are left exactly as they are for that reason.
+      Assumption: scope is package for the same reason as the type check
+        above, so a package-private method is not exempt.
+      Alternatives Considered: allowMissingPropertyJavadoc is explicitly
+        false, and this is the subtle half of Rule 1's accessor allowance.
+        That allowance reads "Trivial accessors (getters/setters with no
+        logic) may use a single-line docstring", which grants a FORM, not an
+        ABSENCE. Setting the property true would permit omitting the
+        docstring altogether on a structurally exact accessor, granting more
+        than the rule does. A linter honours a permission by not prohibiting
+        it, so the single-line form is simply never prohibited here; the
+        SingleLineJavadoc entry under EXCLUDED MODULES records the other half
+        of this same decision.
+      Assumption: allowedAnnotations is left at its default of Override,
+        because an overriding method inherits the documentation of what it
+        overrides and Checkstyle accepts a lone inheritDoc tag in place of
+        the others. The list is deliberately not widened.
+      Trade-off: minLineCount is deliberately not set. Setting it would
+        exempt short methods by counting lines, inventing a threshold this
+        repository has never stated; tests/README.md is explicit that its own
+        numeric targets are "grounded recommendations from critical-path
+        analysis - not contractual SLAs; the repository defines none". The
+        accepted cost is that a one-line method must be documented too.
+    -->
+    <module name="MissingJavadocMethod">
+      <property name="scope" value="package"/>
+      <property name="allowMissingPropertyJavadoc" value="false"/>
+    </module>
+
+    <!--
+      Assumption: this is the second half of the package-info pairing. The
+        JavadocPackage check at Checker level asserts only that the file
+        exists; this one asserts that the file carries Javadoc. Rule 1
+        requires a docstring on a "module entry point", and in Java the
+        package-info file IS that entry point, so enforcing existence without
+        content would satisfy the clause on paper while leaving the package
+        undocumented in fact.
+    -->
+    <module name="MissingJavadocPackage"/>
+
+    <!--
+      Assumption: scope is package here for the same reason it is on the two
+        presence checks above. Completeness and presence have to agree on
+        which types they govern, because a type that is required to have a
+        Javadoc block but is exempt from having a complete one is the gap
+        Rule 1's forbidden pattern describes. Widening one without the other
+        is the mistake this repetition is meant to prevent.
+      Assumption: this module exists specifically to close the record DTO
+        gap, which is also why it is not redundant with MissingJavadocType
+        above. The presence check asks only whether a Javadoc block exists on
+        the type. This check reads that block and reports type parameters AND
+        record components for which no param tag is present. Because the DTO
+        layer across the services is built from Java 21 records, a record
+        whose components are undocumented would otherwise ship with a
+        one-line block and pass the presence check: precisely Rule 1's
+        forbidden pattern of a docstring that omits its parameters.
+      Trade-off: allowMissingParamTags is false, so every record component
+        and every type parameter needs a param tag. On a wide DTO, and the
+        account update payload is wide, that is a great many tags. The cost
+        is accepted because these field-level contracts derive from
+        fixed-width copybook layouts, and the param tag is the one place a
+        field's provenance and declared width can be stated next to it.
+      Assumption: authorFormat and versionFormat are deliberately left unset,
+        so author and version tags are never required. The house convention
+        in tests/README.md names exactly four docstring elements, Purpose,
+        Parameters, Returns and Exceptions, and neither of those tags is
+        among them; requiring a fifth would enforce something that neither
+        the house convention nor Rule 1 asks for.
+    -->
+    <module name="JavadocType">
+      <property name="scope" value="package"/>
+      <property name="allowMissingParamTags" value="false"/>
+    </module>
+
+    <!--
+      Assumption: the visibility property on THIS module is accessModifiers,
+        not scope; the note on MissingJavadocMethod above records what
+        swapping the two costs. The value written out is the default, stated
+        explicitly so that a reader can see private methods are audited too
+        instead of having to know the default to find out.
+      Assumption: the three completeness flags map one to one onto Rule 1's
+        remaining docstring elements. allowMissingParamTags false enforces
+        "Parameters"; allowMissingReturnTag false enforces "Return values";
+        validateThrows true enforces "Exceptions or errors".
+      Assumption: validateThrows defaults to false, so it MUST be set here.
+        Omitting it drops the Exceptions element silently while the other two
+        flags keep working, which is the worst shape of failure available: a
+        gate that reports success while enforcing two thirds of what it
+        claims.
+      Assumption: validateThrows does NOT police the Exceptions element
+        completely, and nothing here should be read as claiming it does.
+        Checkstyle holds no model of the exception type hierarchy, so a base
+        type and a subtype are treated as unrelated types and both may have
+        to be named in the Javadoc. It also does not inspect a throw inside a
+        try block that has a catch, where the try block is skipped entirely;
+        catch blocks, finally blocks and try blocks without a catch are still
+        inspected. Local classes, anonymous classes and lambda bodies are not
+        inspected either. Whatever it misses is carried by review, exactly as
+        the honest-limits note in the header sets out.
+      Assumption: tokens are left at their default, which already covers
+        method definitions, constructors, annotation fields and compact
+        record constructors. Nothing is being added and no default is being
+        corrected; compact constructors are governed without any declaration
+        here.
+    -->
+    <module name="JavadocMethod">
+      <property name="accessModifiers" value="public, protected, package, private"/>
+      <property name="allowMissingParamTags" value="false"/>
+      <property name="allowMissingReturnTag" value="false"/>
+      <property name="validateThrows" value="true"/>
+    </module>
+
+    <!--
+      Assumption: this module is what turns Rule 1's word "description" into
+        something enforceable. The rule asks for a "description for each
+        parameter" and a "description of what is returned", not merely for a
+        tag. Without this check, a block carrying a param tag with nothing
+        written after it satisfies every tag-presence check above while
+        telling a reader nothing at all, and the gate would then be measuring
+        tag count rather than documentation.
+      Assumption: javadocTokens are left at their default, which already
+        covers param, return, throws and deprecated, so every tag whose
+        description Rule 1 cares about is included without declaring the set.
+    -->
+    <module name="NonEmptyAtclauseDescription"/>
+
+    <!--
+      Assumption: this module carries Rule 1's "Purpose" element. It requires
+        a first sentence to exist, which is the one docstring element none of
+        the presence or parameter checks above can express. Two of its
+        behaviours are worth knowing when reading a failure: a block whose
+        summary is only an inheritDoc tag is skipped, and a non-empty return
+        tag is accepted in place of a summary sentence.
+      Trade-off: forbiddenSummaryFragments defaults to a pattern matching
+        only the empty string, so left alone this module would contribute
+        nothing on that axis. The value below is therefore supplied
+        deliberately, and every alternative in it is traceable to a source:
+          (1) TODO, FIXME and TBD are placeholder markers. A summary that is
+              a placeholder is a docstring omitting its purpose, which Rule 1
+              names among its forbidden patterns.
+          (2) "this is better" and "for performance" are Rule 1's own two
+              examples of a vague rationale, taken from the rule verbatim so
+              that the gate rejects the exact wording the rule calls out.
+          (3) a summary opening "Getter for ..." or "Setter for ..." is the
+              canonical no-op summary: it restates the member's own name and
+              conveys no purpose, which is Rule 1's first forbidden pattern.
+              The optional leading article lets "A getter for ..." match too.
+        The accepted cost is a possible false positive: a summary that
+        legitimately mentions performance is rejected and has to be
+        rephrased. That is tolerable because a summary states what a member
+        is for, while rationale belongs in an adjacent comment.
+      Assumption: period is deliberately left at its default. The
+        documentation warns that a period not followed by whitespace is
+        ignored, so a version string such as v1.0 does not end a sentence,
+        but that once the property is set to a non-default value ANY period
+        ends the sentence whether whitespace follows it or not. Setting it
+        would therefore truncate a summary at the first decimal point it
+        happens to contain.
+    -->
+    <module name="SummaryJavadoc">
+      <property name="forbiddenSummaryFragments"
+                value="(?:TODO|FIXME|TBD)|this is better|for performance|^\s*(?:A|An|The)?\s*[GgSs]etter"/>
+    </module>
+
+    <!--
+      Trade-off: this is the weakest binding in the file, and it is included
+        rather than omitted for one reason. Rule 1 enumerates its docstring
+        elements in a fixed sequence, purpose then parameters then return
+        values then exceptions, and its Validation Gate is meant to be
+        checkable against that sequence; a block whose tags arrive in an
+        arbitrary order cannot be read against the rule's own checklist at a
+        glance. The order this module ships with already follows the rule's
+        sequence, so no order is declared.
+      Assumption: this creates no reformatting churn. Every Javadoc block it
+        governs is newly authored, so there is no existing Java for it to
+        reorder and the usual objection to an ordering rule does not arise.
+    -->
+    <module name="AtclauseOrder"/>
+
+    <!--
+      Assumption: this is the ONLY part of Rule 1's Inline Comment
+        Requirements that a linter can express. The rule asks that comments
+        sit "adjacent to the code they explain", and this module is the
+        mechanical reading of adjacency: a comment must be indented
+        consistently with the statement or block it precedes, so a
+        justification cannot drift away from the decision it justifies.
+        Everything else in that half of the rule, whether a comment explains
+        why rather than what, whether it merely restates the code, and
+        whether it names one of the four categories, is not expressible here
+        and is carried by the standard and by review, as the honest-limits
+        note in the header records.
+    -->
+    <module name="CommentsIndentation"/>
+
+  </module>
+
+  <!--
+=============================================================================
+EXCLUDED MODULES: what is deliberately absent from this rule set, and why.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Alternatives Considered: an absence in a configuration file is invisible, so
+  every module below was evaluated for this rule set and deliberately left
+  out. Each entry names the concrete consequence of adding it. None of them
+  is configured, and none should be added without first answering the reason
+  recorded against it. The header's trade-off on module scope is the summary
+  of this section; this is the itemised form of it.
+
+Javadoc family:
+  - SingleLineJavadoc. This is the other half of the accessor decision noted
+    on MissingJavadocMethod above. The module does not grant the single-line
+    form; nothing needs to, because a one-line Javadoc block is always legal
+    Java. What it actually does is FORBID a single-line block that carries an
+    at-clause. Since completeness above requires a return tag on every
+    value-returning accessor, the natural one-line accessor docstring is
+    exactly the shape it rejects, so adding this module would render Rule 1's
+    own explicit allowance unusable for the ordinary getter. The correct
+    action was to not add the module at all.
+  - JavadocVariable. Rule 1 scopes its docstring requirement to functions,
+    classes and module entry points. Fields are not in that list, so
+    requiring Javadoc on every field would enforce more than the rule does,
+    and across the entity and DTO layer it would demand a large volume of
+    documentation the rule never asked for.
+  - JavadocStyle. Its first-sentence check duplicates SummaryJavadoc, which
+    is already configured above; the rest of it validates HTML and formatting
+    inside the block, which Rule 1 does not mention. Two modules reporting
+    one missing first sentence would yield two findings for a single fault.
+  - WriteTag. It exists in order to require tags such as author, since or
+    version. The house convention names exactly four docstring elements and
+    none of those tags is among them, so this module would enforce a fifth
+    requirement of its own invention.
+  - JavadocParagraph, JavadocTagContinuationIndentation,
+    JavadocLeadingAsteriskAlign, JavadocMissingLeadingAsterisk,
+    JavadocMissingWhitespaceAfterAsterisk,
+    RequireEmptyLineBeforeBlockTagGroup, JavadocContentLocation,
+    JavadocBlockTagLocation and InvalidJavadocPosition. Each governs the
+    layout of a Javadoc block rather than whether it documents anything, or
+    repeats a presence check already made above. Rule 1 is about content, and
+    a build that fails on asterisk alignment teaches contributors to read
+    this gate as noise, which is how a gate stops working.
+
+Trade-off: the suppression filters below are an integrity decision rather
+  than tidiness, and the flexibility given up is deliberate.
+  - SuppressWarningsFilter, SuppressionCommentFilter and
+    SuppressWithNearbyCommentFilter. Each lets a suppression be written into
+    the Java source itself. The consequence is concrete: this documentation
+    gate could be switched off line by line, across any number of files, with
+    no single artifact anywhere showing that it had been switched off. Only
+    the file-based SuppressionFilter is configured, so every suppression is a
+    durable entry in one reviewable file and a reviewer can read the entire
+    list of exemptions in one place.
+
+Whole families:
+  - Naming, whitespace, imports including ImportOrder, sizes including
+    LineLength, metrics and headers. The charter of this file is Javadoc
+    enforcement. Configuring these would fail a migration build on style
+    findings Rule 1 never raises, and CONTRIBUTING.md asks for the opposite:
+    "Modify the source; please focus on the specific change you are
+    contributing. If you also reformat all the code, it will be hard for us
+    to focus on your change."
+  - ImportControl specifically. Layering here is owned by ArchUnit, in the
+    LayeringRulesTest that common-lib publishes and every module inherits: no
+    AWS SDK or web type inside a domain package, no service importing another
+    service's domain package, and no binary floating-point type in the money
+    path. Configuring ImportControl would stand up a second engine enforcing
+    an overlapping half of one constraint, and a reader could then no longer
+    tell which of the two owned a given boundary.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Companion file: config/checkstyle/suppressions.xml.
+
+Three further justifications belong in that file rather than in this one,
+because they concern the suppression entries themselves and not this rule
+set: why each suppression exists at all, how tightly each files pattern is
+scoped, and which checks each entry names. Each entry there carries its own,
+which is the whole point of keeping suppressions in one reviewable file
+rather than scattered through the Java sources.
+=============================================================================
+  -->
+
+</module>
