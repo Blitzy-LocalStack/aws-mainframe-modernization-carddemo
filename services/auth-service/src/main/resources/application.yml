@@ -1,0 +1,302 @@
+# =============================================================================
+# services/auth-service/src/main/resources/application.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Base runtime configuration for the CardDemo auth bounded context, which is
+#   the migration target of five COBOL programs -- COSGN00C (sign-on) and
+#   COUSR00C through COUSR03C (user list, add, update, delete). The context owns
+#   exactly one PostgreSQL schema, auth, standing in for the indexed file
+#   defined at app/csd/CARDDEMO.CSD L88-L99, and it ships exactly one Flyway
+#   migration, V1__auth.sql.
+#
+#   This file owns the property SHAPES for the whole service. It is the first
+#   application.yml in this repository, so it does not follow a Spring
+#   convention already established here -- it establishes one. It is therefore
+#   the property-key contract that this service's SecurityConfig,
+#   DataSourceConfig and OpenApiConfig bind against, rather than each declaring
+#   a parallel prefix of its own. Every key below is a standard framework key
+#   with one exception: the single carddemo.auth.cognito namespace, which
+#   carries the four sign-on values the framework publishes no standard key
+#   for. application-dev.yml and application-prod.yml override VALUES only and
+#   introduce no key that is absent here.
+#
+# WHY (non-obvious design decisions):
+#   1. Assumptions: the listener port is fixed by two artifacts outside this
+#      file rather than chosen locally. See server.port.
+#   2. Trade-offs: every credential and every endpoint is an unresolved
+#      placeholder, so an absent value stops startup instead of defaulting.
+#      See spring.datasource and carddemo.auth.cognito.
+#   3. Alternatives Considered: the connection search_path is pinned through an
+#      init statement rather than through the URL. See
+#      spring.datasource.hikari.connection-init-sql.
+#   4. Alternatives Considered: Flyway owns every DDL statement and Hibernate
+#      owns none. See spring.jpa.hibernate.ddl-auto.
+#   5. Assumptions: the schema-creation flag does nothing on the deployed path.
+#      Trade-offs: it is set anyway so a bare database still reaches a usable
+#      state. See spring.flyway.create-schemas.
+#   6. Assumptions: /actuator/health is polled by two consumers that cannot
+#      present a token. See management.endpoints.web.
+#   7. Assumptions: topology is identical in every environment and the profiles
+#      differ in values alone. See the note above logging.level.
+# =============================================================================
+
+server:
+  # Assumptions: this service's Dockerfile declares EXPOSE 8080 and the network
+  # design admits load-balancer-to-application traffic on 8080 alone, so the
+  # number is fixed by two artifacts this file cannot see. Changing it here on
+  # its own leaves the container listening on a port nothing connects to, and
+  # the target group deregisters the task while the process stays healthy.
+  port: 8080
+
+spring:
+  application:
+    # Assumptions: management.metrics.tags.service below reads this property
+    # instead of repeating the literal, so the two cannot drift apart.
+    name: auth-service
+
+  datasource:
+    # WHAT: the connection contract for the one PostgreSQL cluster this context
+    #       reads and writes.
+    # WHY : (1) Trade-offs: none of the three values below carries a fallback,
+    #       so an absent one stops startup with an unresolved-placeholder
+    #       failure. That is accepted over a default that would let the process
+    #       come up and read or write another environment's data, which is a
+    #       fault that presents as a working service. (2) Assumptions: the
+    #       platform resolves all three before the process starts. The task
+    #       definition injects them from Parameter Store and Secrets Manager as
+    #       SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME and
+    #       SPRING_DATASOURCE_PASSWORD, which relaxed environment binding maps
+    #       onto these keys ahead of this file; the image deliberately bakes in
+    #       neither an active profile nor an endpoint.
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    hikari:
+      # Alternatives Considered: accepting the driver pool's generated default
+      # name was rejected. That default is the same string in every service, so
+      # a pool metric or a stack dump of a blocked borrower could not be
+      # attributed to a context without correlating it by hand.
+      pool-name: auth-service-pool
+      # Assumptions: this context owns exactly one schema, because the one
+      # baseline record it migrates is app/cpy/CSUSR01Y.cpy; reading another
+      # context's schema is not part of its contract, so an unqualified
+      # statement resolving anywhere else is a defect rather than a feature.
+      # Alternatives Considered: appending currentSchema to the JDBC URL was
+      # rejected, because the URL arrives from the platform as an opaque string
+      # that may already carry parameters, and editing it here would mean
+      # parsing a value this file does not own. Setting the path per connection
+      # keeps the pin independent of the URL's shape. Setting it to a schema
+      # that does not exist yet is accepted by the engine, so this does not
+      # race the Flyway bootstrap below.
+      connection-init-sql: SET search_path TO auth
+      # Trade-offs: the pool is sized modestly here and the dev and prod
+      # profiles move these numbers. A pool wider than the cluster's own
+      # connection budget turns a traffic peak into refused connections for
+      # every service sharing that cluster, so the base value is the
+      # conservative one and raising it is a deliberate per-environment act.
+      # The third value bounds how long a caller waits for a connection before
+      # failing: stated explicitly so that raising the pool size in a profile
+      # cannot be read as also relaxing the wait, since the two are what decide
+      # whether a saturated pool sheds load or accumulates blocked threads.
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      # Alternatives Considered: schema generation from the mapped entities was
+      # evaluated and rejected, because it cannot express two things
+      # V1__auth.sql has to state. First, the fixed-width CHAR(8) primary key
+      # that app/cpy/CSUSR01Y.cpy L18 fixes as SEC-USR-ID PIC X(08) at offset
+      # 0; a generated column would be variable-length, and the identifier
+      # would stop comparing equal to the blank-padded value the baseline
+      # record holds. Second, the CHECK constraint restricting the user type to
+      # A or U, whose authority is app/cpy/COCOM01Y.cpy L26-L28, where
+      # CDEMO-USER-TYPE PIC X(01) carries 88 CDEMO-USRTYP-ADMIN VALUE 'A' and
+      # 88 CDEMO-USRTYP-USER VALUE 'U'. Generation emits no such domain, so a
+      # third user type would become insertable and the admin/user split that
+      # guards every administrative route would no longer be total.
+      ddl-auto: none
+    # Trade-offs: the persistence session closes with the transaction instead of
+    # staying open until the response is written. Touching an unfetched
+    # association in a controller therefore throws rather than quietly issuing
+    # another query, which costs an explicit fetch in the repository for every
+    # association a response needs. The compromise returns the connection to
+    # the pool before serialisation begins, so a slow client cannot occupy one
+    # of the connections counted above.
+    open-in-view: false
+    properties:
+      hibernate:
+        # Assumptions: generated statements are schema-qualified here as well as
+        # path-pinned on the connection above. The two mechanisms are
+        # independent, so a pooled connection that somehow reached this service
+        # without its init statement still cannot resolve a table in another
+        # context's schema.
+        default_schema: auth
+
+  flyway:
+    # Assumptions: this is the other half of the ddl-auto decision above. With
+    # entity-driven generation switched off, nothing else in the process would
+    # create the auth table, so leaving migration to the framework default
+    # rather than stating it here would make the schema's existence depend on
+    # which artifacts happen to be on the classpath.
+    enabled: true
+    # Assumptions: this module ships exactly one migration on this classpath
+    # location, V1__auth.sql. There is no seed migration in this context; only
+    # the reference context owns one, so a second version here would be an
+    # artifact nothing produced.
+    locations: classpath:db/migration
+    # Assumptions: both keys are set because they answer different questions.
+    # The first is the set of schemas this context manages, and the second is
+    # where the migration history table itself lives. Setting only the first
+    # would leave the history table to land in whatever schema the connection
+    # resolved to, which would put this context's migration state outside the
+    # one schema it owns and make it invisible to a reader inspecting auth.
+    schemas: auth
+    default-schema: auth
+    # Assumptions: data-migration/sql/V0__schemas_and_roles.sql normally creates
+    # all eight schemas together with the per-service roles and their
+    # narrowly-scoped grants, so on the deployed path this flag does nothing at
+    # all.
+    # Trade-offs: it is set anyway so that a bare database -- a fresh local
+    # instance, or the container this module's repository integration test
+    # starts, where V0 has never run -- still reaches a usable state without
+    # this service's migration having to carry CREATE ROLE or GRANT statements
+    # that belong to the migration package rather than to a service. The
+    # compromise accepted is that two components can each create the same
+    # schema object.
+    create-schemas: true
+    # Alternatives Considered: baselining on migrate was rejected. Against a
+    # schema that already holds objects it marks the history as current and
+    # skips V1__auth.sql, so the service would report a successful migration
+    # while the table it needs was never created -- a failure that surfaces
+    # later as a missing relation on the first sign-on rather than at startup.
+    baseline-on-migrate: false
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Trade-offs: an unresolved placeholder with no fallback, on the same
+          # reasoning as the datasource above and with a sharper consequence. A
+          # default issuer would let this service accept tokens minted by the
+          # wrong user pool, and that fault presents as successful
+          # authentication rather than as an error.
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+
+management:
+  endpoints:
+    web:
+      # WHAT: where the operational endpoints live, and which of them are
+      #       published.
+      # WHY : Assumptions: the load balancer target group and this service's
+      #       container HEALTHCHECK both request exactly GET /actuator/health,
+      #       and neither can present a JWT, so that path has to stay reachable
+      #       without one. It reports aggregate status only and no business
+      #       data. Moving the base path, renaming the endpoint, or putting a
+      #       credential in front of it breaks target-group registration and
+      #       container liveness in the same change, which removes the two
+      #       independent signals that a deployment is progressing. Which
+      #       principals may reach the remaining endpoints is decided in this
+      #       service's SecurityConfig; this file only fixes where they live and
+      #       which ones exist.
+      base-path: /actuator
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        # Assumptions: enabling probes is what creates the liveness and
+        # readiness groups, so the aggregate reported at the path above
+        # distinguishes a task that is alive from one ready to be sent traffic.
+        # Without them both consumers would read a single combined status and a
+        # task still running its migration would be advertised as ready.
+        enabled: true
+      # Assumptions: the two pollers above act on the aggregate status alone.
+      # Component detail names the datasource and the schema behind it, which
+      # would publish deployment topology on a path that by design carries no
+      # credential.
+      show-details: never
+  metrics:
+    tags:
+      # Assumptions: these three tag names are the common tags the shared
+      # kernel's MetricsConfig contributes, so one dashboard query can group
+      # every service in the migration by the same keys. A fourth tag added
+      # here would exist for this service alone and would not group.
+      service: ${spring.application.name}
+      # Trade-offs: these two fall back to a token that is deliberately not the
+      # name of any real environment, so a task that starts without them is
+      # counted as unspecified and shows up as its own series, instead of being
+      # folded silently into dev or prod and skewing whichever it landed in.
+      environment: ${CARDDEMO_ENVIRONMENT:unspecified}
+      version: ${CARDDEMO_VERSION:unspecified}
+
+springdoc:
+  api-docs:
+    # Assumptions: openapi/auth-api.yaml, alongside this file, is the
+    # hand-authored contract of record, and ui/src/api/auth.ts is written
+    # against that document rather than against this endpoint. The document
+    # served here has to agree with it; a difference between the two is a defect
+    # in whichever one moved and is not something to reconcile at runtime.
+    path: /v3/api-docs
+    enabled: true
+  swagger-ui:
+    # Trade-offs: the browsable view is published in every environment rather
+    # than switched off outside development. It renders the same document the
+    # path above already serves and adds no endpoint of its own, and the
+    # profiles are not permitted to vary it, so turning it off per environment
+    # would make the surface differ between the environment a change is tested
+    # in and the one it runs in.
+    path: /swagger-ui.html
+    enabled: true
+
+logging:
+  level:
+    # WHAT: the base level set, and the note that governs what the two profiles
+    #       beside this file are allowed to change.
+    # WHY : (1) Assumptions: this file owns the property shapes for the
+    #       datasource, Flyway, the resource server, Cognito, JPA, the actuator
+    #       and observability. application-dev.yml and application-prod.yml
+    #       override values only. They may differ in these log levels, in the
+    #       pool sizing above, in how broadly the actuator is exposed, and in
+    #       the Flyway clean flag -- which is why that flag appears in the prod
+    #       profile and nowhere in this file. They may not differ in route
+    #       structure, schema ownership, identity mechanism, queue usage or
+    #       datastore type, because topology that varies by environment cannot
+    #       be verified in one and then trusted in another. (2) Trade-offs: the
+    #       two loggers below sit above DEBUG on purpose, which costs a
+    #       deliberate override when diagnosing a failing sign-on. At DEBUG they
+    #       emit token claims and bound statement parameters respectively, so
+    #       leaving them low would put user identifiers and credential material
+    #       into log aggregation, where its retention is governed by the log
+    #       group rather than by this service.
+    root: INFO
+    com.carddemo: INFO
+    org.flywaydb: INFO
+    org.springframework.security: WARN
+    org.hibernate.SQL: WARN
+
+carddemo:
+  auth:
+    cognito:
+      # WHAT: the four sign-on values the framework publishes no standard key
+      #       for, held in one namespace this project owns.
+      # WHY : (1) Alternatives Considered: declaring them as extra children of
+      #       spring.security was rejected, because that prefix is bound by the
+      #       framework's own configuration properties, so an unrecognised child
+      #       there is either ignored without a warning or rejected outright
+      #       depending on the release -- and a silently ignored pool
+      #       identifier would leave sign-on pointed at nothing. A prefix this
+      #       project owns binds predictably and is greppable in one place.
+      #       (2) Trade-offs: as with the datasource and the issuer above, none
+      #       of the four carries a fallback, so startup stops when one is
+      #       missing rather than the service coming up bound to another
+      #       environment's user pool. (3) Assumptions: the task definition
+      #       injects all four, the confidential one out of Secrets Manager and
+      #       the other three out of Parameter Store. No value for any of them
+      #       exists anywhere in this repository -- not in this file, not in
+      #       either profile beside it.
+      token-endpoint: ${CARDDEMO_AUTH_COGNITO_TOKEN_ENDPOINT}
+      user-pool-id: ${CARDDEMO_AUTH_COGNITO_USER_POOL_ID}
+      client-id: ${CARDDEMO_AUTH_COGNITO_CLIENT_ID}
+      client-secret: ${CARDDEMO_AUTH_COGNITO_CLIENT_SECRET}

@@ -1,0 +1,175 @@
+<!doctype html>
+<!--
+  =============================================================================
+  ui/index.html
+  =============================================================================
+  Purpose:
+    The single HTML document of the CardDemo single page application: the React
+    19 and TypeScript front end that replaces all 21 CICS/BMS online screens
+    (the 17 base mapsets under app/bms plus the 4 extension mapsets). It carries
+    exactly two things and nothing more, because two is all it is permitted to
+    carry: the DOM node the application mounts into, and the module reference
+    Vite follows to discover the application.
+
+    This document is not a static asset. Vite treats it as the BUILD INPUT: it
+    parses this file, follows the module reference in the body, and derives the
+    whole application module graph from there. That is why ui/vite.config.ts
+    declares no explicit build input of its own, and why a wrong module path
+    yields no build at all rather than a page that merely looks broken.
+
+    The built copy of this file is also what ui/nginx.conf and the CloudFront
+    distribution return as the history fallback, so all 21 client side routes
+    (/signon, /menu, /account/update, /cards/:num, /authorizations/:key and the
+    rest) are served this one document, and the router then decides what
+    renders.
+
+  WHY (non-obvious design decisions):
+    - Assumption: three cross file contracts are asserted by this document and
+      not one of them is checked while the bundle is built. The mount node id
+      must match the lookup in ui/src/main.tsx, the module path must name the
+      real entry module, and the icon path must match the file Vite emits out of
+      ui/public. Each contract is documented at the element that asserts it.
+    - Trade-off: the document is deliberately minimal. Everything a richer entry
+      document could hold is instead owned by a layer that is allowed to differ
+      between environments, which this file is not: it is built once and served
+      byte for byte identically to dev and prod. Styling therefore lives in
+      ui/src/theme/antdTheme.ts, response headers in ui/nginx.conf and at the
+      CloudFront distribution, and runtime configuration in import.meta.env fed
+      from the variable names documented in ui/.env.example.
+    - Assumption: no comment in this file may contain two consecutive hyphens.
+      The HTML grammar forbids that sequence inside a comment body, and a parser
+      or minifier that meets it may close the comment early and spill the rest
+      of the prose into the rendered page. The rules above therefore use '='
+      where the house header template in .github/workflows/tests.yml uses a rule
+      of hyphens, and this repository's double hyphen dash idiom, which occurs
+      20 times in that one workflow, is spelled out in words here instead.
+    - Trade-off: the doctype is written in lower case. The HTML doctype is ASCII
+      case insensitive, so both spellings select standards mode identically and
+      nothing observable turns on the choice; but Prettier 3, which this package
+      runs through its format script, normalises the doctype to lower case and
+      offers no option to disable that. Upper case would therefore be the only
+      formatting complaint in this file and would fail the format gate in CI,
+      and anyone who ran the formatter in write mode would silently flip it back
+      and produce a diff nobody asked for. Please do not upper case it again.
+  =============================================================================
+-->
+
+<!--
+  WHY the document language is fixed rather than negotiated (Assumption): the
+  migration carries every user visible string across character for character
+  (AAP transformation rule T8), and every one of those strings is English: the
+  three PIC X(40) title constants in app/cpy/COTTL01Y.cpy, the PIC X(50) common
+  messages in app/cpy/CSMSG01Y.cpy, and the sign on messages in
+  app/cbl/COSGN00C.cbl. No localisation layer is in scope, so there is no second
+  language for the document to choose between, and assistive technology can be
+  told the language outright instead of guessing it from the content.
+-->
+<html lang="en">
+  <head>
+    <!--
+      WHY the encoding declaration is the first thing in the head (Assumption):
+      the parser has to know the encoding before it reads any byte that could be
+      decoded wrongly, and byte for byte fidelity of the baseline's strings is
+      this application's whole premise. The ETL half of the same migration
+      decodes the 13 EBCDIC seed datasets per fixed width field rather than per
+      record for the identical reason: a decoding mistake raises no error, it
+      silently produces plausible wrong characters.
+    -->
+    <meta charset="UTF-8" />
+
+    <!--
+      WHY a responsive viewport replaces a fixed grid (Trade-off): the 3270
+      original is a fixed 24 by 80 character cell canvas, declared as
+      DFHMDI SIZE=(24,80) in 17 of the 17 base mapsets, which between them
+      position all 902 of their DFHMDF fields absolutely by POS=(row,column).
+      AAP gap G1 records the deliberate deviation: reproducing absolute
+      character positioning in a browser would be both hostile to accessibility
+      and impossible to make responsive, so field grouping, reading order and
+      tab order are preserved while positioning of one pixel per character is
+      not. This tag is where that deviation becomes visible, because it is what
+      lets the antd Layout reflow to the device width instead of leaving the
+      browser to scale a fixed canvas.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!--
+      WHY the icon path names no directory (Assumption): Vite copies the
+      contents of ui/public verbatim to the root of the build output, so a
+      favicon authored there is served as /favicon.svg and the directory it was
+      authored in forms no part of any served path. Naming that directory in the
+      path here is the single most common mistake with Vite's public directory,
+      and it resolves in no environment at all, because such a path does not
+      exist once the bundle is built.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!--
+      WHY this exact text (Assumption): it is the trimmed CCDA-TITLE02 constant
+      from app/cpy/COTTL01Y.cpy line 22, declared
+      PIC X(40) VALUE '              CardDemo                  '. The 14 leading
+      and 18 trailing spaces are the centring of a 40 column 3270 title field,
+      which the browser tab has no use for, so the tab takes the trimmed value.
+      Line 21 of that copybook holds a disabled variant reading
+      'Credit Card Demo Application (CCDA)' that is also exactly 40 characters
+      long, so nothing but the '*' in column 7 marks it dead; it is not the live
+      value and is not used here. ui/src/messages/messages.ts owns the same
+      constant at run time and states that this file must agree with it, which
+      it does: SCREEN_TITLES.TITLE02.text trimmed is the text below.
+    -->
+    <title>CardDemo</title>
+
+    <!--
+      WHY no stylesheet is linked (Alternatives Considered): antd 6 defaults to
+      pure CSS variables theming and injects the styles it needs at run time, so
+      unlike its earlier majors it publishes no stylesheet for an application to
+      import. Adding a reset sheet or a bespoke one was the alternative, and it
+      was rejected because it would put design values in a second place beside
+      ui/src/theme/antdTheme.ts, which breaks both the rule that every value
+      resolves to an antd theme variable rather than to a literal, and the rule
+      that theming happens in exactly one place.
+    -->
+
+    <!--
+      WHY nothing else appears in this head (Trade-off): a progressive web app
+      manifest, an Apple touch icon, Open Graph and Twitter card metadata, and a
+      tag manager or usage tracking snippet are all absent because this
+      application sits behind a JWT authorizer at the gateway and is never a
+      public, shareable or installable page, so each would buy an asset request
+      that nothing consumes. A content security policy meta element is absent
+      for a sharper reason: its value has to name origins that differ per
+      environment, and this document is built once and served identically
+      everywhere, so a policy frozen into it could only ever be right for one
+      environment. Response headers are therefore set where they are free to
+      vary, in ui/nginx.conf for the container and at the CloudFront
+      distribution.
+    -->
+  </head>
+
+  <body>
+    <!--
+      WHY this id and no other (Assumption): ui/src/main.tsx resolves its mount
+      point with document.getElementById('root') and passes the result to
+      createRoot. Nothing verifies that the two spellings agree while the bundle
+      is built, so a rename fails at run time instead: React finds no container,
+      mounts nothing, and the page renders blank with only a console error to
+      account for it. The element is authored empty because the entire tree,
+      the antd ConfigProvider that applies the theme included, is constructed in
+      that module.
+    -->
+    <div id="root"></div>
+
+    <!--
+      WHY the module path is root relative (Assumption): Vite resolves a leading
+      slash against the project root, which here is ui, making this the
+      documented form and the entry of the module graph. The alternative, a
+      document relative path written with a leading dot and slash, resolves
+      against the URL of the page instead, so it drifts the moment the built
+      document is served from a nested path, which is precisely what the nginx
+      and CloudFront history fallback does when it returns this document for a
+      deep route such as /cards/:num. The module type is what makes the browser
+      request the file as an ES module; the build rewrites this reference to the
+      content hashed bundle it emits.
+    -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

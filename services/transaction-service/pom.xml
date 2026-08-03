@@ -215,6 +215,28 @@
     </dependency>
 
     <!--
+      Assumptions: Spring Boot 4 moved autoconfiguration out of the single
+      spring-boot-autoconfigure artifact into per-technology modules, so
+      FlywayAutoConfiguration now ships in
+      org.springframework.boot:spring-boot-flyway, which this starter contributes
+      along with spring-boot-jdbc. The two org.flywaydb artifacts below supply
+      the migration engine and the PostgreSQL dialect, but neither activates it.
+      Verified empirically against this exact dependency set: with the starter
+      absent, spring-boot-autoconfigure carries zero Flyway classes, no
+      FlywayAutoConfiguration is registered, every spring.flyway.* key in
+      src/main/resources/application.yml is inert, and the application starts and
+      reports healthy against a database on which no migration has ever run. On a
+      schema that is the system of record for posted money that failure is silent
+      and total, which is why the starter is declared explicitly rather than
+      assumed to arrive with the engine. No version appears here; the Spring Boot
+      parent manages this artifact.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+
+    <!--
       Assumptions: Flyway 10 moved database-specific support out of the core
       artifact into per-database modules, and that split persists at the 13.0.0
       the parent manages. `flyway-core` alone therefore compiles and starts but

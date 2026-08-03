@@ -1,0 +1,136 @@
+/**
+ * JPA keyed operations plus exactly two keyset browse queries. No offset paging.
+ *
+ * <p>Purpose: this package is the persistence boundary of the auth bounded
+ * context. It declares one Spring Data type, {@code UserRepository}, and that
+ * type reaches the {@code auth.users} table in two ways and in no third way.
+ * The first is keyed access through the primary key: find by identifier,
+ * existence check, save and delete. The second is keyset browsing: exactly two
+ * queries, one reading forward from a key and one reading backward from a key.
+ * The exclusions are as much the charter as the inclusions are, because each of
+ * them is load bearing rather than an oversight: no offset pagination of any
+ * kind, no page number, no total count, and no third browse direction.</p>
+ *
+ * <p>The neighbouring packages are shaped by that charter.
+ * {@code com.carddemo.auth.service} composes these operations into the
+ * behaviour transcribed from the baseline programs, and the two browse queries
+ * fill {@code com.carddemo.common.web.PageResponse}, whose first key, last key
+ * and has-next members are what a caller navigates by. A caller therefore never
+ * supplies a page number, because nothing on this boundary accepts one.</p>
+ *
+ * <p>WHY (non-obvious design decisions):</p>
+ *
+ * <p>Refactoring Rationale: the browse the baseline performs cannot be carried
+ * across unchanged, and what has to change is where the position is kept. In
+ * app/cbl/COUSR00C.cbl the position lives in a CICS cursor opened against the
+ * {@code USRSEC} file and in the identifier pair the program hands back to
+ * itself between screen turns, declared at 67-73, so it survives only for as
+ * long as a task and its cursor survive. A stateless request handler has
+ * neither. AAP transformation rule T5 resolves this by mapping the file verbs
+ * by category, collapsing a positioned browse onto a keyset-paginated query, so
+ * the position travels in the request as a key instead of being remembered
+ * between requests. Four verbs become two queries. {@code STARTBR} at 588-595
+ * opens the cursor and {@code ENDBR} at 689-691 releases it, and neither has a
+ * counterpart here, because a query carries its own predicate and closes its
+ * own result set. {@code READNEXT} at 621-629 and {@code READPREV} at 655-663
+ * are the two that do carry across, and they are the reason the count on this
+ * boundary is two rather than one.</p>
+ *
+ * <p>Assumptions: two is transcribed from the source rather than chosen here.
+ * The same program drives all four verbs from exactly two paragraphs,
+ * {@code PROCESS-PAGE-FORWARD} at 282 and {@code PROCESS-PAGE-BACKWARD} at 336,
+ * reached in turn from {@code PROCESS-PF7-KEY} at 237 and
+ * {@code PROCESS-PF8-KEY} at 260. Two directions in the baseline is two queries
+ * here, so a third query would describe a movement the source does not
+ * offer.</p>
+ *
+ * <p>Assumptions: the key both browse queries page by is {@code SEC-USR-ID},
+ * the eight-character field at offset zero of the 80-byte {@code SEC-USER-DATA}
+ * layout declared at app/cpy/CSUSR01Y.cpy:17-23. It is the whole key rather
+ * than the leading part of a compound one, which is what makes a single-column
+ * keyset predicate sufficient here: each of the three positioned verbs above
+ * passes that same field as both its {@code RIDFLD} and its {@code KEYLENGTH},
+ * so ordering by one column reproduces the sequence the baseline reads in.</p>
+ *
+ * <p>Assumptions: a page holds ten rows. app/cbl/COUSR00C.cbl:56-57 declares
+ * the screen array as {@code USER-REC OCCURS 10 TIMES}, and the forward
+ * paragraph fills it under an index bounded at eleven at 300-306, so ten is a
+ * property of the source and not a default chosen on this side.</p>
+ *
+ * <p>Alternatives Considered: offset pagination was rejected, and with it the
+ * Spring Data {@code Pageable}, {@code Page} and {@code Slice} types that
+ * express it. An offset query locates its starting row by counting from the
+ * beginning of the ordering on every request, so an insert or a delete landing
+ * ahead of that point between two requests shifts every later row by one
+ * position, and the reader then either skips a row it has never seen or
+ * receives one it has already seen. Keyset paging resumes from the key it last
+ * returned, so it is not exposed to that. The baseline is already keyed in
+ * precisely this way, which makes keyset paging the option that preserves the
+ * page boundary the source produces, and offset paging the option that changes
+ * it.</p>
+ *
+ * <p>Alternatives Considered: a total count query was rejected for a separate
+ * reason, which is that nothing in the source computes one. Having filled the
+ * ten screen rows, app/cbl/COUSR00C.cbl reads one further row at 311 purely as
+ * a probe and sets its next-page indicator from whether that read succeeded, at
+ * 313 and 315. Fetching a single row beyond the page is exactly what the
+ * has-next member of the page envelope reports, so counting the table would
+ * answer a question no screen asks and would add a second scan to every page
+ * turn.</p>
+ *
+ * <p>Assumptions: no password member is persisted here or queried by. The
+ * baseline layout carries {@code SEC-USR-PWD} at app/cpy/CSUSR01Y.cpy:21 and
+ * sign-on compares it directly; the target encodes identity verification
+ * against the managed user pool instead and keeps no password column on
+ * {@code auth.users}, so no query here selects it, filters on it or returns it.
+ * The baseline tree stays reference material and keeps its own behaviour, and
+ * the divergence is documented in AAP section 0.7.8.</p>
+ *
+ * <p>Assumptions: no commit boundary is declared in this package. The baseline
+ * file definition at app/csd/CARDDEMO.CSD:88-96 enables browsing while setting
+ * {@code JOURNAL(NO)} at 94 and {@code RECOVERY(NONE)} at 96, and none of the
+ * five auth programs issues a {@code SYNCPOINT} at all, so the source has no
+ * commit or back-out point around a browse to reproduce. Demarcation belongs to
+ * the service layer above, and placing it here would introduce a boundary the
+ * source does not have.</p>
+ *
+ * <p>Assumptions: the {@code auth} schema and its role grants exist before
+ * anything in this package runs. data-migration/sql/V0__schemas_and_roles.sql
+ * creates them and this module's own Flyway migration creates the table, so
+ * nothing here creates or alters a schema object.</p>
+ *
+ * <p>Assumptions: what this boundary does is held to the baseline by
+ * transcription against the program cited throughout and by this module's own
+ * tests, not by a comparison against captured output. tests/README.md:83-85
+ * states that the baseline's online programs cannot be exercised end to end
+ * without a CICS runtime, and every program this package serves is one of them,
+ * so no such comparison exists for the user list screen and none should be
+ * claimed for it. The page size, the key ordering, the two directions and the
+ * single probe read are all readable straight from the source, and those are
+ * the properties asserted exactly.</p>
+ *
+ * <p>Trade-offs: keyset paging gives up random access to an arbitrary page. A
+ * caller can step to the next page or back to the previous one but cannot jump
+ * to the fiftieth, and nothing here accepts an argument that would let it. That
+ * cost is accepted because the baseline screen offers the same two movements
+ * and no jump either, so nothing available to a user of the source is
+ * withdrawn.</p>
+ *
+ * <p>Trade-offs: the three docstring elements Rule 1 (Explainability) names at
+ * clauses L19 to L21 are deliberately absent rather than filled in. A package
+ * declaration accepts no parameter, returns no value and raises nothing, so no
+ * at-clause in this file could carry a true description, and an empty
+ * parameter, return or exception tag added to look complete would assert
+ * something false and would in any case be reported by the
+ * NonEmptyAtclauseDescription check. The purpose required at clause L18 and the
+ * rationale required at clause L40 are both stated above, which is what the
+ * gate at clause L43 asks of a file that declares no member. The prose
+ * convention is docs/CODE_DOCUMENTATION_STANDARD.md; the mechanical gate is
+ * config/checkstyle/checkstyle.xml, where JavadocPackage requires this file to
+ * exist and MissingJavadocPackage requires it to carry this comment. Those two
+ * checks sit at different levels, the first at Checker level because it
+ * inspects the directory and the second inside TreeWalker because it inspects
+ * this comment, so dropping either half would leave the module entry point
+ * clause at L15 only half enforced.</p>
+ */
+package com.carddemo.auth.repository;
