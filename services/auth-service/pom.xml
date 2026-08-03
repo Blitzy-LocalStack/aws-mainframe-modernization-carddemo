@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CardDemo Auth Service : Maven module descriptor
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  Purpose:
+    Build descriptor for the auth bounded context of the CardDemo mainframe to
+    AWS migration. The context carries sign-on plus user administration and is
+    the migration target of five COBOL programs: COSGN00C (sign-on), COUSR00C
+    (user list), COUSR01C (add user), COUSR02C (update user) and COUSR03C
+    (delete user). It owns the PostgreSQL schema named auth and ships exactly
+    one Flyway migration, V1__auth.sql.
+
+  Inherits, from com.carddemo:carddemo-services, itself parented to
+  org.springframework.boot:spring-boot-starter-parent:
+    * every dependency version, by way of three imported BOMs plus the
+      coordinates the aggregator manages explicitly;
+    * the Java release, and the source and reporting encodings;
+    * the Checkstyle execution bound to the Maven validate phase;
+    * spring-boot-starter-test at test scope, declared once in the aggregator's
+      own dependencies element and therefore present in all nine modules;
+    * the Surefire and Failsafe split, which routes classes carrying a Test
+      suffix to the test phase and classes carrying an IT suffix to
+      integration-test and verify, writing into Maven's default report
+      directories because the services CI workflow collects exactly those paths.
+
+  Contributes:
+    * the compile classpath this module actually uses, enumerated below;
+    * a container-backed test scope for the repository integration test;
+    * a bootable jar, produced by spring-boot-maven-plugin, which this module's
+      Dockerfile copies as a single artifact.
+
+  Gates:
+    The inherited Checkstyle documentation gate runs at validate, so it fires on
+    every local build, every CI build, and every container image build of this
+    module. Nothing in this file relaxes it. The written convention it enforces
+    is docs/CODE_DOCUMENTATION_STANDARD.md; the ruleset itself is
+    config/checkstyle/checkstyle.xml, located through a property the aggregator
+    defines and this file deliberately does not redefine.
+
+  WHY (non-obvious design decisions):
+
+    Assumptions: not one dependency below carries a version element, because the
+      aggregator's dependencyManagement supplies every one of them. Re-stating a
+      version here would create a second place to edit, and the two copies would
+      then drift apart silently at the next upgrade rather than failing loudly.
+
+    Trade-offs: this project pins exact versions rather than ranges, which costs
+      a deliberate edit to accept any upgrade. That cost is accepted because the
+      repository verifies migrated behaviour against byte-deterministic golden
+      masters, so a floating dependency could shift a comparison result with no
+      change to any source file. The same doctrine, and the same reasoning, is
+      recorded for the Python test harness in tests/README.md near line 180. It
+      is paraphrased here rather than quoted, for the reason in the next note.
+
+    Assumptions: XML 1.0 section 2.5 forbids two adjacent hyphen characters
+      anywhere inside a comment, on pain of the document not parsing at all.
+      Every horizontal rule in this file is therefore drawn with tildes, and the
+      command line flags named in the sources cited above are described in words
+      instead of being transcribed. A future reader who restores a hyphen rule
+      for visual consistency with this repository's other annotated files will
+      make this file unreadable to Maven, and the build will not start.
+
+    Alternatives Considered: maven-checkstyle-plugin is not re-declared in this
+      module. Configuring it per module was weighed and rejected, because the
+      aggregator already binds it for every module, and a second binding would
+      let the nine modules drift onto nine different rulesets. The suppressions
+      file is likewise not wired from here: checkstyle.xml pulls it in through
+      its own SuppressionFilter module, resolving the path against ${config_loc}
+      and declaring it non-optional so that a missing file stops the build.
+      Naming the same file again from Maven would create a competing wiring, and
+      the two could disagree about which suppressions are in force.
+
+    Assumptions: this module deliberately carries no .gitignore of its own. The
+      repository root already ignores target/ with an intentionally unanchored
+      pattern, chosen because Maven output only ever appears nested beneath
+      services/<module>/, so that single root policy protects this module from
+      its very first build onward.
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    WHAT: the coordinates that place this module inside the nine module reactor,
+          second in build order, immediately after common-lib.
+    WHY : Assumptions: the artifact identifier below has to match the aggregator's
+          own module entry character for character, because Maven correlates the
+          two by string equality and reports a module it cannot correlate as
+          missing rather than as misnamed. The relative path is stated explicitly
+          so that a build launched from inside this directory finds the parent on
+          disk instead of reaching out to a repository for it, which is what
+          keeps a single module build behaving the same as a reactor build.
+  -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>auth-service</artifactId>
+  <packaging>jar</packaging>
+
+  <name>CardDemo Auth Service</name>
+  <description>
+    Sign-on and user administration bounded context of the CardDemo migration,
+    carrying the behaviour of COBOL programs COSGN00C, COUSR00C, COUSR01C,
+    COUSR02C and COUSR03C, and owning the PostgreSQL schema named auth.
+  </description>
+
+  <dependencies>
+
+    <!--
+      WHAT: the shared kernel this context builds on, and the only sibling
+            module this descriptor is permitted to name.
+      WHY : (1) Assumptions: the sibling is built inside this same reactor, so
+            its version is by definition the reactor's own, and the property
+            below is what keeps the two in lockstep. A literal pin would go on
+            resolving to a previously installed artifact after the next version
+            bump, which fails quietly at run time instead of loudly at build
+            time. (2) Alternatives Considered: depending on any other service
+            module was rejected outright, because no service may reach into a
+            peer's domain package. That boundary is asserted by the ArchUnit
+            layering test that lives in common-lib, so a cross-service edge
+            added here would surface as an architecture failure rather than as
+            an honest build error.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      WHAT: the framework surface this context compiles against, declared in
+            full rather than leaned on transitively.
+      WHY : Assumptions: common-lib marks its own starters optional, so nothing
+            reaches this module through it. That single fact is why the list
+            below is long, and it is deliberate: a library that exported its
+            starters would put servlet and persistence types on the classpath of
+            every consumer, including consumers that must not have them. The
+            web starter in particular is absent from the aggregator's shared
+            dependencies for exactly that reason, since placing it there would
+            put servlet types on common-lib's own classpath and blunt the
+            layering rule that keeps web types out of domain packages.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+
+    <!--
+      WHAT: token validation for the identity provider that replaces the
+            baseline's own sign-on check.
+      WHY : Refactoring Rationale: the COBOL sign-on read a user record and
+            compared an eight character password held in clear text, so the
+            credential itself travelled and was stored in the open. This context
+            does not carry that field forward at all; it validates a signed token
+            and reads the group claim instead, which removes the credential from
+            the datastore rather than reproducing it in a new one.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+      WHAT: the health surface this module publishes.
+      WHY : Assumptions: two independent consumers poll it, the load balancer
+            target group and the container image's own health check, so it is a
+            deployment contract rather than a convenience and cannot be dropped
+            as unused simply because no application code imports it.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!--
+      WHAT: schema migration for the auth schema, as a matched pair.
+      WHY : Assumptions: Flyway 10 moved PostgreSQL support out of the core
+            artifact into a separate one, so core on its own does not fail the
+            build, it fails when the service first opens a connection to a real
+            database. That is precisely what makes the second coordinate easy to
+            drop and expensive to omit: the mistake is invisible until
+            deployment, where it presents as a database the service cannot
+            migrate rather than as anything a build would have caught.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!--
+      WHAT: the two artifacts this module needs present when it runs but must
+            never reference when it compiles.
+      WHY : Assumptions: no source file names the driver or the metrics registry.
+            The driver is reached through the connection URL and the registry is
+            picked up by autoconfiguration, with the common tags contributed by
+            common-lib. Keeping both off the compile classpath means an
+            accidental direct import of either one fails the build immediately,
+            which is the cheapest available guard against a leak of vendor
+            specific types into this context.
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+      WHAT: the container harness behind this module's repository integration
+            test.
+      WHY : (1) Alternatives Considered: an embedded or in-memory database was
+            rejected because V1__auth.sql declares a UUID column and a check
+            constraint that restricts the user type to the two values the
+            baseline security record allowed. A substitute engine can accept
+            that DDL and still enforce it differently, which would leave the
+            constraint asserted against something other than the engine that
+            actually runs. (2) Trade-offs: the Boot container integration is one
+            extra test dependency, accepted because its service connection
+            support derives the datasource settings from the container that was
+            just started, so the test carries no hand written connection
+            properties that could fall out of step with it. (3) Assumptions:
+            Testcontainers 2.x renamed every module artifact to carry a
+            testcontainers prefix, so the two coordinates below read
+            testcontainers-postgresql and testcontainers-junit-jupiter. Their
+            1.x names are absent from the Testcontainers BOM the aggregator
+            imports, so spelling them the old way would leave both dependencies
+            with no managed version and Maven would refuse to read this file.
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      WHAT: the dependencies this module is required NOT to have. Each absence
+            below is a decision with a reasonable alternative, so each is
+            recorded here rather than left for a reader to infer from silence.
+
+      Assumptions: the Boot test starter is not named above. The aggregator
+        declares it once, at test scope, in its own dependencies element, so it
+        already applies to all nine modules. Repeating it would add a second
+        declaration whose scope could later be edited independently.
+
+      Alternatives Considered: the ArchUnit test support is not named above
+        either. A module local architecture test was considered and rejected
+        because layering has exactly one owner, the single layering test in
+        common-lib, and every dependency added here brings a further obligation
+        to document it under this project's explainability rule.
+
+      Alternatives Considered: no annotation processor for boilerplate
+        generation is used. The obvious candidate generates accessors, and
+        generated members cannot carry the documentation this project requires
+        on every public member; Java records with hand written members give the
+        same brevity while remaining documentable.
+
+      Alternatives Considered: no mapping generator is used either. Its current
+        published release is a beta, and more decisively the copybook to DTO
+        mapping in this migration is not mechanical: it drops filler fields,
+        masks an account number to its last four digits, encrypts national and
+        government identifiers, and corrects three misspelled baseline field
+        names. Every one of those needs a justification recorded at the mapping
+        site, which a generated mapper has nowhere to put.
+
+      Alternatives Considered: no cloud SDK and no external configuration
+        property source are declared. Configuration arrives as environment
+        variables that the task definition injects from Parameter Store and
+        Secrets Manager, SPRING_DATASOURCE_URL among them, so the framework's
+        own relaxed environment binding already reads it. Adding a property
+        source library would pull in an SDK and open a second privileged read
+        path for configuration the platform has already resolved before the
+        process starts.
+
+      Assumptions: nothing for messaging is declared, because this context
+        neither publishes nor consumes a message; queue configuration belongs to
+        the authorization and batch contexts alone. The batch starter is absent
+        for the same reason, being scoped to the batch context.
+
+      Trade-offs: no retry library and no circuit breaker are declared. Spring
+        Framework 7 relocated retry into the framework core, which supplies the
+        Retryable and ConcurrencyLimit annotations and a programmatic retry
+        policy, switched on by EnableResilientMethods rather than by the older
+        enabling annotation, and configured through maxRetries rather than the
+        older attribute name, with total attempts being one more than that
+        number. The established third party library targets the previous Boot
+        major version, and the superseded framework module is redundant. A
+        circuit breaker is omitted as a considered trade: the only synchronous
+        calls here stay inside the private network behind an internal load
+        balancer with bounded timeouts, so a breaker would introduce a new
+        failure mode of its own without removing one that exists.
+
+      Assumptions: no cache tier, no streaming platform and no read replica
+        routing appear. The baseline has none of them, none is needed to match
+        its behaviour, and each would widen this module beyond the migration's
+        agreed scope.
+    -->
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!--
+        WHAT: the single plugin this module adds; every other plugin it runs,
+              Checkstyle and the two test runners included, is inherited.
+        WHY : Alternatives Considered: this plugin is present here and is
+              deliberately absent from common-lib. The asymmetry is the point.
+              This module is one of the eight deployables, and its Dockerfile
+              copies one self contained jar, so it needs the repackage step that
+              builds one. Running that same step on a library would move the
+              library's classes under BOOT-INF/classes, which is not a location
+              a dependent module can put on its classpath, so the library would
+              build successfully and then fail to be usable. The finished
+              artifact's name is left at the inherited default, because the
+              repackage step writes the bootable jar under that name and leaves
+              the original beside it under a longer one; the image build selects
+              the first by a plain jar glob, and renaming would break that
+              selection.
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

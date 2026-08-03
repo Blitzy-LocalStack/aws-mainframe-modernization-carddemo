@@ -1,0 +1,477 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  =============================================================================
+  services/transaction-service/pom.xml
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  Purpose:
+    Maven module descriptor for the LEDGER bounded context of the CardDemo
+    mainframe-to-microservices migration. It joins this module to the
+    com.carddemo:carddemo-services reactor, declares the module's dependency
+    set, and activates Spring Boot repackaging.
+
+    It carries the migration of four CICS transactions, whose COBOL sources are
+    the behavioural oracle and are never modified:
+      CT00  transaction list    app/cbl/COTRN00C.cbl  (699 lines)
+      CT01  transaction view    app/cbl/COTRN01C.cbl
+      CT02  transaction add     app/cbl/COTRN02C.cbl  (783 lines)
+      CB00  bill payment        app/cbl/COBIL00C.cbl  (572 lines)
+
+    The module owns the PostgreSQL schema `ledger` and its four tables:
+    transactions, daily_transactions, transaction_rejects and
+    transaction_category_balances. Their columns derive from the record layouts
+    in app/cpy/CVTRA05Y.cpy (TRAN-RECORD, RECLN 350) and app/cpy/CVTRA01Y.cpy
+    (TRAN-CAT-BAL-RECORD, 50 bytes, group-level composite key TRAN-CAT-KEY).
+
+    This module is a DEPLOYABLE Spring Boot application, not a library. That
+    single fact drives the plugin decision at the foot of this file.
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  WHY (non-obvious design decisions):
+
+    Assumptions: XML 1.0 section 2.5 forbids the two-character sequence of two
+      consecutive hyphens anywhere inside a comment. Verified empirically with
+      a conforming parser: a hyphen run, a hyphen-pair em-dash, an arrow whose
+      head closes the comment early, and a hyphenated line range such as
+      L281 then L371 written with a hyphen pair, are ALL rejected as
+      not-well-formed, while runs of `=` and `~` parse cleanly. Consequently
+      this file deviates from the house mid-rule character used at
+      .github/workflows/tests.yml L3, substituting `~` for it, and writes every
+      line range in the form "L281 to L371". The deviation is recorded here
+      rather than left silent, because an unexplained inconsistency with the
+      house geometry would read as carelessness instead of as a constraint.
+
+    Assumptions: the four canonical justification labels below are written in
+      the plural, hyphenated form required by the project's Explainability
+      rule. The singular variants that appear in .github/workflows/tests.yml
+      L19 and L23 and in .gitignore L59 are house exemplars that predate the
+      rule; the rule is the binding authority, so the plural form is used
+      uniformly and the two forms are never mixed inside this file.
+
+    Alternatives Considered: this module activates spring-boot-maven-plugin
+      while services/common-lib/pom.xml deliberately omits it. See the plugin
+      declaration for the full reasoning; the short form is that `repackage`
+      relocates classes under BOOT-INF/classes, which suits a deployable and
+      breaks a library.
+
+    Assumptions: every version this module needs is supplied by the parent, so
+      the only literal version element in this file is inside `parent`. The one
+      exception is a `project.version` property reference on the reactor
+      sibling, justified at its declaration.
+
+    Assumptions: four Spring Boot starters are re-declared here even though
+      common-lib already compiles against them, because common-lib marks them
+      optional and optional dependencies are not transitive. Omitting them
+      yields a NoClassDefFoundError at run time rather than a build failure.
+
+    Alternatives Considered: Lombok, MapStruct, a resilience library, a circuit
+      breaker, a cache tier and any sibling-service dependency are all absent
+      by decision, not by oversight. Each absence is justified in the block
+      that closes the dependency list.
+
+    Trade-offs: this module declares its own starters rather than inheriting a
+      wide compile classpath from common-lib. The cost is a longer dependency
+      list in each of the eight service POMs; the benefit is that a library
+      consumed by eight modules cannot silently place a servlet container on a
+      consumer that has no web tier.
+  =============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    Assumptions: the parent aggregator supplies the Java release level, the
+    resource encoding, the Checkstyle documentation gate bound to `validate`,
+    the Surefire and Failsafe executions, and every dependency version this
+    module consumes. `relativePath` points at the reactor parent on disk so a
+    module build resolves it without first installing it to the local
+    repository. This is the ONLY place a literal version element appears in
+    this file: a hard-coded version on any dependency or plugin below would
+    desynchronise from the reactor the moment the parent version is bumped,
+    and Maven would not report the drift because both values would still
+    resolve.
+  -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>transaction-service</artifactId>
+  <packaging>jar</packaging>
+
+  <name>CardDemo Transaction Service</name>
+  <description>
+    Ledger bounded context of the CardDemo migration. Owns the `ledger`
+    PostgreSQL schema (transactions, daily_transactions, transaction_rejects,
+    transaction_category_balances) and migrates CT00 transaction list
+    (COTRN00C), CT01 transaction view (COTRN01C), CT02 transaction add
+    (COTRN02C) and CB00 bill payment (COBIL00C) from CICS and VSAM to a
+    stateless REST service on Spring Boot.
+  </description>
+
+  <dependencies>
+
+    <!--
+      Assumptions: `project.version` is a property reference, not a literal, and
+      it resolves from the version inherited from `parent` above, so the reactor
+      sibling is always pinned to the same version as the module consuming it
+      and no version string is duplicated into this file. A hard-coded version
+      here would silently desynchronise from the reactor on the next parent
+      version bump.
+
+      Alternatives Considered: omitting the version entirely and relying on the
+      parent's dependencyManagement to supply it. Rejected because that is
+      correct only while such an entry exists: verified with a reactor build,
+      a sibling declaration with no version and no managing entry fails with
+      "'dependencies.dependency.version' for com.carddemo:common-lib:jar is
+      missing" and Maven then reports "The build could not read 1 project", so
+      the module becomes unbuildable rather than merely mis-versioned. The
+      property reference is correct whether or not the parent manages the
+      entry, because an explicit version and a managed version resolve to the
+      identical reactor value.
+
+      This is the ONLY intra-reactor dependency permitted for this module. It
+      supplies the shared kernel: the keyset page envelope that replaces the
+      COMMAREA browse cursor of app/cbl/COTRN00C.cbl L281 to L371, the date
+      edit validator standing in for the CALL to CSUTLDTC at
+      app/cbl/COTRN02C.cbl L393 and L413, the fixed-point money type, the
+      fixed-width and zoned-decimal codecs, and the shared error model.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      Assumptions: services/common-lib/pom.xml marks the four starters below
+      `optional`, and Maven does not propagate optional dependencies to
+      consumers, so none of them arrives transitively from the shared kernel.
+      common-lib does that deliberately: a plain compile-scope declaration
+      there would place a servlet container and a full security filter chain on
+      every one of the eight consuming modules, including any with no web tier,
+      which would dissolve the boundary the parent POM draws on purpose. The
+      accepted trade-off is that each consumer restates what it actually uses.
+
+      Trade-offs: omitting any one of these four does NOT break the build. It
+      breaks at run time, as a NoClassDefFoundError raised on the first request
+      that touches the missing tier, which is why the omission is easy to make
+      and expensive to diagnose. That asymmetry is the reason all four are
+      listed explicitly here instead of being left to inheritance.
+
+      Each is load-bearing for this bounded context: `web` serves the four
+      migrated transactions as REST endpoints; `validation` carries the field
+      edit chain transcribed from app/cbl/COTRN02C.cbl; `security` plus
+      `oauth2-resource-server` replace the client-echoed CDEMO-USER-TYPE field
+      of app/cpy/COCOM01Y.cpy L19 to L44 with a signed token claim, so the
+      client can no longer assert its own authority.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the four `ledger` entities map the fixed-width VSAM records
+      one field at a time, and the three keyset access paths replace the CICS
+      browse verbs of app/cbl/COTRN00C.cbl (STARTBR at L281, READNEXT at L286,
+      READPREV at L340, ENDBR at L322). The balance-affecting rewrite at
+      app/cbl/COBIL00C.cbl L379 sits inside one CICS syncpoint, so it needs a
+      single declarative transaction boundary rather than two independent
+      writes; JPA supplies that, and it supplies the optimistic version column
+      that replaces the before-image comparison the COBOL performs by hand
+      across the pseudo-conversational gap.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: two independent consumers poll the health endpoint this
+      starter publishes, and both are defined outside this module: the load
+      balancer target group that decides whether to route to a task, and the
+      HEALTHCHECK instruction in this module's own Dockerfile. Dropping the
+      starter would leave both probing a 404 and the container would be
+      reported unhealthy while the application itself was serving correctly.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: Flyway 10 moved database-specific support out of the core
+      artifact into per-database modules, and that split persists at the 13.0.0
+      the parent manages. `flyway-core` alone therefore compiles and starts but
+      fails at run time when it tries to resolve the PostgreSQL database type,
+      because no implementation is on the classpath to claim the jdbc:postgresql
+      URL. Both artifacts are required, and neither is re-pinned here: the
+      parent overrides the Spring Boot default of 12.4.0 up to 13.0.0, and
+      restating a version in this file would fork that decision.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the browser client is generated against the OpenAPI 3.1
+      contract this starter serves from
+      src/main/resources/openapi/transaction-api.yaml, so the contract is a
+      published interface of this module and not developer convenience. Version
+      3.0.3 is managed by the parent, since Spring Boot does not manage
+      springdoc.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: HikariCP and Flyway both instantiate the driver reflectively
+      from the JDBC URL, so no class in this module names a PostgreSQL type at
+      compile time. Runtime scope keeps the driver out of the compile classpath,
+      which prevents a repository or mapper from accidentally compiling against
+      a vendor-specific type and hard-wiring this bounded context to one engine.
+      Version 42.7.13 comes from the parent, which overrides the Spring Boot
+      default of 42.7.11.
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+      Assumptions: Spring Boot discovers this registry through
+      auto-configuration by its presence on the classpath; no application class
+      imports it. Runtime scope is therefore sufficient, and compile scope would
+      widen the compile classpath for a dependency nothing references. The
+      version resolves to 1.17.0 through the micrometer BOM that Spring Boot
+      4.1.0 imports transitively.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: the layering rules this module is held to are authored once,
+      at
+      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java,
+      but they cannot be inherited as a dependency: common-lib's POM binds no
+      maven-jar-plugin `test-jar` goal, so no test-jar artifact is produced and
+      a dependency declaring that type would fail to resolve. Re-declaring the
+      engine test-scoped here lets this module run its own copy of the rules
+      instead. Version 1.4.2 is managed by the parent, since Spring Boot does
+      not manage ArchUnit.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: the artifact identifiers below carry the `testcontainers-`
+      prefix because Testcontainers 2.x renamed every module, and the parent
+      imports the 2.0.5 BOM that Spring Boot 4.1.0 already pins. Verified with a
+      reactor build: the 1.x identifiers `junit-jupiter` and `postgresql` are
+      absent from that BOM, so declaring them versionless fails with
+      "'dependencies.dependency.version' for org.testcontainers:junit-jupiter:jar
+      is missing" and the POM becomes unreadable rather than merely stale. The
+      prefixed identifiers resolve to 2.0.5 at test scope with no version here.
+
+      Alternatives Considered: an in-memory database for the repository suite.
+      Rejected because the behaviour under test is engine-specific: the three
+      keyset access paths and the deliberately NON-UNIQUE index over the
+      processing timestamp, which stands in for the batch alternate index over
+      app/cpy/CVTRA05Y.cpy field TRAN-PROC-TS at zero-based offset 304, cannot
+      be exercised on H2. The RepositoryIT suite that Failsafe runs exists
+      precisely to prove those paths, so it must run against real PostgreSQL or
+      it proves nothing.
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      DELIBERATE EXCLUSIONS. Each entry below is an absence with a reasonable
+      alternative, recorded so that a reader does not restore it as an apparent
+      omission.
+
+      Alternatives Considered: Lombok, for generated accessors and builders.
+      Rejected because the generated members carry no Javadoc, so the very
+      accessors it produces would fail the Javadoc gate the parent binds at
+      `validate`; the tool would breach the documentation rule it was added to
+      save effort under. Java 21 record types with explicit constructors give
+      the same brevity while leaving every member documentable.
+
+      Alternatives Considered: MapStruct, for copybook-to-DTO mapping. Rejected
+      for two independent reasons. Its newest published release is a beta. More
+      decisively, the mapping in this module is not mechanical: it drops FILLER
+      (app/cpy/CVTRA05Y.cpy L18 and app/cpy/CVTRA01Y.cpy L10), masks the
+      primary account number to its last four digits, and carries money as a
+      string so no client parses it into a binary floating-point double. Each of
+      those needs a justification at the mapping site, and a generated mapper
+      has nowhere to put one.
+
+      Alternatives Considered: io.github.resilience4j:resilience4j-spring-boot3,
+      or org.springframework.retry:spring-retry, for retry and rate limiting.
+      Both rejected: the resilience4j artifact targets Spring Boot 3.x, and
+      spring-retry is superseded. Spring Framework 7.0.8, which arrives inside
+      the Spring Boot 4.1.0 parent, relocated the capability into the core
+      container as org.springframework.resilience.annotation.Retryable and
+      ConcurrencyLimit, enabled by EnableResilientMethods. Verified against the
+      shipped jar: the retry attribute is `maxRetries`, so total attempts equal
+      one plus that value, and the older EnableRetry annotation is not present
+      in the artifact at all. Adding either library would shadow a capability
+      already on the classpath.
+
+      Alternatives Considered: a circuit breaker. Rejected because the only
+      synchronous hops out of this module stay inside the private network behind
+      an internal load balancer under bounded connect and read timeouts. A
+      breaker would introduce an open-circuit state, and therefore a new failure
+      mode, without removing the failure mode it exists to contain.
+
+      Alternatives Considered: a Maven dependency on batch-service, which posts
+      to the same tables. Rejected on two grounds. batch-service and this module
+      are two views of one physical `ledger` schema and agree through column
+      names, types and decimal scale under a narrowly scoped cross-schema grant,
+      never through shared code. A code dependency would also breach the
+      ArchUnit rule that forbids importing another service's domain package, so
+      the layering test would fail the build. common-lib is the only permitted
+      intra-reactor dependency.
+
+      Assumptions: spring-boot-starter-batch, io.awspring.cloud and
+      software.amazon.awssdk are all absent because this bounded context owns no
+      queue and no job repository. It therefore configures no queue client and
+      no batch infrastructure, and the jobs that sweep `ledger` tables live in
+      batch-service. A Spring Batch starter here would create job repository
+      tables this schema does not own.
+
+      Alternatives Considered: a Redis or in-process cache tier. Rejected
+      because the VSAM baseline has no cache and adding one would introduce a
+      staleness window the golden-master comparison would correctly flag as a
+      parity failure. Kafka and Kinesis are likewise absent: the messaging this
+      migration needs is request and reply, not a stream, and this context
+      publishes neither.
+    -->
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <!--
+        Alternatives Considered: leaving this plugin undeclared and inheriting
+        only the parent's plugin management, exactly as
+        services/common-lib/pom.xml does. That is right for common-lib and wrong
+        here, and the asymmetry between the two POMs is deliberate rather than an
+        inconsistency.
+
+        The `repackage` goal rewrites the module artifact into an executable
+        archive whose application classes move from the archive root down to
+        BOOT-INF/classes, with dependencies nested under BOOT-INF/lib and a
+        launcher installed as the main class. A library resolved onto the
+        compile classpath of eight sibling modules must stay a plain archive,
+        because a consumer's compiler does not look under BOOT-INF/classes and
+        would see none of its types; that is why common-lib omits the plugin.
+
+        This module is the opposite case. It is a deployable whose container
+        runtime stage launches a single self-contained archive, so it MUST
+        activate the plugin to produce one. Without this note the two POMs look
+        arbitrarily different, and a future reader would be tempted to make them
+        match and break one of the two.
+
+        No version is declared: the Spring Boot parent's plugin management pins
+        it in lockstep with the framework version, and verified against a real
+        reactor build it resolves cleanly with no version stated here.
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+
+      <!--
+        DELIBERATELY NOT DECLARED HERE. As with the dependency exclusions, each
+        absence below is a decision with a plausible alternative.
+
+        Assumptions: the Checkstyle plugin is bound by the parent to the
+        `validate` phase, so the documentation gate fires on every local build
+        rather than only in continuous integration. The parent supplies engine
+        13.8.0, a configuration location of config/checkstyle/checkstyle.xml,
+        violation severity of warning, console output, and failure on violation.
+        Re-declaring the plugin in this module would silently override whichever
+        of those settings the redeclaration omitted, and weakening the gate is a
+        breach of the project's Explainability rule rather than a build
+        preference. In particular a suppressions location must never be set
+        here: the suppression file is wired from inside checkstyle.xml by a
+        filter module declared non-optional, so the configuration is fail-closed
+        and a module-local override would reopen it. No module-local Checkstyle
+        or suppressions file is added for the same reason.
+
+        Alternatives Considered: enforcing the layering invariant a second time
+        through the Checkstyle import-control module. Rejected because two
+        enforcement points for one invariant drift apart as soon as one is
+        edited, and the invariant is already expressed as an ArchUnit test, so
+        it executes on every build and cannot quietly rot the way a static
+        allow-list can.
+
+        Assumptions: Surefire and Failsafe are configured by the parent, which
+        runs Test-suffixed classes at the `test` phase and the
+        RepositoryIT-suffixed integration classes at `integration-test` and
+        `verify`. Continuous integration collects reports from the DEFAULT
+        output directories under this module's target directory, so relocating
+        or renaming either report directory here would leave the pipeline
+        collecting nothing while every test still passed locally. Neither plugin
+        is re-declared, and neither report directory is moved.
+
+        Assumptions: no coverage, formatter, shade, release or site plugin is
+        declared, and no compiler plugin is re-declared. The parent already sets
+        the compiler release level, and a shade plugin in particular would
+        conflict with the Spring Boot repackaging above by rewriting the same
+        artifact. No repository or plugin-repository element is declared either:
+        every coordinate in this file resolves from Maven Central, and this
+        project has no private registry to point at.
+
+        Assumptions: no properties block is declared. The parent owns the Java
+        release level and the source and resource encodings, and restating any
+        of them here would create a second place to change them.
+      -->
+    </plugins>
+  </build>
+
+</project>

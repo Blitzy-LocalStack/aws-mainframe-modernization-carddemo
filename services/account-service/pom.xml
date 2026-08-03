@@ -1,0 +1,623 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+ MODULE DOCSTRING : services/account-service/pom.xml
+=============================================================================
+
+ Purpose
+   Maven module descriptor for the CardDemo Account Service, the bounded
+   context that owns the account, customer and card cross reference data of
+   the AWS CardDemo mainframe to AWS migration. This file is the module's
+   dependency contract and nothing else: every class under src/main/java and
+   src/test/java compiles against exactly the artifact set declared below.
+   Declaring too little breaks those compiles; declaring more violates an
+   explicit architectural prohibition recorded at the point of exclusion.
+
+ Bounded context and owned data
+   PostgreSQL schema : account
+   Tables            : accounts, customers, card_xref
+   Record contracts  : app/cpy/CVACT01Y.cpy  ACCOUNT-RECORD    RECLN 300
+                       app/cpy/CVCUS01Y.cpy  CUSTOMER-RECORD   RECLN 500
+                       app/cpy/CVACT03Y.cpy  CARD-XREF-RECORD  RECLN 50
+   Money contract    : ACCT-CURR-BAL PIC S9(10)V99 at app/cpy/CVACT01Y.cpy
+                       line 7 is the normative exemplar. It becomes
+                       NUMERIC(12,2) in SQL, BigDecimal at scale 2 with
+                       RoundingMode.HALF_UP in Java, and a JSON string on the
+                       wire so that no client can route it through an
+                       IEEE 754 double.
+   Secondary access  : a non unique index on card_xref.account_id replaces
+                       the CXACAIX VSAM alternate index, described at
+                       app/csd/CARDDEMO.CSD line 64 as the alternate index to
+                       CCXREF via the account key.
+
+ COBOL programs migrated into this module (REFERENCE ONLY, never modified)
+   app/cbl/COACTVWC.cbl              941 lines, account view,   CICS CAVW
+   app/cbl/COACTUPC.cbl             4236 lines, account update, CICS CAUP
+   app/cbl/CBACT01C.cbl              430 lines, account file reader
+   app/cbl/CBACT03C.cbl              178 lines, cross reference reader
+   app/cbl/CBCUS01C.cbl              178 lines, customer reader
+   app/app-vsam-mq/cbl/COACCT01.cbl  620 lines, MQ account inquiry
+
+ Dependency contract
+   Sibling modules   : common-lib, and ONLY common-lib. It is the one
+                       permitted intra reactor dependency of this module, and
+                       it supplies every shared contract listed at its
+                       declaration below. No other service module may be
+                       depended on from here, because importing another
+                       bounded context's domain package would put two
+                       deployables in charge of one table.
+   Everything else   : third party artifacts whose versions are managed for
+                       this module by the parent, enumerated once at their
+                       declarations and never pinned again here.
+
+ Parameters (all inherited, none restated in this file)
+   groupId, version, java.version 21, maven.compiler.release 21, the source
+   and reporting encodings, the three imported bills of materials, and every
+   dependency and plugin version arrive from the parent aggregator at
+   services/pom.xml. This module contributes none of them, which is why no
+   groupId element, no version element on the project itself and no
+   properties section appear below.
+
+ Returns
+   A Spring Boot executable jar under target/, named from this module's
+   artifactId and its inherited version, produced by the repackage goal of
+   spring-boot-maven-plugin. That jar is the single artifact the runtime
+   stage of this module's Dockerfile copies.
+
+ Errors
+   The build fails, deliberately and with no tolerance, when the inherited
+   maven-checkstyle-plugin execution named checkstyle-documentation-gate
+   finds a missing or incomplete Javadoc comment, when Surefire reports a
+   failing *Test, or when Failsafe reports a failing *RepositoryIT. No
+   suppression, no relaxation and no severity downgrade of that gate appears
+   anywhere in this file, and none may be added.
+
+ Documentation convention
+   Rule 1 "Explainability" governs this file. XML has no docstring construct,
+   so the mandated analogue applies: this header block is the module
+   docstring, and every non obvious declaration below carries an adjacent
+   "WHY :" comment naming one of the four rule categories. The polyglot
+   convention is written up in docs/CODE_DOCUMENTATION_STANDARD.md.
+
+   Label form: this file uses the PLURAL labels "Alternatives Considered:",
+   "Refactoring Rationale:", "Assumptions:" and "Trade-offs:", spelled as
+   Rule 1 itself and the house convention in tests/README.md section 12
+   spell them. config/checkstyle/checkstyle.xml and its suppressions file use
+   the singular in file forms instead; that variant is deliberately NOT
+   followed here, so please do not harmonise this file toward it.
+
+   Comment safety: XML 1.0 section 2.5 forbids a doubled hyphen anywhere
+   inside a comment body, and a POM that breaks that rule fails to parse
+   before any goal runs. Every ruler in this file is therefore drawn with
+   "=" or "~", never with a hyphen, and every line range is written in the
+   form "L669 to L756".
+=============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+    WHAT: resolves the aggregator at services/pom.xml as this module's parent.
+    WHY : Assumptions: the explicit ../pom.xml relative path records that this
+          module is only ever built inside the nine module reactor rooted at
+          services/pom.xml. It is never resolved from a remote repository,
+          because com.carddemo:carddemo-services is never published. Leaving
+          the element off would make Maven probe the local and remote
+          repositories for a parent that does not exist there, turning a
+          missing sibling checkout into an opaque resolution failure instead
+          of a plain "file not found".
+    -->
+    <parent>
+        <groupId>com.carddemo</groupId>
+        <artifactId>carddemo-services</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!--
+    WHAT: this module's own coordinates, deliberately reduced to artifactId.
+    WHY : Assumptions: groupId and version are omitted ON PURPOSE because both
+          are inherited from the parent above. Restating either here would
+          create a second place that has to be edited at every version bump,
+          and the two would drift silently the first time only one was
+          updated. The artifactId matches the parent's modules entry character
+          for character, which is what lets "-pl account-service" select this
+          module in the reactor and in the CI workflow.
+    -->
+    <artifactId>account-service</artifactId>
+
+    <!--
+    WHAT: a Spring Boot executable jar rather than a plain library jar or a war.
+    WHY : Assumptions: the deployment unit is a container image whose runtime
+          stage copies one self contained jar and starts it with "java -jar".
+          A war would require a servlet container in the image, and the plain
+          library packaging the repackage goal starts from would produce a jar
+          with no embedded server and no manifest main class, so the container
+          would build successfully and then fail to start.
+    -->
+    <packaging>jar</packaging>
+
+    <name>CardDemo Account Service</name>
+    <description>
+        Account bounded context of the AWS CardDemo mainframe to AWS
+        migration. Owns the account, customer and card cross reference data in
+        PostgreSQL schema "account" (tables accounts, customers, card_xref)
+        and migrates six COBOL programs: COACTVWC (account view), COACTUPC
+        (account update), CBACT01C (account file reader), CBACT03C (card cross
+        reference reader), CBCUS01C (customer reader) and COACCT01 (the MQ
+        account inquiry extension).
+    </description>
+
+    <dependencies>
+
+        <!--
+        =============================================================================
+         Shared kernel: the ONE permitted intra reactor dependency
+        =============================================================================
+        WHAT: the com.carddemo shared kernel, resolved at the reactor's own
+              version.
+        WHY : Assumptions: common-lib is the only sibling module this one is
+              allowed to depend on, and it supplies every shared contract this
+              module consumes: money/Money and money/MoneyModule,
+              codec/FixedWidthCodec, codec/ZonedDecimalCodec,
+              codec/CopybookLayout, error/ApiError,
+              error/GlobalExceptionHandler, error/AbendDetail,
+              web/PageResponse, web/CorrelationIdFilter,
+              security/JwtRoleConverter, observability/MetricsConfig,
+              time/TimestampFormatter, validation/DateEditValidator and
+              validation/FieldValidationFlag. Each former COBOL COPY of a
+              shared concern resolves to exactly one type in that package and
+              is never re declared per service, which is the Java analogue of
+              compiling every program against a single copybook include path.
+        WHY : Assumptions: common-lib's GlobalExceptionHandler ALREADY maps
+              OptimisticLockException to HTTP 409 Conflict, which is precisely
+              the contract the account update path needs, so this module must
+              not re implement it. COACTUPC carries its own before image
+              comparison across the pseudo conversational gap: ACUP-OLD-DETAILS
+              at app/cbl/COACTUPC.cbl line 669, the 1205-COMPARE-OLD-NEW
+              paragraph, WS-DATACHANGED-FLAG at line 168 with its 88 level
+              DATA-WAS-CHANGED-BEFORE-UPDATE at line 521, and SYNCPOINT
+              ROLLBACK at line 4100 on the failed rewrite. Here that check is
+              expressed as a JPA version column and the 409 comes from the
+              shared handler.
+        WHY : Trade-offs: ${project.version} couples this module to the
+              reactor's version and makes it unbuildable on its own. That is
+              accepted because carddemo-services is never published, so a
+              literal version would buy nothing and add a second value to
+              forget to update.
+        NOTE: there is deliberately NO dependency on auth-service,
+              card-service, transaction-service, reference-service,
+              batch-service, authorization-service or reporting-service.
+              Importing another service's domain package is forbidden and is
+              enforced mechanically, not by review, in
+              services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+        -->
+        <dependency>
+            <groupId>com.carddemo</groupId>
+            <artifactId>common-lib</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!--
+        =============================================================================
+         Spring Boot starters: declared explicitly, versions inherited
+        =============================================================================
+        WHAT: the six starters this module's controllers, repositories and
+              security configuration need, each with no version element.
+        WHY : Assumptions: NOTHING in this block arrives transitively.
+              services/common-lib/pom.xml marks its own copies of
+              spring-boot-starter-web, spring-boot-starter-validation,
+              spring-boot-starter-security and
+              spring-boot-starter-oauth2-resource-server as optional, and
+              Maven does not propagate optional dependencies to consumers. A
+              reader who assumes transitivity and deletes a "redundant"
+              starter below breaks the compile of every controller and config
+              class in this module, so each one is restated here on purpose.
+        WHY : Assumptions: every version comes from
+              spring-boot-starter-parent 4.1.0 by way of the aggregator.
+              Adding a version element here would pin this module
+              independently of the other eight and reintroduce exactly the
+              drift a single parent exists to prevent.
+        -->
+
+        <!--
+        WHY : Assumptions: beyond the MVC stack, this starter is what puts a
+              Jackson ObjectMapper in the context for common-lib's MoneyModule
+              to register into. That registration is what makes every monetary
+              field serialise as a JSON string rather than a JSON number, so
+              removing this starter would not merely disable the controllers,
+              it would silently remove the money encoding guarantee.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: supplies the JPA optimistic locking this module
+              depends on. The version column on accounts and customers is the
+              native expression of the before image comparison COACTUPC
+              performs by hand, so the concurrency behaviour is inherited from
+              this starter rather than coded here.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: carries the Jakarta Validation constraints that the
+              sixteen paragraph validation family of app/cbl/COACTUPC.cbl is
+              transcribed into, running from 1200-EDIT-MAP-INPUTS through
+              1280-EDIT-US-STATE-ZIP-CD. Those constraints are the parity
+              surface for account update, so this starter is load bearing
+              rather than convenience.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: the filter chain this starter provides is what
+              replaces the client echoed CDEMO-USER-TYPE field of the CICS
+              communication area. In the baseline that field was storage the
+              terminal handed back, so a client could in principle assert its
+              own privilege level; here authority comes from a signed token
+              the client cannot forge.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: validates the Cognito issued JWT. SecurityConfig
+              pairs it with common-lib's JwtRoleConverter, which turns the
+              cognito:groups claim into Spring Security authorities and so
+              preserves the administrator and user split the baseline encoded
+              as SEC-USR-TYPE values A and U.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: the actuator health endpoint is probed by BOTH the
+              ALB target group and the HEALTHCHECK instruction in this
+              module's Dockerfile, so container level and load balancer level
+              health can never disagree about the same instance. Dropping this
+              starter breaks both probes at once, and the container would
+              report itself unhealthy rather than fail loudly at startup.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!--
+        =============================================================================
+         AWS integration: SQS plus wholly externalised configuration
+        =============================================================================
+        WHAT: the three io.awspring.cloud starters, versions supplied by the
+              spring-cloud-aws-dependencies 4.1.0 bill of materials the parent
+              imports.
+        WHY : Alternatives Considered: the legacy
+              org.springframework.cloud:spring-cloud-aws-* coordinate was
+              evaluated and rejected because it is unmaintained and publishes
+              nothing compatible with Spring Boot 4.1.0. io.awspring.cloud is
+              the maintained line, and because the parent imports its bill of
+              materials no version appears on any of the three entries below.
+        WHY : Assumptions: Parameter Store and Secrets Manager are the ONLY
+              sources of the datasource URL, the queue identifiers, the
+              Cognito issuer URI and the encryption key identifiers. Not one
+              of those values may be hardcoded, here or in any application
+              profile. The baseline already proves that endpoints are
+              configuration rather than code:
+              app/app-vsam-mq/cbl/COACCT01.cbl physical line 92 declares
+              01 QUEUE-INFO. holding four PIC X(48) queue name fields at lines
+              93 to 96, every one initialised VALUE SPACES and filled at run
+              time.
+        WHY : Assumptions: NO transactional outbox artifact is required here,
+              which is the exact opposite of authorization-service. COACCT01
+              sets MQGMO-SYNCPOINT at physical line 347 before the get and
+              MQPMO-SYNCPOINT at physical line 475 before the put, so get,
+              business logic and put already form one atomic unit of work and
+              there is no lost reply window to close.
+        -->
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-parameter-store</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-secrets-manager</artifactId>
+        </dependency>
+
+        <!--
+        =============================================================================
+         Persistence driver and schema migration
+        =============================================================================
+        WHAT: the PostgreSQL JDBC driver plus the Flyway pair that applies this
+              module's one migration, all versions inherited.
+        WHY : Assumptions: the driver is runtime scope because no application
+              class names a PostgreSQL type. Keeping it off the compile
+              classpath means a stray import of a vendor specific class cannot
+              creep into the domain or service layer, which is the same
+              boundary the ArchUnit rules assert.
+        WHY : Assumptions: flyway-database-postgresql is MANDATORY, not
+              optional. Flyway 10 and later moved PostgreSQL support out of
+              flyway-core, so core on its own fails at RUN time and not at
+              compile time. Omitting the companion therefore produces a green
+              build and an image that dies on first startup when it tries to
+              migrate, which is the most expensive possible place to discover
+              it. Both are left at the default compile scope on purpose so
+              that a mis scoped runtime entry cannot quietly drop out of the
+              packaged jar.
+        WHY : Assumptions: this module owns exactly one migration,
+              V1__account.sql, creating accounts, customers and card_xref
+              inside the account schema. The schema itself, its owning role
+              and its grants are bootstrapped separately by
+              data-migration/sql/V0__schemas_and_roles.sql, so the migration
+              here must never attempt to create a schema; the two would then
+              race during a parallel deployment.
+        WHY : Refactoring Rationale: encryption at rest and point in time
+              recovery are corrections rather than ports. Every CICS file
+              resource behind these tables is defined with no recovery and no
+              journalling in app/csd/CARDDEMO.CSD, at line 9 for ACCTDAT,
+              line 46 for CCXREF, line 59 for CUSTDAT and line 72 for CXACAIX,
+              so there was nothing to carry across. Aurora supplies both, and
+              the customer identifier columns land as encrypted BYTEA.
+        -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+
+        <!--
+        =============================================================================
+         Published API contract and metric export
+        =============================================================================
+        WHAT: springdoc, which serves this module's OpenAPI document, and the
+              Prometheus meter registry, both versions inherited.
+        WHY : Assumptions: springdoc serves the OpenAPI 3.1 contract kept at
+              src/main/resources/openapi/account-api.yaml. That contract is the
+              artifact ui/src/api/accounts.ts is written against, so it is a
+              cross boundary commitment rather than documentation, and dropping
+              this dependency would leave the browser client compiling against
+              a contract nothing publishes.
+        WHY : Assumptions: the registry is runtime scope because no application
+              class references a Prometheus type directly. Common tags are
+              applied centrally by common-lib's MetricsConfig, so the only
+              thing this module has to contribute is the exporter on the
+              classpath.
+        -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+        =============================================================================
+         Test scope: unit, security, integration and architecture
+        =============================================================================
+        WHAT: the six test only artifacts the *Test and *RepositoryIT classes
+              of this module need, every version inherited.
+        WHY : Assumptions: the parent already splits the two test phases, so
+              nothing below needs a plugin binding here. Surefire runs *Test in
+              the test phase and Failsafe runs *RepositoryIT in integration
+              test and verify, writing to target/surefire-reports and
+              target/failsafe-reports. Those two directories are collected by
+              .github/workflows/services-ci.yml and must never be relocated.
+        -->
+
+        <!--
+        WHY : Assumptions: supplies JUnit 5, Mockito, AssertJ and MockMvc, the
+              last of which is what lets the controller tests be sliced with
+              @WebMvcTest instead of booting the full context and a database
+              for what are request and response assertions.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: the controller tests must assert the administrator
+              and user authority split that replaces the client echoed
+              CDEMO-USER-TYPE field, and that needs the mock JWT and mock
+              authority support this artifact provides. Without it the only way
+              to exercise an authority boundary would be to obtain a real token
+              from an identity provider during the test run, which would make
+              the suite depend on a live external service.
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+        WHAT: the three Testcontainers modules that back the integration tests.
+        WHY : Alternatives Considered: an in memory database, H2 in particular,
+              was evaluated and rejected because the *RepositoryIT classes must
+              exercise real PostgreSQL behaviour that H2 does not reproduce:
+              NUMERIC(12,2) fixed point semantics, BYTEA columns, a genuine
+              non unique secondary index standing in for the CXACAIX alternate
+              index, and JPA version conflict detection under a real
+              concurrent update. A test that passes on H2 and fails on Aurora
+              is worse than no test, because it reads as parity evidence.
+        WHY : Assumptions: the artifactIds carry a testcontainers prefix
+              because Testcontainers 2.x renamed every module. The bare 1.x
+              names junit-jupiter, postgresql and localstack are absent from
+              testcontainers-bom 2.0.5, so declaring those spellings without a
+              version yields a fatal missing version model error and the build
+              never starts. Verified against the managed artifactId list of
+              org/testcontainers/testcontainers-bom/2.0.5 and independently
+              against spring-boot-dependencies 4.1.0, which sets the managed
+              Testcontainers version to 2.0.5.
+        WHY : Assumptions: the LocalStack module is here because the inquiry
+              listener test needs a real SQS endpoint to observe delete on
+              success and visibility timeout behaviour. A mocked client would
+              assert that the code called a method, not that a message was
+              actually removed from a queue, and redelivery is precisely the
+              behaviour being preserved from the baseline.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-localstack</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+        WHY : Assumptions: ArchUnit turns three architectural boundaries into
+              build failures rather than review comments: no AWS SDK type and
+              no web type inside a domain package, no import of another
+              service's domain package, and no float or double anywhere in the
+              money path. The last is the one that matters most here, because
+              a floating point balance produces plausible numbers that are
+              quietly wrong, and ACCT-CURR-BAL PIC S9(10)V99 at
+              app/cpy/CVACT01Y.cpy line 7 is exact fixed point by contract.
+        -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     DELIBERATE EXCLUSIONS
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     Everything named in this block is ABSENT ON PURPOSE. Each entry records
+     why, so that a later reader does not add it back as an oversight. Nothing
+     here appears in any dependency or plugin element above or below.
+
+     Lombok
+       Alternatives Considered: Lombok was evaluated and rejected because
+       generated accessors cannot carry the Javadoc that Rule 1's validation
+       gate requires, and the inherited Checkstyle configuration runs
+       MissingJavadocMethod without allowing missing property Javadoc, so every
+       generated getter would fail the gate. Java 21 record types plus explicit
+       constructors give the same brevity with members that can be documented.
+
+     MapStruct
+       Alternatives Considered: rejected for two independent reasons. First, its
+       most recent published release is a beta. Second and decisively, the
+       copybook to DTO mapping in this module is not mechanical: it drops
+       FILLER (for example FILLER PIC X(178) at app/cpy/CVACT01Y.cpy line 17
+       and FILLER PIC X(168) at app/cpy/CVCUS01Y.cpy line 23), masks the
+       primary account number to its last four digits, never serialises a card
+       verification value, encrypts CUST-SSN and CUST-GOVT-ISSUED-ID, and
+       renames the misspelled ACCT-EXPIRAION-DATE of app/cpy/CVACT01Y.cpy
+       line 11. Every one of those decisions needs an inline justification at
+       the mapping site, and a generated mapper has nowhere to hold it.
+
+     resilience4j, spring-retry, and any circuit breaker
+       Alternatives Considered: io.github.resilience4j:resilience4j-spring-boot3
+       targets Spring Boot 3.x and was rejected on that basis, and the
+       superseded spring-retry was rejected because Spring Framework 7, which
+       arrives through the Boot 4.1.0 parent, moved retry into the framework
+       core. Any class here that needs declarative retry uses @Retryable with
+       the attribute maxRetries, where total attempts equal one plus that
+       value, enabled by @EnableResilientMethods on a configuration class. It
+       is NOT @EnableRetry and NOT maxAttempts; those are the older API and
+       will not activate. A circuit breaker is omitted as well, because the only
+       synchronous hops are inside the VPC behind an internal load balancer
+       with bounded timeouts, so a breaker would add a failure mode without
+       removing one.
+
+     spring-boot-starter-batch
+       Assumptions: chunk oriented jobs and the durable job repository belong
+       to batch-service. This module has no BatchConfig and no job repository,
+       and the posting unit of work that needs cross schema write grants is
+       owned there, not here.
+
+     redis, ElastiCache, kafka and kinesis clients
+       Assumptions: the baseline has neither a cache tier nor a streaming
+       platform, so neither is needed for parity. The messaging requirement is
+       request and reply, which SQS satisfies through the starter declared
+       above.
+
+     A read replica or any second datasource
+       Trade-offs: a replica would add cost and replica lag semantics for no
+       parity benefit, since the baseline has no such split. Reporting reads
+       are served from the writer through read only cross schema views owned by
+       reporting-service, which keeps every read consistent with the write that
+       preceded it.
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -->
+
+    <build>
+        <plugins>
+            <!--
+            WHAT: the sole plugin this module declares, version inherited from
+                  the Boot parent's plugin management.
+            WHY : Assumptions: the repackage goal rewrites the plain library
+                  jar into the executable jar whose manifest names the boot
+                  launcher, and that jar is the single artifact the runtime
+                  stage of this module's Dockerfile copies. Without this plugin
+                  the module still builds, so the omission would surface only
+                  as a container that starts and immediately reports no main
+                  manifest attribute.
+            WHY : Assumptions: maven-checkstyle-plugin, maven-surefire-plugin
+                  and maven-failsafe-plugin are configured once in the parent
+                  at services/pom.xml and inherited here UNCHANGED. In
+                  particular the Checkstyle execution named
+                  checkstyle-documentation-gate is bound to the validate phase
+                  so the documentation rule is enforced on every local build
+                  and not only in CI, it runs the Checkstyle engine against
+                  config/checkstyle/checkstyle.xml, and it stops the build on
+                  any violation at warning severity or above. Re declaring any
+                  of those three here would either duplicate the binding, so
+                  the gate runs twice, or silently loosen it, so please do not.
+                  For the same reason no suppressions location is set here: the
+                  suppression set is reached only through the suppression
+                  filter inside checkstyle.xml, which resolves it from the
+                  configuration directory and is declared non optional so a
+                  missing file fails the build instead of disabling
+                  suppression.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

@@ -1,0 +1,574 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+ CardDemo modernization: Maven module descriptor for the REPORTING AND
+ STATEMENT bounded context, published as com.carddemo:reporting-service and
+ rooted at the Java package com.carddemo.reporting.
+
+ PURPOSE
+ One Spring Boot service that re-expresses four COBOL programs. Each is cited
+ by path and line so a maintainer can diff intent against the baseline:
+
+   app/cbl/CORPT00C.cbl   Online report request screen. Its ad hoc job
+                          submission is assembled as PIC X(80) JCL card image
+                          literals at L100 to L125 and handed to CICS with
+                          EXEC CICS WRITEQ TD QUEUE('JOBS') at L517 to L518.
+   app/cbl/CBTRN03C.cbl   Transaction detail report writer. FD-REPTFILE-REC is
+                          PIC X(133) at L85, which is where the 133 column
+                          report width comes from; COPY CVTRA07Y. at L113.
+   app/cbl/CBSTM03A.CBL   Statement generator, writing TWO formats:
+                          FD-STMTFILE-REC PIC X(80) at L45 and
+                          FD-HTMLFILE-REC PIC X(100) at L47.
+   app/cbl/CBSTM03B.CBL   Statement subprogram, CALLed from CBSTM03A at L351,
+                          L377 and L401.
+
+ SUPPORTING CONTRACTS
+   app/cpy/CVTRA07Y.cpy   The 133 column report layout and its COBOL edit
+                          masks: L30 TRAN-REPORT-AMT PIC -ZZZ,ZZZ,ZZZ.ZZ, and
+                          L54, L60, L66 PIC +ZZZ,ZZZ,ZZZ.ZZ.
+   app/cpy/COSTM01.CPY    The 350 byte card ordered statement view. TRNX-KEY
+                          at L21 to L23 is card number then transaction id,
+                          and the trailing FILLER PIC X(20) at L36 occupies
+                          bytes 331 to 350.
+   app/jcl/CREASTMT.JCL   L87 to L91 STMTFILE with DCB LRECL=80, and L92 to
+                          L96 HTMLFILE with DCB LRECL=100: the origin of the
+                          two statement output formats.
+   app/csd/CARDDEMO.CSD   L499 to L505 DEFINE TDQUEUE(JOBS), the submission
+                          path this service replaces.
+
+ Every path above is REFERENCE-ONLY: the COBOL baseline is the behavioural
+ oracle for functional parity and is never modified by this migration. The
+ uppercase .CBL, .CPY and .JCL spellings are the on disk spellings, so a
+ lowercase citation is a dead reference.
+
+ WHAT THIS MODULE OWNS
+ Nothing in the database: no schema, no table, no index, no constraint and no
+ grant. Alone among the nine aggregator modules it owns no relational objects.
+ It reads read-only cross-schema views through a database role that holds
+ SELECT-only grants, and both the views and the grants are bootstrapped by
+ data-migration/sql/V0__schemas_and_roles.sql.
+
+ Assumptions: XML 1.0 §2.5 forbids two consecutive hyphens anywhere inside a
+ comment, and this file was verified against that rule with xmllint. The house
+ comment style used at .gitignore L40 to L65 separates clauses with a double
+ hyphen and draws hyphen rulers, and BOTH of those forms are hard not well-formed
+ parse errors in XML. This file therefore deviates from house style
+ deliberately: rules are drawn with '=', mid-rules with '~', line ranges are
+ written "L499 to L505", and prose takes a colon or the word "because" where it
+ would naturally take a dash. Consequence of ignoring this: a future reader who
+ "restores" the house dash style makes this POM unparseable, and because Maven
+ reads it before doing anything else, that breaks every build in the entire
+ nine module aggregator rather than only this module.
+=============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+  Assumptions: relativePath is left at its default of ../pom.xml, which resolves
+  the aggregator at services/pom.xml on disk. The grandparent
+  org.springframework.boot:spring-boot-starter-parent 4.1.0 is reached through
+  that aggregator and supplies Java 21, the UTF-8 source and reporting
+  encodings that the Checkstyle Checker charset must agree with, and every
+  managed dependency version, so nothing here restates any of them. An empty
+  relativePath element was rejected because com.carddemo:carddemo-services is
+  never published to a repository, so a repository lookup for it could only
+  fail. The consequence of this choice is a hard layout contract: this module
+  must remain a direct child directory of services/.
+  -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>reporting-service</artifactId>
+  <name>CardDemo Reporting Service</name>
+  <description>
+    Transaction reports and account statements for the CardDemo migration.
+    Serves the 133 column transaction detail report and the plain text plus
+    HTML statement pair, and starts on demand report executions. Reads
+    read-only cross-schema views under a SELECT-only database role and owns no
+    relational objects of its own.
+  </description>
+
+  <dependencies>
+
+    <!--
+    Refactoring Rationale: Rule T2 of the migration replaces the COBOL copybook
+    include path with Java imports, so one former COPY statement becomes exactly
+    one type import from the single package that owns that contract. Under COBOL
+    every program that needed a layout re-included it, which meant a layout
+    change had to be re-verified program by program; a shared kernel module
+    makes those contracts single-sourced instead. Money, codecs, the error
+    model, the keyset page envelope, the JWT role converter, the timestamp
+    formatter and the validation flags are consumed only from
+    com.carddemo.common.* and are never re-declared in this module:
+    money.Money and money.MoneyModule, codec.CopybookLayout and
+    codec.FixedWidthCodec, error.ApiError and error.GlobalExceptionHandler and
+    error.AbendDetail, web.CorrelationIdFilter and web.PageResponse,
+    security.JwtRoleConverter, observability.MetricsConfig,
+    time.TimestampFormatter, validation.DateEditValidator and
+    validation.FieldValidationFlag.
+
+    This is the ONLY intra-project dependency. No module may depend on another
+    service module, and that prohibition is an ArchUnit test rather than a
+    convention, precisely because it would otherwise be tempting here: every
+    view this module reads is derived from tables that other services own.
+    Agreement with those services is reached through the physical database
+    views, never through compiled code.
+
+    Assumptions: the parent aggregator does not manage the intra-project
+    coordinate com.carddemo:common-lib in its dependencyManagement, so the
+    version is stated on this one dependency. The value used is the
+    project.version property inherited from the parent element above, so the
+    module version and the sibling version are the same expression and cannot
+    drift apart; a literal version string could.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: JPA is present in a module that never writes, which looks
+    contradictory until the mapping is named. Hibernate arrives with this
+    starter and supplies the Immutable annotation that marks each read-only
+    view projection, so an accidental write is rejected in the persistence
+    layer instead of travelling to the database and failing there against the
+    SELECT-only grant. The projections are views, not tables, so schema
+    generation stays off and this module contributes no DDL.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: the report request carries a date range, held in the baseline
+    as the PARM-START-DATE and PARM-END-DATE card image fields at
+    app/cbl/CORPT00C.cbl L105 to L112. Those dates were edited by COBOL
+    paragraph logic before the job was ever submitted, so the same rejection
+    must happen before an execution starts here. Bean Validation supplies the
+    declarative half and com.carddemo.common.validation.DateEditValidator
+    supplies the calendar half; both are needed because neither expresses the
+    other's rules.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: identity is a validated Cognito JWT, and the cognito:groups
+    claim is converted to Spring Security authorities by
+    com.carddemo.common.security.JwtRoleConverter. This replaces the
+    CDEMO-USER-TYPE field of the CICS communication area at
+    app/cpy/COCOM01Y.cpy L26, whose admin and user domain is fixed by the
+    condition names at L27 and L28 of that copybook. The replacement is a
+    security correction rather than a like for like port: the communication
+    area at L19 to L44 was storage the terminal echoed back, so a client could
+    in principle assert its own user type, whereas a signed group claim cannot
+    be asserted by the client at all.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: two independent consumers probe the /actuator/health endpoint
+    this starter publishes, and they fail in different places. The container
+    HEALTHCHECK in this module's Dockerfile uses it to decide whether the task
+    is serving, and the ALB target group uses it to decide whether to route to
+    the task at all. Removing this dependency therefore breaks the container
+    health check and the load balancer health check together, and the second
+    failure looks like a networking fault rather than a missing dependency,
+    which is why the coupling is recorded here rather than left to be
+    rediscovered.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: this module connects to the same Aurora PostgreSQL cluster as
+    the six owning services, but under a role holding SELECT-only grants, and
+    it reads only. That is the deliberate asymmetry against those services: a
+    driver is required, a migration tool is not. That absence is not an
+    oversight and is argued in the consolidated absences block below.
+    Runtime scope is used because no compiled class in this module names a
+    driver type; only the connection URL, supplied at runtime, selects it.
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+    Assumptions: the contract this publishes is OpenAPI 3.1, authored at
+    src/main/resources/openapi/reporting-api.yaml, and ui/src/api/reporting.ts
+    is written against it. That makes it a cross-boundary contract consumed by
+    a separately built and separately deployed artifact, not internal
+    documentation, so a breaking edit to it breaks the browser client rather
+    than merely dating a document.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: metrics carry the service, environment and version common tags
+    applied centrally by com.carddemo.common.observability.MetricsConfig, so
+    this module adds a registry and no tagging logic of its own. The baseline
+    had no metrics tier at all, only job log SYSOUT, so nothing here is a port
+    and there is no legacy naming to preserve. Runtime scope is used because
+    the registry is discovered by autoconfiguration and no compiled class in
+    this module names a Prometheus type.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Refactoring Rationale: the baseline submitted an ad hoc report job by
+    writing 80 byte JCL card images to an extrapartition transient data queue.
+    app/csd/CARDDEMO.CSD defines that queue at L499 to L505, with
+    DDNAME(INREADER) and, critically, ERROROPTION(IGNORE) both on L501 and
+    RECORDSIZE(80) on L502. Three things were wrong with that approach, and all
+    three are why the transport changes instead of being reimplemented.
+
+    First, ERROROPTION(IGNORE) silently swallows write failures, so a request
+    could be accepted at the screen and never reach the job entry subsystem
+    with nothing anywhere recording the loss. app/cbl/CORPT00C.cbl even carries
+    an 'Unable to Write TDQ (JOBS)...' message at L531 that the IGNORE option
+    makes unreachable for exactly the failure it names. Second, the request was
+    serialised as raw JCL text rather than as data: the card images are built
+    as PIC X(80) VALUE literals in double quotes at L100 to L125, so the sort
+    field positions TRAN-CARD-NUM,263,16,ZD on L100 and TRAN-PROC-DT,305,10,CH
+    on L102 were compiled into presentation strings. Third, the queue is fire
+    and forget, leaving no handle with which to observe, address or retry a run.
+
+    states:StartExecution answers all three: it accepts typed input instead of
+    card images, it returns an execution ARN that makes the run observable and
+    addressable, and it raises an exception instead of ignoring an error, so a
+    failed submission can no longer be lost.
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sfn</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: this module writes three fixed width artifacts to object
+    storage, and every one of those widths is a contract inherited from the
+    baseline rather than a choice made here. app/jcl/CREASTMT.JCL declares
+    STMTFILE with DCB LRECL=80 at L87 to L91 and HTMLFILE with DCB LRECL=100 at
+    L92 to L96, which is the origin of statements being produced in BOTH a
+    plain text and an HTML form; app/cbl/CBSTM03A.CBL agrees exactly, carrying
+    FD-STMTFILE-REC PIC X(80) at L45 and FD-HTMLFILE-REC PIC X(100) at L47. The
+    transaction detail report is the third artifact, at the 133 columns fixed by
+    FD-REPTFILE-REC PIC X(133) at app/cbl/CBTRN03C.cbl L85. Object storage
+    replaces the catalogued sequential datasets those DD statements allocated,
+    so the bytes are preserved even though the container for them is not.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+
+    <!--
+    Assumptions: every endpoint and identifier this service needs is resolved at
+    runtime from Terraform outputs, because no service hard-codes an endpoint.
+    Parameter Store supplies the non secret values, namely the datasource URL,
+    the state machine ARN for the report execution, the output bucket name and
+    the JWT issuer URI; Secrets Manager supplies the database credentials for
+    the SELECT-only role and the customer managed key references. That split is
+    what makes the project constraint of no committed secrets structurally true
+    rather than merely observed: there is no configuration file in this module
+    into which a credential could be pasted, so none of these values appears in
+    application.yml, in a tfvars file or anywhere else under version control.
+    -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-parameter-store</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-secrets-manager</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+    Assumptions: a controller slice test has no token exchange available to it,
+    yet authorization is part of the behaviour under test, since the report and
+    statement endpoints are guarded by the cognito:groups authorities described
+    at the security starter above. This artifact mints a JWT directly, so the
+    slice exercises the same JwtRoleConverter path production uses rather than
+    disabling security to reach the handler, which would leave the guard
+    untested precisely where it matters.
+    -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Trade-offs: a real PostgreSQL container is materially slower to start than
+    an in-memory database, and that cost is accepted because an in-memory
+    database cannot prove either of the two properties on which this module's
+    correctness actually rests.
+
+    It cannot prove that the SELECT-only database role genuinely CANNOT write,
+    because a substitute engine does not implement the same grant model and
+    would report success on precisely the write that production must reject,
+    turning the one test that guards this module's read-only contract into a
+    test that passes for the wrong reason. And it cannot prove that the
+    read-only views return the required card number then processing date
+    ordering, which is the baseline's own key order rather than a preference:
+    TRNX-KEY at app/cpy/COSTM01.CPY L21 to L23 is card number then transaction
+    id, and the sort fields compiled into app/cbl/CORPT00C.cbl name
+    TRAN-CARD-NUM at position 263 on L100 and TRAN-PROC-DT at position 305 on
+    L102. A slower test that is able to fail for the right reason is worth more
+    than a fast one that cannot fail at all.
+
+    Assumptions: these are the Testcontainers 2.x coordinates. The 2.x line
+    renamed every module to the testcontainers prefixed form, so the 1.x names
+    'postgresql' and 'junit-jupiter' are absent from
+    org.testcontainers:testcontainers-bom 2.0.5, which the parent imports.
+    Verified directly against that BOM rather than assumed: it declares
+    testcontainers-junit-jupiter and testcontainers-postgresql and does not
+    declare the bare names at all. Using the 1.x names would leave both
+    dependencies with no managed version and break the build, and the resulting
+    error names a missing version rather than a wrong artifact id, so it reads
+    as a parent misconfiguration. That misdirection is why the rename is
+    recorded here instead of being left to be rediscovered.
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+    Assumptions: the layering and money prohibitions are enforced as executable
+    tests rather than as conventions, so a violation fails the build instead of
+    depending on a reviewer noticing it. The rules inherited from
+    services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+    are that the money path admits no float, no double and no JSON number; that
+    no service may import another service's domain package; and that a domain
+    package may not import AWS SDK or web types. The third rule is load bearing
+    in this module specifically, because it holds both an AWS SDK client and web
+    controllers, so its view projections are exactly where such an import would
+    otherwise creep in. That test file's path is itself part of the contract and
+    must not be relocated, because the rules are discovered by package.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+    =============================================================================
+    DELIBERATELY ABSENT. Every entry below is a decision rather than an
+    omission, recorded here so that a future reader does not helpfully add one
+    back. The dependency set above is complete: nothing further belongs in it.
+    =============================================================================
+
+    org.flywaydb:flyway-core and org.flywaydb:flyway-database-postgresql
+    Alternatives Considered: (a) own a schema and migrate it, as the other seven
+    services do, and as the parent's managed versions for both artifacts would
+    make trivial. Rejected because this module is assigned NO owned tables. It
+    reads read-only cross-schema views under a role holding SELECT-only grants,
+    and both the views and the grants are bootstrapped by
+    data-migration/sql/V0__schemas_and_roles.sql. A migration tool here would
+    claim ownership of objects this module must not own, and two owners of one
+    object is how a schema drifts. (b) add an Aurora read replica so that
+    reporting reads never touch the writer. Rejected because a replica adds cost
+    and replica-lag semantics for no parity benefit: the baseline read the very
+    same VSAM clusters the online programs read, so a replica would introduce a
+    staleness window the baseline never had and the golden masters would have no
+    way to express. Consequence to act on rather than work around: if a required
+    view is missing at runtime that is a data-migration defect to be reported,
+    not something to create from here. A src/main/resources/db/migration
+    directory in this module is an affirmative defect for the same reason.
+
+    org.springframework.boot:spring-boot-starter-batch
+    Refactoring Rationale: the parent manages this at 4.1.0 and batch-service
+    declares it, but what changed for reporting is the direction of control.
+    This module STARTS a Step Functions state machine execution and returns; it
+    does not run the job inline. batch-service owns the Spring Batch
+    JobRepository and the batch.batch_run step ledger, which together supply the
+    restart semantics that the JCL RESTART= parameter never actually provided in
+    the baseline. A second job repository here would be a second, competing
+    restart mechanism over the same runs, and two ledgers disagreeing about
+    whether a step completed is a worse position than having only one.
+
+    io.awspring.cloud:spring-cloud-aws-starter-sqs
+    Alternatives Considered: model the report request as a queued message, the
+    way the authorization context models its request and reply exchange.
+    Rejected because the baseline submission at app/csd/CARDDEMO.CSD L499 to
+    L505 was not a request and reply exchange at all: it had no reply queue and
+    no correlation identifier, only a one way write. An execution ARN is the
+    faithful analogue of a submitted job, whereas adding a queue would invent a
+    messaging contract the baseline never had and then oblige this module to
+    honour it.
+
+    org.projectlombok:lombok
+    Alternatives Considered: generate accessors to keep the DTOs and view
+    projections short. Rejected because generated accessors cannot carry the
+    Javadoc that the project's explainability rule requires, and the inherited
+    Checkstyle gate does not relax skipAnnotations, so generated members would
+    be reported as undocumented while offering no source location at which to
+    document them. Java 21 record types with explicit constructors give the same
+    brevity and leave every member documentable.
+
+    org.mapstruct:mapstruct and its annotation processor
+    Alternatives Considered: generate the copybook to DTO mappers. Rejected for
+    two independent reasons, either of which alone is sufficient. First, its
+    most recent published release is a beta, which is not an acceptable
+    dependency anywhere on the money path. Second, and more fundamentally, the
+    mapping in this module is not mechanical: it drops FILLER, for example the
+    trailing FILLER PIC X(20) at bytes 331 to 350 of app/cpy/COSTM01.CPY; it
+    masks the primary account number to its last four digits; it never
+    serialises a card verification value; and it applies the COBOL edit masks
+    from app/cpy/CVTRA07Y.cpy, namely PIC -ZZZ,ZZZ,ZZZ.ZZ at L30 and
+    PIC +ZZZ,ZZZ,ZZZ.ZZ at L54, L60 and L66. Each of those transformations needs
+    an inline justification at the mapping site, and a generated mapper has no
+    source line on which to hold one.
+
+    io.github.resilience4j:resilience4j-spring-boot3,
+    org.springframework.retry:spring-retry, and any circuit breaker starter
+    Alternatives Considered: add a resilience library for retry around the state
+    machine call and the view reads. Rejected because Spring Framework 7, which
+    arrives inside the Spring Boot 4.1.0 parent, moved retry into the framework
+    core and already supplies the Retryable annotation, the ConcurrencyLimit
+    annotation and a programmatic RetryTemplate with a RetryPolicy. Two API
+    facts are easy to get wrong and are recorded here because downstream code in
+    this module will use them: the enabling annotation is EnableResilientMethods
+    and NOT EnableRetry, and the attribute is maxRetries and NOT maxAttempts, so
+    the total number of attempts is one plus the value rather than the value
+    itself. resilience4j is additionally ruled out because its published
+    artifact targets Spring Boot 3.x. A circuit breaker is omitted separately
+    and deliberately: the only synchronous hops here are in-VPC behind an
+    internal load balancer with bounded connect and read timeouts, so a breaker
+    would add a failure mode, namely an open circuit rejecting healthy traffic,
+    without removing one.
+
+    Redis, ElastiCache, Kafka and Kinesis clients
+    Alternatives Considered: cache the report and statement results, or stream
+    them to consumers. Both rejected because the baseline has neither a cache
+    tier nor a streaming tier, so either would be new observable behaviour
+    rather than migrated behaviour, and the parity oracle compares this system
+    against the baseline's outputs.
+
+    org.testcontainers:testcontainers-localstack
+    Trade-offs: the state machine submission could be proven against an emulated
+    AWS endpoint, and that accuracy is declined in favour of a Mockito verified
+    unit test asserting the StartExecution request this module builds. The
+    behaviour worth proving is which input is sent and that a failure propagates
+    instead of being ignored, and neither needs a container; adding one would
+    pay a container start on every build to verify a service this module does
+    not implement.
+    =============================================================================
+    -->
+
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <!--
+      Assumptions: the documentation gate is INHERITED and is deliberately not
+      restated in this file. The parent aggregator binds maven-checkstyle-plugin
+      to the validate phase with the engine overridden to
+      com.puppycrawl.tools:checkstyle 13.8.0, configLocation set to
+      config/checkstyle/checkstyle.xml, failOnViolation true, violationSeverity
+      warning and consoleOutput true, so the gate fires on every local build and
+      not only in CI. suppressionsLocation is NOT set here because suppressions
+      are wired from inside config/checkstyle/checkstyle.xml by a
+      SuppressionFilter module whose optional attribute is false; setting the
+      property at the plugin as well would create a second, competing source for
+      that path, with nothing to keep the two in step.
+
+      Nothing in this file skips, relaxes, redeclares or lowers the gate, and
+      nothing may. A module local Checkstyle configuration, a skip flag,
+      failOnViolation false, failsOnError false, a raised violationSeverity or
+      any tolerance of the plugin's return code would each render the
+      explainability rule unenforceable for this module while still reporting a
+      green build, and a gate that passes without checking is the single failure
+      mode the gate exists to prevent.
+      -->
+
+      <!--
+      Assumptions: this plugin must be declared here rather than inherited, and
+      that was verified rather than assumed. In
+      org.springframework.boot:spring-boot-starter-parent 4.1.0 the build element
+      contains a pluginManagement block and no bare plugins block at all, so
+      spring-boot-maven-plugin is MANAGED there and never activated by
+      inheritance; activation is per module, which is the standard Spring Boot
+      arrangement. The managed declaration already binds the repackage goal and
+      pins the version at 4.1.0 by way of spring-boot-dependencies 4.1.0, so no
+      version, no execution and no configuration is restated here. The consumer
+      of that repackaging is this module's Dockerfile runtime stage, which copies
+      the executable jar. Omitting the plugin would still produce a green build
+      and a plain library jar, and the failure would surface only much later as a
+      container that cannot start, which is why the reasoning sits at the
+      declaration instead of being left implicit.
+
+      Trade-offs: finalName is deliberately not set, so the Dockerfile matches
+      target/*.jar rather than a pinned file name. A glob is one degree less
+      explicit than a pinned name, and that is accepted for two reasons: the
+      repackage goal leaves the pre-packaged artifact beside the executable one
+      with a .jar.original suffix, which a *.jar glob does not match, so the
+      ambiguity the glob appears to introduce does not exist; and a pinned
+      finalName would have to be kept in step with the artifact coordinates in
+      two separate files, breaking the container build silently the moment they
+      diverged.
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+
+    </plugins>
+  </build>
+
+</project>

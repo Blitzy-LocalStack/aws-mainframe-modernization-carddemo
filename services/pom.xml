@@ -1,0 +1,1006 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  services/pom.xml    AGGREGATOR and PARENT for the migrated CardDemo services
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  Purpose:
+    Single build descriptor that BOTH aggregates the nine Maven modules of the
+    migrated CardDemo service tree AND acts as their parent. Java toolchain
+    level, the pinned dependency version set, the documentation gate and the
+    test wiring are therefore declared exactly once here and inherited, rather
+    than restated nine times where they could drift apart.
+
+    This tree is the Java re-expression of the z/OS COBOL baseline under app/**.
+    That baseline is the behavioural oracle for the migration and is never
+    modified; nothing in this build reads, writes or depends on it.
+
+  Usage:
+    mvn -f services/pom.xml clean verify
+        Canonical command. Builds all nine modules, runs the documentation and
+        toolchain gates, then the unit tests and the integration tests.
+    mvn -f services/pom.xml validate
+        Runs the gates alone, without compiling.
+    mvn -f services/<module>/pom.xml verify
+        Builds one module standalone. The gates resolve identically; see the
+        checkstyle configuration directory profiles at the foot of this file.
+
+  Modules:
+    Declaration order is dependency order, shared kernel first.
+      common-lib             money, copybook codecs, error model, page
+                             envelope, correlation filter, validation flags
+      auth-service           sign on and user administration
+      account-service        account, customer and card cross reference
+      card-service           card list, detail and update
+      transaction-service    transaction list, detail, add and bill payment
+      reference-service      transaction types and categories, disclosure
+                             groups, date conversion, lookup reference data
+      batch-service          posting, interest, backup, combine, export,
+                             import
+      authorization-service  pending authorizations, fraud marking, queue
+                             consumer
+      reporting-service      transaction reports and statements
+
+  Gates:
+    Both gates below are bound to the `validate` phase, so they run before a
+    single class is compiled and on every local build, not only in CI.
+      checkstyle-documentation-gate   Javadoc presence and completeness, driven
+                                      by config/checkstyle/checkstyle.xml
+      enforce-toolchain-and-pins      JDK and Maven floor, plus a ban on
+                                      dynamic (range or snapshot) dependency
+                                      versions outside this reactor
+    Test execution is split across the standard phases: Surefire runs the
+    `*Test` classes in `test`, Failsafe runs the `*IT` classes in
+    `integration-test` and asserts their results in `verify`.
+
+    Exit status of this build is BINARY: it either passes or it fails. There is
+    no tolerated warning level. See the note beside `failOnViolation` for why
+    that is stated explicitly rather than left implied.
+
+  WHY (non-obvious design decisions):
+    Each decision is justified in a comment adjacent to the element it
+    concerns, using the four rationale categories the project's Explainability
+    rule defines. The rationales that belong to no single element are:
+
+      Trade-offs: both gates run at `validate` rather than at `verify` or in CI
+      only. That costs a few seconds on every local build. It buys two things
+      the cheaper placements cannot: a developer sees a documentation failure
+      before pushing rather than after, and the gate becomes structurally
+      unskippable because `validate` is the first phase of every lifecycle a
+      developer can invoke.
+
+      Assumptions: every comment in this file avoids two consecutive hyphen
+      characters, because XML 1.0 forbids that sequence inside a comment and a
+      POM containing one does not parse at all. Section rulers therefore use
+      `=` and `~` where the rest of the repository's shell and YAML files use
+      hyphens, and command line flags are named in prose rather than written
+      literally.
+  ============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    WHAT: Spring Boot 4.1.0 supplies dependency management, plugin management
+          and the sensible resource filtering defaults for all nine modules.
+    WHY :
+      Assumptions: Boot 4.1.0 carries Spring Framework 7, which relocated retry
+        support into the framework core as
+        org.springframework.resilience.annotation.Retryable, ConcurrencyLimit
+        and EnableResilientMethods. That relocation is the entire reason NO
+        resilience library appears anywhere in this build. Note the attribute is
+        `maxRetries` (total attempts are one more than that value) and the
+        enabling annotation is EnableResilientMethods, not the older
+        EnableRetry, so a service that copies a Boot 3 example will not compile.
+      Alternatives Considered: io.github.resilience4j:resilience4j-spring-boot3
+        was evaluated and rejected because its published artifact targets Spring
+        Boot 3.x; org.springframework.retry:spring-retry was rejected as
+        superseded by the core relocation above. Adopting either would add a
+        dependency that duplicates a framework capability already on the
+        classpath, and would have to be re-evaluated at every Boot upgrade.
+      Trade-offs: no circuit breaker is present either, and its absence is a
+        decision rather than an omission. The only synchronous hops between
+        these services run inside the private network behind an internal load
+        balancer, with explicit connect and read timeouts on the HTTP client, so
+        a breaker would add a failure mode of its own, an open circuit rejecting
+        calls a healthy dependency could have served, without removing one. The
+        durable retry tiers that do matter are supplied by the infrastructure
+        instead: queue redelivery into a dead letter queue, and per state retry
+        with backoff in the batch orchestrator. What is given up is fast failure
+        during a partial outage, which bounded timeouts already approximate.
+      Assumptions: an empty relativePath forces resolution from the configured
+        repository. Without it Maven first probes ../pom.xml, which in this
+        layout is the repository root, where no POM exists; the resulting
+        warning appears on every single build and trains readers to ignore
+        warnings.
+  -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.0</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.carddemo</groupId>
+  <artifactId>carddemo-services</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>CardDemo Services</name>
+  <description>
+    Aggregator and parent POM for the CardDemo credit card management services
+    migrated from z/OS COBOL under CICS and JCL to Spring Boot on Linux. Owns
+    the Java toolchain level, the pinned dependency set, the Javadoc
+    documentation gate and the unit versus integration test split for all nine
+    modules.
+  </description>
+
+  <!--
+    WHAT: the nine modules of the migrated service tree.
+    WHY :
+      Assumptions: Maven derives the actual reactor order from the dependency
+        graph, so this list does not control build order. It is written shared
+        kernel first, then the seven request serving contexts, then the two
+        asynchronous ones, because the declaration order is the only place a
+        reader learns the intended layering: common-lib is consumed by all
+        eight services, and no service module may depend on another service
+        module.
+      Trade-offs: the eight bounded contexts deliberately do NOT include a
+        module per online transaction. The two CICS menu programs became client
+        side routes in the browser application rather than a service, and the
+        three decoupled extensions were folded into the contexts that already
+        own their data instead of becoming three more deployables. Splitting
+        them out would have put one database table under two owners, which is
+        precisely the failure mode bounded contexts exist to prevent.
+      Assumptions: common-lib is a LIBRARY, not a service. It has no container
+        image, no actuator endpoint and no executable main class, so the Spring
+        Boot repackage goal is deliberately not applied at this level; each
+        service module opts into it individually.
+  -->
+  <modules>
+    <module>common-lib</module>
+    <module>auth-service</module>
+    <module>account-service</module>
+    <module>card-service</module>
+    <module>transaction-service</module>
+    <module>reference-service</module>
+    <module>batch-service</module>
+    <module>authorization-service</module>
+    <module>reporting-service</module>
+  </modules>
+
+  <properties>
+
+    <!--
+      WHAT: Java 21 as both the language level and the compiled API surface.
+      WHY :
+        Assumptions: the Boot parent defines maven.compiler.release as
+          ${java.version} and defaults java.version to 17. Setting java.version
+          alone would therefore work, but only through that indirection. Both
+          are stated explicitly so the compiled level is readable here and does
+          not silently change if a future parent alters the indirection.
+        Trade-offs: `release` is used rather than the older `source` plus
+          `target` pair. The older pair emits Java 21 bytecode while still
+          compiling against the running JDK's full class library, so a method
+          added after Java 21 compiles cleanly and then fails with
+          NoSuchMethodError on a Java 21 runtime. `release` validates against
+          the Java 21 API surface as well, which converts that runtime failure
+          into a compile error. The cost is that a genuinely newer API cannot be
+          used even when the build JDK offers it, which is the intended
+          restriction: the container images run Java 21.
+    -->
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+
+    <!--
+      WHAT: UTF-8 for sources and for generated reports.
+      WHY :
+        Assumptions: config/checkstyle/checkstyle.xml declares charset UTF-8 at
+          Checker level. Checkstyle reads each source file with the charset the
+          plugin passes it, which is project.build.sourceEncoding. If the two
+          disagree, the gate silently reads bytes differently from the compiler,
+          so a file can pass Checkstyle and fail javac, or a message string can
+          be mis-scanned. The Boot parent already sets both to UTF-8; they are
+          restated here because the value is half of a contract with a file
+          this POM does not own, and a reader auditing that contract must find
+          both halves without leaving the tree.
+    -->
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!--
+      WHAT: every third party version this build pins, named once here.
+      WHY :
+        Assumptions: this mirrors the reproducibility doctrine the repository
+          already applies to its Python test dependencies, which are pinned to
+          exact versions and hash verified because a floating dependency could
+          silently break the byte deterministic golden master comparisons. The
+          migrated Java code is verified the same way: its output is compared
+          against the COBOL golden masters, so a dependency that resolves to a
+          different build between two runs can turn a genuine parity failure
+          into an unreproducible one. Every version below is therefore an exact
+          value. No range, no LATEST, no RELEASE, and no coordinate left to
+          arrive transitively.
+        Trade-offs: exact pins mean upgrades are deliberate edits rather than
+          something that happens on its own. That is the intended cost; the
+          maven-enforcer-plugin rule further down turns the doctrine into a
+          build failure rather than a convention.
+    -->
+
+    <!--
+      WHY :
+        Assumptions: spring-boot-starter-batch is a Boot artifact, so the Boot
+          parent already manages it at the parent version. It is named here
+          anyway, and pinned to a literal that MUST equal the <parent> version
+          declared above, because batch-service is the only consumer and a
+          reader looking for the batch starter should find it in this build's
+          managed set rather than infer it. A property expression referring to
+          the parent version cannot be used: inherited dependencyManagement is
+          re-interpolated in each child's context, where the parent version is
+          this aggregator's own version, not Boot's.
+    -->
+    <spring-boot.version>4.1.0</spring-boot.version>
+
+    <!--
+      WHY :
+        Alternatives Considered: the legacy org.springframework.cloud
+          spring-cloud-aws coordinates were evaluated and rejected. The
+          maintained line is io.awspring.cloud, which is where SQS listener and
+          Parameter Store support actually receives releases; the legacy
+          coordinate would resolve but leave the queue integration on an
+          unmaintained code path.
+    -->
+    <spring-cloud-aws.version>4.1.0</spring-cloud-aws.version>
+
+    <!--
+      WHY :
+        Assumptions: one BOM aligns the S3, SQS, Step Functions, Secrets
+          Manager and KMS clients. Those five are released as independent
+          artifacts off a shared core; pinning them individually is how a build
+          ends up with two incompatible core versions on one classpath.
+    -->
+    <aws-sdk.version>2.49.3</aws-sdk.version>
+
+    <!--
+      WHY :
+        Assumptions: the Boot parent happens to manage this same version, so
+          the value here is currently a restatement rather than an override.
+          It is declared anyway so the repository integration tests are pinned
+          by this build rather than by whatever the parent chooses next.
+    -->
+    <testcontainers.version>2.0.5</testcontainers.version>
+
+    <!--
+      WHAT: two DELIBERATE overrides of versions the Boot parent manages.
+      WHY :
+        Trade-offs: Boot 4.1.0 manages postgresql at 42.7.11 and the Flyway
+          family at 12.4.0; the migration targets 42.7.13 and 13.0.0. Advancing
+          past the versions the Boot release was tested against is accepted
+          knowingly, in exchange for the driver and migration behaviour the
+          Aurora PostgreSQL target requires. This is the ONLY place this build
+          departs from the parent's tested dependency set, and it is why the
+          departure is written as a property override rather than buried in a
+          coordinate.
+        Assumptions: the override MUST be expressed as these properties and not
+          only as dependencyManagement entries. Boot manages roughly two dozen
+          Flyway artifacts through the single flyway.version property. Pinning
+          just flyway-core and flyway-database-postgresql in
+          dependencyManagement was measured to leave every other Flyway
+          artifact at 12.4.0, so any additional Flyway module reaching the
+          classpath would meet a 13.0.0 core and fail at application startup on
+          a version mismatch, long after the build went green. Overriding the
+          property retargets the whole family coherently.
+    -->
+    <postgresql.version>42.7.13</postgresql.version>
+    <flyway.version>13.0.0</flyway.version>
+
+    <!--
+      WHY :
+        Assumptions: each service publishes an OpenAPI 3.1 contract that the
+          browser application's typed clients are generated against, so the
+          contract is an interface with a consumer rather than documentation.
+    -->
+    <springdoc.version>3.0.3</springdoc.version>
+
+    <!--
+      WHY :
+        Assumptions: the architectural prohibitions of this migration are
+          enforced as TESTS, not as review conventions, in
+          common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+          which every module inherits: no AWS SDK or web type inside a domain
+          package, no service importing another service's domain package, and
+          no float or double anywhere in the money path. Expressing them as a
+          test is what stops them rotting, because a violation fails the build
+          instead of surviving a review.
+        Alternatives Considered: Checkstyle's ImportControl module was
+          evaluated for the layering half and deliberately left out of the
+          ruleset. Two engines enforcing overlapping halves of one rule means a
+          reader cannot tell which one owns a given boundary; layering has one
+          owner, and it is ArchUnit.
+    -->
+    <archunit.version>1.4.2</archunit.version>
+
+    <!--
+      WHY :
+        Assumptions: the Boot parent does NOT manage the checkstyle plugin, so
+          this version is the only thing pinning it. Plugin 3.6.0 declares
+          Checkstyle 9.3 as its bundled engine; the ruleset this build points at
+          was authored against 13.8.0 and uses module properties that the 9.3
+          engine rejects outright, which is why the engine is overridden in the
+          plugin's own dependencies block rather than left at its default.
+    -->
+    <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
+    <checkstyle.version>13.8.0</checkstyle.version>
+
+    <!--
+      WHAT: directory holding checkstyle.xml and its companion suppressions.xml.
+      WHY :
+        Assumptions: this default is the value correct for THIS aggregator, one
+          level below the repository root. Modules sit one level deeper, so the
+          profiles at the foot of this file override it. The default is left as
+          a concrete path rather than a sentinel so that, if the configuration
+          directory is genuinely absent, Checkstyle fails naming the exact path
+          it looked for instead of failing on an unresolved property. Failing
+          closed is intentional: a documentation gate that quietly does nothing
+          when its ruleset is missing is worse than no gate, because the build
+          still reports success.
+    -->
+    <carddemo.checkstyle.config.dir>${project.basedir}/../config/checkstyle</carddemo.checkstyle.config.dir>
+
+  </properties>
+
+  <!--
+    WHAT: the managed version set every module inherits, so a module declares a
+          coordinate without a version and cannot pick its own.
+    WHY :
+      Assumptions: the Boot parent already manages spring-boot-starter-web,
+        data-jpa, validation, security, oauth2-resource-server, actuator, test
+        and the Micrometer Prometheus registry. None of those is restated below.
+        Restating a version the parent manages forks this build from the
+        dependency set Boot 4.1.0 was integration tested against, and the fork
+        is invisible until something breaks at runtime. The two exceptions,
+        postgresql and Flyway, are overridden by property above where the
+        departure is documented as a departure.
+  -->
+  <dependencyManagement>
+    <dependencies>
+
+      <!--
+        WHAT: the reactor's own shared kernel, so the eight service modules name
+              com.carddemo:common-lib without a version and always get the
+              sibling built alongside them.
+        WHY :
+          Assumptions: this entry is REQUIRED, not a convenience. common-lib is
+            the only first-party artifact any module depends on, and it is
+            published by no repository — it exists solely as a reactor sibling.
+            Without a managed version here Maven cannot even read the modules
+            that omit the version and fails during project scanning with
+            'dependencies.dependency.version' for com.carddemo:common-lib:jar is
+            missing, before a single goal executes.
+          Trade-offs: ${project.version} is used rather than a literal
+            1.0.0-SNAPSHOT so the shared kernel is always taken from the reactor
+            currently being built and can never be silently satisfied by a stale
+            installed snapshot of a different version. Every module inherits its
+            version from this aggregator, so the expression resolves to the same
+            value in all nine of them, which is exactly what makes a version
+            bump here a single edit.
+          Alternatives Considered: requiring each module to write
+            <version>${project.version}</version> at the dependency site was
+            considered and rejected. Six of the eight already do, two delegate to
+            this file, and the delegating form is the one that scales: it keeps
+            the shared kernel's coordinate in one place, matches how every
+            third-party coordinate in this section is handled, and removes the
+            possibility of one module pinning a kernel version that differs from
+            the reactor's. Declaring it as a plain managed dependency rather than
+            an imported BOM is deliberate — common-lib is a jar, and an import
+            scope entry is only meaningful for a pom.
+      -->
+      <dependency>
+        <groupId>com.carddemo</groupId>
+        <artifactId>common-lib</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <!--
+        WHAT: one version for the S3, SQS, Step Functions, Secrets Manager and
+              KMS clients.
+        WHY :
+          Assumptions: THE POSITION OF THIS IMPORT IS SIGNIFICANT AND MUST STAY
+            FIRST, ahead of the Spring Cloud AWS import below. Within one
+            dependencyManagement section Maven expands imports in declaration
+            order and the FIRST entry it sees for a coordinate wins. Spring Cloud
+            AWS 4.1.0 carries its own AWS SDK version internally, currently
+            2.47.4, and manages the SDK artifacts with it. Declared after that
+            import, this block was measured to have NO effect at all: the SDK
+            clients resolved to the version Spring Cloud AWS chose and the pin
+            here was silently inert. Declared first, it governs, and Spring Cloud
+            AWS still supplies its own integration artifacts at its own version.
+          Trade-offs: this deliberately runs the SDK slightly ahead of the
+            version Spring Cloud AWS was released against, which is accepted so
+            that every AWS client in the build sits on one known core rather than
+            on whichever core an intermediate BOM happened to pick. The
+            alternative, deleting this import and inheriting the SDK version from
+            Spring Cloud AWS, would leave the AWS client versions decided as a
+            side effect of an unrelated upgrade.
+          Assumptions: the SDK publishes one artifact per service, all sharing a
+            core, so importing the BOM is also what prevents two cores reaching
+            one classpath through separately pinned clients.
+      -->
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${aws-sdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!--
+        WHAT: SQS listener and Parameter Store integration for the queue backed
+              flows and for reading configuration at startup.
+        WHY :
+          Assumptions: imported as a BOM rather than pinned artifact by artifact
+            because the listener, the messaging core and the Parameter Store
+            support are released together and are only mutually compatible at a
+            matching version. See the property above for why the io.awspring.cloud
+            coordinate is used instead of the legacy one, and see the import
+            above for why this one must not be moved ahead of it.
+      -->
+      <dependency>
+        <groupId>io.awspring.cloud</groupId>
+        <artifactId>spring-cloud-aws-dependencies</artifactId>
+        <version>${spring-cloud-aws.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!--
+        WHAT: real PostgreSQL and AWS emulator containers for the repository and
+              messaging integration tests.
+        WHY :
+          Assumptions: Testcontainers 2.x renamed every module to the
+            testcontainers-<module> form, so a module POM must declare
+            testcontainers-postgresql and testcontainers-junit-jupiter rather
+            than the 1.x groupId-per-module coordinates. Importing the BOM is
+            what makes those names resolve without each module repeating the
+            version and getting the naming generation wrong.
+          Trade-offs: repository tests run against a real PostgreSQL container
+            rather than an in memory database. That is slower, and it is the
+            point: the schemas derived from the COBOL copybooks rely on
+            PostgreSQL specific column types and constraint behaviour, so an in
+            memory substitute would verify a schema this system never deploys.
+      -->
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!--
+        WHY :
+          Assumptions: the record data migrated out of VSAM lands in Aurora
+            PostgreSQL, and every money column is exact fixed point NUMERIC with
+            scale 2. This driver is the only path by which a BigDecimal reaches
+            the database without passing through a binary floating point
+            representation, which is why the money path prohibition on float and
+            double reaches all the way down to the driver choice.
+      -->
+      <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>${postgresql.version}</version>
+      </dependency>
+
+      <!--
+        WHAT: versioned schema migration, owned per service.
+        WHY :
+          Assumptions: flyway-database-postgresql is NOT redundant beside
+            flyway-core and must not be deleted as though it were. Flyway 10 and
+            later moved the database specific support out of core into these
+            companion artifacts, so core on its own resolves and compiles
+            perfectly and then fails at application startup with no PostgreSQL
+            support registered. That failure mode arrives at deploy time rather
+            than build time, which is exactly why it is written down here.
+          Assumptions: seven of the eight services own a schema and carry
+            migrations; reporting-service owns no schema and reads through read
+            only cross schema views, so it has no migration directory. Flyway is
+            still managed here because the version must be identical across
+            every service that does migrate.
+      -->
+      <dependency>
+        <groupId>org.flywaydb</groupId>
+        <artifactId>flyway-core</artifactId>
+        <version>${flyway.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flywaydb</groupId>
+        <artifactId>flyway-database-postgresql</artifactId>
+        <version>${flyway.version}</version>
+      </dependency>
+
+      <!--
+        WHY :
+          Assumptions: each service serves its own OpenAPI 3.1 contract, which
+            the browser application's typed clients are written against. The
+            contract is therefore a consumed interface, and the artifact that
+            publishes it is pinned like any other interface bearing dependency.
+      -->
+      <dependency>
+        <groupId>org.springdoc</groupId>
+        <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        <version>${springdoc.version}</version>
+      </dependency>
+
+      <!--
+        WHY :
+          Assumptions: test scope is declared here, in the managed set, rather
+            than left to each module. ArchUnit exists to police production code
+            from the outside; if it ever reached compile scope a production class
+            could import it and the boundary checker would become part of the
+            thing it checks. Pinning the scope centrally removes that
+            possibility from eight module POMs at once.
+      -->
+      <dependency>
+        <groupId>com.tngtech.archunit</groupId>
+        <artifactId>archunit-junit5</artifactId>
+        <version>${archunit.version}</version>
+        <scope>test</scope>
+      </dependency>
+
+      <!--
+        WHY :
+          Assumptions: consumed only by batch-service, which reproduces the
+            nightly JCL chain as chunk oriented jobs with a durable job
+            repository. That repository is the analogue of the mainframe restart
+            facility, so the starter is a functional requirement of the
+            migration rather than a convenience. See the spring-boot.version
+            property above for why the version is a literal.
+      -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-batch</artifactId>
+        <version>${spring-boot.version}</version>
+      </dependency>
+
+    </dependencies>
+  </dependencyManagement>
+
+  <!--
+    WHAT: the single dependency every one of the nine modules inherits.
+    WHY :
+      Alternatives Considered: adding spring-boot-starter-web here was
+        considered and rejected. Eight of the nine modules do serve HTTP, so it
+        looks like a saving. The ninth, common-lib, is a library, and putting
+        servlet and web MVC types on its compile classpath would let a shared
+        codec or a domain type import them accidentally. The ArchUnit rule that
+        forbids web types inside domain packages would still catch it, but only
+        after the import already existed; keeping web off the inherited
+        classpath means the mistake is not available to make. Each service
+        declares web for itself, which costs one block per service POM.
+      Assumptions: spring-boot-starter-test is inherited because all nine
+        modules have tests without exception, including common-lib, whose codec
+        round trip tests are the ones that verify sign overpunch and packed
+        decimal decoding against the fixtures the COBOL suite already uses.
+      Alternatives Considered: MapStruct was evaluated for the copybook to DTO
+        mapping layer and rejected for two independent reasons, either of which
+        would be sufficient. Its most recent published release is a beta, and
+        the mapping it would generate is not mechanical: that layer drops
+        trailing FILLER, masks the primary account number to its last four
+        digits, suppresses the card verification value entirely, encrypts the
+        national identifier and the government issued identifier, and corrects
+        three misspelled baseline field names. Every one of those is a decision
+        that needs its justification written at the mapping site, and a
+        generated mapper has nowhere to carry it. The mappers are therefore
+        hand written, which is also what makes them the single place copybook
+        representation concerns are allowed to appear.
+      Assumptions: Redis, ElastiCache, Kafka and Kinesis are absent by decision
+        rather than omission. The COBOL baseline has no cache tier, so adding
+        one would create behaviour the golden masters cannot verify; the
+        messaging requirement is request and reply, which SQS satisfies without
+        a streaming platform; and reporting reads reach the writer through read
+        only cross schema views rather than a replica, so no replica lag
+        semantics enter the system.
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <!--
+        WHAT: the Javadoc documentation gate. This is the mechanical enforcement
+              of the project's Explainability rule for Java, and it is the most
+              load bearing element in this file.
+        WHY :
+          Trade-offs: declared in <plugins> and not merely in
+            <pluginManagement>. Plugin management only supplies defaults to a
+            plugin something else already declares, so a managed only gate would
+            never execute and every module would silently pass. Declaring it
+            here makes it run for all nine modules with nothing required of the
+            module POMs, which also means a newly added module cannot forget it.
+          Alternatives Considered: Lombok was evaluated for the entity and DTO
+            classes and rejected BECAUSE of this gate. Lombok generates
+            accessors during annotation processing, and generated members cannot
+            carry the Javadoc the Explainability rule requires on every public
+            member, so the gate would either fail on the generated code or have
+            to be weakened to ignore it. Java 21 record types plus explicit
+            constructors give the same brevity with members that can be
+            documented. This is the one place in the build where a documentation
+            rule determines a dependency decision.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>${maven-checkstyle-plugin.version}</version>
+
+        <!--
+          WHY :
+            Assumptions: this override is mandatory, not tidiness. Plugin 3.6.0
+              bundles Checkstyle 9.3, whereas config/checkstyle/checkstyle.xml
+              was authored against 13.8.0 and uses module properties the 9.3
+              engine rejects while parsing the configuration. Without the
+              override the build fails before auditing a single file, with a
+              parse error that names a property rather than the version gap that
+              caused it.
+        -->
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>${checkstyle.version}</version>
+          </dependency>
+        </dependencies>
+
+        <executions>
+          <execution>
+            <!--
+              WHY :
+                Assumptions: the execution id names what it enforces rather than
+                  repeating the goal, because the id is what appears in the build
+                  log and in CI output. A reader who has never seen this file
+                  should be able to tell from one log line that a documentation
+                  requirement failed, not merely that some checkstyle ran.
+            -->
+            <id>checkstyle-documentation-gate</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <configuration>
+
+              <!--
+                WHY :
+                  Trade-offs: the ruleset is addressed through a property that
+                    the two profiles at the foot of this file resolve, rather
+                    than through a literal path. A literal relative path is
+                    resolved against each module's own base directory during a
+                    reactor build, so config/checkstyle/checkstyle.xml would be
+                    looked for beneath services/auth-service, where it does not
+                    exist, and the gate would break in exactly the eight places
+                    it matters most.
+                  Alternatives Considered: three expressions that look like they
+                    solve this were measured and rejected.
+                    ${maven.multiModuleProjectDirectory} and
+                    ${session.executionRootDirectory} both track the directory of
+                    whichever POM the invocation names, so they are correct for
+                    the aggregator and wrong for a module built on its own;
+                    anchoring them would need a .mvn marker directory at the
+                    repository root, and no Maven wrapper or marker is introduced
+                    by this migration. ${project.basedir} is re-interpolated in
+                    each child, so a value written here resolves against the
+                    child and lands one directory too deep.
+                    ${project.parent.basedir} is the mirror image: correct in
+                    every module, null in this aggregator because its parent is
+                    resolved from the repository rather than from disk. The
+                    profile mechanism was chosen because it is the only one of
+                    the four that is correct in all four combinations of
+                    aggregator or module and reactor or standalone build.
+              -->
+              <configLocation>${carddemo.checkstyle.config.dir}/checkstyle.xml</configLocation>
+
+              <!--
+                WHAT: supplies the config_loc property the ruleset expands.
+                WHY :
+                  Assumptions: config/checkstyle/checkstyle.xml wires its
+                    companion file itself, with a SuppressionFilter whose file is
+                    ${config_loc}/suppressions.xml and whose optional flag is
+                    false. Nothing defines config_loc on its own: the string
+                    appears in neither maven-checkstyle-plugin 3.6.0 nor
+                    Checkstyle 13.8.0, because config_loc is a convention that
+                    other integrations such as Gradle and the IDE plugins set for
+                    you. Under Maven it must be supplied here, and without it the
+                    build stops while parsing the configuration with the message
+                    that config_loc has not been set.
+                  Alternatives Considered: the plugin's own suppressions
+                    location parameter, which this configuration deliberately
+                    does NOT set, would also make suppressions load. Setting it
+                    would leave the ruleset still
+                    naming a suppressions file while this POM named another,
+                    giving one behaviour two sources of truth and no way to tell
+                    from either file which one won. Supplying config_loc keeps the
+                    ruleset the sole owner of which filters exist and which file
+                    each reads, and confines this POM to answering where the
+                    configuration directory is. That is also why the companion
+                    file resolves identically from the aggregator and from every
+                    module: it is always found next to the ruleset that names it.
+                  Assumptions: the ruleset's optional flag being false is relied
+                    upon and must not be worked around from this side. It makes
+                    the filter fail closed, so a missing suppressions file is an
+                    error rather than a silent switch to auditing unsuppressed.
+              -->
+              <propertyExpansion>config_loc=${carddemo.checkstyle.config.dir}</propertyExpansion>
+
+              <!--
+                WHY :
+                  Trade-offs: violationSeverity is set to warning even though the
+                    ruleset declares error at Checker level, so the two settings
+                    currently agree. The looser threshold is chosen so that they
+                    keep agreeing: if any future rule is added at warning
+                    severity, it still fails the build rather than becoming a
+                    message nobody reads. The cost is that this POM cannot be
+                    used to grade a rule down, which is the intended loss of
+                    flexibility.
+                  Assumptions: this build's exit status is BINARY. The COBOL test
+                    suite in tests/** grades its outcomes on a mainframe
+                    condition code rubric where a warning level result is the
+                    current green state, and that tolerance exists for exactly
+                    one reason: two baseline programs carry an unfixable record
+                    key defect in immutable reference source. That rubric belongs
+                    to the COBOL parity oracle alone and must never be imported
+                    into a Maven, Checkstyle, Surefire or Failsafe gate here.
+                    Nothing in this file skips the gate, downgrades a violation,
+                    or tolerates a non zero result, and nothing should be added
+                    that does.
+              -->
+              <failOnViolation>true</failOnViolation>
+              <violationSeverity>warning</violationSeverity>
+
+              <!--
+                WHY :
+                  Trade-offs: violations are printed to the console as well as
+                    written to the report file. It makes the build output longer,
+                    and it means a developer running the canonical command sees
+                    the offending file and line immediately instead of being told
+                    a count and left to open an XML report to find out where.
+              -->
+              <consoleOutput>true</consoleOutput>
+
+              <!--
+                WHY :
+                  Trade-offs: test sources are audited too.
+                  Alternatives Considered: excluding them was considered, on the
+                    usual argument that tests are throwaway. It was rejected
+                    because in this migration they are the opposite: the ArchUnit
+                    layering rules, the codec round trip vectors and the
+                    repository integration tests are where the parity contract
+                    with the COBOL baseline is actually written down, so they are
+                    the classes a future reader most needs explained. The
+                    Explainability rule makes no exemption for tests either. The
+                    accepted cost is that fixture builders must be documented as
+                    well, which the suppressions file already narrows where it
+                    would be pure noise.
+              -->
+              <includeTestSourceDirectory>true</includeTestSourceDirectory>
+
+              <!--
+                WHY :
+                  Assumptions: no source cross reference report is generated by
+                    this build, so leaving the link enabled makes the plugin warn
+                    that it cannot find one, once per module, on every build.
+                    Disabling it removes nine warnings that carry no information
+                    and would otherwise teach readers to skim past warnings.
+              -->
+              <linkXRef>false</linkXRef>
+
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
+        WHAT: turns the exact pin doctrine and the Java 21 toolchain from
+              conventions into build failures.
+        WHY :
+          Assumptions: the version is inherited from the Boot parent's plugin
+            management, so it is not restated here; the parent manages this
+            plugin and there is no reason to fork it. The rules themselves are
+            the reinforcement of the reproducibility doctrine described beside
+            the version properties: parity against the COBOL golden masters is
+            only meaningful if the dependency set is identical between runs, and
+            a rule that fails the build is the only form of that doctrine which
+            cannot be forgotten.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-toolchain-and-pins</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+
+                <!--
+                  WHY :
+                    Trade-offs: a floor rather than an exact Java 21 range. The
+                      floor is what actually matters, because a JDK below 21
+                      cannot compile at release level 21 and would otherwise fail
+                      deep inside the compiler plugin with a message about an
+                      invalid release rather than at validate with a message
+                      about the toolchain. A newer JDK is left permitted because
+                      maven.compiler.release already pins the API surface, so it
+                      cannot silently widen what the code may call.
+                -->
+                <requireJavaVersion>
+                  <version>[21,)</version>
+                </requireJavaVersion>
+
+                <!--
+                  WHY :
+                    Assumptions: the checkstyle configuration directory profiles
+                      at the foot of this file rely on ${basedir} being
+                      interpolated inside file based profile activation, which is
+                      Maven 3 behaviour. Naming the floor here means an older
+                      Maven fails with a clear version message instead of
+                      activating no profile and reporting a missing ruleset,
+                      which looks like the sibling configuration is absent rather
+                      than like the build tool is too old.
+                -->
+                <requireMavenVersion>
+                  <version>[3.9.0,)</version>
+                </requireMavenVersion>
+
+                <!--
+                  WHY :
+                    Assumptions: the ignore entry is LOAD BEARING and must not be
+                      removed as apparent noise. Every service module depends on
+                      com.carddemo:common-lib at this reactor's own snapshot
+                      version, and a snapshot counts as a dynamic version, so
+                      without the ignore this rule fails all eight service
+                      builds. Narrowing the exemption to the com.carddemo group
+                      keeps snapshots banned everywhere it matters, which is
+                      third party coordinates, while permitting the one intra
+                      reactor case that is resolved from the reactor rather than
+                      downloaded.
+                    Trade-offs: allowSnapshots stays false rather than being
+                      switched on to make the rule pass. Turning it on would be
+                      one word shorter and would silently permit a third party
+                      snapshot, whose content can change under a fixed
+                      coordinate. That is precisely the failure the exact pin
+                      doctrine exists to prevent.
+                -->
+                <banDynamicVersions>
+                  <allowSnapshots>false</allowSnapshots>
+                  <ignores>
+                    <ignore>com.carddemo:*</ignore>
+                  </ignores>
+                </banDynamicVersions>
+
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
+        WHAT: activates the integration test half of the test split.
+        WHY :
+          Assumptions: neither a version nor an executions block is declared.
+            The Boot parent's plugin management already binds this plugin's
+            integration-test and verify goals, so declaring the coordinate alone
+            is what turns those bindings on for all nine modules. Adding an
+            executions block here would replace the parent's configuration
+            rather than extend it, including the classes directory it sets.
+          Assumptions: the split is by class name and both halves are left at
+            their default report directories. Surefire runs the *Test classes,
+            which are the unit and web layer tests, during the test phase and
+            needs no declaration because the standard lifecycle already binds it.
+            Failsafe runs the *IT classes, which are the Testcontainers backed
+            repository tests, after packaging, and asserts their results in
+            verify so a failure surfaces as a build failure rather than as a
+            silently skipped assertion. The *RepositoryIT naming this project
+            uses already matches Failsafe's default include pattern, so no
+            include configuration is needed or wanted.
+          Assumptions: the continuous integration workflow collects test reports
+            from services/*/target/surefire-reports and
+            services/*/target/failsafe-reports. Those are the defaults, and they
+            are deliberately not relocated: moving either would make the build
+            green while the workflow published nothing.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+      </plugin>
+
+    </plugins>
+  </build>
+
+  <!--
+    WHAT: locates config/checkstyle, which sits beside this aggregator at the
+          repository root, from whichever project Maven is currently building.
+    WHY :
+      Trade-offs: two profiles rather than one property, because the aggregator
+        and the modules sit at different depths and no single Maven expression is
+        correct for both. Each profile is activated by the existence of the
+        ruleset at one specific depth, and file based activation is evaluated per
+        project with ${basedir} bound to that project, so exactly one of the two
+        can ever match: the other's probe path does not exist on disk. That makes
+        the outcome deterministic rather than order dependent. The accepted cost
+        is that the repository root path appears twice, once per depth, which is
+        the price of not adding a marker directory, a wrapper, or a third party
+        plugin merely to compute a directory.
+      Alternatives Considered: the four expressions that look sufficient are
+        measured and dismissed beside the configLocation element above. A plugin
+        that discovers the reactor root and publishes it as a property was also
+        considered and rejected: it would add a dependency, a build phase
+        ordering constraint against the gate it feeds, and its own documentation
+        obligation, all to replace two declarative blocks.
+      Assumptions: config/checkstyle/checkstyle.xml and its companion
+        suppressions.xml are owned elsewhere in this repository and are not
+        created, stubbed or defaulted by this build. If they are absent no
+        profile activates, the property keeps the concrete default declared
+        above, and Checkstyle fails naming the path it could not find. That is
+        the intended behaviour: a documentation gate that passes because its
+        ruleset is missing would report success for work nobody checked.
+      Assumptions: no Maven wrapper and no settings.xml accompany this build, so
+        neither is referenced by these profiles or by anything else here.
+        Continuous integration invokes the system Maven directly, every
+        coordinate resolves from public registries, and the only registry this
+        project publishes to is authenticated by short lived federated role
+        assumption at deploy time. That is what keeps the build free of any
+        credential bearing configuration file, and it is why there is no
+        repository, server or mirror declaration anywhere in this POM.
+  -->
+  <profiles>
+
+    <!--
+      WHY :
+        Assumptions: matches this aggregator, one directory below the repository
+          root, and any other project at the same depth.
+    -->
+    <profile>
+      <id>checkstyle-config-beside-reactor-root</id>
+      <activation>
+        <file>
+          <exists>${basedir}/../config/checkstyle/checkstyle.xml</exists>
+        </file>
+      </activation>
+      <properties>
+        <carddemo.checkstyle.config.dir>${basedir}/../config/checkstyle</carddemo.checkstyle.config.dir>
+      </properties>
+    </profile>
+
+    <!--
+      WHY :
+        Assumptions: matches each of the nine module directories, which sit one
+          level deeper than this aggregator. This is the profile that makes the
+          gate fire correctly during a reactor build and during a single module
+          build alike, because activation is decided from the module's own base
+          directory and not from the command line invocation.
+    -->
+    <profile>
+      <id>checkstyle-config-one-level-above-reactor-root</id>
+      <activation>
+        <file>
+          <exists>${basedir}/../../config/checkstyle/checkstyle.xml</exists>
+        </file>
+      </activation>
+      <properties>
+        <carddemo.checkstyle.config.dir>${basedir}/../../config/checkstyle</carddemo.checkstyle.config.dir>
+      </properties>
+    </profile>
+
+  </profiles>
+
+</project>

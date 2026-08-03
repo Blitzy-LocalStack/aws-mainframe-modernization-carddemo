@@ -1,0 +1,532 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ==========================================================================
+  services/batch-service/pom.xml
+  Maven module descriptor for the CardDemo BATCH bounded context.
+  ==========================================================================
+
+  PURPOSE
+    Builds the deployable artifact for the batch bounded context of the
+    CardDemo mainframe to AWS migration. This module re-expresses the nightly
+    z/OS batch chain as argument-driven Spring Batch jobs:
+
+      app/cbl/CBTRN01C.cbl  ->  PreflightDailyTransactionsJob
+      app/cbl/CBTRN02C.cbl  ->  PostTransactionsJob, PostingValidationService,
+                                CategoryBalanceService
+      app/cbl/CBACT04C.cbl  ->  CalculateInterestJob,
+                                InterestCalculationService
+      app/jcl/TRANBKP.jcl   ->  BackupTransactionsJob
+      app/jcl/COMBTRAN.jcl  ->  CombineTransactionsJob
+      app/cbl/CBEXPORT.cbl  ->  ExportJob
+      app/cbl/CBIMPORT.cbl  ->  ImportJob
+
+    Java package root       : com.carddemo.batch
+    Owned database schema   : batch  (the batch_run step ledger plus the
+                              Spring Batch JobRepository tables)
+    Cross-schema authority  : narrowly scoped WRITE grants on ledger.* and
+                              account.*, held by a dedicated database role, so
+                              that the three-write posting unit of work at
+                              app/cbl/CBTRN02C.cbl:440-442
+                              (2700-UPDATE-TCATBAL, 2800-UPDATE-ACCOUNT-REC,
+                              2900-WRITE-TRANSACTION-FILE) stays a single ACID
+                              commit exactly as the baseline commits it.
+                              Interest accrual additionally READS disclosure
+                              group reference rows; it writes none of them.
+
+  INPUTS
+    Build   : every dependency and plugin version is supplied by the parent
+              services/pom.xml. This module declares no version of its own,
+              so a version bump happens in exactly one place.
+    Runtime : job selection and the business date arrive as process arguments
+              in the container command, never as an HTTP request and never
+              from the wall clock. app/jcl/INTCALC.jcl:22 passes
+              PARM='2022071800', a 10-character token, which is why the
+              business date remains an injected job parameter and reruns stay
+              reproducible.
+              Environment-specific settings (database location, dataset
+              bucket, queue destinations, encryption key identifiers) are
+              resolved from AWS Parameter Store at startup. No value of any
+              such setting appears anywhere in this repository.
+
+  OUTPUTS
+    Build   : one executable jar, which the sibling Dockerfile copies into the
+              runtime image.
+    Runtime : the process exit status, read by the invoking Step Functions
+              state. The mainframe condition-code rubric lives THERE and
+              nowhere else: app/cbl/CBTRN02C.cbl:229-230 moves 4 to
+              RETURN-CODE when the reject count is non-zero, and
+              app/jcl/TRANBKP.jcl:51 gates the consuming step with
+              COND=(4,LT), i.e. skip when 4 is less than the return code, so
+              a return code of 4 is a WARN tier that must still let the chain
+              continue.
+
+  FAILURE MODES
+    Build   : the Checkstyle documentation gate inherited from the parent
+              fails the build on missing or incomplete Javadoc. It is neither
+              re-declared nor weakened anywhere in this file.
+    Runtime : a Flyway per-database plugin that is declared but absent fails
+              on first container start rather than at build time, which is why
+              flyway-database-postgresql below is a first-class dependency and
+              not an afterthought.
+
+  GOVERNING CONVENTION
+    docs/CODE_DOCUMENTATION_STANDARD.md is the written convention for this
+    repository. XML has no docstring construct, so this header block is the
+    module-entry-point equivalent, and every non-obvious declaration below
+    carries a WHY comment naming at least one of Alternatives Considered,
+    Refactoring Rationale, Assumptions or Trade-offs.
+
+  REFERENCE-ONLY BASELINE
+    Everything under app/** is the behavioural specification for this module
+    and is never modified. All citations above and below are by path and line.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- WHAT: Aggregator parent supplying the Java release level, the Spring Boot
+             parent, all dependencyManagement and all pluginManagement.
+       WHY : Assumptions: the parent is resolved from the reactor through
+             relativePath rather than from a repository, because this module is
+             never built or released independently of the aggregator. groupId
+             and version are deliberately NOT restated below: Maven inherits
+             both, and restating them creates a second place that must be
+             edited on the next coordinate change. -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>batch-service</artifactId>
+
+  <!-- WHY : Assumptions: the sibling Dockerfile copies a single self-contained
+             jar into the runtime image, so the packaging type is stated
+             explicitly instead of relying on the Maven default. -->
+  <packaging>jar</packaging>
+
+  <name>CardDemo Batch Service</name>
+  <description>
+    Batch bounded context of the CardDemo migration. Owns the batch schema and
+    runs the nightly chain (daily-transaction preflight, transaction posting,
+    interest accrual, backup, combine, and the export/import round trip) as
+    argument-driven Spring Batch jobs invoked as container tasks by a Step
+    Functions state machine.
+  </description>
+
+  <dependencies>
+
+    <!-- ====================================================================
+         SHARED KERNEL
+         ==================================================================== -->
+
+    <!-- WHAT: The one and only intra-repository dependency of this module.
+               Supplies Money, the zoned and packed decimal codecs, the fixed
+               width codec, the error model, the timestamp formatter and the
+               validation flags.
+         WHY : Alternatives Considered: depending on transaction-service and
+               account-service in order to reuse their Transaction and Account
+               JPA entities was evaluated and rejected on two grounds. First,
+               the layering rules enforce that no service imports another
+               service's domain package, so such an import would fail an
+               executable test, not merely a review. Second, a compile-time
+               dependency between two independently deployable services
+               reintroduces precisely the coupling that bounded contexts exist
+               to remove: the two would then have to be released together.
+               This module therefore declares its OWN local JPA mappings for
+               the ledger and account tables it writes, and the agreement with
+               the owning contexts is at the physical schema level, expressed
+               as database grants, never through shared code.
+         WHY : Assumptions: tests/README.md:273 documents that GnuCOBOL must be
+               given the EBCDIC sign convention because the ASCII default
+               silently corrupts negative balances. The zoned decimal codec
+               that encodes that overpunch rule lives in common-lib and is
+               single-sourced there, so this module must never re-declare it. -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!-- ====================================================================
+         APPLICATION FRAMEWORK
+         ==================================================================== -->
+
+    <!-- WHAT: Chunk-oriented job execution with a durable JobRepository.
+         WHY : Refactoring Rationale: the baseline has NO checkpoint contract
+               to preserve. The only RESTART= anywhere in the tree is commented
+               out at app/jcl/DEFGDGD.jcl:2, and there is no CHKPT= in any of
+               the 38 JCL members. A failed step therefore had to be resubmitted
+               by hand, from the top, with no record of what had already
+               completed. The durable JobRepository, paired with the batch_run
+               step ledger in the owned schema, makes a resumed step idempotent
+               and a partial run auditable. This is a strict improvement over
+               the baseline, not a port of an existing capability, and it is
+               the only module in the repository that needs this starter. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-batch</artifactId>
+    </dependency>
+
+    <!-- WHAT: Managed persistence for the entities this module maps, including
+               its own local mappings of the ledger and account tables it is
+               granted write access to.
+         WHY : Alternatives Considered: a plain JDBC template or an SQL mapping
+               framework was evaluated, since a batch workload leans on
+               set-based statements that an object mapper adds nothing to. JPA
+               wins on the record-at-a-time paths, which are the ones
+               transcribed straight from the COBOL: the posting and interest
+               programs read, mutate and rewrite whole records, and an entity
+               with a managed version field expresses that far more directly
+               than hand-written statements per field. The set-based steps
+               deliberately bypass the mapper and issue ordered SQL instead, so
+               this choice costs nothing where it would not have helped. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!-- WHAT: Declarative constraint annotations on the job parameter and
+               record types.
+         WHY : Assumptions: the posting reject reasons transcribed from
+               app/cbl/CBTRN02C.cbl are short-circuit field checks whose exact
+               message text is part of the observable contract. Expressing the
+               structural half of those checks as declarative constraints keeps
+               the transcribed business ordering readable in the service layer
+               instead of burying it in hand-rolled null and length guards. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!-- WHAT: Health endpoint used as the container probe target.
+         WHY : Trade-offs: this module exposes no business REST surface, so the
+               actuator is carried solely to give the Dockerfile HEALTHCHECK
+               something to probe. Carrying it is accepted because the
+               alternative, a bespoke health mechanism unique to this one
+               module, would diverge from the convention the other eight
+               modules already follow. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- WHAT: Embedded servlet container that serves the actuator endpoint.
+         WHY : Trade-offs: a servlet container is genuinely surplus to an
+               argument-driven batch container that answers no request, and its
+               startup cost and attack surface are the accepted price. The
+               alternative, omitting the web stack entirely and probing health
+               with a shell command against a marker file, was rejected because
+               both the container task definition and the target-group
+               convention shared with the other eight modules expect an
+               actuator endpoint reachable over HTTP; a one-off probe here
+               would have to be maintained separately from every other
+               module's. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- ====================================================================
+         PERSISTENCE
+         ==================================================================== -->
+
+    <!-- WHAT: PostgreSQL JDBC driver.
+         WHY : Trade-offs: scoped to runtime rather than compile so that no
+               compilation unit in this module can bind to a driver-specific
+               type. Every table this module touches is reached through JPA or
+               through set-based SQL, both of which stay portable; the driver is
+               a deployment detail, not an API. -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- WHAT: Versioned schema migration for the owned batch schema.
+         WHY : Assumptions: migrations shipped by this module create and evolve
+               ONLY the batch schema. The ledger, account and reference schemas
+               are created and evolved exclusively by the contexts that own
+               them; this module reaches them through grants, so pointing a
+               migration location at any of them would make two modules
+               authoritative for one table. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+
+    <!-- WHAT: The PostgreSQL dialect plugin for Flyway. Mandatory companion to
+               flyway-core, not an optional extra.
+         WHY : Assumptions: from Flyway 10 onward, per-database support was
+               moved OUT of flyway-core into a separate module per database.
+               flyway-core on its own therefore compiles, packages and passes
+               every test, then fails at first container start with a "no
+               database plugin found" error. That build-green / runtime-broken
+               asymmetry is exactly why this coordinate is declared explicitly
+               and adjacent to flyway-core: omitting it produces a defect that
+               no build gate in this repository can catch. Both artifacts take
+               their version from the parent, so they cannot drift apart. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!-- ====================================================================
+         AWS INTEGRATION
+         ==================================================================== -->
+
+    <!-- WHAT: Queue producer and listener support for the jobs that exchange
+               messages, wired through SqsConfig.
+         WHY : Alternatives Considered: the legacy
+               org.springframework.cloud:spring-cloud-aws-* coordinate was
+               evaluated and rejected because it is no longer the maintained
+               line; io.awspring.cloud is the group that receives releases
+               tracking current Spring Boot versions. Choosing the legacy
+               coordinate would pin this module to an unmaintained
+               autoconfiguration set while looking, at a glance, correct. -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+    </dependency>
+
+    <!-- WHAT: Resolves externalised configuration from AWS Parameter Store as
+               a Spring property source at startup.
+         WHY : Assumptions: the infrastructure layer publishes every runtime
+               location (database endpoint, dataset bucket, queue destinations,
+               encryption key identifiers) as parameters, and this module reads
+               them from there. That is the mechanism by which no endpoint and
+               no credential is ever committed to this repository, so it is a
+               structural guarantee rather than a review convention. -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-parameter-store</artifactId>
+    </dependency>
+
+    <!-- WHAT: Object storage client used by DatasetGenerationService and the
+               backup, combine, export and import jobs.
+         WHY : Refactoring Rationale: the baseline addressed dataset
+               generations through relative generation numbers, for example the
+               (0) and (+1) references at app/jcl/COMBTRAN.jcl:24, :26, :37 and
+               :44, and retained five generations per base. Generation-data-group
+               cataloguing has no on-cluster equivalent, so the generations
+               become object versions under a dated prefix convention and this
+               client is the access path to them. Reading them back through the
+               database instead was rejected: a dataset generation is an opaque
+               byte-for-byte artifact that must survive unchanged for
+               comparison, which is a storage concern, not a relational one. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+
+    <!-- ====================================================================
+         OBSERVABILITY
+         ==================================================================== -->
+
+    <!-- WHAT: Metric export in the scrape format the monitoring stack reads.
+         WHY : Trade-offs: runtime scope only, because no code in this module
+               may reference a registry implementation directly. Instrumentation
+               is expressed against the vendor-neutral facade that arrives with
+               the actuator, so swapping the backend stays a dependency change
+               rather than a code change.
+         WHY : Refactoring Rationale: the baseline's only operational telemetry
+               was the job log written to the SYSOUT and SYSPRINT data
+               definitions of each JCL step, which could be read after the fact
+               but never queried or alerted on while a step was running. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- ====================================================================
+         TEST SCOPE
+         ==================================================================== -->
+
+    <!-- WHAT: The aggregate test stack (test engine, assertions, mocking and
+               the Spring test context support).
+         WHY : Assumptions: the aggregate is declared instead of pinning each
+               test library individually, so the test stack is version-aligned
+               with the runtime by construction and cannot drift away from it
+               when the parent moves the framework version. It also supplies the
+               test engine that the unit and integration test runners discover,
+               which is why no engine is declared separately here. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- WHAT: Job and step launcher utilities plus step-scope support for the
+               job-level tests.
+         WHY : Assumptions: the jobs are argument-driven, so a test must be able
+               to launch one with an explicit business date and assert on the
+               resulting exit status. app/jcl/INTCALC.jcl:22 injects
+               PARM='2022071800' for exactly the same reason, and a test that
+               let the job read a clock instead would stop being reproducible
+               the day after it was written. -->
+    <dependency>
+      <groupId>org.springframework.batch</groupId>
+      <artifactId>spring-batch-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- WHAT: Disposable PostgreSQL instance for the repository integration
+               tests.
+         WHY : Trade-offs: a real database container starts far more slowly than
+               an in-memory engine, and that cost is accepted deliberately. The
+               integration tests must prove that the three-write posting unit of
+               work at app/cbl/CBTRN02C.cbl:440-442 both COMMITS and ROLLS BACK
+               atomically while spanning two schemas in one transaction. That
+               depends on genuine multi-schema search-path resolution, real
+               grant enforcement and real transactional semantics, none of which
+               an in-memory substitute reproduces faithfully; a test that passed
+               against a substitute would prove nothing about the property that
+               actually matters here.
+         WHY : Assumptions: the parent imports the Testcontainers bill of
+               materials at a 2.x version, in which every module artifact was
+               renamed to carry the testcontainers- prefix. The pre-2.x
+               artifactIds (postgresql, junit-jupiter) are managed only by the
+               1.x bill of materials, so using them here would leave the version
+               unmanaged and break resolution outright. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- WHAT: Architecture assertions evaluated as ordinary tests.
+         WHY : Refactoring Rationale: the two prohibitions this module depends on
+               most, that the money path never uses a binary floating-point type
+               and that no service imports another service's domain package,
+               were previously expressible only as review conventions, and a
+               convention silently stops holding the first time a reviewer is in
+               a hurry. Encoding them as executable assertions means a violation
+               fails the build instead of reaching the branch. The rule set
+               itself is inherited from the layering rules published by
+               common-lib, so the rules are stated once and applied everywhere
+               rather than copied per module. -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ====================================================================
+         DELIBERATELY ABSENT DEPENDENCIES
+
+         Recorded because each is a choice a reader could reasonably expect to
+         find made the other way. Rule 1 treats an undocumented non-obvious
+         choice as a review failure, and choosing NOT to add a library is such
+         a choice.
+         ====================================================================
+
+         No annotation-driven boilerplate generator (lombok).
+           Alternatives Considered: evaluated and rejected because generated
+           accessors carry no Javadoc, so annotating a type to synthesise its
+           members would make this module structurally incapable of passing the
+           inherited Checkstyle documentation gate. Java records with explicit
+           constructors give the same brevity while leaving every member
+           documentable.
+
+         No generated bean mapper (mapstruct).
+           Alternatives Considered: evaluated and rejected because the record
+           to data-transfer mapping in this repository is not mechanical. It
+           drops FILLER padding, masks the primary account number to its last
+           four digits, suppresses the card verification value entirely,
+           encrypts identifiers and corrects three misspelled baseline field
+           names. Each of those needs a justification at the mapping site, and
+           a generated mapper has nowhere to put one.
+
+         No external resilience library (resilience4j, spring-retry) and no
+         circuit breaker.
+           Alternatives Considered: retry moved into the Spring Framework core
+           that arrives with the parent, which supplies method-level retry, a
+           concurrency limiter and a programmatic retry policy. The published
+           resilience4j Spring Boot integration targets the previous Boot major
+           version, and spring-retry is superseded by the in-framework support,
+           so adding either would layer a second retry mechanism over the one
+           already present. Durable retry for this module comes from per-state
+           retry in the invoking state machine and from queue redelivery into a
+           dead-letter queue, which survive a task dying outright; an in-process
+           retry cannot. A circuit breaker is omitted because this module makes
+           no synchronous call to another service that could be broken open.
+
+         No in-memory cache or streaming platform (redis, kafka, kinesis).
+           Alternatives Considered: out of scope by design. The baseline has no
+           cache tier, so adding one would introduce a coherence question that
+           functional parity does not ask; and the messaging requirement here is
+           request/reply, which the queue service already satisfies without a
+           broker or a shard to operate.
+
+         No distributed-transaction coordinator (XA data source, or any
+         two-phase-commit, saga or compensating-reversal framework).
+           Alternatives Considered: a saga with compensating reversals was
+           evaluated for transaction posting and rejected. app/cbl/CBTRN02C.cbl
+           commits its three writes as ONE unit of work at lines 440-442, so a
+           saga would replace a single atomic commit with a sequence of
+           committed steps, making states such as a posted transaction with an
+           unposted balance observable. Those states do not exist in the
+           baseline, so the golden masters would correctly flag them as a parity
+           failure. Keeping one local transaction over scoped cross-schema
+           grants preserves atomicity and needs no coordinator at all.
+
+         No API documentation starter and no security starters.
+           Alternatives Considered: exposing an administrative endpoint to
+           trigger a job over HTTP was evaluated and rejected. The only
+           invocation path in the target architecture is a synchronous run-task
+           call from a state machine state, which passes job selection and the
+           business date as container command arguments. An HTTP trigger would
+           add a second invocation path and, with it, a second authorization
+           surface to design, test and defend, for no operational gain. There is
+           consequently no controller, no published contract, and no
+           OpenApiConfig or SecurityConfig class shipped under src; the module
+           README states the same, so the two cannot disagree. The actuator
+           endpoint IS served, but it is health-only and reachable solely inside
+           the task's own network namespace, where the container health check
+           probes it.
+         ==================================================================== -->
+
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <!-- WHAT: Activates the integration-test runner for this module. Version,
+                 lifecycle bindings and configuration all come from the
+                 inherited pluginManagement; nothing is restated here.
+           WHY : Assumptions: the inherited pluginManagement supplies the
+                 bindings but a module must still opt in for the plugin to run
+                 at all, and the default include pattern already matches the
+                 IT-suffixed class names used by this module's repository tests,
+                 so no include override is needed. Unit tests are matched by the
+                 default test runner's own patterns and need no declaration.
+           WHY : Trade-offs: no failure tolerance of any kind is configured
+                 here, and that is a deliberate separation rather than an
+                 omission. The mainframe condition-code rubric, under which a
+                 return code of 4 is a warn tier that still lets the chain
+                 continue (app/cbl/CBTRN02C.cbl:229-230 paired with the
+                 COND=(4,LT) gate at app/jcl/TRANBKP.jcl:51), belongs to the
+                 batch container's process exit status, because that is what the
+                 invoking state machine reads. A build gate is binary: a test
+                 either passes or fails the build. Letting the graded rubric
+                 leak into this gate would turn a real test failure into a
+                 tolerated warning and quietly disarm the suite. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+      </plugin>
+
+    </plugins>
+  </build>
+
+</project>

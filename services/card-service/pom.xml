@@ -1,0 +1,561 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  =============================================================================
+  Maven module descriptor: card-service (the card bounded context)
+  =============================================================================
+
+  Purpose:
+    Builds the deployable service that owns everything about a credit card in
+    the migrated CardDemo system: listing cards with paging, reading one card,
+    and updating one card. It owns exactly one PostgreSQL schema, "card", which
+    holds a single table, "card.cards", and no other module writes to it. All
+    Java in this module lives under the package root com.carddemo.card.
+
+  Parameters (inherited configuration):
+    parent            com.carddemo:carddemo-services:1.0.0-SNAPSHOT
+                      (the reactor aggregator at services/pom.xml)
+    groupId           inherited from that parent; deliberately not restated
+    version           inherited from that parent; deliberately not restated
+    java release      inherited from the parent toolchain configuration
+    dependency
+    versions          inherited, every one of them, from the parent's
+                      dependencyManagement and the Spring Boot BOM it imports.
+                      This file contains no version element on any dependency.
+    Checkstyle
+    binding           inherited from the parent, which binds the documentation
+                      gate to the validate phase for all modules at once.
+
+  Return values (build output):
+    One executable Spring Boot layered jar at the deterministic path
+    target/card-service.jar. The path is deterministic because <finalName> is
+    pinned below; services/card-service/Dockerfile copies that exact path, so
+    the name is a contract between these two files rather than a preference.
+
+  Exceptions or errors (build failure modes a reader will meet):
+    1. Checkstyle runs in the validate phase with failOnViolation set true and
+       violationSeverity set to warning. A missing Javadoc comment, or a source
+       package with no package-info.java, therefore fails "mvn validate" before
+       the compiler is ever invoked. That ordering is intentional: the
+       documentation gate is cheap and should reject early.
+    2. The shared Checkstyle configuration declares its SuppressionFilter fail
+       closed (optional set to false). config/checkstyle/suppressions.xml must
+       be reachable from the build's working tree or validate aborts outright
+       rather than silently continuing with no suppressions in force.
+    3. flyway-core on its own does not fail the build. It fails at application
+       startup instead. See the note on flyway-database-postgresql below.
+    4. CardRepositoryIT runs under Failsafe against a real database started by
+       Testcontainers, so a host with no working container runtime fails the
+       integration phase even when every unit test passes.
+
+  Provenance (all paths below are REFERENCE ONLY and are never modified):
+    app/cbl/COCRDLIC.cbl   1459 lines  card list, the canonical CICS browse
+    app/cbl/COCRDSLC.cbl    887 lines  card detail read
+    app/cbl/COCRDUPC.cbl   1560 lines  card update
+    app/cbl/CBACT02C.cbl    178 lines  sequential card file reader, read path
+    app/cpy/CVACT02Y.cpy     14 lines  01 CARD-RECORD, record length 150
+    The copybook is the storage contract this module's schema is derived from:
+    CARD-NUM X(16), CARD-ACCT-ID 9(11), CARD-CVV-CD 9(03), CARD-EMBOSSED-NAME
+    X(50), CARD-EXPIRAION-DATE X(10) (misspelled in the baseline and corrected
+    to expiration_date in the target), CARD-ACTIVE-STATUS X(01), then FILLER
+    X(59) which is padding to the fixed record length and is dropped. Those
+    widths sum to 150, which is why the record length is what it is.
+
+  Assumptions:
+    XML 1.0 section 2.5 forbids a doubled hyphen anywhere inside a comment, and
+    a violation is a hard parse failure rather than a warning. Every horizontal
+    ruler in this file is therefore built from "=" or "~" and never from the
+    hyphen, because a run of hyphens contains the forbidden pair by
+    construction. For the same reason prose ranges here are written with the
+    word "to" instead of a dash. A maintainer reaching for a hyphen ruler will
+    break this build, so the constraint is recorded rather than left to be
+    rediscovered.
+
+  Documentation standard:
+    Prose convention: docs/CODE_DOCUMENTATION_STANDARD.md
+    Mechanical gate:  config/checkstyle/checkstyle.xml
+    Where the two disagree, the linter configuration is authoritative, because
+    it is the one that actually decides whether the build passes.
+  =============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    Assumptions: the parent is the reactor aggregator at services/pom.xml, and
+    the explicit relativePath is what lets this module be read from a clean
+    checkout in which the parent has never been installed into a local
+    repository. Without it Maven would look for the parent in the repository
+    first, so a container build running
+    "mvn -f services/pom.xml -pl card-service -am package" against a fresh
+    ~/.m2 would fail to resolve its own parent.
+  -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <!--
+    Assumptions: groupId and version are intentionally absent here, not
+    forgotten. Maven inherits both from the parent above, and restating them
+    would create a second place to edit at the next version bump plus a silent
+    drift path if only one of the two is updated. A reader tempted to "fix" the
+    omission should leave it alone.
+  -->
+  <artifactId>card-service</artifactId>
+  <packaging>jar</packaging>
+
+  <name>CardDemo Card Service</name>
+  <description>
+    Card bounded context for the migrated CardDemo system, covering card list
+    (COCRDLIC), card detail (COCRDSLC), card update (COCRDUPC) and the
+    sequential card read path (CBACT02C).
+  </description>
+
+  <!--
+    Alternatives Considered: a module local <properties> block restating the
+    Java release level, the source encoding or any dependency version. Rejected
+    and therefore absent entirely: every one of those values is already managed
+    by the parent, so duplicating one here would give the project two places to
+    change and would let this module drift from its eight siblings the moment
+    only one of the two copies is updated. Nothing in this module needs a value
+    the parent does not already supply, so the correct block is no block.
+  -->
+
+  <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Dependencies
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Governing principle: every version used below is inherited from the parent's
+    dependencyManagement and from the Spring Boot BOM that parent imports. No
+    version element appears on any dependency in this file.
+
+    Trade-offs: the accepted cost of that rule is real, and it is worth naming
+    because it looks like an omission. Reading this file alone does not tell you
+    which version of anything you will get, so answering that question means
+    opening the parent as well. The alternative, pinning each version at the point
+    of use where it would be visible, was rejected because nine modules pinning
+    the same artifact independently is nine places to update and eight chances to
+    miss one, and a divergence between two services on, for example, the Flyway
+    version would surface as a runtime migration difference rather than as a build
+    error.
+
+    Assumptions: the set is closed rather than open. Each entry traces to one of
+    the four migrated programs or to the card record contract described in the
+    header, so an addition that cannot be traced that way belongs in a different
+    context, not in this one.
+  -->
+  <dependencies>
+
+    <!--
+      Assumptions: common-lib is the shared kernel and the only sibling this
+      module compiles against. It supplies Money (BigDecimal held at scale 2
+      with HALF_UP rounding), PageResponse (the keyset page envelope), ApiError
+      with GlobalExceptionHandler, JwtRoleConverter, FieldValidationFlag and the
+      fixed-width and zoned-decimal codecs, all under com.carddemo.common. Those
+      types are consumed rather than redeclared per service so that a card
+      payload and an account payload cannot disagree about what a money value or
+      a page cursor is.
+
+      Trade-offs: ${project.version} is used in place of a literal version so
+      the sibling always moves with the reactor. The accepted cost is that this
+      module cannot be built against an older common-lib without editing the
+      POM, which is the correct bias here because the two are released together
+      from one reactor.
+
+      This is the only sibling dependency this module may declare. No other
+      service module belongs here. The layering test forbids importing another
+      service's domain package, and keeping that coupling out of the build graph
+      is what prevents the rule being satisfied on paper while a transitive path
+      quietly reintroduces the dependency.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      Assumptions: these three starters carry the three categories of CICS verb
+      this context actually used. SEND MAP and RECEIVE MAP become JSON responses
+      and requests (web); the keyed reads and the browse at
+      app/cbl/COCRDLIC.cbl:1129 through :1376 become repository calls (data-jpa);
+      and the field-level validation chain in app/cbl/COCRDUPC.cbl becomes
+      declarative constraints (validation). The constraint widths are not free
+      choices either: each is the picture width from app/cpy/CVACT02Y.cpy, so the
+      fixed field length the 3270 screen enforced still holds at the API edge.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the baseline CICS transaction definitions for all
+      three card transactions declare RESSEC(NO) and CMDSEC(NO): see
+      app/csd/CARDDEMO.CSD:354 for CCDL (card detail, COCRDSLC), :364 for CCLI
+      (card list, COCRDLIC) and :375 for CCUP (card update, COCRDUPC). CICS
+      therefore performed no resource-level or command-level authorization for
+      them, and the only admin versus user distinction available to the programs
+      was the CDEMO-USER-TYPE field travelling in the COMMAREA that the terminal
+      echoed back between turns. A resource server validating a signed token
+      moves that decision onto the server, where a client cannot assert its own
+      role at all.
+
+      This is a difference in what the two platforms provide rather than a defect
+      in the COBOL: on the mainframe an external security manager covered this
+      ground outside the application, and that component has no in-process
+      equivalent on this side, so its job is redistributed onto token validation
+      here and onto task role policy in the infrastructure tree.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: two consumers outside this module poll the health endpoint
+      this starter publishes. The load balancer target group uses it to decide
+      whether a task receives traffic, and the HEALTHCHECK instruction in
+      services/card-service/Dockerfile uses it to decide whether the container is
+      up. Removing this dependency breaks both, and it breaks them at deploy time
+      rather than at build time, so the coupling is written down here.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: runtime scope rather than compile scope because no source file
+      in this module names a driver class. The driver is located through the
+      java.sql.Driver service loader from the JDBC URL alone. Keeping it off the
+      compile classpath means application code cannot accidentally import a
+      PostgreSQL-specific type and bind the card context to one engine at the
+      source level, which is the coupling the repository interface exists to
+      avoid.
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+      Assumptions: this module carries the one migration that creates the schema
+      it owns, src/main/resources/db/migration/V1__card.sql, so schema ownership
+      and code ownership live in the same deployable and cannot be applied out of
+      step with each other.
+
+      The second artifact below is a mandatory companion, not a redundant copy of
+      the first. Flyway 10 moved database-specific support out of flyway-core into
+      one module per database. Declaring flyway-core alone compiles perfectly and
+      then fails at application startup, when Flyway cannot find an implementation
+      matching a postgresql JDBC URL. There is no compile-time signal for the
+      omission whatsoever, which is precisely why it is called out. It is not a
+      duplicate and it must not be removed as one.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: this serves the OpenAPI 3.1 document described by
+      src/main/resources/openapi/card-api.yaml, and the browser client for the
+      card screens is written against that document. The contract is the
+      integration point between two separately built trees, so the publisher
+      belongs in the runtime dependency set. A build-time-only generator was the
+      alternative and would emit a file that nothing serves, leaving no way for a
+      client to discover a drifted contract at run time.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: runtime scope because no source file imports the registry
+      type; actuator autoconfiguration discovers it on the classpath. Compile
+      scope would advertise an API this module deliberately does not call, since
+      the common metric tags are configured once in common-lib rather than
+      per service.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      Test scope
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      Assumptions: the five test artifacts below are declared here rather than
+      left to inheritance. The parent aggregator's contract is dependencyManagement
+      only, meaning it fixes the version of each artifact without contributing any
+      dependency of its own, so there is nothing on the test classpath to inherit
+      in the first place. Declaring them is also the safe direction of error should
+      that contract ever widen: a child entry carrying no version merges with an
+      identical parent entry on the same groupId and artifactId and resolves to
+      exactly the same artifact, so no drift is possible; whereas omitting an entry
+      the parent does not supply leaves this module's test tree uncompilable, which
+      is the more expensive mistake of the two.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: the controller test is a @WebMvcTest against a controller
+      sitting behind the resource server filter chain. This artifact supplies the
+      JWT request post processor used to present a token carrying the
+      carddemo-admin group, which is how the admin-only card detail route is
+      exercised and how the non-admin rejection is asserted. It is not bundled
+      inside spring-boot-starter-test, so without it neither assertion can be
+      written at all.
+    -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: these are the Testcontainers 2.x coordinates and the
+      artifactId prefix is load-bearing. Spring Boot imports testcontainers-bom,
+      and version 2 of that BOM renamed every module away from its 1.x form: it
+      manages testcontainers-postgresql and testcontainers-junit-jupiter and
+      contains no entry named postgresql or junit-jupiter at all. Using the 1.x
+      names here yields "dependencies.dependency.version for
+      org.testcontainers:postgresql:jar is missing" and the POM cannot even be
+      read, because there is no managed version to inherit. Both versions come
+      from that BOM through the parent and must never be restated here.
+
+      Alternatives Considered: an embedded in-memory database for the repository
+      integration test. Rejected because that test exists to prove the by-account
+      query which replaces the CARDAIX alternate index
+      (app/csd/CARDDEMO.CSD:13 defines that file, app/cbl/COCRDLIC.cbl:217 names
+      it) behaves correctly, and all three properties it checks are engine
+      behaviours: ordering under a keyset predicate, CHAR(16) blank padding on the
+      card number, and whether the planner actually selects the secondary index.
+      An in-memory engine reproduces none of the three faithfully, so a green test
+      against one would say nothing about the deployed database.
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: the layering rules are authored once in common-lib's test
+      tree, but an ArchUnit rule can only analyse classes present on the
+      classpath of the module whose tests execute it. Declaring the artifact here
+      is what allows this module's own tests to apply those rules to
+      com.carddemo.card, in particular the prohibition on float and double
+      anywhere in the money path and the prohibition on importing another
+      service's domain package. Leaving it out would make the rules authored but
+      unenforced for this module, which is not distinguishable from not having
+      written them.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+  </dependencies>
+
+  <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Deliberate non-adoptions
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Alternatives Considered: the following are each a reasonable thing to expect
+    in a Spring Boot service POM, and each is absent on purpose. They are listed
+    with their specific reason so that a reader does not read absence as an
+    oversight and add one back.
+
+    Lombok. The inherited Checkstyle configuration requires a Javadoc comment on
+    methods and does not exempt property accessors, so accessors and constructors
+    generated at compile time carry no documentation the linter can see. Adopting
+    Lombok would leave two options, both unacceptable: suppress the whole of
+    src/main/java from the documentation gate, or ship a module that cannot pass
+    its own validate phase. Java 21 record types with explicit constructors give
+    the same brevity while leaving every member somewhere a Javadoc comment can
+    be attached.
+
+    MapStruct. Mapping the card record onto DTOs in this module is not a
+    mechanical field copy, so a generated mapper has nowhere to put the reasoning
+    each step needs. Four of the steps are judgements: the 59-byte FILLER at
+    app/cpy/CVACT02Y.cpy:11 is dropped because it is padding to the fixed record
+    length and not data; the primary account number is masked to its last four
+    digits on every response except the administrative detail route; the card
+    verification value is never serialised at all; and the baseline's misspelled
+    CARD-EXPIRAION-DATE at app/cpy/CVACT02Y.cpy:9 is renamed to expirationDate,
+    which is a rename that has to be traceable because the baseline field keeps
+    its original spelling forever. Hand-written mappers hold that reasoning at
+    the point of use.
+
+    resilience4j and spring-retry. Spring Framework 7 arrives through the Spring
+    Boot parent and provides retry in the framework core, so a library would add
+    a second, competing retry vocabulary for a capability already present. The
+    core annotation is Retryable with a maxRetries attribute, where total
+    attempts are one plus that value, and it is switched on with
+    EnableResilientMethods rather than the older EnableRetry that predates the
+    move into core.
+
+    A circuit breaker. This module makes no synchronous outbound call to another
+    service, so there is no dependency for a breaker to protect. Adding one would
+    introduce a new failure mode of its own, an open circuit rejecting requests
+    the database would have served, while removing none.
+
+    Redis or ElastiCache. The baseline reads its card file directly with no cache
+    tier anywhere in front of it. Introducing one here would add an invalidation
+    contract that no golden master expresses an expectation about, so a stale read
+    would be a behaviour change that the parity comparison could not detect.
+
+    Kafka or Kinesis. Out of scope for the project, and unnecessary here in any
+    case: this module neither publishes nor consumes a message. The baseline's
+    decoupled messaging extensions belong to other contexts, not to the card
+    screens.
+
+    spring-boot-starter-batch. None of the four migrated programs is a nightly
+    job. CBACT02C is a read-and-print utility, and its logic becomes the read
+    path on the card repository rather than a chunk-oriented batch step, so a job
+    repository and its schema would be provisioned for nothing.
+
+    An SQS client, spring-cloud-aws, or an AWS SDK messaging module. This module
+    defines no queue configuration and no message listener, so a messaging client
+    would enlarge both the image and the task role's required permissions with no
+    caller.
+
+    A read replica or multi-datasource routing library. Read replicas are out of
+    scope for the project; reporting reads are served from read-only cross-schema
+    views on the writer, so this module has exactly one datasource and needs no
+    routing decision at all.
+  -->
+
+  <!--
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Build
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Governing principle: the parent owns the plugin set. This section declares
+    only what is genuinely specific to this module and restates no version.
+
+    Trade-offs: the Checkstyle documentation gate is inherited deliberately and is
+    not re-declared here. Re-declaring it would open three ways to get it wrong at
+    once: re-pinning the Checkstyle version so this module lints under a different
+    ruleset than its eight siblings, duplicating the configLocation so the two
+    copies can diverge, or relaxing the setting that makes a violation fail the
+    build. Single-sourcing it in the parent is what keeps every module gated
+    identically. Accepted cost: reading this file alone does not tell you which
+    rules apply, so the pointer in the header block above exists to close that
+    gap.
+
+    For the avoidance of doubt, this module must never weaken that gate: not by
+    passing the Checkstyle skip property on a command line, not by adding a
+    plugin-level skip flag, not by turning off the setting that makes a violation
+    fail the build, and not by tolerating a non-zero return code in any pipeline
+    that builds it. No suppressionsLocation is declared here and there is no
+    module-local Checkstyle or suppressions file; both live only under
+    config/checkstyle so that all modules share one ruleset.
+
+    Assumptions: Surefire is deliberately not declared, because the default
+    lifecycle for jar packaging already binds it. Class names ending in Test are
+    picked up by its default include pattern and run in the test phase with no
+    help from this file.
+
+    Failsafe is the opposite case and is therefore declared below. The Spring Boot
+    parent carries maven-failsafe-plugin in pluginManagement only, which fixes its
+    version and pre-binds its goals but never adds it to the build itself, so a
+    module that stays silent about it gets no integration test phase at all. The
+    include pattern was never the missing piece; the binding was. This was
+    verified by running the reactor both ways: with no entry, CardRepositoryIT is
+    never executed, no failsafe report directory is produced, and the build still
+    reports success, which is worse than having no integration test because it
+    looks like coverage that does not exist.
+  -->
+  <build>
+    <!--
+      Assumptions: this pins the build output to target/card-service.jar instead
+      of target/card-service-1.0.0-SNAPSHOT.jar, and
+      services/card-service/Dockerfile copies that exact literal path. A version-suffixed
+      name would force the Dockerfile to match the jar with a wildcard,
+      which keeps working right up until target holds two jars, for instance
+      after a version change with no intervening clean, and then copies the wrong
+      one with no error. This name is a contract between this file and that
+      Dockerfile, so neither may change it alone.
+    -->
+    <finalName>card-service</finalName>
+
+    <plugins>
+      <!--
+        Assumptions: this plugin contributes the repackage goal, which rewrites
+        the plain jar produced by the jar plugin into the executable layered jar
+        the Dockerfile's runtime stage expects. Without it the runtime stage would
+        receive an archive with no Main-Class entry in its manifest and no nested
+        dependency layout, and the container would exit immediately instead of
+        starting the service. The version is supplied by the Spring Boot parent on
+        purpose: pinning it here would let the plugin drift away from the Boot
+        version whose jar layout it is written to produce.
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+
+      <!--
+        Assumptions: this entry is what makes the module's integration test run at
+        all. The Spring Boot parent declares maven-failsafe-plugin in
+        pluginManagement, which supplies its version and pre-binds its
+        integration-test and verify goals, but it does not add the plugin to the
+        build, so inheritance alone leaves it inert. Listing it here with no
+        version and no configuration is the minimum that activates it: the version
+        and both goals still come from the parent, and the default include pattern
+        for the integration test suffix is already exactly what CardRepositoryIT
+        needs, so no includes block is added and none should be.
+
+        Trade-offs: this repeats a plugin coordinate that a reader might expect to
+        be purely inherited, and the parent could later bind the plugin itself,
+        which would make this entry redundant. That redundancy is accepted because
+        it is harmless (Maven merges the two declarations on the same coordinate
+        and the goals carry the same identity) whereas the failure it prevents is
+        silent: without it the integration test phase does not happen and the
+        build still reports success, so the gap would show up as absent coverage
+        rather than as a red build. This is the same mechanism that makes the
+        spring-boot-maven-plugin entry above necessary rather than optional.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

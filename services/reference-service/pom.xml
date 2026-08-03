@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- =============================================================================
+     services/reference-service/pom.xml
+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     Purpose:
+        Maven module descriptor for the reference-data bounded context, the sixth
+        of nine modules in the com.carddemo:carddemo-services reactor. It names the
+        module, binds it to the parent aggregator, and declares the exact runtime
+        and test dependency set the module needs. The service it describes owns the
+        PostgreSQL reference schema (transaction_types, transaction_categories,
+        disclosure_groups, us_phone_area_codes, us_states, us_state_zip_prefixes)
+        and serves transaction-type maintenance, disclosure-group interest-rate
+        lookup, address lookup validation and date conversion, migrated from
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl, COTRTUPC.cbl and
+        COBTUPDT.cbl together with app/app-vsam-mq/cbl/CODATE01.cbl.
+
+     Parameters (build inputs inherited from the parent, services/pom.xml):
+        groupId com.carddemo and version 1.0.0-SNAPSHOT; the Java 21 release level
+        and the UTF-8 source and reporting encodings; the imported dependency
+        management of spring-boot-starter-parent 4.1.0,
+        spring-cloud-aws-dependencies 4.1.0, software.amazon.awssdk bom 2.49.3 and
+        testcontainers-bom 2.0.5; and the maven-checkstyle-plugin execution bound
+        to the validate lifecycle phase that enforces Rule 1 on every build.
+
+     Returns (build output):
+        reference-service-1.0.0-SNAPSHOT.jar, an executable Spring Boot
+        application carrying the Flyway migrations for the reference schema and the
+        OpenAPI 3.1 contract, plus test reports written under
+        services/reference-service/target/surefire-reports and
+        services/reference-service/target/failsafe-reports.
+
+     Errors (conditions under which this module fails the build):
+        a Checkstyle violation at or above severity warning, which is the Rule 1
+        documentation gate; a Surefire failure in any class matching *Test; a
+        Failsafe failure in any class matching *RepositoryIT, most importantly the
+        assertion that deleting a referenced transaction type is refused rather
+        than cascaded; or an unresolvable coordinate, since every version consumed
+        here is supplied by the parent rather than declared in this file.
+
+     WHY (non-obvious design decisions):
+        - Assumptions: XML 1.0 section 2.5 forbids two consecutive hyphen
+          characters anywhere inside a comment. The rulers above therefore use
+          equals and tilde runs where the sibling house header at
+          .github/workflows/tests.yml line 3 uses a hyphen run, and no prose in
+          this file contains consecutive hyphens or the comment close sequence.
+          This is not a stylistic preference. A maintainer who "restores" a
+          conventional hyphen ruler for visual consistency with tests.yml makes
+          this file not well formed, and every Maven invocation that parses it then
+          fails before a single goal runs.
+        - Assumptions: Rule 1 names its four rationale categories as Alternatives
+          Considered, Refactoring Rationale, Assumptions and Trade-offs, and the
+          pre-existing house gate at tests/README.md line 544 to line 549 names the
+          same four for every test, helper, mock and runner routine. The two
+          authorities agree. Sibling files including .github/workflows/tests.yml
+          write the singular forms Assumption and Trade-off; those denote exactly
+          the same categories. Stated once here, this file uses the canonical
+          plural labels throughout and never mixes the two forms.
+        - Assumptions: the parent owns all version management and the Checkstyle
+          binding, so this file deliberately carries no properties block, no
+          dependencyManagement, no version element on any dependency, no
+          repositories or pluginRepositories, and no build section re-declaring
+          maven-checkstyle-plugin or spring-boot-maven-plugin. Duplicating any of
+          them would create a second source of truth that drifts silently. The
+          parent already overrides Spring Boot 4.1.0's own Flyway 12.4.0 and
+          PostgreSQL 42.7.11 to 13.0.0 and 42.7.13, so a local copy of either
+          number would quietly diverge the next time the parent moves.
+     ============================================================================= -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>reference-service</artifactId>
+
+  <!-- Assumptions: the ECS Fargate task launches this artifact as an executable
+       jar through the container entry point, so there is no servlet container to
+       deploy into and war packaging would produce an artifact nothing consumes. -->
+  <packaging>jar</packaging>
+
+  <name>CardDemo Reference Service</name>
+  <description>
+    Reference-data bounded context for the CardDemo mainframe to AWS migration.
+    Owns the PostgreSQL reference schema and serves transaction-type maintenance,
+    disclosure-group interest-rate lookup, seeded address lookup validation and
+    date conversion. Migrated from the Db2 transaction-type screens COTRTLIC and
+    COTRTUPC, the batch reference update COBTUPDT, and the IBM MQ date-conversion
+    flow CODATE01, with the date-edit rules of CSUTLDTC consumed from common-lib.
+  </description>
+
+  <dependencies>
+
+    <!-- Refactoring Rationale: the CICS region was a single address space in which
+         any program could reach any file, so the transaction-type screens and the
+         interest batch touched the same VSAM and Db2 objects with nothing between
+         them. The target decomposes that into bounded contexts, and common-lib is
+         the ONLY reactor sibling this module is permitted to reach. Cross-service
+         domain imports are forbidden by the ArchUnit rules that ship in
+         common-lib, and a Maven dependency on a sibling service would defeat that
+         boundary before a single import statement was written. batch-service and
+         account-service both consume reference data, but over the published API or
+         over the schema, never through compiled code.
+         Assumptions: the parent aggregator manages the reactor version in its own
+         dependencyManagement, which is what allows every module here to stay free
+         of version elements. If that management is ever withdrawn the reactor
+         fails fast with a missing version for com.carddemo:common-lib, and the fix
+         belongs in services/pom.xml, the single source of truth for versions,
+         rather than in this file. -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+    </dependency>
+
+    <!-- Assumptions: common-lib declares spring-boot-starter-web,
+         spring-boot-starter-validation, spring-boot-starter-security and
+         spring-boot-starter-oauth2-resource-server with optional set to true.
+         Maven does not pass optional dependencies on to consumers, so all four are
+         re-declared here. Omitting them compiles cleanly against common-lib and
+         then fails at run time with a missing class, which is the most expensive
+         place to discover the gap.
+         Trade-offs: the alternative was a shared web starter module aggregating
+         these four so that the services could inherit them in one line. It was
+         rejected because batch-service is not a web application, and giving it a
+         servlet stack and an OAuth2 resource server it never serves would enlarge
+         both its image and its attack surface for no benefit. The accepted cost is
+         that each web-facing service repeats these four declarations. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!-- Assumptions: the six reference tables are mapped as JPA entities, and
+         DIS-INT-RATE PIC S9(04)V99 at app/cpy/CVTRA02Y.cpy line 9 becomes
+         NUMERIC(6,2) carried as a BigDecimal at scale 2. The persistence layer
+         must therefore preserve exact fixed point rather than bind the rate to a
+         floating point column. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!-- Assumptions: two independent consumers poll the same health endpoint, the
+         ALB target group and the container HEALTHCHECK, so the actuator is part of
+         the deployment contract rather than a development convenience. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- Assumptions: no compiled class in this module names a PostgreSQL type,
+         because JPA and Flyway both reach the driver through JDBC at run time.
+         Runtime scope keeps the driver off the compile classpath, so an accidental
+         import of a vendor class fails the build instead of silently coupling the
+         domain to one database product. -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Assumptions: this module owns the reference schema, so it carries its own
+         migrations rather than sharing a global set. One of them seeds the
+         mandatory DEFAULT disclosure-group row. app/cbl/CBACT04C.cbl line 436 to
+         line 439 falls back to that group when the group-specific read returns
+         status 23, and line 455 to line 458 shows the fallback is not graceful:
+         it displays ERROR READING DEFAULT DISCLOSURE GROUP and performs
+         9999-ABEND-PROGRAM. A missing seed row hard abends the nightly interest
+         run rather than degrading. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+
+    <!-- Assumptions: Flyway 10 and later moved PostgreSQL support out of
+         flyway-core into this companion artifact. flyway-core alone resolves and
+         compiles perfectly and then fails at run time on the first migration
+         because no database type matches the JDBC url. This dependency is not
+         optional and must never be pruned as apparently unused. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!-- Assumptions: the OpenAPI 3.1 contract at
+         src/main/resources/openapi/reference-api.yaml is the published interface
+         that the browser client and the sibling services are written against, so
+         the running service serves it directly. Leaving it a static file would let
+         it drift away from the controllers with nothing detecting the drift. -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!-- Assumptions: app/app-vsam-mq/cbl/CODATE01.cbl is an IBM MQ request and
+         reply front door. It carries MQ-QUEUE, MQ-QUEUE-REPLY and MQ-CORRELID and
+         copies CMQGMOV, CMQPMOV, CMQMDV and CMQODV, so date conversion is reached
+         asynchronously as well as synchronously today. That flow becomes an SQS
+         standard-queue consumer, which is why an SQS client is required even
+         though the primary front door for this service is REST. -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+    </dependency>
+
+    <!-- Assumptions: common-lib configures the Micrometer common tags but depends
+         only on micrometer-core, which carries no exporter. The registry that
+         actually publishes the scrape endpoint is a per-service choice, so it is
+         declared by the service rather than pushed onto every consumer of the
+         shared kernel. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
+    <!-- Trade-offs: this starter pulls a large graph, JUnit 5 and Mockito and
+         AssertJ alongside Hamcrest, JSONassert, JsonPath, XMLUnit and spring-test,
+         in exchange for one declaration. The breadth is accepted rather than
+         cherry-picking only the libraries this module actually calls, because test
+         scope keeps every one of them out of the packaged image, so the price paid
+         is build time rather than deployed bytes.
+         Assumptions: the transcribed COTRTUPC and COBTUPDT validation branches are
+         asserted one branch at a time, and the controllers through MockMvc slices,
+         so no separate assertion or HTTP client library is declared here. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Assumptions: every write path on this service is administrative and is
+         guarded by the carddemo-admin group claim that common-lib derives from
+         cognito:groups. A WebMvcTest slice has no identity provider of its own, so
+         the add, edit and delete cases for transaction types cannot be exercised
+         at all without a mock JWT carrying that claim. -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Assumptions: testcontainers-bom 2.0.5, imported by the parent, manages
+         exactly the artifact ids testcontainers, testcontainers-junit-jupiter and
+         testcontainers-postgresql. Testcontainers 2.x renamed every module to that
+         prefix, so the 1.x ids junit-jupiter and postgresql are no longer managed
+         by the bom; naming them would leave the version unresolved and force a
+         local version element that the parent is meant to own. Verified by reading
+         the 63 managed entries in the bom itself rather than from documentation. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Refactoring Rationale: the single most important behavioural assertion in
+         this module is that deleting a transaction type still referenced by a
+         category is refused. app/app-transaction-type-db2/ddl/TRNTYCAT.ddl line 6
+         to line 7 declares FOREIGN KEY TRC_TYPE_CODE referencing
+         CARDDEMO.TRANSACTION_TYPE (TR_TYPE) ON DELETE RESTRICT, which Db2 reports
+         as SQLCODE minus 532 and PostgreSQL as SQLSTATE 23503, surfacing as a
+         Spring DataIntegrityViolationException that common-lib's
+         GlobalExceptionHandler maps to HTTP 409. An in-memory database was the
+         alternative and was rejected: it neither enforces ON DELETE RESTRICT
+         identically nor runs Flyway's PostgreSQL dialect, so a green test there
+         would prove the migration applied somewhere other than where it runs. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Assumptions: the interest rate this service serves is one of exactly two
+         operands in app/cbl/CBACT04C.cbl line 464 to line 465, which computes
+         WS-MONTHLY-INT as ( TRAN-CAT-BAL * DIS-INT-RATE ) / 1200, so a float or a
+         double anywhere on the rate path would change cents on real balances.
+         ArchUnit turns that prohibition, and the ban on importing another
+         service's domain package, into a build failure rather than a note a
+         reviewer might miss. -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- The four entries below are deliberate omissions. They are recorded next to
+         the dependency list because an absent dependency has no element of its own
+         to sit beside, and each is a choice a reader would otherwise have to
+         re-litigate.
+         Alternatives Considered: Lombok. Rejected because its generated accessors
+         cannot carry the Javadoc that Rule 1 requires on every public member, so
+         adopting it would trade an enforceable documentation gate for brevity.
+         Java 21 record types with explicit constructors give the same brevity with
+         members that can be documented.
+         Alternatives Considered: MapStruct. Rejected because copybook to DTO
+         mapping is not mechanical here. It drops FILLER, which is X(28) at
+         app/cpy/CVTRA02Y.cpy line 10, X(08) at CVTRA03Y.cpy line 7 and X(04) at
+         CVTRA04Y.cpy line 9, and elsewhere in the reactor the same layer applies
+         masking and encryption and renames misspelled baseline fields. Each of
+         those needs a justification at the mapping site and a generated mapper has
+         nowhere to hold one. A second, practical objection is that MapStruct's
+         most recent published release is a beta.
+         Alternatives Considered: a resilience library. resilience4j-spring-boot3
+         publishes against Spring Boot 3.x, and spring-retry is superseded. Spring
+         Framework 7, which arrives through the Spring Boot 4.1.0 parent, moved
+         retry into the core as @Retryable, @ConcurrencyLimit and a programmatic
+         RetryTemplate, switched on by @EnableResilientMethods. Two details are
+         easy to get wrong and are recorded here rather than rediscovered: the
+         retry attribute is maxRetries, where total attempts are one plus its
+         value, not maxAttempts, and the enabler is @EnableResilientMethods, not
+         @EnableRetry. A circuit breaker is omitted as well, because the only
+         synchronous hops are inside the VPC behind an internal load balancer with
+         bounded timeouts, so a breaker would add a failure mode without removing
+         one.
+         Assumptions: spring-boot-starter-batch is absent by design; it belongs to
+         batch-service. app/app-transaction-type-db2/cbl/COBTUPDT.cbl is labelled
+         Layer: Business logic and declares SELECT TR-RECORD ASSIGN TO INPFILE with
+         ORGANIZATION IS SEQUENTIAL, so its migration is a service method reading a
+         sequential input, not a chunk-oriented job needing a job repository. -->
+
+  </dependencies>
+
+</project>

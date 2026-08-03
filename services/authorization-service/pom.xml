@@ -1,0 +1,652 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ===========================================================================
+  CardDemo :: authorization-service
+  ===========================================================================
+  WHAT: Maven build definition for the pending-authorization bounded context
+        of the CardDemo mainframe to AWS migration. The module builds one
+        executable Spring Boot jar that serves the pending-authorization
+        summary and detail read endpoints, the fraud-marking write endpoint,
+        the authorization request consumer together with its
+        transactional-outbox reply publisher, the pending-authorization expiry
+        purge, and the segment load and unload maintenance operations.
+
+  SOURCE OF TRUTH: the eight COBOL programs of the decoupled authorization
+        extension. They are REFERENCE-ONLY and are never modified; this file
+        cites them by path only.
+          app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl   summary list
+          app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl   detail view
+          app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl   mark fraud
+          app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl   queue consumer
+          app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl   expiry purge
+          app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL   segment load
+          app/app-authorization-ims-db2-mq/cbl/PAUDBUNL.CBL   segment unload
+          app/app-authorization-ims-db2-mq/cbl/DBUNLDGS.CBL   GSAM unload
+        Data contracts come from cpy/CIPAUSMY.cpy (summary segment),
+        cpy/CIPAUDTY.cpy (detail segment), cpy/CCPAURQY.cpy (the 18-field
+        request payload) and cpy/CCPAURLY.cpy (the 6-field reply payload).
+        The relational shape comes from ddl/AUTHFRDS.ddl:L28, which declares a
+        composite primary key, and ddl/XAUTHFRD.ddl, which declares an index
+        ordered CARD_NUM ascending with AUTH_TS descending.
+
+  WHY : Assumptions: two properties of the baseline single this context out
+        from its siblings, and between them they account for every dependency
+        selected below. Both are properties of the REFERENCE source, so they
+        are constraints this module inherits rather than choices it makes.
+        (1) It is the only bounded context whose PERSISTED data originates in
+            packed decimal. CIPAUSMY.cpy:L19-L30 and CIPAUDTY.cpy:L20-L35
+            declare COMP-3 money and a COMP-3 composite key, so the shared
+            kernel's packed-decimal codec is load-bearing here rather than a
+            convenience. That is why common-lib is a hard dependency and not
+            an optional nicety.
+        (2) The baseline splits this data across IMS DL/I segments and a Db2
+            table joined by two-phase commit. The migration lands all three
+            business tables in ONE PostgreSQL schema, so that distributed
+            transaction is eliminated outright rather than emulated. That is
+            why plain JPA suffices, and why no distributed-transaction
+            coordinator appears anywhere in this file.
+
+  Documentation convention: XML has no docstring construct, so the
+        documentation obligation is met by this header block plus an adjacent
+        WHY comment on every non-obvious element. That XML-comment analogue is
+        defined by docs/CODE_DOCUMENTATION_STANDARD.md and by the migration
+        plan that mandates it; it is NOT claimed by the project explainability
+        rule itself, whose format clause names Javadoc, JSDoc, Python
+        docstrings and C# XML comments and is silent on Maven XML. Every
+        comment below names one of exactly four categories: Alternatives
+        Considered, Refactoring Rationale, Assumptions, Trade-offs. Those are
+        the same four the repository already requires of its own test suite
+        (tests/README.md:L544-L549), so this file extends an established house
+        convention rather than inventing a new one.
+  ===========================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <!--
+      Assumptions: the aggregator sits exactly one directory up, at
+      services/pom.xml, and is the sole owner of the Java 21 toolchain, the
+      Spring Boot parent, every dependencyManagement entry this module relies
+      on, and the Checkstyle plugin binding. Stating relativePath explicitly
+      forces Maven to resolve that parent from the REACTOR on disk. Leaving it
+      out would let Maven fall back to resolving carddemo-services from a
+      repository, which for a parent that is only ever built locally either
+      fails outright or, worse, silently binds this module to a previously
+      installed copy whose managed versions differ from the tree being built.
+      The second outcome is the dangerous one, because the build still
+      succeeds while resolving different library versions than the source tree
+      declares.
+    -->
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <!--
+    Assumptions: groupId and version are deliberately absent from this module.
+    Maven inherits both from the parent coordinates above, so com.carddemo and
+    1.0.0-SNAPSHOT apply without being restated. Repeating either would create
+    a second place where this module's group or release identity could drift
+    out of step with the rest of the reactor, and it would diverge from the
+    shape the shared-kernel module establishes for a module POM under this
+    parent.
+  -->
+  <artifactId>authorization-service</artifactId>
+
+  <!--
+    Assumptions: the container image's runtime stage copies exactly one
+    self-contained executable archive and launches it directly, so jar
+    packaging is part of that contract rather than an incidental default.
+    Declaring it makes the contract with the image build visible at the top of
+    this file instead of implied by Maven's default, which a reader would
+    otherwise have to know to infer.
+  -->
+  <packaging>jar</packaging>
+
+  <name>CardDemo Authorization Service</name>
+  <description>
+    Pending-authorization bounded context: authorization summary and detail
+    queries, fraud marking, the FIFO authorization request consumer with its
+    transactional-outbox reply publisher, expiry purge, and segment load and
+    unload maintenance. Migrated from the eight COBOL programs of
+    app/app-authorization-ims-db2-mq, whose IMS DL/I segments and Db2 fraud
+    table collapse into a single PostgreSQL schema.
+  </description>
+
+  <dependencies>
+
+    <!--
+      Assumptions: every dependency in this module is declared WITHOUT a
+      version. Each version is supplied by the parent, either from its own
+      dependencyManagement block or from one of the bills of materials the
+      parent imports for Spring Boot, Spring Cloud AWS, the AWS SDK and
+      Testcontainers. Writing a version here would create a second source of
+      truth for that artifact and let this module silently diverge from its
+      siblings on a shared library. The repository already holds itself to
+      exactly this discipline for its Python test dependencies, describing
+      exact pinning as "a hard financial-grade requirement, because a floating
+      dependency could silently break the byte-deterministic golden
+      comparisons" (tests/README.md:L177-L187). The reasoning transfers
+      directly: in a service that moves money, an unpinned decimal or JDBC
+      library is an unpinned rounding behaviour.
+    -->
+
+    <!--
+      Assumptions: the shared kernel supplies the packed-decimal codec this
+      context cannot function without, the scale-2 HALF_UP money type, the
+      codec for the 18-field request and 6-field reply payloads, the group
+      claim to authority converter, the keyset page envelope, the error model
+      and the exact 26-character timestamp formatter. It is declared without a
+      version because the parent pins the reactor version of this sibling
+      module, which keeps the shared kernel identical across every module by
+      construction rather than by convention.
+
+      Refactoring Rationale: this is the ONLY intra-project dependency this
+      module is permitted to declare. The baseline was a single CICS region in
+      which any program could open any file, and the migration replaces that
+      with schema-per-service bounded contexts. A Maven edge to any other
+      CardDemo service module would reintroduce precisely the coupling the
+      decomposition exists to remove, and would turn what must be an HTTP or
+      queue boundary into a compile-time one. The complementary prohibition on
+      importing another context's domain package is enforced as an ArchUnit
+      test rather than left to review, so it cannot be quietly reintroduced in
+      source either.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the three online programs of this extension are CICS
+      pseudo-conversational tasks whose continuity between screen turns lives
+      in a passed communication area. The migration replaces that with
+      stateless request handling, so this module needs a synchronous HTTP
+      layer but deliberately no session store: the summary list, the detail
+      view and the fraud-marking action each carry their own selection context
+      in the request path, which is also what makes each request
+      independently authorizable.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the baseline reaches its data through IMS DL/I
+      segment calls against two databases and an SQL cursor against a Db2
+      table, coordinated by two-phase commit. Both stores collapse into one
+      PostgreSQL schema here, which turns that distributed transaction into a
+      single local one and lets one managed transaction boundary cover the
+      authorization decision and its outbox row together. Committing the reply
+      intent with the data is what closes the baseline's lost-reply window,
+      where a crash between the database commit and the queue put loses a
+      reply the data says was produced (COPAUA0C.cbl:L335 commits the data,
+      COPAUA0C.cbl:L750-L756 puts the reply outside that commit).
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the value domains being validated are fixed by the
+      copybooks and are not free choices. CIPAUDTY.cpy:L46-L49 restricts the
+      match status to P, D, E or M and CIPAUDTY.cpy:L51-L52 restricts the
+      fraud marker to F or R, while every request payload field carries an
+      exact declared width (CCPAURQY.cpy:L19-L36). Declarative constraints
+      keep those transcribed COBOL edit rules adjacent to the fields they
+      govern, instead of dispersing them through service code where a
+      transcription gap would be invisible.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: identity no longer comes from a record this service reads.
+      The baseline compared a plaintext password held in a VSAM security
+      record; the migration takes identity from a signed token, and the shared
+      kernel's converter turns the group claim into authorities. That
+      distinction is load-bearing here specifically because fraud marking is
+      an administrative action: it is gated on an administrator group claim,
+      which is signed by the identity provider, rather than on a user-type
+      field the client supplies and could therefore assert for itself.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the health endpoint this starter contributes is consumed by
+      TWO independent out-of-process checks, so it is not optional
+      instrumentation. The load balancer target group probes it to decide
+      whether the task is in service, and the container image's own health
+      check probes it as well. Omit this dependency and both probes receive a
+      404, the container is reported unhealthy, and the task never reaches
+      steady state, which presents as a deployment that rolls itself back with
+      no application error anywhere in the logs.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: this module is a queue consumer because its baseline
+      counterpart is one. COPAUA0C.cbl reads authorization requests from the
+      IBM MQ queue named AWS.M2.CARDDEMO.PAUTH.REQUEST and puts replies to
+      AWS.M2.CARDDEMO.PAUTH.REPLY, and the migration targets that pair with a
+      FIFO queue pair so that per-card ordering survives the transport change:
+      the message group is the card number and the deduplication identifier is
+      the transaction identifier. Two baseline disciplines are carried by the
+      listener rather than by configuration alone, so that throughput
+      characteristics do not shift silently: the 500-message processing limit
+      (COPAUA0C.cbl:L40) becomes a bounded long-poll loop, and the five-second
+      get-with-wait (COPAUA0C.cbl:L242) becomes an equivalent receive wait.
+
+      Alternatives Considered: the retired org.springframework.cloud
+      spring-cloud-aws coordinate was evaluated and rejected. io.awspring.cloud
+      is the maintained home for this integration, and it is the group the
+      parent imports a bill of materials for, so the retired coordinate would
+      additionally arrive unmanaged and would force a hard-coded version into
+      this file.
+    -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-sqs</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the listener abstraction alone does not reach everything
+      this context needs. The FIFO attributes that carry the ordering and
+      idempotency contract, and the message attribute that substitutes for a
+      per-message time to live, are set and read through the SDK client types
+      directly. Declaring the client explicitly rather than leaning on the
+      starter's transitive graph makes that requirement visible and keeps a
+      change in the starter's own dependencies from removing it silently.
+
+      Assumptions: the expiry substitution is a real semantic gap handled in
+      code, not a configuration detail. COPAUA0C.cbl:L750 sets a message
+      expiry of 50 tenths of a second on the reply, and the target queue
+      service has no per-message time to live at all, so the reply instead
+      carries an expiry instant as a message attribute that the consumer
+      honours by dropping and logging a stale message.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sqs</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: PostgreSQL is the target for this context because every
+      record it owns is already a fixed-field row with a deterministic key.
+      CIPAUSMY.cpy and CIPAUDTY.cpy are fixed-width segment layouts,
+      ddl/AUTHFRDS.ddl:L28 already declares a composite primary key, and the
+      fraud-marking flow writes more than one table in one unit of work, so
+      the store has to offer real referential integrity and a real transaction
+      rather than eventual convergence. The driver is declared explicitly, and
+      not left to arrive behind a starter, because the schema migration below
+      runs on a plain JDBC connection during application startup, before any
+      JPA entity manager exists to supply one.
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the authorization schema is created and evolved by a
+      versioned migration that ships inside this same jar, so the schema and
+      the code that reads it are released as one artifact and cannot disagree
+      about a column. The alternative of applying schema changes by hand
+      leaves no record that a given running image expects a given column to
+      exist.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: this companion artifact is MANDATORY and is not
+      interchangeable with the core artifact above. Flyway 10 moved
+      database-specific support out of core into per-database modules, so
+      flyway-core on its own resolves cleanly, compiles cleanly, and then
+      fails at RUNTIME when the authorization migration is applied, reporting
+      an unsupported database. The failure surfaces at application startup
+      rather than during the build, which is exactly why it is called out
+      here: nothing in the build output hints that it is missing, so its
+      absence costs a debugging cycle rather than a compile error.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the published contract is a real consumer contract, not
+      documentation. The browser client's authorization module is written
+      against src/main/resources/openapi/authorization-api.yaml, so serving
+      that contract from the running service is what allows a drift between
+      contract and implementation to be detected against the implementation
+      itself rather than against a checked-in copy that nothing verifies.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the baseline's operational visibility was job output and
+      the operator console, neither of which has a target analogue. The
+      replacement is a scrape endpoint whose series carry the common tags the
+      shared kernel's metrics configuration supplies, so this module's series
+      are directly comparable with every other context's instead of each
+      service inventing its own tag names and making cross-service dashboards
+      impossible to write.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the controller layer is exercised as a web slice, which
+      needs the test engine, the mocking library, the fluent assertions and
+      the server-less request harness this starter aggregates. The
+      fraud-marking authorization rule in particular needs the security test
+      support that arrives with the same starter, because the assertion that
+      matters is the negative one: a caller without the administrator group
+      claim must be refused.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Trade-offs: real containers cost test wall time and require a container
+      runtime on the build host, whereas an in-memory database would cost
+      neither. The trade is accepted because the assertions that matter here
+      are ones an in-memory engine cannot make. The repository integration
+      tests must prove the composite primary key derived from the COMP-3
+      composite key of CIPAUDTY.cpy:L20-L21, every check constraint that
+      carries a copybook condition-name value set forward
+      (CIPAUDTY.cpy:L46-L52), and the DIRECTION of the fraud index, which
+      ddl/XAUTHFRD.ddl declares as CARD_NUM ascending with AUTH_TS descending.
+      A dialect-emulating in-memory database accepts all three and verifies
+      none of them, so a green suite would prove nothing about the schema that
+      actually ships.
+
+      Assumptions: these artifact identifiers are the Testcontainers 2.x
+      names. The 2.x line renamed every module to a testcontainers-prefixed
+      identifier, so the earlier spellings (postgresql, localstack,
+      junit-jupiter) are absent from the bill of materials the parent imports
+      and would leave these three dependencies with no managed version at all,
+      making this POM unresolvable. They are not to be shortened back.
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Assumptions: the queue emulator is what makes the messaging contract
+      testable with no cloud account involved. The properties under test are
+      the ones the FIFO choice exists to guarantee, namely per-card ordering
+      by message group and duplicate suppression by transaction identifier,
+      plus the expiry attribute that stands in for the absent per-message time
+      to live. The repository already virtualises its cloud surface this way
+      for the COBOL suite's dataset staging layer, so this reuses an
+      established local pattern rather than introducing a second one a
+      maintainer would have to learn.
+    -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-localstack</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the boundaries this module must respect were
+      conventions in the baseline and become assertions here. Expressing them
+      as a test rather than as a review checklist is the entire point, because
+      a rule that lives in a test cannot rot and a violation fails the build
+      instead of surviving until someone happens to notice it. Three inherited
+      rules bite in this context in particular. Domain types may not import
+      cloud SDK or web types, which keeps the segment layouts free of
+      transport concerns. No context may import another context's domain
+      package, which is the source-level complement of the
+      single-sibling-dependency rule stated above. And no binary floating
+      point may appear in the money path, which is load-bearing precisely
+      because this context's money arrives as COMP-3 and has to stay exact
+      fixed point through every hop.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      =====================================================================
+      Deliberate non-adoptions. Every entry below is a dependency a reader
+      might reasonably expect to find in a module of this shape. Each is
+      absent on purpose, and the reason is recorded here so that its absence
+      reads as a decision rather than as an oversight to be helpfully
+      corrected.
+      =====================================================================
+
+      Alternatives Considered: Lombok was evaluated and rejected. Its
+      generated accessors have nowhere to carry documentation, and every
+      public member in this project is required to have some. Java 21 record
+      types with explicit constructors give the same brevity while leaving
+      each member a place to state its purpose, which matters most on exactly
+      the types this context is full of: a decoded COMP-3 amount and a
+      five-slot account status array both need somewhere to say what they
+      mean.
+
+      Alternatives Considered: MapStruct was evaluated and rejected for two
+      independent reasons. Its most recent published release is a beta, and,
+      decisively, the mapping in THIS module is not mechanical. It decodes
+      packed decimal
+      into exact fixed point; it splits the PA-ACCOUNT-STATUS array declared
+      OCCURS 5 TIMES at CIPAUSMY.cpy:L22 into five discrete columns so the
+      fixed arity of five is enforced by the schema itself; it corrects the
+      PA-MERCHANT-CATAGORY-CODE misspelling of CIPAUDTY.cpy:L36 to a
+      correctly spelled column; and it masks the primary account number.
+      Each of those four steps is a judgement that needs its rationale
+      recorded at the mapping site, and a generated mapper has nowhere to hold
+      one.
+
+      Alternatives Considered: two retry and resilience libraries were
+      evaluated and neither is added. Neither the resilience4j Spring Boot
+      starter, whose published artifact targets the previous Spring Boot
+      major, nor the superseded spring-retry
+      is needed, because Spring Framework 7 arrives inside the Boot parent
+      with retry support in the core container. Two API details are easy to
+      get wrong and are recorded here because getting them wrong looks like a
+      library gap rather than a usage error: the annotation attribute is
+      maxRetries and not maxAttempts, so total attempts are one plus that
+      value with a default of three, and the enabling annotation is
+      EnableResilientMethods and not EnableRetry. The durable retry tier is
+      deliberately not in-process at all. It is queue redelivery backed by a
+      dead-letter queue at a receive count of five, which survives a task
+      restart in a way that no in-process policy can. Recorded in
+      docs/adr/ADR-002-compute-platform.md.
+
+      Alternatives Considered: a circuit breaker was evaluated and rejected.
+      The only synchronous hops this module makes are inside the private
+      network behind
+      an internal load balancer, already bounded by explicit connect and read
+      timeouts. A breaker would contribute its own open state, and therefore
+      its own way to refuse traffic that would otherwise have succeeded,
+      without removing any failure mode those timeouts do not already bound.
+
+      Alternatives Considered: a cache tier and a streaming platform were both
+      evaluated and both rejected, so neither appears here. The
+      baseline has no cache tier, so adding one would change the observable
+      freshness of a pending-authorization read for no parity benefit; and the
+      messaging requirement here is request and reply, which a queue with an
+      explicit reply destination expresses directly, whereas a durable event
+      log would require correlating each reply back out of a second topic
+      without improving any guarantee actually needed.
+
+      Alternatives Considered: a distributed-transaction coordinator was
+      evaluated and rejected, and this one must never be reintroduced. The
+      baseline needed two-phase
+      commit only because its data was split between IMS DL/I and Db2.
+      Landing all three business tables in one PostgreSQL schema removes the
+      split, so identical atomicity is obtained from one local transaction.
+      Bringing a coordinator back would restore a failure mode that no longer
+      has a cause.
+    -->
+
+  </dependencies>
+
+  <build>
+    <plugins>
+
+      <!--
+        Assumptions: the container image's runtime stage copies one
+        self-contained executable archive and launches it directly, with no
+        application server and no externally assembled classpath. This plugin
+        repackages the plain archive into that form, so the image build
+        depends on it having run. It is declared without a version because the
+        Boot parent manages the plugin alongside the framework it repackages,
+        which keeps the repackager and the runtime it targets from drifting
+        apart.
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+
+      <!--
+        Assumptions: the two test tiers in this module are separated by class
+        NAME, and the split has to be declared on both plugins or the tiers
+        collide. Tests that need no external process end in Test and run here.
+        Tests that require a real database or queue container end in
+        RepositoryIT and are deliberately NOT matched by this include, so a
+        developer running only the fast tier neither pays container startup nor
+        fails for want of a container runtime.
+
+        Trade-offs: a naming convention is a weaker separator than a tag or a
+        profile, because a misnamed class lands silently in the wrong tier. It
+        is accepted because it needs no annotation on every test class and no
+        profile to remember at the command line, and because the distinct
+        report directories configured here make the tier a test actually ran
+        in visible afterwards rather than a matter of inference.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+          </includes>
+          <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+        </configuration>
+      </plugin>
+
+      <!--
+        Assumptions: the integration tier is bound to the integration-test and
+        verify goals so that one verify invocation runs it, and so that a
+        container-backed failure is reported by the verify goal after the
+        post-integration-test stage has had its chance to stop the container.
+        Binding integration-test on its own would let a failing test abort the
+        build before that teardown ran, which leaks a container per failing
+        run. The include pattern is the exact complement of the fast tier's,
+        which is what keeps the two sets disjoint rather than merely different.
+
+        Assumptions: the execution identifier is deliberately "default", which
+        is the identifier Maven assigns to an execution declared without one.
+        The Spring Boot parent's plugin management ALREADY binds this plugin's
+        integration-test and verify goals through such an unnamed execution.
+        Maven merges a module execution with an inherited one only when the
+        identifiers match, so any other identifier here produces a SECOND
+        execution rather than a refinement of the first, and both goals then
+        run twice. That is not merely noisy: every container-backed test pays
+        its container startup a second time. Matching the inherited identifier
+        keeps the binding visible in this file, which is the reason for
+        restating it at all, while still resolving to exactly one execution.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/*RepositoryIT.java</include>
+          </includes>
+          <reportsDirectory>${project.build.directory}/failsafe-reports</reportsDirectory>
+        </configuration>
+        <executions>
+          <execution>
+            <id>default</id>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
+        Assumptions: the documentation gate is INHERITED and is deliberately
+        absent from this plugin list. The Checkstyle plugin is declared once,
+        in services/pom.xml, bound there to the validate lifecycle phase
+        against config/checkstyle/checkstyle.xml, and every module picks it up
+        automatically. Re-declaring it here would create a competing
+        configuration whose effective ruleset depends on merge order rather
+        than on one file, and the likeliest outcome of that is a gate which
+        appears to run while enforcing something other than the parent's
+        ruleset.
+
+        Assumptions: the suppression file is wired from INSIDE that ruleset by
+        a suppression filter that resolves it relative to the configuration
+        location and is marked non-optional, so a missing suppression file
+        fails the build rather than being quietly ignored. Naming the
+        suppression file from this POM instead would route around that
+        fail-closed behaviour and turn a missing file back into silence.
+
+        Assumptions: the gate is also never to be weakened. That means no
+        Checkstyle bypass property on the command line, no disabling element
+        inside a plugin configuration, no relaxation of the fail-on-violation
+        setting or of the violation severity, no shell short-circuit that
+        swallows a non-zero exit status, and no error-tolerating step flag in
+        a pipeline definition. Layering rules belong to the ArchUnit test
+        declared above and are not to be re-expressed as import-control
+        configuration here, because two mechanisms enforcing one rule means
+        neither is authoritative.
+
+        Assumptions: on return codes specifically. The COBOL suite aggregates
+        a mainframe condition code in which 4 is a documented green state
+        (tests/README.md:L412-L423), for reasons that live entirely inside the
+        immutable baseline and have no bearing on this module. That rubric
+        belongs to the COBOL oracle alone and must never reach a Maven or test
+        gate. A gate here is binary: it passes, or it fails.
+      -->
+
+    </plugins>
+  </build>
+
+</project>

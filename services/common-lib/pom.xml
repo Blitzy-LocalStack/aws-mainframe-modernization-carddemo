@@ -1,0 +1,441 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+ CardDemo migration  |  services/common-lib/pom.xml
+ Maven module descriptor for the shared kernel of the migrated services.
+=============================================================================
+
+ PURPOSE
+ Declares the `common-lib` Maven module: the shared kernel that every
+ migrated CardDemo service compiles against. It is the Java analogue of
+ compiling every COBOL program with one copybook include path. The
+ reference test suite states that convention explicitly, building each
+ program with `cobc ... -I app/cpy` and requiring that a record layout is
+ never duplicated but kept single sourced from `app/cpy/`
+ [tests/README.md section 5.2 L268; section 12 L541 to L542]. Migration
+ rule T2 carries the same discipline into Java: one COBOL `COPY` becomes
+ one type import, and the shared concerns (money, the fixed width, zoned
+ decimal and packed decimal codecs, the error model, the correlation
+ filter, the keyset page envelope, the validation flags) live ONLY here so
+ that no service re-declares them.
+
+ The concerns this module owns, and therefore the dependencies it needs,
+ come straight from the immutable COBOL baseline:
+
+   * Money is zoned decimal with sign overpunch, for example
+     `ACCT-CURR-BAL PIC S9(10)V99` [app/cpy/CVACT01Y.cpy:L7]. The reference
+     suite records that reading such a field with the compiler's default
+     ASCII sign convention silently corrupts negative balances, which is
+     why `-fsign=EBCDIC` is mandatory there [tests/README.md L273 to L274].
+     Java therefore carries money as `BigDecimal` at scale 2, never as
+     `float` or `double`.
+
+   * Packed decimal appears alongside it: the export layout declares
+     `EXPORT-SEQUENCE-NUM PIC 9(9) COMP` and
+     `EXP-ACCT-CURR-BAL PIC S9(10)V99 COMP-3`
+     [app/cpy/CVEXPORT.cpy:L16, L50], and the authorization segments use it
+     pervasively. Two distinct numeric codecs are therefore required, not
+     one.
+
+   * Arithmetic order is part of the contract. The interest calculation
+     multiplies before it divides:
+     `COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200`
+     [app/cbl/CBACT04C.cbl:L464 to L465]. Dividing first yields different
+     cents on many inputs, so the shared money helper preserves the order
+     rather than leaving it to each caller.
+
+   * The abend work area [app/cpy/CSMSG02Y.cpy] is the source of the
+     structured error detail this module exposes to all eight services.
+
+ POSITION IN THE REACTOR
+ FIRST module built. All eight service modules depend on `common-lib`;
+ `common-lib` depends on NONE of them, so this descriptor declares ZERO
+ intra reactor dependencies. The dependency arrow points inward only.
+
+ THIS MODULE IS A LIBRARY, NOT A DEPLOYABLE
+ It has no Spring Boot application class, no `application.yml`, no
+ database migration directory, no OpenAPI contract, no actuator endpoint,
+ no Dockerfile and no container registry repository of its own. The
+ repository wide counts are therefore deliberately asymmetric and must not
+ be "corrected" into agreement: 9 Maven modules, 8 Dockerfiles, 10
+ container images (the 8 services plus `ui` plus `data-migration`).
+ Reconciling the module count with the image count would provision an
+ eleventh phantom registry repository for a module that publishes no image.
+
+ PACKAGE ROOT
+ Fixed and non-negotiable: `com.carddemo.common`. Every type in this module
+ lives beneath it, which is what lets the architectural test forbid cross
+ service imports by package name alone.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ PARAMETERS (the inputs this descriptor supplies to the build)
+
+   parent        `com.carddemo:carddemo-services:1.0.0-SNAPSHOT`, resolved
+                 from `../pom.xml`. Supplies the Java 21 toolchain, every
+                 dependency version and the inherited documentation gate.
+   artifactId    `common-lib`, matching this directory name exactly.
+   packaging     `jar`, an ordinary classpath jar.
+   dependencies  Four Spring Boot starters marked optional, plus Jackson
+                 databind and Micrometer core as exported API, plus two
+                 test scoped artifacts.
+
+ RETURNS
+   `com.carddemo:common-lib:1.0.0-SNAPSHOT`, written as
+   `target/common-lib-1.0.0-SNAPSHOT.jar`: a plain jar whose classes sit at
+   the archive root and are therefore directly usable as a classpath entry
+   by the eight dependent service modules. Test reports stay at their
+   default `target/surefire-reports/` location, which is where the services
+   pipeline collects them.
+
+ EXCEPTIONS (how this descriptor makes a build fail, by design)
+   * A documentation violation at severity warning or above fails the
+     `validate` phase, because the inherited Checkstyle gate is configured
+     to fail rather than warn. That gate is the machine checkable half of
+     this project's Explainability rule.
+   * A missing or unresolvable parent fails before any goal runs, since
+     every version used here is inherited rather than declared.
+   * `LayeringRulesTest` fails the `test` phase when an architectural
+     boundary is crossed, using the ArchUnit engine this descriptor puts on
+     the test classpath.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ Assumptions: every dependency version is owned by `services/pom.xml` and,
+ transitively, by the Spring Boot 4.1.0 parent that it inherits from. This
+ file declares group id, artifact id and scope ONLY. The single `<version>`
+ element in the whole file is the one inside `<parent>`. Re-pinning a
+ version here would silently diverge this module from the other eight,
+ which is precisely the failure the single copybook include path exists to
+ prevent on the COBOL side.
+
+ Assumptions: XML 1.0 section 2.5 forbids two consecutive hyphens anywhere
+ inside a comment, so this file cannot use the house em dash idiom that the
+ Java, Python and shell sources use, and cannot rule a comment off with
+ hyphens. Rules here are drawn with `=` and `~`, line ranges are written as
+ "L464 to L465", and long command line options are described in words
+ rather than quoted. One stray pair of hyphens in any comment below would
+ make this descriptor unparseable and the build would not start at all.
+=============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+   Assumptions: this module inherits every dependency version, every plugin
+   version and every plugin binding from the aggregator, which in turn
+   inherits them from the Spring Boot 4.1.0 parent. `<relativePath>` is
+   stated explicitly so the reactor reads the aggregator from the working
+   tree; left to its default, a stale aggregator previously installed into
+   the local repository could satisfy the reference instead, and the module
+   would then build against versions nobody can see in the source.
+
+   Trade-offs: `<groupId>` and `<version>` are deliberately NOT repeated on
+   this module even though restating them would make its full coordinates
+   readable without opening the parent. Inheriting them keeps exactly one
+   place to edit at release time; restating them creates two, and a module
+   whose coordinates have drifted from its reactor is the usual result.
+  -->
+  <parent>
+    <groupId>com.carddemo</groupId>
+    <artifactId>carddemo-services</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <!--
+   Assumptions: the aggregator lists this module first in its module block,
+   and Maven resolves a module entry to a directory and then reads the
+   artifact id from the descriptor inside it. The directory name and the
+   artifact id must therefore agree character for character; if they do not,
+   the reactor does not resolve this module at all and the failure surfaces
+   as the eight services being unable to find their shared kernel rather
+   than as anything that names this file.
+  -->
+  <artifactId>common-lib</artifactId>
+
+  <name>CardDemo Shared Kernel</name>
+  <description>
+    Shared kernel for the migrated CardDemo services: fixed point money,
+    zoned decimal and packed decimal codecs, the fixed width record codec,
+    the CSV authorization codec, the error and abend model, the correlation
+    id filter, the keyset page envelope, the JWT role converter, the metric
+    tag configuration, the timestamp formatter and the date edit validator.
+    Consumed by all eight service modules; consumes none of them.
+  </description>
+
+  <!--
+   Alternatives Considered: `pom` packaging, rejected because this module
+   compiles real Java and must publish a jar of classes rather than
+   aggregate other modules; and `war`, rejected because nothing here is
+   deployed into a servlet container. `jar` is stated explicitly rather than
+   left to Maven's default so the contract this module offers its eight
+   consumers, an ordinary classpath jar, is legible without the reader
+   having to know what the default is.
+  -->
+  <packaging>jar</packaging>
+
+  <dependencies>
+
+    <!--
+     The four starters below carry types that this module's own sources
+     implement against, so they must sit on ITS compile classpath:
+     `web` for the servlet filter in `CorrelationIdFilter` and the
+     controller advice in `GlobalExceptionHandler`; `validation` for the
+     Jakarta constraint annotations used by `FieldValidationFlag` and the
+     shared error types; `oauth2-resource-server` for the JWT and
+     authentication converter types `JwtRoleConverter` is built on; and
+     `security` for the granted authority values that converter produces.
+
+     Alternatives Considered: `provided` scope, rejected because it asserts
+     that a surrounding runtime container supplies the artifact, which is
+     untrue here. A Spring Boot service packages its own server, so
+     `provided` would document a deployment model this project does not
+     have. Plain `compile` scope was rejected for a concrete reason rather
+     than a stylistic one: it would push a servlet container transitively
+     onto EVERY consumer of this module, including any consumer that is not
+     a web application, and would undercut the boundary the aggregator
+     draws deliberately by carrying no web starter in its own dependency
+     block. Marking them optional keeps them on this module's compile
+     classpath and stops them at its boundary.
+
+     Trade-offs: optional dependencies are not inherited, so each of the
+     eight consuming services must declare for itself whichever starters it
+     uses; nothing arrives implicitly. That repetition is accepted because
+     it keeps every service's dependency list an honest description of what
+     that service is, instead of a list that grows quietly because a shared
+     library happened to need a web stack. It is safe for a second reason
+     too: `LayeringRulesTest` constrains web types only inside `..domain..`
+     packages, and this module has no `domain` package at all, so holding
+     web types here crosses no boundary.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!--
+     `MoneyModule` is a Jackson module: it is what makes money serialise as
+     a JSON string, so that no client parses an exact fixed point amount
+     into an IEEE 754 double and loses cents at the boundary the user
+     actually sees. The module type it implements is part of this module's
+     exported API, because every consumer registers it, so unlike the four
+     starters above this dependency is deliberately NOT optional. It has to
+     reach consumers.
+
+     Assumptions: the Spring Boot 4.1.0 parent imports TWO Jackson bills of
+     material, one for the 2.x line under the `com.fasterxml.jackson` group
+     and one for the 3.x line under the `tools.jackson` group, so both lines
+     are version managed and neither needs a version stated here. That is
+     worth recording because Boot 4's own web stack resolves the 3.x line,
+     under group `tools.jackson.core`, transitively through the web starter
+     above. A reader who notices a `jackson-databind` already arriving that
+     way may conclude this declaration is redundant. It is not: the two are
+     different group ids on different major lines, and this coordinate
+     selects the 2.x line explicitly for the types `MoneyModule` is written
+     against.
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <!--
+     `MetricsConfig` contributes a meter registry customizer that stamps the
+     common service, environment and version tags onto every metric, so the
+     registry types are needed at compile time.
+
+     Alternatives Considered: declaring a concrete registry implementation
+     here, so that all eight services exported metrics without each having
+     to opt in. Rejected because the export format is a per service
+     deployment decision, and binding it in the shared kernel would take
+     that decision away from all eight at once while adding an exporter to
+     the classpath of any consumer that does not scrape at all. Only the
+     vendor neutral core is shared; each service chooses its own registry.
+    -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+    </dependency>
+
+    <!--
+     Assumptions: `CorrelationIdFilter` writes the correlation id into the
+     SLF4J mapped diagnostic context, and the SLF4J API arrives transitively
+     through the logging starter that sits inside every starter declared
+     above, so it is deliberately not declared on its own. Declaring it
+     directly would create a second, independently resolved path to the
+     logging API; when two such paths disagree the binding chosen at startup
+     is effectively arbitrary, and the symptom is silent loss of log output
+     rather than a build error. Letting the starter own it keeps exactly one
+     path.
+    -->
+
+    <!--
+     Assumptions: all seven test classes in this module end in `Test`, so
+     Surefire runs them in the `test` phase and no Failsafe execution or
+     include pattern override is needed. This module has no integration
+     test and needs none: it touches no database, no queue and no container,
+     which is a direct consequence of it owning no schema and no transport.
+     Report output stays at the default location the services pipeline
+     collects from; relocating it would silently empty the pipeline's test
+     report step while every test still passed locally.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+     Assumptions: `LayeringRulesTest`, under
+     `src/test/java/com/carddemo/common/architecture/`, is the single owner
+     of the architectural invariants for the entire reactor and is inherited
+     by all eight service modules, so the ArchUnit engine has to resolve on
+     THIS module's test classpath. Its version, 1.4.2, is managed by
+     `services/pom.xml` and must not be re-pinned here. The services
+     pipeline may invoke that class by name as a labelled step of its own,
+     so the class name and its path are a fixed external contract, not an
+     implementation detail that can be renamed freely.
+
+     Alternatives Considered: expressing the same package boundaries through
+     Checkstyle's `ImportControl` module, which is already available given
+     the inherited gate and would need no new dependency. It is deliberately
+     absent from the shared Checkstyle configuration and must not be added
+     here or anywhere else, because two enforcement points for one invariant
+     drift apart, and the moment they disagree it is whichever one is
+     cheaper to silence that gets silenced. Layering therefore has exactly
+     one owner, and that owner is an executable test, so the rule cannot rot
+     into a comment that no longer matches the code.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+  </dependencies>
+
+  <!--
+=============================================================================
+ DELIBERATE OMISSIONS
+ Everything named below is absent on purpose. Each entry records why: an
+ unexplained absence reads as an oversight and invites the next reader to
+ "fix" it, and several of these would break the build or the reactor in ways
+ that are slow to diagnose.
+=============================================================================
+
+ NO `spring-boot-maven-plugin` execution.
+ Alternatives Considered: activating its repackage goal, which the Boot
+ parent already manages, so enabling it costs one element. Rejected because
+ repackage rewrites the artifact into an executable archive: application
+ classes move to `BOOT-INF/classes/` and dependency jars to `BOOT-INF/lib/`,
+ leaving the archive root empty of types. That layout is loadable by Boot's
+ own launcher but is NOT a usable classpath entry for a compiler, so all
+ eight dependent modules would resolve this artifact successfully and then
+ fail to find a single type inside it. A library consumed by other modules
+ stays a plain jar whose classes sit at the archive root; only the eight
+ deployable services repackage.
+
+ NO re-declaration of the Checkstyle plugin.
+ Assumptions: `services/pom.xml` binds `maven-checkstyle-plugin` to the
+ `validate` phase with the Checkstyle engine overridden to 13.8.0, its
+ configuration read from `config/checkstyle/checkstyle.xml`, console output
+ on, and the build set to fail rather than warn on any violation at severity
+ warning or above. Plugin configuration is inherited, so that gate already
+ applies here with nothing declared. Repeating it would create a second
+ place for the configuration path and the failure policy to drift, and a
+ module that had quietly loosened either would be the one place the
+ documentation gate stopped applying. Because the binding sits on `validate`
+ rather than in a pipeline step, the gate also fires on every local build,
+ not only in continuous integration. The suppressions file location is
+ likewise not overridden anywhere in this module: suppressions are wired
+ from inside the shared Checkstyle configuration itself, so there is exactly
+ one file to read to know what is exempt. No skip flag, no severity
+ downgrade and no return code tolerance wrapper appears in this file.
+
+ NO Lombok.
+ Alternatives Considered: Lombok's generated accessors and builders, which
+ would shorten the money, error and page envelope types appreciably.
+ Rejected because generated accessors cannot carry the Javadoc this
+ project's Explainability rule requires on every public member, and a
+ documentation gate a code generator can walk around is not a gate. Java 21
+ record types with explicit constructors give the same brevity with members
+ that can be documented.
+
+ NO MapStruct.
+ Alternatives Considered: generating the copybook to DTO mappers. Rejected
+ for two independent reasons. Its most recent published release is a beta;
+ and the mapping is not mechanical, so there is nothing safe to generate. It
+ drops `FILLER` padding, masks the primary account number to its last four
+ digits, suppresses the card verification value entirely, encrypts the
+ national identifier and the government issued identifier, and renames three
+ fields whose baseline spelling is wrong, among them `ACCT-EXPIRAION-DATE`
+ [app/cpy/CVACT01Y.cpy:L11]. Every one of those is a decision that has to
+ carry its justification at the mapping site, and a generated mapper has
+ nowhere to put one.
+
+ NO resilience or circuit breaker library.
+ Alternatives Considered: the Resilience4j Spring Boot 3 starter and Spring
+ Retry. Neither is needed: Spring Framework 7, which arrives inside the Boot
+ 4.1.0 parent, moved retry into the framework core, offering `@Retryable`,
+ `@ConcurrencyLimit` and a programmatic retry template under
+ `org.springframework.resilience`. Two details of that API are easy to
+ misremember and are recorded here so nobody adds a library to work around a
+ name: the annotation attribute is `maxRetries`, and total attempts are one
+ plus its value; and the enabling annotation is `@EnableResilientMethods`,
+ not the older `@EnableRetry`. The Resilience4j artifact targets Boot 3.x, and
+ Spring Retry is superseded by the core support. A circuit breaker is
+ omitted separately and for its own reason: the only synchronous hops
+ between services stay inside the private network behind an internal load
+ balancer with bounded connect and read timeouts, so a breaker would add a
+ failure mode without removing one. The durable retry tier is queue
+ redelivery into a dead letter queue plus per state orchestration retry,
+ neither of which is a library concern at all.
+
+ NO AWS SDK, no JPA, no JDBC driver, no Flyway, no actuator, and no cache or
+ streaming client.
+ Assumptions: this module owns no schema, no entity and no transport; the
+ eight services own those, one schema each. Keeping the AWS SDK off the
+ shared kernel's classpath is what makes the layering rule structural rather
+ than aspirational, because `LayeringRulesTest` forbids AWS SDK and web
+ types inside any `..domain..` package and a rule is far easier to hold when
+ the forbidden types are not sitting on every consumer's classpath to begin
+ with. Redis, Kafka and Kinesis are absent because the baseline has no cache
+ tier and its messaging requirement is request and reply, which a queue
+ satisfies. Actuator is absent for a simpler reason: a library exposes no
+ health endpoint.
+
+ NO `repositories` and no `pluginRepositories` element.
+ Assumptions: every artifact declared above resolves from Maven Central.
+ This project has no private or internal registry and introduces none, so no
+ build here depends on a credentialed settings file. The one registry the
+ project writes to is its own container registry, reached by short lived
+ federated role assumption from the deployment pipeline and never from a
+ build descriptor.
+
+ NO `properties` element and no `build` element.
+ Assumptions: the Java release, the compiler settings and every plugin
+ binding come from the aggregator, and this module overrides none of them.
+ Both elements are omitted entirely rather than left empty, because an empty
+ element carries no information and invites the next reader to fill it in.
+=============================================================================
+  -->
+
+</project>
