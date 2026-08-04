@@ -34,6 +34,42 @@
 #   and it is why this document configures no session store and no sticky-session
 #   affinity: there is no server-side conversation to keep.
 #
+#   State at this checkpoint, stated once here rather than restated at every key
+#   that names one of them. This file is authored ahead of the module it
+#   configures, and the migration lands its artifacts in plan order, so four
+#   classes of artifact named below DO NOT EXIST YET and are authored at later
+#   indexes of the same plan:
+#     - db/migration/V1__ledger.sql, the single Flyway migration this module owns
+#       and the file that creates the four `ledger` tables. Flyway does not fail
+#       on a migration location that resolves to nothing, so the service starts
+#       and reports zero migrations applied. spring.flyway.locations below is
+#       therefore the contract that migration will land at, not a description of
+#       DDL that runs today, and the four tables are the schema this module is to
+#       own rather than tables that currently exist.
+#     - openapi/transaction-api.yaml, the hand-authored contract of record,
+#       together with the com.carddemo.transaction.config classes that bind these
+#       keys and the controllers a generated document would be derived from.
+#       Until that file lands, the extra static-resource location and the
+#       springdoc keys below publish nothing and the Swagger view's pinned url
+#       resolves to a 404; the contract-versus-generated comparison they exist to
+#       make possible cannot yet be made.
+#     - ui/src/api/transactions.ts, the browser client to be written against
+#       that contract. It is named below as the reason the hand-authored document
+#       wins over a generated one; that reason holds as a target contract, not as
+#       a description of a client that is calling this service today.
+#     - application-dev.yml and application-prod.yml, the two profile overlays
+#       this document is written to be overridden by. They are authored at a
+#       later index of the same plan, so nothing currently overrides any value
+#       here and the paragraph above about what an overlay may differ in is the
+#       constraint those files will be written to, not a description of files
+#       that exist.
+#   Every key is nevertheless declared now, deliberately: these are the decisions
+#   a module author needs settled BEFORE writing the first class, and a schema
+#   search path or a migration location retrofitted afterwards is exactly how a
+#   service ends up applying another context's migration into its own schema.
+#   Nothing below is to be read as a claim that any of these artifacts is
+#   currently being applied, served or compared.
+#
 #   NO SECRET, CREDENTIAL OR ENDPOINT VALUE APPEARS ANYWHERE IN THIS FILE. Every
 #   deployment-specific value is a ${...} placeholder resolved at run time from an
 #   environment variable, and none of them carries a fallback.
@@ -48,11 +84,16 @@
 #   Assumptions: every pooled connection is pinned to the `ledger` search path,
 #     which is what makes schema-per-service a boundary rather than a naming
 #     convention. Detail at spring.datasource.hikari.connection-init-sql.
+#   Assumptions: every pooled connection also requires fully verified TLS,
+#     declared as driver properties rather than trusted to the injected URL, and
+#     paired with the server-side force-SSL cluster parameter. Detail at
+#     spring.datasource.hikari.data-source-properties.
 #   Assumptions: Flyway needs a second artifact beyond its core, and the failure
 #     mode of omitting it is a run-time abort rather than a build error. Detail
 #     at the `spring.flyway` key.
-#   Assumptions: this module ships exactly one migration, V1__ledger.sql, and one
-#     migration location. Detail at spring.flyway.locations.
+#   Assumptions: this module is to ship exactly one migration, V1__ledger.sql,
+#     into one migration location. Detail at spring.flyway.locations and at State
+#     at this checkpoint above.
 #   Assumptions: the Actuator health endpoint is a deployment contract with two
 #     consumers defined outside this repository's Java. Detail at `management`.
 #   Assumptions: the token issuer is resolved at run time, and identity is now
@@ -65,8 +106,8 @@
 #     cannot hold every value the amount field can. Detail at `spring.jackson`.
 #   Alternatives Considered: publishing the annotation-generated API document as
 #     the contract. Rejected in favour of the hand-authored contract the browser
-#     client is written against. Detail at spring.web.resources.static-locations
-#     and `springdoc`.
+#     client is to be written against. Detail at
+#     spring.web.resources.static-locations and `springdoc`.
 #   Trade-offs: the connection pool is sized small against a cluster-wide Aurora
 #     connection budget shared with seven peer services and the batch role.
 #     Detail at spring.datasource.hikari.maximum-pool-size.
@@ -82,7 +123,6 @@
 #     spring.lifecycle.timeout-per-shutdown-phase.
 # =============================================================================
 
-# WHAT: the HTTP listener this service publishes, and how it stops.
 # WHY : Assumptions: 8080 is not a free choice made here. Two artifacts outside
 #       this file fix it and cannot renegotiate it at run time: the EXPOSE
 #       instruction in this module's own Dockerfile, and the internal load
@@ -92,6 +132,69 @@
 #       code in this module.
 server:
   port: 8080
+
+  ssl:
+    # WHAT: the listener above serves HTTPS rather than cleartext HTTP.
+    # WHY : (1) Refactoring Rationale: this block did not exist, so the
+    #       load-balancer-to-task hop was cleartext while the hop in front of it
+    #       was encrypted under the TLS 1.2 floor the alb module pins on its
+    #       listener -- the protected path stopped at the load balancer and every
+    #       request then crossed the private application subnets readable. For
+    #       this context that traffic is the ledger itself: transaction amounts,
+    #       card numbers, merchant detail and bill-payment requests, alongside the
+    #       bearer token that authorised each one. Being inside a VPC bounds who
+    #       can observe the traffic; it does not make the traffic unreadable, and
+    #       the design requires encryption in transit end to end rather than up to
+    #       the edge.
+    #       (2) Assumptions: this is one half of a two-part change. The other half
+    #       is target_protocol = "HTTPS" in infra/modules/ecs-service, which fixes
+    #       the protocol of both the target group and its health check. Either half
+    #       alone means every probe speaks the wrong protocol and no task turns
+    #       healthy, so the two move together.
+    #       (3) Assumptions: the port does not change -- the Dockerfile's EXPOSE,
+    #       the target group and the security group are all built against 8080 --
+    #       so this encrypts the existing listener in place rather than moving it.
+    enabled: true
+
+    # WHY : (1) Alternatives Considered: a keystore file baked into the image.
+    #       Rejected because a private key in an image layer is readable by anyone
+    #       who can pull the image, and one key in one image is one key shared by
+    #       dev and prod.
+    #       (2) Assumptions: both values arrive from Secrets Manager, injected by
+    #       the task definition as SERVER_SSL_CERTIFICATE and
+    #       SERVER_SSL_CERTIFICATE_PRIVATE_KEY through the ECS container secrets
+    #       mechanism, so neither is stored in the task definition, in Terraform
+    #       state or in plan output. They must be passed through the ecs-service
+    #       module's secret_arns input rather than environment_variables, whose
+    #       validation refuses a name ending in KEY for this reason.
+    #       (3) Assumptions: these properties accept PEM CONTENT as well as a
+    #       path, which is what lets an environment-injected value work. Verified
+    #       against the pinned Spring Boot 4.1.0 rather than assumed:
+    #       org.springframework.boot.ssl.pem.PemContent exposes
+    #       isPresentInText(String), and the loader tests for PEM markers before
+    #       treating the value as a resource location.
+    #       (4) Trade-offs: neither placeholder carries a fallback, matching the
+    #       datasource contract below. An absent certificate stops startup rather
+    #       than falling back to cleartext, which would present as a healthy
+    #       service that had stopped meeting the requirement this block exists for.
+    certificate: ${SERVER_SSL_CERTIFICATE}
+    certificate-private-key: ${SERVER_SSL_CERTIFICATE_PRIVATE_KEY}
+
+    # WHY : (1) Assumptions: the two versions are named rather than left to the
+    #       JDK default, which still negotiates the withdrawn TLS 1.1 and, on some
+    #       distributions, TLS 1.0. This holds the same floor the alb module pins
+    #       on its listener and the cloudfront-spa module enforces for viewers, so
+    #       one floor applies at all three hops.
+    #       (2) Trade-offs: no `ciphers` list. A hand-written list ages into a
+    #       liability, silently permitting a suite the JDK has since deprecated
+    #       and excluding suites added later; the runtime's own default set for
+    #       these two versions is maintained by whoever ships it.
+    #       (3) Assumptions: the load balancer does not verify this certificate --
+    #       an Application Load Balancer trusts whatever a registered target
+    #       presents -- so this encrypts the hop without authenticating it. That
+    #       residual is recorded on target_protocol in the ecs-service module.
+    protocol: TLS
+    enabled-protocols: TLSv1.2,TLSv1.3
 
   # WHAT: let in-flight requests finish instead of cutting them at SIGTERM.
   # WHY : Assumptions: the image starts the JVM through an exec-form ENTRYPOINT,
@@ -105,8 +208,6 @@ server:
   #       not something this contract should depend on silently.
   shutdown: graceful
 
-# WHAT: the framework configuration shared by every environment, and, just as
-#       deliberately, what is absent from it.
 # WHY : Assumptions: there is no spring.cloud.aws.* key anywhere in this
 #       document, and no spring.batch.* key either. That is a consequence of the
 #       sibling POM, not an oversight. This module declares no io.awspring.cloud
@@ -126,7 +227,6 @@ server:
 #       SPRING_DATASOURCE_URL onto spring.datasource.url on its own.
 spring:
 
-  # WHAT: the logical name this service reports to every telemetry consumer.
   # WHY : Assumptions: MetricsConfig in com.carddemo.common.observability turns
   #       this value into a Micrometer common tag attached to every meter, and
   #       CorrelationIdFilter emits it beside the correlation identifier it
@@ -137,7 +237,6 @@ spring:
   application:
     name: transaction-service
 
-  # WHAT: how long one shutdown phase may run before the JVM stops waiting.
   # WHY : Trade-offs: the platform allows 30 seconds between SIGTERM and SIGKILL
   #       by default, and the framework default for this key is also 30 seconds,
   #       so the two boundaries coincide exactly and a task can be killed at the
@@ -150,7 +249,6 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
-  # WHAT: the single Aurora PostgreSQL datasource this context reads and writes.
   # WHY : (1) Assumptions: each value below is injected as a plain environment
   #       variable by the ECS task definition, which resolves the URL from
   #       Parameter Store and the credentials from Secrets Manager, both
@@ -170,7 +268,6 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD}
 
     hikari:
-      # WHAT: names the pool in logs, metrics and thread names.
       # WHY : Assumptions: pool metrics arrive at the observability stack tagged
       #       with this name only, and several services share one Aurora cluster.
       #       A name that says which context and which schema a saturated pool
@@ -178,7 +275,6 @@ spring:
       #       reports the framework default `HikariPool-1` from eight tasks.
       pool-name: ledger-pool
 
-      # WHAT: pins every pooled connection to this context's own schema.
       # WHY : (1) Assumptions: unqualified table names in the entity mappings
       #       must resolve to `ledger` and to nothing else. That resolution is
       #       what turns schema-per-service into an enforced boundary instead of
@@ -194,7 +290,6 @@ spring:
       #       with no error to show for it.
       connection-init-sql: SET search_path TO ledger
 
-      # WHAT: the bounds on how many connections this service may hold.
       # WHY : Trade-offs: Aurora enforces one connection budget for the whole
       #       cluster, and seven peer services plus the batch role draw on the
       #       same budget. A generous pool here starves those peers rather than
@@ -205,7 +300,6 @@ spring:
       maximum-pool-size: 10
       minimum-idle: 2
 
-      # WHAT: how long a caller waits for a connection, and how long one lives.
       # WHY : (1) Assumptions: these three keys bind as millisecond integers, not
       #       as durations, so the `20s` form used for the shutdown phase above
       #       would not bind here. The values are 10 seconds, 5 minutes and 15
@@ -219,6 +313,40 @@ spring:
       connection-timeout: 10000
       idle-timeout: 300000
       max-lifetime: 900000
+
+      # WHAT: the transport-security terms every connection this pool opens is
+      #       made on, independent of whatever the injected URL happens to say.
+      # WHY : Assumptions: the URL above arrives from the platform as an opaque
+      #       string, so this file cannot inspect it and cannot rely on it
+      #       carrying any TLS parameter. Driver properties set here are handed to
+      #       the driver alongside the URL, so a URL with no ssl parameter still
+      #       negotiates on these terms. Stating them here is the only way this
+      #       file can REQUIRE verified encryption rather than hope for it, and
+      #       the rows behind this pool are posted money movement.
+      # WHY : Assumptions: verify-full is the strongest mode the driver offers and
+      #       the only one that closes the whole gap. `require` encrypts and
+      #       accepts ANY certificate, so it defeats a passive listener but not an
+      #       active one; `verify-ca` checks the chain but not the host name, so a
+      #       valid certificate issued for a different host is accepted. Only
+      #       verify-full checks both, which is what makes the endpoint reached
+      #       the endpoint the credential was issued for.
+      # WHY : Assumptions: this is the CLIENT half of a two-sided requirement. The
+      #       cluster parameter group sets rds.force_ssl, so the server refuses an
+      #       unencrypted connection outright. Neither half is redundant: without
+      #       the server flag a misconfigured client could downgrade, and without
+      #       these properties a forced-TLS server would still accept a connection
+      #       that verified no certificate at all.
+      # WHY : Assumptions: verify-full needs a trust anchor, and this driver has
+      #       no option to fall back to the JVM trust store, so the bundle path is
+      #       explicit. The default names where the service image places the
+      #       managed certificate bundle; an environment holding it elsewhere
+      #       overrides the variable rather than editing this file. A missing
+      #       bundle fails the connection with a message naming the file, which is
+      #       correct: connecting with no trust anchor is precisely what this
+      #       setting prevents.
+      data-source-properties:
+        sslmode: verify-full
+        sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
 
   # WHAT: schema migration for the four tables this context owns.
   # WHY : Assumptions: flyway-core on its own is not enough, and the way it fails
@@ -236,17 +364,20 @@ spring:
     enabled: true
 
     # WHAT: the only place this module keeps migrations.
-    # WHY : Assumptions: this module ships exactly one migration, V1__ledger.sql,
-    #       and it is the sole owner of the four `ledger` tables. The schemas
-    #       themselves and the per-service database roles are created ahead of
-    #       any service starting, by the migration bootstrap DDL under
-    #       data-migration/sql; the seed rows for the shared reference tables are
-    #       owned by reference-service. Neither is on this classpath and neither
-    #       is named here, so this location cannot pick either of them up and
-    #       apply another context's migration into `ledger`.
+    # WHY : Assumptions: this module is to ship exactly one migration,
+    #       V1__ledger.sql, and to be the sole owner of the four `ledger` tables.
+    #       That migration is authored at a later index of the same plan, so this
+    #       location currently resolves to nothing and the service reports zero
+    #       migrations applied rather than failing; see State at this checkpoint
+    #       in the header. The schemas themselves and the per-service database
+    #       roles are created ahead of any service starting, by the migration
+    #       bootstrap DDL under data-migration/sql; the seed rows for the shared
+    #       reference tables are owned by reference-service. Neither is on this
+    #       classpath and neither is named here, so this location cannot pick
+    #       either of them up and apply another context's migration into
+    #       `ledger`.
     locations: classpath:db/migration
 
-    # WHAT: confines both the migration and its history table to `ledger`.
     # WHY : Assumptions: the schema history table has to sit in the same schema as
     #       the objects it describes, because each service connects under a role
     #       scoped to its own schema and could not otherwise read its own
@@ -257,16 +388,42 @@ spring:
     schemas: ledger
     default-schema: ledger
 
-    # WHAT: refuses to invent a starting point for the migration history.
     # WHY : Alternatives Considered: enabling baseline-on-migrate, the usual
     #       remedy when Flyway meets a populated schema. Rejected because it tells
     #       Flyway to treat whatever objects it finds as the baseline version when
     #       no history table is present, which would mark the ledger as already
-    #       migrated and skip V1__ledger.sql outright. A genuinely missing
-    #       migration would then look like a clean startup, and the absence of the
-    #       four tables would surface at the first query from a user instead of at
-    #       deployment.
+    #       migrated and skip V1__ledger.sql outright once that migration lands.
+    #       A genuinely missing migration would then look like a clean startup,
+    #       and the absence of the four tables would surface at the first query
+    #       from a user instead of at deployment.
     baseline-on-migrate: false
+
+    # WHAT: refuses to create the `ledger` schema, leaving that to the bootstrap.
+    # WHY : Assumptions: data-migration/sql/V0__schemas_and_roles.sql is the
+    #       EXCLUSIVE authority for schemas, roles and grants in this system. It
+    #       creates all eight schemas together with the eight login roles, the
+    #       NOLOGIN owner of the reporting schema, the credential binding for
+    #       every role, and the whole cross-schema privilege graph. Its completion
+    #       is a deployment precondition of this service, so Flyway here may
+    #       migrate the `ledger` schema and may not create it.
+    # WHY : Refactoring Rationale: this key was ABSENT, and its absence was the
+    #       defect rather than a neutral omission -- Flyway's own default is to
+    #       create a missing schema, so leaving the key out accepted that default
+    #       silently. A schema Flyway creates belongs to whichever role connected
+    #       and carries none of V0's grants, and this schema in particular is
+    #       written by TWO roles: transaction-service owns it and batch-service
+    #       writes it under the narrowly scoped cross-schema grant that keeps the
+    #       three-row posting commit atomic. A `ledger` created here would
+    #       therefore satisfy this service and leave the nightly posting job
+    #       unable to write at all, with the failure appearing in the other
+    #       module. Stating false converts a missing bootstrap into an abort at
+    #       startup naming the absent schema.
+    # WHY : Trade-offs: the cost is that a bare database, including one started by
+    #       Testcontainers for a repository integration test, now needs its schema
+    #       created before this service can migrate. The test profile supplies
+    #       that for itself, which is a visible act in a reviewable test resource
+    #       rather than a production default that conceals a missing precondition.
+    create-schemas: false
 
     # WHAT: refuses to drop the objects in this schema.
     # WHY : Assumptions: a Flyway clean drops every object in the target schema,
@@ -280,12 +437,11 @@ spring:
 
   jpa:
     hibernate:
-      # WHAT: forbids the persistence provider from touching the schema at all.
       # WHY : Alternatives Considered: `update`, and `validate`. Flyway owns this
       #       schema, so `update` is rejected outright: it would let the entity
-      #       mappings mutate the physical contract V1__ledger.sql defines, and
-      #       that contract is shared with batch-service, which writes these same
-      #       tables under a narrowly scoped cross-schema grant. A column widened
+      #       mappings mutate the physical contract V1__ledger.sql is to define,
+      #       and that contract is shared with batch-service, which writes these
+      #       same tables under a narrowly scoped cross-schema grant. A column widened
       #       or added from this side would break the posting unit of work in that
       #       other module, not in this one, which is the worst place for the
       #       failure to appear. `validate` was rejected too: it fails startup on
@@ -293,7 +449,6 @@ spring:
       #       its next migration, turning an ordering difference into an outage.
       ddl-auto: none
 
-    # WHAT: closes the persistence context when the service call returns.
     # WHY : Trade-offs: leaving this enabled holds a pooled connection for the
     #       whole request including response rendering, which for a JSON API that
     #       has already finished reading is connection-hold time spent on nothing,
@@ -303,7 +458,6 @@ spring:
     #       outcome, because such a query is invisible in the code that causes it.
     open-in-view: false
 
-    # WHAT: keeps generated SQL out of the container's output stream.
     # WHY : Assumptions: this key echoes statements through the provider directly
     #       to standard output rather than through the logging framework, so no
     #       logger level can filter it and the floors set under `logging` at the
@@ -312,8 +466,6 @@ spring:
     #       the framework-routed SQL logger is set with the other levels below.
     show-sql: false
 
-  # WHAT: the JSON encoding rules for every request and response this context
-  #       serves.
   # WHY : (1) Alternatives Considered: transporting money as a JSON number, which
   #       is what a BigDecimal serialises to by default. Rejected because most
   #       clients parse a JSON number into an IEEE-754 double, and a double
@@ -330,8 +482,20 @@ spring:
   #       setting below sits under `datatype.datetime`: the equivalent
   #       serialization-feature key of the previous Jackson major version no
   #       longer exists in this one and would fail to bind if written that way.
+  #       (3) Assumptions: the automatic registration claimed in (1) holds ONLY
+  #       because MoneyModule implements the CURRENT Jackson generation's module
+  #       type, the one under the tools.jackson group that
+  #       services/common-lib/pom.xml selects. The framework discovers module
+  #       BEANS of that type and contributes them to the mapper it builds; a
+  #       module written against the previous generation's type is a bean of a
+  #       type that mapper does not accept, so it would be silently absent and
+  #       every amount would serialise as the JSON number rejected in (1). This
+  #       key set and that coordinate are therefore one decision: neither this
+  #       document nor any profile beside it may switch
+  #       spring.jackson.use-jackson2-defaults on, because doing so would move
+  #       the mapper to the other generation and unregister the module that
+  #       makes money a string.
   jackson:
-    # WHAT: emits every mapped property, including the ones that are null.
     # WHY : Assumptions: the screens this service replaces render a fixed field
     #       set on every turn, because a BMS map writes each field position
     #       whether it holds a value or a blank, so a constant response shape is
@@ -343,7 +507,6 @@ spring:
 
     datatype:
       datetime:
-        # WHAT: renders date and time values as text, never as epoch numbers.
         # WHY : Assumptions: the baseline holds both transaction timestamps as
         #       characters - TRAN-ORIG-TS and TRAN-PROC-TS are PIC X(26) at
         #       app/cpy/CVTRA05Y.cpy L16 and L17 - and TimestampFormatter in
@@ -357,7 +520,6 @@ spring:
         write-dates-as-timestamps: false
 
     deserialization:
-      # WHAT: rejects a request body carrying a field the DTO does not declare.
       # WHY : Trade-offs: the framework leaves this off, so by default an
       #       unrecognised field is silently discarded. That default is wrong
       #       here because the record layouts are closed field sets taken from the
@@ -373,7 +535,6 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          # WHAT: the identity provider whose tokens this service will accept.
           # WHY : Assumptions: the value is a Cognito user-pool issuer
           #       resolved at run time from a Terraform output, never a
           #       literal in this file. SecurityConfig builds the
@@ -389,12 +550,14 @@ spring:
           #       claim alone.
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
-  # WHAT: publishes the hand-authored API contract as a served static resource.
   # WHY : (1) Alternatives Considered: leaving this list untouched and letting the
   #       API document generated from annotations be the published contract.
-  #       Rejected because the browser client in ui/src/api/transactions.ts is
-  #       written against openapi/transaction-api.yaml, which makes that file a
-  #       published interface of this module rather than developer convenience. A
+  #       Rejected because the browser client in ui/src/api/transactions.ts is to
+  #       be written against openapi/transaction-api.yaml, which makes that file a
+  #       published interface of this module rather than developer convenience.
+  #       Neither file exists at this checkpoint; both are authored at later
+  #       indexes of the same plan, so this list settles where the contract will
+  #       be published rather than describing a document served today. A
   #       generated document reflects whichever annotations happen to be present
   #       and can drift from it, leaving two documents that disagree about the
   #       same endpoint and no rule for which one a client should believe.
@@ -414,18 +577,19 @@ spring:
         - classpath:/public/
         - classpath:/openapi/
 
-# WHAT: where the API contract and its browser view are published.
 # WHY : Alternatives Considered: pointing the browser view at the generated
 #       document, which is what it displays if left alone. Rejected because the
-#       browser client in ui/src/api/transactions.ts is written against the
+#       browser client in ui/src/api/transactions.ts is to be written against the
 #       hand-authored contract, so publishing a second, generated description of
 #       the same endpoints would leave a client author with two documents and no
-#       rule for which one wins. The contract shown here is therefore the
-#       hand-authored openapi/transaction-api.yaml, reachable at the path below
-#       because the static-locations list above publishes the classpath folder
-#       holding it, and
-#       disable-swagger-default-url stops the view falling back to the generated
-#       one and presenting it as authoritative. The generated endpoint is left at
+#       rule for which one wins. The contract pinned here is therefore the
+#       hand-authored openapi/transaction-api.yaml, which will be reachable at
+#       the path below because the static-locations list above publishes the
+#       classpath folder holding it, and disable-swagger-default-url stops the
+#       view falling back to the generated one and presenting it as
+#       authoritative. Until that contract lands the pinned url resolves to a
+#       404, which is the intended staged state and not a misconfiguration; see
+#       State at this checkpoint in the header. The generated endpoint is left at
 #       its default rather than switched off, because it earns its keep as the
 #       thing to compare against when an implementation and the contract are
 #       suspected of having diverged.
@@ -435,7 +599,6 @@ springdoc:
     url: /transaction-api.yaml
     disable-swagger-default-url: true
 
-# WHAT: the Actuator surface exposed over HTTP.
 # WHY : (1) Assumptions: health is a deployment contract, not a convenience. Two
 #       consumers poll it and neither is defined in this repository's Java: the
 #       load balancer target group that decides whether to route to this task, and
@@ -460,7 +623,6 @@ management:
         include: health,prometheus
   endpoint:
     health:
-      # WHAT: withholds the per-contributor detail, leaving the aggregate status.
       # WHY : Assumptions: both pollers of this endpoint are unauthenticated - the
       #       balancer health check and the container health check - and neither
       #       reads anything beyond the status. The detail this suppresses is the
@@ -474,7 +636,6 @@ management:
       #       a profile cannot widen it without deleting a documented decision.
       show-details: never
 
-# WHAT: log levels for the base document.
 # WHY : (1) Trade-offs: the root logger sits at WARN and only this project's own
 #       package is raised to INFO, so framework startup narration stays out of the
 #       stream that log storage is billed on. What is given up is that narration
@@ -500,3 +661,53 @@ logging:
     org.hibernate: WARN
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
+
+# WHAT: the three token properties every request's bearer token is checked
+#       against, over and above the issuer and expiry the resource server
+#       validates for itself. The only keys in this file with no standard
+#       property name, held under a namespace this project owns.
+# WHY : (1) Assumptions: validating the issuer is not validating the token. The
+#       issuer-uri above makes the filter chain verify the signature, the issuer
+#       and the time claims, and that is where its guarantees end. One user pool
+#       mints TWO token kinds from the same signing key: an access token, whose
+#       token_use claim is `access`, and an identity token, whose token_use claim
+#       is `id`. Both are validly signed by the configured issuer, so without the
+#       check below an identity token - meant to describe a user to a client,
+#       never to authorize an API call - would be accepted as authorization here.
+#       It is also the token a browser is most likely to have to hand, which is
+#       what makes the gap reachable rather than theoretical. In this context the
+#       consequence is money movement: the endpoints here add a transaction and
+#       take a bill payment, so a request admitted on the wrong token kind posts
+#       against a real account.
+#       (2) Assumptions: one pool can hold more than one app client, and a token
+#       minted for a different client of this pool carries this pool's issuer.
+#       Binding the accepted client id closes that.
+#       (3) Alternatives Considered: expressing this through the framework's own
+#       spring.security.oauth2.resourceserver.jwt.audiences key, which is the
+#       obvious declarative route and is wrong here. A Cognito ACCESS token
+#       carries no aud claim at all - the client id travels in client_id instead
+#       - so an audience validator would reject every access token the sign-on
+#       flow issues while accepting the identity tokens this block exists to
+#       refuse. It would invert the control.
+#       (4) Assumptions: these keys are read by config/SecurityConfig.java, which
+#       installs a delegating token validator ahead of the group mapping, so a
+#       token failing any of the three never reaches JwtRoleConverter and no
+#       authority is derived from it. common-lib's security package owns the
+#       group mapping alone and explicitly no token validation, so the validator
+#       belongs to each service; the property shape is identical in every service
+#       so the eight filter chains cannot diverge in what they accept.
+#       (5) Trade-offs: required-scope names the scope the pool grants to a token
+#       obtained through its authentication API rather than a custom
+#       resource-server scope. Custom scopes are granted only through the OAuth
+#       flows this design does not use, so requiring one would reject every token
+#       the sign-on flow can produce. What the value still buys is decisive: an
+#       identity token carries no scope claim whatsoever, so requiring any scope
+#       at all is a second, independent rejection of the wrong token kind, and it
+#       is the same claim the API Gateway route authorization scopes assert at the
+#       edge, so edge and service agree rather than each guessing.
+carddemo:
+  security:
+    jwt:
+      expected-token-use: access
+      expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
+      required-scope: aws.cognito.signin.user.admin

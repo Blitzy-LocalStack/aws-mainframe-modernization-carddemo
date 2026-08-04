@@ -2,6 +2,25 @@
  * Root package of the transaction-service module, the LEDGER bounded context of
  * the CardDemo mainframe-to-microservices migration.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter
+ * describes the package's <b>target contract</b> as the migration plan assigns it,
+ * not the set of files present beside this one today. The migration lands its
+ * artifacts in plan order and this charter is authored first, so at the checkpoint
+ * that authored it this directory holds this charter and nothing else, and no subpackage of it
+ * exists yet. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> This package roots the Java re-expression of the CardDemo
  * transaction ledger: the four CICS transactions that list, view and add
  * transactions and that take a bill payment, migrated from z/OS COBOL running
@@ -61,9 +80,12 @@
  *   <li>{@code CR00} / {@code CORPT00C}, "Transaction Reports" at
  *       {@code README.md} line 281, sits between {@code CT02} and {@code CB00}
  *       in the inventory and so reads as a fifth transaction of this context.
- *       It belongs to the reporting bounded context, which owns no schema of
- *       its own and reaches these tables through read-only cross-schema
- *       views.</li>
+ *       It belongs to the reporting bounded context, which owns no TABLE of its
+ *       own -- its {@code reporting} schema holds views and nothing else, and is
+ *       owned in the database by {@code carddemo_reporting_owner}, a role created
+ *       {@code NOLOGIN} -- and which reaches these tables through those
+ *       read-only cross-schema views under a role holding {@code SELECT} on the
+ *       views alone.</li>
  *   <li>{@code app/cbl/CBTRN02C.cbl}, the nightly posting program, writes three
  *       of the four tables this context owns and is nonetheless the batch
  *       context's program. It is read here for the schema contract only: for
@@ -165,12 +187,19 @@
  * <p>This context neither owns nor imports {@code Account}, {@code Card},
  * {@code CardXref}, {@code Customer} or {@code User}. Cross-service
  * {@code domain} imports are forbidden outright, and the prohibition is a test
- * rather than a convention: the ArchUnit layering rules that common-lib
- * publishes at
+ * rather than a convention: the ArchUnit layering rules authored at
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * are inherited by this module, and they additionally keep AWS and web types
- * out of {@code domain} and binary floating-point types out of the money path.
- * Cross-context data is reached over HTTP, never by import.
+ * are re-run by this module against its own classes, and they additionally keep
+ * AWS and web types out of {@code domain} and binary floating-point types out of
+ * the money path. Cross-context data is reached over HTTP, never by import.
+ *
+ * <p>Assumptions: authored once is not inherited, and the difference is why this
+ * module declares the ArchUnit engine at test scope in its own POM. common-lib
+ * binds no {@code test-jar} goal, so it publishes no test classes for another
+ * module to depend on. That rule class is authored at a later index of the same
+ * plan and does not exist yet, so at this checkpoint the prohibition is carried
+ * by review and the declaration in this module's POM is what makes it executable
+ * when the class lands.
  *
  * <p>Assumptions: the baseline reaches other contexts' records directly,
  * because one CICS region shares one file set, and two of the four programs
@@ -492,18 +521,17 @@
  *                           simplicity vs. flexibility, etc.)
  * </pre>
  *
- * <p>Refactoring Rationale: the plural, unparenthesised forms above diverge
- * from the form that predominates elsewhere in this repository, and the
- * divergence is deliberate. A reader searching the shell, workflow and
- * infrastructure artifacts meets the singular far more often than the plural,
- * and the ruleset's own companion suppression file prescribes the singular for
- * itself, so that same reader could reasonably conclude this file had ignored
- * house style. It has not. The rule words its four categories in the plural,
- * and its line 43 makes that wording the sentence this tree is audited against,
- * so the plural is the form matching the audited text. It is also already the
- * form every sibling charter in this Java tree uses. Forms are never mixed
- * inside one file: this tree uses the plural exclusively, while the artifacts
- * in other languages keep the singular they were authored with.
+ * <p>Assumptions: the plural, unparenthesised, colon-terminated forms above are
+ * the only accepted spelling of the four labels, and they are mandatory in every
+ * language and every file of the migration trees -- Java, TypeScript, Python,
+ * HCL, SQL, Dockerfile, YAML and shell alike. The rule words its four categories
+ * in the plural, and its line 43 makes that wording the sentence this tree is
+ * audited against, so the plural is the audited text itself. A singular,
+ * bracketed, heading-style or dash-terminated variant is not an alternative
+ * spelling: it is a label that a fixed-string search for the category will not
+ * find, which makes a documented rationale read as absent to the audit that
+ * looks for it. {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full
+ * statement of the convention and enumerates the rejected shapes.
  *
  * <p>The rule's validation gate at its line 43 is conjunctive: a docstring with
  * purpose, parameters and return values, and an inline rationale naming at
@@ -564,17 +592,23 @@
  * is prose.
  *
  * <p>Assumptions: the inline form this Java tree establishes for rationale on
- * statements is a twin comment placed immediately above the code it explains,
- * {@code // WHAT:} on one line and {@code // WHY :} on the next, with
- * continuations indented to line up beneath them. The spacing is exact and is
- * not a slip: the first carries no space before its colon and the second
- * carries one, so both labels are eight characters wide and their text starts
- * in the same column. The form is taken from the shell blocks at
- * {@code tests/README.md} lines 267 and 270, and the {@code //} code form is
- * established by this Java tree rather than inherited from an existing Java
- * precedent. This charter uses the in-Javadoc equivalent, a labelled sentence
- * opening a paragraph, because it holds one declaration and no statements to
- * annotate.
+ * statements is a single comment placed immediately above the code it explains,
+ * opening with one of the four canonical labels and its colon, then the reason
+ * and what would differ under the alternative, with continuations indented to
+ * line up beneath the label. Nothing else belongs in it.
+ *
+ * <p>Alternatives Considered: pairing that comment with a second, preceding line
+ * labelled for what the code does was the earlier convention in this tree and is
+ * rejected. The shell blocks at {@code tests/README.md} lines 267 and 270 do use
+ * that twin form, but they annotate command pipelines in prose documentation,
+ * where no docstring construct exists and the effect of a pipeline genuinely is
+ * not evident from its tokens. A Java statement is the opposite case: a line
+ * above it saying what it does restates it, which is the first pattern the
+ * explainability rule forbids, and purpose already has a home in the Javadoc.
+ * The twin form is therefore kept for fenced command blocks and forbidden on
+ * statements, as {@code docs/CODE_DOCUMENTATION_STANDARD.md} sets out. This
+ * charter uses the in-Javadoc equivalent, a labelled sentence opening a
+ * paragraph, because it holds one declaration and no statements to annotate.
  *
  * <p>Assumptions: two identifier namespaces collide by number and are kept
  * textually distinct throughout this subtree. The user-specified rule is

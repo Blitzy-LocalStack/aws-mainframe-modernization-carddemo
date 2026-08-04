@@ -43,7 +43,7 @@
 #   infra/modules/cloudfront-spa/outputs.tf.
 #
 # Errors / failure modes:
-#   Six `validation` blocks reject a bad value while Terraform is evaluating
+#   Nine `validation` blocks reject a bad value while Terraform is evaluating
 #   variables, which happens at the START of a plan and before the AWS provider
 #   is asked to create anything. Each surfaces as `Error: Invalid value for
 #   variable`, naming the variable and carrying the message written beside it:
@@ -55,6 +55,22 @@
 #     - price_class ....... any value CloudFront does not accept.
 #     - log_retention_days and spa_noncurrent_version_retention_days ...
 #                           zero, negative, or fractional.
+#     - acm_certificate_arn and aliases ...
+#                           null, or an empty list, when environment is prod.
+#                           The pair is one decision; see the Refactoring
+#                           Rationale on acm_certificate_arn for why the
+#                           default-certificate path cannot be used there.
+#     - minimum_protocol_version ...
+#                           any of the four legacy viewer policies that accept
+#                           TLS 1.0 or 1.1. A deny-list rather than an
+#                           allow-list, for the reason recorded on the variable.
+#
+#   Two of the nine read ANOTHER variable -- both prod rules read
+#   var.environment -- so Terraform defers them from `terraform validate` to
+#   `terraform plan`. The other seven are evaluated by `validate`. Both stages
+#   precede every resource, so a prod distribution cannot be created without a
+#   certificate and an alias either way; a pipeline step that validates without
+#   planning simply does not exercise those two.
 #
 #   Three failures are NOT caught here, and are named so nobody looks for them
 #   in this file:
@@ -70,7 +86,7 @@
 #       s3_kms_key_arn respectively.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: HCL has no docstring construct, so this header block IS the
+#   - Assumptions: HCL has no docstring construct, so this header block IS the
 #     entry-point documentation for this file, and each variable's
 #     `description` IS that parameter's documentation. tflint's
 #     terraform_documented_variables and terraform_typed_variables rules make
@@ -78,7 +94,7 @@
 #     them is gating. Rationale for an individual default or validation is
 #     carried adjacent to it below rather than collected up here, so a reader
 #     changing one value sees why it is what it is without scrolling.
-#   - Trade-off: this contract is deliberately NARROW. The dev and prod roots
+#   - Trade-offs: this contract is deliberately NARROW. The dev and prod roots
 #     differ only in sizing and retention and never in topology, so the only
 #     two knobs they actually disagree on are price_class and
 #     log_retention_days. Nothing below can change the module's shape -- there
@@ -110,7 +126,7 @@ variable "name_prefix" {
   default     = "carddemo"
 
   # WHAT: an upper bound of 20 characters, derived rather than picked.
-  # WHY : Assumption: main.tf composes the bucket names deterministically from
+  # WHY : Assumptions: main.tf composes the bucket names deterministically from
   #       this prefix, the environment, a role suffix, the AWS account id and
   #       the region -- the same composition infra/modules/s3-datasets uses --
   #       because the S3 bucket namespace is GLOBAL. A bare `carddemo-spa`
@@ -127,7 +143,7 @@ variable "name_prefix" {
   #       overflow rather than a cautious round number -- at 20 the worst case
   #       composes a name of exactly 63 characters, and a 21-character prefix
   #       composes 64.
-  #       Trade-off: checking the derived budget on the input here, rather than
+  #       Trade-offs: checking the derived budget on the input here, rather than
   #       checking the composed name in main.tf, reports the problem against
   #       the value an operator actually typed and does it during plan. The
   #       alternative surfaces the same mistake as an S3 InvalidBucketName
@@ -139,7 +155,7 @@ variable "name_prefix" {
 
   # WHAT: lower-case letters and digits, with hyphens allowed only between
   #       them.
-  # WHY : Assumption: S3 rejects an upper-case character outright in a
+  # WHY : Assumptions: S3 rejects an upper-case character outright in a
   #       general-purpose bucket name and requires the name to begin and end
   #       with a letter or a digit. The anchors are what enforce that second
   #       rule through a prefix rather than on the finished name: `carddemo-`
@@ -161,7 +177,6 @@ variable "environment" {
   description = "Environment discriminator embedded in every resource name, so the dev and prod stacks can coexist without colliding on a globally unique bucket name."
   type        = string
 
-  # WHAT: no `default`, which makes the argument mandatory at every call site.
   # WHY : Alternatives Considered: defaulting to "dev", which is the shorter
   #       call site and the obvious convenience. Rejected for one specific
   #       failure: infra/envs/prod/main.tf omitting the argument would then
@@ -173,7 +188,7 @@ variable "environment" {
   #       instead by Terraform at the call site, naming this variable.
 
   # WHAT: the value is restricted to the two environments that exist.
-  # WHY : Assumption: this package defines exactly two environment roots,
+  # WHY : Assumptions: this package defines exactly two environment roots,
   #       infra/envs/dev and infra/envs/prod, and nothing consumes a third
   #       value. A typo such as "prd" is a perfectly good string, so without
   #       this block it provisions a parallel, correctly-formed set of
@@ -199,14 +214,14 @@ variable "s3_kms_key_arn" {
   type        = string
 
   # WHAT: supplied by the caller, with no default and no data-source lookup.
-  # WHY : Assumption: the value is one of the four customer-managed keys
+  # WHY : Assumptions: the value is one of the four customer-managed keys
   #       infra/modules/kms creates, and the environment root wires that
   #       module's output into this argument. Resolving the key here with a
   #       data source instead would make this module depend on a key already
   #       existing under a name it guessed, which turns a wiring mistake into a
   #       plan-time lookup failure that names no module as responsible.
 
-  # WHY : Assumption: the ARN on its own is not sufficient for this to work.
+  # WHY : Assumptions: the ARN on its own is not sufficient for this to work.
   #       The key POLICY on that key must also grant the CloudFront service
   #       principal `kms:Decrypt`, conditioned on this module's distribution,
   #       or the origin access control cannot read an SSE-KMS object and
@@ -246,7 +261,7 @@ variable "price_class" {
   default     = "PriceClass_100"
 
   # WHAT: the narrowest tier as the default.
-  # WHY : Trade-off: PriceClass_100 restricts the distribution to the cheapest
+  # WHY : Trade-offs: PriceClass_100 restricts the distribution to the cheapest
   #       edge locations, which raises latency for viewers far from them and
   #       lowers the per-request and data-transfer cost everywhere. That is the
   #       right side of the trade for this package, whose deployment is
@@ -258,7 +273,7 @@ variable "price_class" {
   #       raises the value rather than editing the module.
   #
   # WHAT: the three values CloudFront accepts, enumerated.
-  # WHY : Assumption: CloudFront accepts exactly these three, and they are a
+  # WHY : Assumptions: CloudFront accepts exactly these three, and they are a
   #       closed set rather than a growing one -- unlike the TLS security
   #       policies, which is why minimum_protocol_version below is deliberately
   #       left unvalidated and this is not. A value such as PriceClass_50 is a
@@ -277,7 +292,7 @@ variable "log_retention_days" {
   default     = 30
 
   # WHAT: a bounded default rather than indefinite retention.
-  # WHY : Trade-off: access logs are charged for as long as they are stored,
+  # WHY : Trade-offs: access logs are charged for as long as they are stored,
   #       and their investigative value decays -- an incident is nearly always
   #       reconstructed from recent log objects and hardly ever from old ones.
   #       Storing every object indefinitely bills forever for the rare case;
@@ -286,7 +301,7 @@ variable "log_retention_days" {
   #       axes this module's dev and prod configurations may differ on.
   #
   # WHAT: a whole number greater than zero.
-  # WHY : Assumption: the value is written straight into an S3 lifecycle
+  # WHY : Assumptions: the value is written straight into an S3 lifecycle
   #       expiration rule, which counts whole days and has no meaning at zero
   #       or below. Terraform's `number` type is the reason this block is
   #       needed at all: it accepts 0, -1 and 30.5 just as readily as 30, so
@@ -314,7 +329,7 @@ variable "spa_noncurrent_version_retention_days" {
   default     = 30
 
   # WHAT: noncurrent versions expire on a schedule rather than never.
-  # WHY : Trade-off: versioning is enabled on the SPA origin bucket so that a
+  # WHY : Trade-offs: versioning is enabled on the SPA origin bucket so that a
   #       bad front-end deploy can be rolled back to the previous build by
   #       restoring the prior object versions. That is what makes "revert the
   #       SPA" an actual capability and not a claim in a runbook. The cost is
@@ -342,7 +357,7 @@ variable "force_destroy" {
   default     = false
 
   # WHAT: false, so a populated bucket refuses to be deleted.
-  # WHY : Trade-off: with false, `terraform destroy` stops rather than deleting
+  # WHY : Trade-offs: with false, `terraform destroy` stops rather than deleting
   #       a bucket that still holds the deployed SPA and its access logs, and
   #       an operator has to purge the objects first -- the manual step
   #       docs/runbooks/teardown.md documents. What that costs is a teardown
@@ -365,7 +380,7 @@ variable "force_destroy" {
   #
   # WHAT: this is not a topology toggle, and nothing about the module's shape
   #       changes with it.
-  # WHY : Assumption: worth stating because a bool input in a module is often
+  # WHY : Assumptions: worth stating because a bool input in a module is often
   #       exactly that. The dev and prod roots are required to differ only in
   #       sizing and retention, so a flag that decided whether a bucket exists
   #       at all would breach that constraint. This one only decides whether a
@@ -389,7 +404,7 @@ variable "default_root_object" {
 
   # WHAT: this one value serves two purposes -- the root document, and the
   #       target of the error-response rewrite that makes deep links work.
-  # WHY : Assumption: ui/src/router.tsx owns all twenty-one screen routes on
+  # WHY : Assumptions: ui/src/router.tsx owns all twenty-one screen routes on
   #       the CLIENT. The origin bucket holds the built bundle and nothing
   #       resembling a server, so a request for a deep route such as
   #       /account/update arrives at S3 as a key that simply does not exist:
@@ -399,7 +414,7 @@ variable "default_root_object" {
   #       the bundle is loaded. main.tf therefore maps both 403 and 404 back to
   #       this document with a 200 status, which delivers the bundle and lets
   #       the router resolve the path from the address bar.
-  #       Assumption: this is load-bearing rather than cosmetic because the
+  #       Assumptions: this is load-bearing rather than cosmetic because the
   #       migration made navigation client-side ON PURPOSE. The mainframe
   #       transferred control between programs with EXEC CICS XCTL -- the
   #       sign-on program's branch to the admin or main menu at
@@ -416,7 +431,6 @@ variable "default_root_object" {
   #       root still serves and only deep links break, and the resulting bug
   #       looks like a routing problem rather than a typo.
   #
-  # WHAT: no `validation` block.
   # WHY : Alternatives Considered: asserting the value ends in .html, or is
   #       non-empty. Declined -- the name has to match whatever ui/vite.config
   #       emits as the entry document, this module cannot see that build, and a
@@ -433,7 +447,7 @@ variable "acm_certificate_arn" {
   nullable    = true
 
   # WHAT: the certificate is supplied, never created here.
-  # WHY : Assumption: CloudFront requires the certificate to live in us-east-1
+  # WHY : Assumptions: CloudFront requires the certificate to live in us-east-1
   #       NO MATTER WHICH REGION the rest of the stack is deployed to, because
   #       the distribution is a global resource that reads its certificate from
   #       that one region. This is the least obvious constraint in the module
@@ -446,14 +460,14 @@ variable "acm_certificate_arn" {
   #       that otherwise inherits exactly one provider configuration.
   #
   # WHAT: null by default, with `nullable` stated explicitly.
-  # WHY : Assumption: `nullable = true` is not decoration next to a null
+  # WHY : Assumptions: `nullable = true` is not decoration next to a null
   #       default -- it is the only coherent pairing. Terraform rejects the
   #       configuration outright with "A null default value is not valid when
   #       nullable=false", so the alternative is not merely undesirable, it
   #       does not load. Stating it explicitly documents that an environment
   #       root passing null through a conditional expression is expressing "no
   #       custom domain" and is not making a mistake.
-  #       Trade-off: with no certificate the distribution answers on its
+  #       Trade-offs: with no certificate the distribution answers on its
   #       generated cloudfront.net domain name, and CloudFront then PINS the
   #       viewer security policy to TLSv1 regardless of what
   #       minimum_protocol_version below asks for. Two consequences follow, and
@@ -466,6 +480,43 @@ variable "acm_certificate_arn" {
   #       scan therefore supplies a certificate here; the default keeps dev
   #       deployable without owning a domain, which is the compromise being
   #       accepted rather than an oversight.
+  #
+  # WHAT: the default is now available to dev ONLY, enforced rather than advised.
+  # WHY : Refactoring Rationale: the Trade-off above described the consequence
+  #       accurately and then left the choice open in every environment, which
+  #       made the weaker option reachable exactly where it must not be. On the
+  #       default certificate CloudFront PINS the viewer security policy to
+  #       TLSv1 -- not as a floor this module could raise, but as the stored
+  #       value -- so a production distribution left on that path serves the
+  #       operator console and every account, card and transaction view it
+  #       renders to browsers negotiating TLS 1.0 and 1.1. Both are withdrawn
+  #       protocols with practical attacks against them, and nothing in the plan
+  #       output would have said so, because the configuration would still read
+  #       minimum_protocol_version = "TLSv1.2_2021" while the API stored TLSv1.
+  #       That is the worst shape a weakness can take: a setting that looks
+  #       correct in the source and is inert in the deployment.
+  #       Assumptions: an environment either owns a domain or it does not, and
+  #       "prod" is the one that does -- the alternative is that production
+  #       serves the application from a generated cloudfront.net name, which no
+  #       operator would accept for a system carrying card data. So requiring
+  #       the certificate in prod costs a real deployment nothing it was not
+  #       already going to configure, while dev keeps the property that made the
+  #       default worth having: creatable and destroyable repeatedly by anyone,
+  #       with no hosted zone, no certificate and no validation records.
+  #       Alternatives Considered: making the certificate required
+  #       unconditionally, which would make the rule uniform and needs no
+  #       cross-variable reference. Rejected because it would force every dev
+  #       and review deployment to own a domain in us-east-1, and the reliable
+  #       response to that is a shared long-lived certificate ARN pasted into a
+  #       tfvars file -- so the rule would be satisfied while the practice got
+  #       worse. Also considered: leaving this to the CI policy scan, which
+  #       already reports an outdated viewer policy. Rejected because the scan
+  #       reports the SYMPTOM (a TLSv1 policy) in a run someone must read and
+  #       act on, whereas this rule refuses the CAUSE before a plan completes.
+  validation {
+    condition     = var.environment != "prod" || var.acm_certificate_arn != null
+    error_message = "acm_certificate_arn is required when environment is \"prod\". Without a certificate CloudFront serves the default cloudfront.net domain and PINS the viewer security policy to TLSv1, so the distribution accepts TLS 1.0 and 1.1 from browsers no matter what minimum_protocol_version asks for -- and the configuration still reads as though it asked for TLS 1.2. Supply a certificate issued in us-east-1 together with at least one entry in aliases."
+  }
 }
 
 variable "aliases" {
@@ -475,12 +526,12 @@ variable "aliases" {
 
   # WHAT: an empty list by default, and a pair with acm_certificate_arn rather
   #       than an independent setting.
-  # WHY : Assumption: CloudFront refuses an alternate domain name that the
+  # WHY : Assumptions: CloudFront refuses an alternate domain name that the
   #       supplied certificate does not cover, and refuses any alias at all
   #       while the default certificate is in use. The two inputs are therefore
   #       one decision expressed in two variables, and main.tf treats them that
   #       way; setting this alone cannot work.
-  #       Trade-off: an empty default means the module stands up with no DNS
+  #       Trade-offs: an empty default means the module stands up with no DNS
   #       prerequisite whatsoever -- no hosted zone, no certificate, no
   #       validation records -- which is what lets dev be created and destroyed
   #       repeatedly by anyone without owning a domain. The cost is that a
@@ -491,6 +542,56 @@ variable "aliases" {
   #       covering both apex and www is equally common, and a string would have
   #       to be widened to a list later, which is a breaking change to both
   #       roots for no gain over starting as a list.
+
+  # WHAT: a cross-variable validation, reading acm_certificate_arn.
+  # WHY : Assumptions: "setting this alone cannot work" is stated twice above and
+  #       is now ENFORCED, because a documented impossibility that plans cleanly
+  #       is still applied. CloudFront refuses an alternate domain name while the
+  #       default certificate is in use, so the invalid pair -- aliases without a
+  #       certificate -- previously reached apply and failed there, partway
+  #       through creating a distribution, with an error naming the API argument
+  #       rather than the two inputs that disagree. Both halves of one decision
+  #       are visible in one plan, so the check belongs at plan time.
+  #       Trade-offs: only this direction is refused. A certificate supplied with
+  #       no alias is permitted, because it is a coherent staging step: the
+  #       certificate can be issued and validated in one change and the domain
+  #       cut over in the next, whereas an alias with no certificate is never a
+  #       working state.
+  #       Assumptions: each entry is also checked for the SHAPE of a domain name.
+  #       An alias is a bare host -- no scheme, no port, no path -- and CloudFront
+  #       rejects anything else at apply; a wildcard label is admitted because a
+  #       certificate covering *.example.com is the usual way to serve several
+  #       subdomains from one distribution.
+  validation {
+    condition     = length(var.aliases) == 0 || var.acm_certificate_arn != null
+    error_message = "aliases requires acm_certificate_arn: CloudFront refuses an alternate domain name while the distribution is using the default certificate, so the two inputs are one decision and setting aliases alone can never work."
+  }
+
+  validation {
+    condition = alltrue([
+      for alias in var.aliases :
+      can(regex("^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(alias)))
+    ])
+    error_message = "Each aliases entry must be a bare domain name, optionally with a leading wildcard label -- app.example.com or *.example.com. A scheme, a port, a path or a trailing dot is refused by CloudFront at apply."
+  }
+
+  #
+  # WHY : Assumptions: in prod this list must be non-empty, for the reason
+  #       recorded at length on acm_certificate_arn. The two inputs are one
+  #       decision, and a certificate supplied with no alias leaves the
+  #       distribution answering only on its generated cloudfront.net name --
+  #       which is the same TLSv1-pinned outcome the certificate was supplied to
+  #       avoid, reached by configuring half of the pair. Checking both halves
+  #       is what makes the certificate requirement mean what it says.
+  #       Trade-offs: this rule reads var.environment, so Terraform defers it to
+  #       plan time rather than evaluating it during `terraform validate`. A
+  #       pipeline step that validates without planning therefore does not
+  #       exercise it; `plan` and `apply` both do, and both precede any
+  #       resource, so no distribution is created without it either way.
+  validation {
+    condition     = var.environment != "prod" || length(var.aliases) > 0
+    error_message = "aliases must list at least one domain name when environment is \"prod\". A certificate with no alias leaves the distribution answering only on its generated cloudfront.net name, where CloudFront pins the viewer security policy to TLSv1 -- the same outcome the certificate was supplied to avoid. Every name listed must be covered by acm_certificate_arn."
+  }
 }
 
 variable "minimum_protocol_version" {
@@ -499,35 +600,66 @@ variable "minimum_protocol_version" {
   default     = "TLSv1.2_2021"
 
   # WHAT: a modern security policy as the default, not the oldest accepted one.
-  # WHY : Assumption: the infrastructure pipeline includes a policy scan that
+  # WHY : Assumptions: the infrastructure pipeline includes a policy scan that
   #       fails on HIGH and CRITICAL findings, and an outdated viewer TLS
   #       policy is a standard finding in every scanner's CloudFront ruleset.
   #       Defaulting to the current recommended policy means a distribution
   #       with a certificate passes that scan without a per-root override,
   #       which is the only way a default here is worth having.
-  #       Assumption: this setting is also REQUIRED once a certificate is
+  #       Assumptions: this setting is also REQUIRED once a certificate is
   #       supplied -- CloudFront will not accept an ACM certificate ARN without
   #       both a minimum protocol version and an SNI support method -- so this
   #       is not an optional refinement of acm_certificate_arn but the other
   #       half of the same argument.
-  #       Deliberately cross-referenced: read the Trade-off on
+  #       Deliberately cross-referenced: read the `Trade-offs:` paragraph on
   #       acm_certificate_arn before changing this. With the default
   #       certificate the value is inert and any setting other than TLSv1
   #       creates a perpetual plan diff, so main.tf applies this only on the
   #       certificate path. It is documented in both places precisely because
   #       the interaction is invisible from either one alone.
   #
-  # WHAT: no `validation` block enumerating the accepted policies.
-  # WHY : Alternatives Considered: a `contains(...)` check like the one on
-  #       price_class. Rejected on evidence: the AWS provider already carries
-  #       its own enumeration of these policy names and has demonstrably
-  #       lagged the service, rejecting a newer TLS 1.3 policy that CloudFront
-  #       itself accepted. Copying that list into this module would reproduce
-  #       exactly that failure one layer further out -- an operator wanting the
-  #       newer policy would be blocked by this file even after upgrading the
-  #       provider that had caught up. The set is open and growing, unlike
-  #       price_class, so the provider is left to be the single place it is
-  #       enumerated.
+  # WHAT: no `validation` ENUMERATING the accepted policies, but one refusing
+  #       the outdated ones.
+  # WHY : Alternatives Considered: a `contains(...)` allow-list like the one on
+  #       price_class. Rejected on evidence, and this rejection still stands:
+  #       the AWS provider already carries its own enumeration of these policy
+  #       names and has demonstrably lagged the service, rejecting a newer TLS
+  #       1.3 policy that CloudFront itself accepted. Copying that list into
+  #       this module would reproduce exactly that failure one layer further out
+  #       -- an operator wanting the newer policy would be blocked by this file
+  #       even after upgrading the provider that had caught up. The set is open
+  #       and growing, unlike price_class, so the provider stays the single
+  #       place it is enumerated.
+  # WHY : Refactoring Rationale: what the paragraph above got wrong was
+  #       concluding that because the ACCEPTED set cannot be closed, nothing can
+  #       be checked. The set of policies that must be REFUSED is closed and
+  #       does not grow: AWS publishes exactly four legacy viewer policies below
+  #       the TLS 1.2 floor -- SSLv3, TLSv1, TLSv1_2016 and TLSv1.1_2016 -- and
+  #       will publish no more, because new policies floor at 1.2 or higher.
+  #       Refusing a fixed deny-list therefore holds the floor without closing
+  #       the ceiling: a policy family released tomorrow passes untouched, and
+  #       the four that accept withdrawn protocols cannot be selected. That
+  #       asymmetry is the whole point -- an allow-list of a growing set ages
+  #       badly, a deny-list of a closed set does not.
+  #       Assumptions: the floor is TLS 1.2 because TLS 1.0 and 1.1 are withdrawn
+  #       and have practical attacks against them, and because the sibling `alb`
+  #       module already pins the same floor on its listener. One floor across
+  #       the two internet-facing edges is what makes the transport posture a
+  #       property of the package rather than of whichever module a reader
+  #       happens to open.
+  #       Trade-offs: "TLSv1" is refused here even though it is the value
+  #       CloudFront itself stores on the default-certificate path. That is not
+  #       a contradiction: main.tf applies this input only on the certificate
+  #       path, so the pinned TLSv1 of a dev distribution is never expressed as
+  #       an input, and refusing the string prevents the one configuration that
+  #       would state it deliberately.
+  validation {
+    condition = !contains(
+      ["SSLv3", "TLSv1", "TLSv1_2016", "TLSv1.1_2016"],
+      var.minimum_protocol_version
+    )
+    error_message = "minimum_protocol_version must not be SSLv3, TLSv1, TLSv1_2016 or TLSv1.1_2016. Those four are the only CloudFront viewer policies that accept TLS 1.0 or 1.1, both withdrawn protocols, and no future policy will join them. Use TLSv1.2_2021 or a newer family; the accepted set is deliberately left open so a policy released after this module was written needs no edit here."
+  }
 }
 
 
@@ -541,7 +673,6 @@ variable "web_acl_arn" {
   default     = null
   nullable    = true
 
-  # WHAT: the association is an input, and the default deployment has none.
   # WHY : Alternatives Considered: provisioning a web ACL inside this module so
   #       that every deployment gets one. Rejected on two independent grounds,
   #       and this comment is the documented reason for the absence rather than
@@ -564,7 +695,7 @@ variable "web_acl_arn" {
   #       would bill per request for inspecting immutable asset fetches while
   #       leaving the surface that matters exactly as protected as it already
   #       is.
-  #       Trade-off: keeping the association as an INPUT rather than omitting
+  #       Trade-offs: keeping the association as an INPUT rather than omitting
   #       the capability is what makes this reversible. An environment that has
   #       a web ACL -- because an organisation-wide policy supplies one, or
   #       because a rate limit becomes wanted in front of the bundle -- attaches
@@ -574,7 +705,7 @@ variable "web_acl_arn" {
   #
   # WHAT: null by default, with `nullable` stated explicitly, exactly as on
   #       acm_certificate_arn.
-  # WHY : Assumption: same mechanism as there -- Terraform rejects a null
+  # WHY : Assumptions: same mechanism as there -- Terraform rejects a null
   #       default alongside `nullable = false`, so this pairing is the only one
   #       that loads, and stating it records that an explicit null from a root
   #       means "associate nothing" rather than "argument forgotten". main.tf
@@ -603,7 +734,7 @@ variable "web_acl_arn" {
 #   file rules out.
 #
 # No `region` or `aws_region` input:
-#   Assumption: the region comes from the provider configuration this module
+#   Assumptions: the region comes from the provider configuration this module
 #   inherits from its calling root, and main.tf reads it from the aws_region
 #   data source where it needs the value for name composition. A region
 #   variable could disagree with the inherited provider, and the provider wins:
@@ -613,7 +744,7 @@ variable "web_acl_arn" {
 #
 # No topology switch -- no `enable_logging`, `create_bucket`, `enable_waf`,
 # `origin_failover` or `enable_ipv6`:
-#   Assumption: the dev and prod roots are required to differ only in sizing
+#   Assumptions: the dev and prod roots are required to differ only in sizing
 #   and retention, never in topology, and each of those flags is a lever that
 #   would let one root build a materially different stack from the other. The
 #   value of the constraint is that a defect found in dev is reachable in prod;
@@ -624,7 +755,7 @@ variable "web_acl_arn" {
 #   empty rather than as a boolean that changes the resource graph.
 #
 # No input accepting a pre-existing bucket name:
-#   Assumption: this module creates its own origin and log buckets and names
+#   Assumptions: this module creates its own origin and log buckets and names
 #   them itself. Accepting a name would make it possible to aim this module at
 #   the dataset bucket owned by infra/modules/s3-datasets or the remote-state
 #   bucket owned by infra/bootstrap. All three are versioned, encrypted S3
@@ -635,7 +766,7 @@ variable "web_acl_arn" {
 #   discouraged.
 #
 # No `sensitive = true` on any input above:
-#   Assumption: none of the twelve carries a secret. They are names, an
+#   Assumptions: none of the twelve carries a secret. They are names, an
 #   environment discriminator, resource ARNs, an edge tier, day counts, a
 #   boolean and a document name; ARNs are identifiers, not credentials, and
 #   they appear in state and in the console regardless. Marking one sensitive
@@ -643,7 +774,7 @@ variable "web_acl_arn" {
 #   key or which web ACL a change points at -- while protecting nothing.
 #
 # No credential, password or other secret input of any kind:
-#   Assumption: no secret is committed to this repository, and this module
+#   Assumptions: no secret is committed to this repository, and this module
 #   needs none: a CloudFront distribution reaches its origin through an origin
 #   access control, which is an identity-based grant in the bucket policy
 #   rather than a shared secret. Where this package genuinely needs a
@@ -651,4 +782,3 @@ variable "web_acl_arn" {
 #   the module that owns it, and never travels through a variable declared in
 #   source.
 # =============================================================================
-

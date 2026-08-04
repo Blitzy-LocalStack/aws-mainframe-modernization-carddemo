@@ -5,6 +5,24 @@
  * validate and shape HTTP, the repositories below it read and write rows,
  * and the classes here hold the rules that neither of those layers may own.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>Each significant COBOL paragraph becomes one named method, so the
  * traceability matrix at
  * {@code docs/architecture/cobol-to-service-traceability.md} can cite a
@@ -113,16 +131,21 @@
  * that layout; this package does not, and the divergence is recorded here
  * rather than reproduced as a dependency that never carried data.
  *
- * <p>Assumptions: the prohibition is enforced mechanically rather than left
- * to convention. {@code LayeringRulesTest}, which {@code common-lib}
- * publishes under
+ * <p>Assumptions: the prohibition is to be enforced mechanically rather than
+ * left to convention. {@code LayeringRulesTest}, authored under
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture}
- * and every module inherits, is the sole owner of layering enforcement in
- * this build. Checkstyle's {@code ImportControl} module is deliberately
- * absent from {@code config/checkstyle/checkstyle.xml}, which records the
- * reason at lines 552 to 558: a second engine enforcing an overlapping half
- * of one constraint would leave a reader unable to tell which of the two
- * owned a given boundary.
+ * and re-run by each module against its own classes, is the sole owner of
+ * layering enforcement in this build. Two facts qualify that: the rule class is
+ * authored at a later index of the same plan and does not exist yet, so at this
+ * checkpoint the boundary is carried by review; and it is not inherited as an
+ * artifact, because common-lib binds no {@code test-jar} goal and so publishes
+ * no test classes to depend on, which is why this module's POM declares the
+ * ArchUnit engine at test scope for itself. Checkstyle's {@code ImportControl}
+ * module is deliberately absent from
+ * {@code config/checkstyle/checkstyle.xml}, which records the reason in its
+ * excluded-modules section: a second engine enforcing an overlapping half of one
+ * constraint would leave a reader unable to tell which of the two owned a given
+ * boundary.
  *
  * <h2>No class here holds session state</h2>
  *

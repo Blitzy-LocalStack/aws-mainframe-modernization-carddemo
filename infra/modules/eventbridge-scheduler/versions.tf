@@ -50,7 +50,7 @@ terraform {
   # WHAT: a constraint on this module's callers rather than on this directory --
   #       a module is never initialised on its own, so the version actually
   #       checked is that of whichever CLI runs the root.
-  # WHY : (Trade-offs) a reusable module is loaded by separate roots, and
+  # WHY : Trade-offs: a reusable module is loaded by separate roots, and
   #       Terraform intersects every `required_version` constraint it
   #       encounters. A `~>` or `=` constraint here would therefore let this
   #       module veto a CLI its callers had already agreed on, and the failure
@@ -62,13 +62,13 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHY : (Alternatives Considered) an exact `= 6.56.0` pin was the
+    # WHY : Alternatives Considered: an exact `= 6.56.0` pin was the
     #       alternative and is rejected -- inside a single minor range it adds
     #       no safety, because `~>` already refuses the next major and the
     #       resource-schema churn that comes with it, while it does block patch
     #       releases carrying provider fixes. Two reasons the constraint is
     #       6.56 specifically. First, it is the one constraint every module in
-    #       this tree uses, so all sixteen compose inside a single root without
+    #       this tree uses, so they all compose inside a single root without
     #       a provider-version conflict; Terraform intersects the constraints
     #       of every module it loads, so one divergent pin is enough to make
     #       that intersection empty. Second, it is recent enough to expose the
@@ -80,7 +80,7 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHY : (Assumptions) `hashicorp/random` is absent on purpose. This module
+    # WHY : Assumptions: `hashicorp/random` is absent on purpose. This module
     #       derives every name from its inputs and generates no password and no
     #       name suffix, so it has nothing to ask a random provider for; the
     #       credential generation that does need it belongs to
@@ -93,18 +93,18 @@ terraform {
   }
 }
 
-# WHY : (Alternatives Considered) there is deliberately no `provider "aws"`
+# WHY : Alternatives Considered: there is deliberately no `provider "aws"`
 #       block in this file, and adding one is the plausible-looking wrong
 #       answer. A reusable module inherits its provider configuration -- region,
 #       default_tags and any alias -- from whichever root calls it, which keeps
 #       the root the single place region and tagging are decided and lets dev
 #       and prod differ without editing a module. Configuring the provider
-#       inside the module would duplicate that decision across sixteen modules,
+#       inside the module would duplicate that decision across every module,
 #       and it would also break the two composition patterns this tree relies
 #       on: a root could no longer pass an aliased provider in through
 #       `providers = {}`, and the module could no longer be instantiated
 #       per-item with `for_each`. Note the deliberate contrast with
 #       infra/bootstrap/versions.tf, which *does* own the only `provider "aws"`
 #       block in its tree -- bootstrap is a root rather than a module, so
-#       configuring the provider is precisely its job. Inverting these two
-#       cases is the mistake this comment exists to prevent.
+#       configuring the provider is precisely its job. Inverting these two cases
+#       is the mistake this comment exists to prevent.

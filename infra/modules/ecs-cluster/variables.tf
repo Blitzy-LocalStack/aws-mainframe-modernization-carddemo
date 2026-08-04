@@ -57,7 +57,7 @@
 #     so this file is deliberately limited to the ten inputs listed above.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this module owns the cluster and nothing else, so there is
+#   - Assumptions: this module owns the cluster and nothing else, so there is
 #     deliberately no input for a VPC, a subnet, a security group, task
 #     sizing, a task count, a container image, a port, a load-balancer
 #     target group, a task or execution role, an autoscaling bound or a log
@@ -68,7 +68,7 @@
 #     arrives with the provider configuration the calling root owns, and this
 #     module declares no provider block of its own, so such an input would
 #     have no consumer and would fail the unused-declaration rule.
-#   - Trade-off: nine inputs carry a default and one does not. That makes the
+#   - Trade-offs: nine inputs carry a default and one does not. That makes the
 #     module callable with a single argument while keeping the environment
 #     discriminator impossible to omit by accident.
 # =============================================================================
@@ -79,7 +79,7 @@
 
 variable "name_prefix" {
   # WHAT: the leading component of the composed cluster name.
-  # WHY : Assumption: every resource in this infrastructure package is named
+  # WHY : Assumptions: every resource in this infrastructure package is named
   #       carddemo-<component>-<env> -- the request queues, the dataset
   #       bucket and the nightly batch state machine all follow it. The
   #       default IS that convention, so a caller that wants the house name
@@ -87,7 +87,7 @@ variable "name_prefix" {
   #       of the module rather than a literal buried in main.tf, which is
   #       what lets one root stamp out a second cluster under a different
   #       prefix with `for_each`.
-  # WHY : Trade-off: the charset is narrowed below to lowercase letters,
+  # WHY : Trade-offs: the charset is narrowed below to lowercase letters,
   #       digits and hyphens, which is stricter than what the pinned
   #       provider accepts for a cluster name -- it takes mixed case and
   #       underscores as well. The compromise is that a caller cannot
@@ -100,7 +100,7 @@ variable "name_prefix" {
   default     = "carddemo"
 
   validation {
-    # WHY: Assumption: 32 characters is the ceiling because the composed name
+    # WHY: Assumptions: 32 characters is the ceiling because the composed name
     #      is "<name_prefix>-<environment>" and the pinned provider bounds a
     #      cluster name to 255 characters. Thirty-two here plus the sixteen
     #      allowed for the environment leaves the composed name well inside
@@ -117,8 +117,6 @@ variable "name_prefix" {
 }
 
 variable "environment" {
-  # WHAT: the deployment-environment discriminator in the composed cluster
-  #       name, supplied by whichever root is calling.
   # WHY : Alternatives Considered: defaulting this to "dev" was rejected.
   #       Terraform reports nothing when a default is silently accepted, so
   #       a prod root that forgot the argument would plan and apply a cluster
@@ -151,7 +149,6 @@ variable "environment" {
 }
 
 variable "cluster_name" {
-  # WHAT: an explicit cluster name that replaces the composed one outright.
   # WHY : Alternatives Considered: two other shapes were rejected. Making the
   #       name a required input would force both roots, and every future
   #       root, to restate the carddemo-<component>-<env> convention by hand,
@@ -163,7 +160,7 @@ variable "cluster_name" {
   #       `coalesce` in main.tf gives the convention as the default path and
   #       still admits the exception; it is also the shape the bootstrap
   #       module already uses for its state-bucket and lock-table names.
-  # WHY : Trade-off: no charset or length validation is asserted here. A
+  # WHY : Trade-offs: no charset or length validation is asserted here. A
   #       caller reaching for this input is naming a cluster that exists
   #       outside this module's control, so the only authority on whether the
   #       name is legal is the provider, which bounds it to 255 characters of
@@ -182,14 +179,14 @@ variable "cluster_name" {
 variable "container_insights" {
   # WHAT: the value main.tf writes into the cluster's containerInsights
   #       setting, which selects the cluster-level monitoring tier.
-  # WHY : Assumption: the module specification for `ecs-cluster` is "Fargate
+  # WHY : Assumptions: the module specification for `ecs-cluster` is "Fargate
   #       cluster, Container Insights", so the default is the on value. The
   #       policy scan in .github/workflows/infra-ci.yml runs at high and
   #       critical severity as a gating step and expects cluster-level
   #       monitoring to be configured on the cluster resource itself; a
   #       default of "disabled" would mean every caller had to remember to
   #       switch it on and that the gate failed on an unmodified call.
-  # WHY : Trade-off: the tier is a parameter rather than a literal because
+  # WHY : Trade-offs: the tier is a parameter rather than a literal because
   #       "enhanced" bills per additional observation for the extra task and
   #       container dimensions it collects, and a development environment
   #       gains nothing from container-level drill-down that it pays for on
@@ -200,17 +197,16 @@ variable "container_insights" {
   default     = "enabled"
 
   validation {
-    # WHY: Refactoring Rationale: this block was originally going to be
-    #      omitted on the assumption that the provider already constrained
-    #      the value. It does not. The pinned provider validates the setting
+    # WHY: Assumptions: this validation is required because the pinned
+    #      provider does not constrain the value. It validates the setting
     #      NAME against a single-entry list but applies no validator at all
     #      to the setting VALUE -- a probe against provider 6.57.1 accepted
     #      "bogusValue", "ENABLED" and "Enabled" without complaint, and each
     #      would then be rejected by the ECS API at apply time, after the
     #      cluster call had already been attempted. This block is therefore
-    #      the only pre-apply guard on this input, which is why it is here
-    #      rather than left to the provider.
-    #      Assumption: the three accepted values are taken from the ECS
+    #      the only pre-apply guard on this input, which is why it cannot be
+    #      left to the provider.
+    #      Assumptions: the three accepted values are taken from the ECS
     #      ClusterSetting API contract, which documents the supported values
     #      as enhanced, enabled and disabled. The comparison is exact rather
     #      than case-folded because the provider forwards the casing it is
@@ -224,7 +220,7 @@ variable "container_insights" {
 variable "capacity_providers" {
   # WHAT: the capacity providers main.tf associates with the cluster before
   #       any service or task can reference them.
-  # WHY : Assumption: the compute decision recorded in
+  # WHY : Assumptions: the compute decision recorded in
   #       docs/adr/ADR-002-compute-platform.md selects Fargate for the eight
   #       services and Step-Functions-invoked Fargate tasks for batch, so the
   #       Fargate pair is the default. The reasoning is specific to this
@@ -234,7 +230,7 @@ variable "capacity_providers" {
   #       Lambda's fifteen-minute execution ceiling, so a function cannot
   #       host them at all; and EC2 would add instance patching and capacity
   #       management for no benefit this workload can name.
-  # WHY : Trade-off: FARGATE_SPOT is in the default list even though Spot
+  # WHY : Trade-offs: FARGATE_SPOT is in the default list even though Spot
   #       capacity is reclaimable with a two-minute warning, because
   #       attaching a provider does not by itself place any task on it. What
   #       decides how much work lands on Spot is
@@ -273,7 +269,7 @@ variable "capacity_providers" {
   }
 
   validation {
-    # WHY: Assumption: the underlying cluster argument is a set, so a
+    # WHY: Assumptions: the underlying cluster argument is a set, so a
     #      duplicated entry is collapsed silently rather than reported. A
     #      duplicate is almost always a copy-paste slip in a tfvars file, and
     #      silently absorbing it hides the slip; comparing the list length
@@ -286,7 +282,7 @@ variable "capacity_providers" {
 variable "default_capacity_provider_strategy" {
   # WHAT: how the cluster places a task that names neither a launch type nor
   #       a strategy of its own.
-  # WHY : Trade-off: the default reserves a base of one task on on-demand
+  # WHY : Trade-offs: the default reserves a base of one task on on-demand
   #       Fargate and then apportions everything above that base four to one
   #       in favour of on-demand. The mechanism matters and is worth stating
   #       exactly: ECS satisfies the base first, so one task always runs on
@@ -340,7 +336,7 @@ variable "default_capacity_provider_strategy" {
   ]
 
   validation {
-    # WHY: Assumption: the strategy may only name a provider that is also
+    # WHY: Assumptions: the strategy may only name a provider that is also
     #      associated with the cluster, because ECS refuses a strategy entry
     #      for a provider it does not hold. Checking that here, against the
     #      other input rather than against a literal list, is what makes a
@@ -357,7 +353,7 @@ variable "default_capacity_provider_strategy" {
   }
 
   validation {
-    # WHY: Assumption: an omitted weight is treated by ECS as zero, and a
+    # WHY: Assumptions: an omitted weight is treated by ECS as zero, and a
     #      provider with a weight of zero cannot be used to place a task, so
     #      a strategy in which every weight is zero or absent fails every
     #      RunTask and CreateService call that relies on it. An empty list is
@@ -371,7 +367,7 @@ variable "default_capacity_provider_strategy" {
   }
 
   validation {
-    # WHY: Assumption: ECS permits a base on at most one entry in a strategy,
+    # WHY: Assumptions: ECS permits a base on at most one entry in a strategy,
     #      because the base is a floor on total task count rather than a
     #      per-provider share. Two bases are rejected by the API, and the
     #      pinned provider forwards the strategy without checking the rule,
@@ -395,8 +391,6 @@ variable "default_capacity_provider_strategy" {
 # -----------------------------------------------------------------------------
 
 variable "execute_command_log_group_name" {
-  # WHAT: the name of an EXISTING CloudWatch log group that execute-command
-  #       session output is redirected to.
   # WHY : Alternatives Considered: creating the log group inside this module
   #       was rejected. Log groups are owned by `ecs-service`, which creates
   #       one per service, and by `observability`, which owns the group,
@@ -406,7 +400,7 @@ variable "execute_command_log_group_name" {
   #       already-exists error rather than converge. Taking the name as an
   #       input keeps a single owner and matches the ECS contract, which
   #       requires the group to exist before the cluster references it.
-  # WHY : Trade-off: null rather than a composed default name. A composed
+  # WHY : Trade-offs: null rather than a composed default name. A composed
   #       default would name a group this module does not create, so the
   #       cluster would reference a group that may not exist and the failure
   #       would land at apply time; null instead omits the log-configuration
@@ -418,7 +412,7 @@ variable "execute_command_log_group_name" {
 
 variable "execute_command_logging" {
   # WHAT: which log destination the cluster uses for execute-command output.
-  # WHY : Assumption: the default is "DEFAULT" because that is the value the
+  # WHY : Assumptions: the default is "DEFAULT" because that is the value the
   #       ECS API itself applies when the parameter is omitted -- it routes
   #       session output through whatever awslogs configuration the task
   #       definition already carries. Defaulting to the API's own behaviour
@@ -426,7 +420,7 @@ variable "execute_command_logging" {
   #       that makes the input safe to add to an existing call. "NONE" was
   #       rejected as the default because it would silently discard an audit
   #       trail of interactive access to a production task.
-  # WHY : Trade-off: "OVERRIDE" is accepted but not defaulted. It is the only
+  # WHY : Trade-offs: "OVERRIDE" is accepted but not defaulted. It is the only
   #       value that consults execute_command_log_group_name, and the ECS
   #       contract requires a log configuration whenever it is set, so
   #       defaulting to it would make the log-group input mandatory in
@@ -436,7 +430,7 @@ variable "execute_command_logging" {
   default     = "DEFAULT"
 
   validation {
-    # WHY: Assumption: these three values are the provider's own domain, not
+    # WHY: Assumptions: these three values are the provider's own domain, not
     #      a guess -- the pinned provider rejects anything else with
     #      "expected logging to be one of [NONE DEFAULT OVERRIDE]". The block
     #      is kept even though the provider duplicates it, because the
@@ -448,7 +442,7 @@ variable "execute_command_logging" {
   }
 
   validation {
-    # WHY: Assumption: ECS requires a log configuration whenever the logging
+    # WHY: Assumptions: ECS requires a log configuration whenever the logging
     #      mode is OVERRIDE, and the only log destination this module exposes
     #      is the CloudWatch group name. OVERRIDE with no group name therefore
     #      produces an empty log configuration that the API refuses after the
@@ -472,18 +466,18 @@ variable "kms_key_arn" {
   #       as well; the input keeps the longer name because that is the form
   #       the environment root has, having taken it from the `kms` module's
   #       output.
-  # WHY : Assumption: the key is never created here. The four customer-managed
+  # WHY : Assumptions: the key is never created here. The four customer-managed
   #       keys in this package -- for the database, object storage, the secret
   #       store and the queues -- are owned by the sibling `kms` module and
   #       wired into this one by the environment root, so this input is a
   #       reference to a key that already exists. Creating a fifth key here
   #       would put key rotation and key policy in two places.
-  # WHY : Trade-off: deliberately not marked sensitive. A key reference is an
+  # WHY : Trade-offs: deliberately not marked sensitive. A key reference is an
   #       identifier rather than a secret -- holding it grants nothing without
   #       a matching IAM grant and key policy -- and marking it sensitive
   #       would redact it from plan output, which is exactly where an operator
   #       confirms that the intended key was wired in.
-  # WHY : Assumption: the default is null and could not be anything else. Any
+  # WHY : Assumptions: the default is null and could not be anything else. Any
   #       literal key reference embeds an account identifier, and this package
   #       treats committing one as forbidden outright, so there is no legal
   #       non-null value to put here. Null also omits the argument rather than
@@ -507,13 +501,13 @@ variable "kms_key_arn" {
 variable "tags" {
   # WHAT: the module-specific keys main.tf merges onto the two resources it
   #       creates, alongside the set they inherit from the calling root.
-  # WHY : Assumption: this map is ADDITIVE, not a replacement. The calling
+  # WHY : Assumptions: this map is ADDITIVE, not a replacement. The calling
   #       root configures the aws provider with `default_tags`, and every
   #       resource in this module inherits that set without restating it, so
   #       what belongs here is only the keys that are specific to this module
   #       or to one environment. Without this note a reader would reasonably
   #       ask why the module tags at all when the provider already does.
-  # WHY : Trade-off: an empty map is the default rather than a composed set
+  # WHY : Trade-offs: an empty map is the default rather than a composed set
   #       built from name_prefix and environment. Composing tags here would
   #       duplicate values the root's `default_tags` almost certainly already
   #       carries, and a key set by both places is resolved in favour of the
@@ -530,4 +524,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-

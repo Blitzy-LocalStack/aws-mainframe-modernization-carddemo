@@ -2,7 +2,25 @@
  * Owns the copybook anti-corruption layer: the one place in the migrated Java
  * that is allowed to know how a COBOL record is physically laid out.
  *
- * <p><b>Purpose.</b> This package holds the five contracts that translate
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
+ * <p><b>Purpose.</b> This package owns the five contracts that translate
  * between the reference baseline's fixed-width record bytes and the clean
  * domain types every service downstream consumes. It is the only place in the
  * entire Java code base where copybook representation concerns may appear at
@@ -527,7 +545,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>17 production classes</b> and <b>9</b> package
+ * <p>The shared kernel's target inventory is <b>17 production classes</b> and <b>9</b> package
  * charter files, for <b>26</b> compilation units in total:
  *
  * <pre>
@@ -550,8 +568,10 @@
  * that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: a figure of 18 production classes appears in earlier drafts of
- * the migration plan. It is superseded and must not be propagated.
+ * <p>Assumptions: the authoritative figures are <strong>17 production classes
+ * across 8 subpackages, in 26 compilation units, of which 9 are charters</strong>.
+ * Both cross-checks above re-derive them independently, by class and by
+ * compilation unit, so any other class count fails both sums and is wrong.
  *
  * <p>This package's own share of that canon is <b>five production classes plus
  * this charter, so exactly six compilation units in {@code codec}, no more and
@@ -628,25 +648,18 @@
  *                           simplicity vs. flexibility, etc.)
  * </pre>
  *
- * <p>Refactoring Rationale: the plural, unparenthesised label forms above are a
- * deliberate divergence from the form that predominates elsewhere in this
- * repository, and the divergence is stated with counts rather than as an
- * impression because that is what makes it checkable. Searched across every
- * tracked file other than this one, the parenthesised singular
- * {@code (Trade-off)} is the most common single form at 158 occurrences and is
- * concentrated in the oracle suite's Python -- 17 in its own configuration
- * module alone -- while the two colon forms are nearly tied, 147 plural against
- * 142 singular. This file takes the plural because the rule's four categories
- * are worded in the plural at its lines 31 to 34 and its line 43 makes that
- * wording the sentence this tree is audited against, so the plural is the form
- * that matches the audited text. The forms are semantically identical, and
- * holding to one is what makes the convention read as one convention rather
- * than two. Forms are never mixed inside a single file: all 32 labelled
- * paragraphs in this charter open with the plural colon form -- 18
- * {@code Assumptions:}, 9 {@code Trade-offs:}, 4
- * {@code Alternatives Considered:} and this one -- and the only other
- * appearances of any label text are the four definitions quoted above and the
- * one mention of the parenthesised form in the sentence before this.
+ * <p>Assumptions: those four labels, in exactly that spelling -- plural,
+ * unparenthesised and colon-terminated -- are the only accepted forms, and they
+ * are mandatory in every language and every file of the migration trees. The
+ * rule words its categories in the plural at its lines 31 to 34, and its line 43
+ * makes that wording the sentence this tree is audited against, so the plural is
+ * the audited text itself rather than one house preference among several. A
+ * singular, bracketed, heading-style or dash-terminated variant is not an
+ * alternative spelling of a label: it is a label that a fixed-string search for
+ * the category will not find, which makes a documented rationale read as absent
+ * to the audit that looks for it. {@code docs/CODE_DOCUMENTATION_STANDARD.md}
+ * carries the full statement of the convention and enumerates the rejected
+ * shapes.
  *
  * <p>That rule's validation gate, at its line 43, is the audited sentence and it
  * is conjunctive: a docstring with purpose, parameters and return values, and an

@@ -51,7 +51,7 @@
 #     `default_tags` so every resource lost the common tag set, and leave a
 #     root no way to pass in an aliased provider for a second region.
 #     Inheriting the caller's configuration keeps all three open.
-#   - Assumption: no state configuration appears here, because a module never
+#   - Assumptions: no state configuration appears here, because a module never
 #     owns state. The state definition belongs to the calling root, in
 #     infra/envs/<env>/backend.tf, and infra/bootstrap provisions the
 #     versioned bucket and lock table standing behind it.
@@ -61,24 +61,23 @@
 #     generates no random one, and tflint's unused-declaration gate --
 #     terraform_unused_required_providers, gating in infra-ci -- reports any
 #     entry the module does not use. infra/bootstrap/versions.tf reaches the
-#     same conclusion for the same reason. Trade-off: the nineteen
-#     directories under infra/ are then not textually identical, which is the
+#     same conclusion for the same reason. Trade-offs: the directories under
+#     infra/ are then not textually identical, which is the
 #     lesser cost of the two.
 # =============================================================================
 
 terraform {
   # WHAT: floor the CLI at 1.15.0 rather than pinning one release exactly.
-  # WHY : Assumption: 1.15.8 is the release this tree was authored and
+  # WHY : Assumptions: 1.15.8 is the release this tree was authored and
   #       validated against, and 1.15.0 is the oldest that accepts the
-  #       configuration syntax used across infra/. Trade-off: a floor lets an
+  #       configuration syntax used across infra/. Trade-offs: a floor lets an
   #       operator take a newer patch or minor release without editing all
-  #       nineteen infra/ directories, at the cost of not naming one exact
+  #       infra/ directories, at the cost of not naming one exact
   #       build; the calling root's lock file, not this constraint, is what
   #       records the exact selection a plan was computed against.
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: admit aws 6.56 and later 6.x, never 7.x.
     # WHY : Alternatives Considered: `= 6.56.0` was rejected for freezing
     #       out provider fixes and forcing a coordinated edit across the tree
     #       for each one, and an open `>= 6.56` was rejected because it would
@@ -88,7 +87,7 @@ terraform {
     #       stays a deliberate, reviewable edit. The floor itself traces to
     #       the sibling aurora-postgresql module, which needs a provider no
     #       older than 5.81.0 to accept a zero minimum Aurora capacity, and
-    #       6.56 clears that comfortably. Trade-off: this module provisions
+    #       6.56 clears that comfortably. Trade-offs: this module provisions
     #       no database and would run on a far older provider, but repeating
     #       one constraint in every infra/ directory means a calling root
     #       resolves a single aws provider version for its whole module

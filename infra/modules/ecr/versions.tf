@@ -53,7 +53,7 @@
 #     `DSNAME01(&HLQ..LOADLIB)`, which is the same instinct that keeps this
 #     directory's version contract in one file rather than repeating it
 #     beside every resource.
-#   - Assumption: the calling root owns provider *configuration* and this
+#   - Assumptions: the calling root owns provider *configuration* and this
 #     file owns only provider *version bounds*. The split is what lets dev
 #     and prod drive the identical module with different region and tagging
 #     configuration; see the three deliberate omissions recorded below the
@@ -67,7 +67,7 @@ terraform {
   # permitted, not what was proven -- an operator triaging odd `plan` output
   # on a 1.15.x CLI needs to know which build is the known-good reference.
   #
-  # Trade-off: a floor, not an exact `= 1.15.8` pin. An exact pin would force
+  # Trade-offs: a floor, not an exact `= 1.15.8` pin. An exact pin would force
   # every operator and CI runner onto one CLI build and would break the day a
   # patched CLI shipped for a security fix; a floor admits newer 1.x CLIs
   # while still rejecting pre-1.15 releases outright.
@@ -82,7 +82,7 @@ terraform {
     # root resolves one `aws` provider version for its entire module graph
     # and a single lock file per root stays authoritative.
     #
-    # Trade-off: `~>` bounded at the minor position admits 6.56.x patches and
+    # Trade-offs: `~>` bounded at the minor position admits 6.56.x patches and
     # later 6.x minors while excluding 7.0. That buys provider bug and
     # security fixes without editing the version contract in every Terraform
     # directory in this package, at the cost of never adopting a 7.0 major
@@ -90,11 +90,11 @@ terraform {
     #
     # Alternatives Considered: an exact `= 6.56.0` pin was rejected because it
     # freezes the package on one patch release, turning every provider
-    # security fix into an edit of all nineteen Terraform directories. A bare
+    # security fix into an edit of every Terraform directory. A bare
     # `>= 6.56` was rejected because it would let a 7.0 major, with breaking
     # resource schemas, enter unannounced on the next `init -upgrade`.
     #
-    # Assumption: `source` is stated explicitly rather than leaning on
+    # Assumptions: `source` is stated explicitly rather than leaning on
     # Terraform's implicit `hashicorp/` namespace lookup, so the address can
     # never resolve to a same-named provider published under a different
     # namespace.
@@ -117,7 +117,7 @@ terraform {
 # block; this is a called module, so it must not.
 
 # No `hashicorp/random` provider here, deliberately.
-# Assumption: every repository name this module creates is composed
+# Assumptions: every repository name this module creates is composed
 # deterministically from `var.name_prefix` and `var.environment`, and no
 # password, token or unique suffix is generated, so nothing in this module
 # needs a random value. infra/README.md pins `hashicorp/random ~> 3.9` for the
@@ -127,7 +127,7 @@ terraform {
 # `required_providers` entry, which is what this would be.
 
 # No `backend` block and no `cloud` block here, deliberately.
-# Assumption: a called module has no state of its own -- the resources it
+# Assumptions: a called module has no state of its own -- the resources it
 # declares are recorded in the calling root's state file. Backend
 # configuration therefore belongs only to infra/envs/dev/backend.tf and
 # infra/envs/prod/backend.tf, which point at the versioned S3 bucket and the

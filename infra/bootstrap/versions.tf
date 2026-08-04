@@ -37,11 +37,11 @@
 #   version-constraint error before any resource is evaluated.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this root declares no `backend` block because it CREATES the
+#   - Assumptions: this root declares no `backend` block because it CREATES the
 #     bucket and lock table that a `backend "s3"` stanza would have to find
 #     already present. Declaring one here would make the root's state depend
 #     on resources the root has not yet created.
-#   - Trade-off: provider-level default_tags is the single tagging mechanism
+#   - Trade-offs: provider-level default_tags is the single tagging mechanism
 #     for this root, so the common tag map is stated once rather than repeated
 #     on every resource; the cost is that those tags are not visible at the
 #     resource declaration site in main.tf.
@@ -52,18 +52,30 @@
 # =============================================================================
 
 terraform {
-  # WHY a `>=` floor instead of a `~>` pessimistic pin (Trade-off): this root
-  # is run by operators and by CI against whatever Terraform the environment
-  # already provides, and nothing here uses a language feature that a newer
-  # 1.x release removes. Pinning the minor would therefore reject a perfectly
-  # capable 1.x CLI for no gain. The floor is 1.15.0 because that is the
-  # release whose syntax this root is written against; it is validated on
-  # 1.15.8. The constraint deliberately does not admit a 2.x CLI, whose major
-  # bump would warrant its own review.
-  required_version = ">= 1.15.0"
+  # WHY `~> 1.15.0` rather than an open `>= 1.15.0` floor (Refactoring
+  # Rationale): the earlier floor was chosen on the reasoning that nothing here
+  # uses a language feature a newer 1.x release removes, and that reasoning is
+  # about the CONFIGURATION when the risk is in the TOOLCHAIN. A Terraform minor
+  # release is where language behaviour, validation semantics and state-format
+  # handling change, so an open floor let this root -- the one that creates the
+  # state bucket and lock table every other root depends on -- be applied by a
+  # CLI no reviewed plan was ever produced under. The pessimistic operator on the
+  # patch component accepts 1.15.0 through 1.15.x, which is the
+  # supported-major/minor policy this package is reviewed under, and refuses
+  # 1.16.0 as well as 2.x.
+  # WHY not an exact `= 1.15.8`. Trade-offs: this root is run by operators and by
+  # CI against whatever Terraform their image provides, and a patch release
+  # cannot change what this file means; an exact pin would break every runner the
+  # moment its toolchain moved forward within the series. It is validated on
+  # 1.15.8. Moving to a new minor stays a deliberate edit to this one line.
+  # WHY this pairs with the lock file. Assumptions: .terraform.lock.hcl beside
+  # this file records which provider version and checksums were selected. A CLI
+  # from an unvalidated minor could re-resolve or re-format that lock, so the
+  # constraint and the lock are one mechanism and neither suffices alone.
+  required_version = "~> 1.15.0"
 
   required_providers {
-    # WHY `~> 6.56` rather than an exact `= 6.56.0` (Trade-off): the
+    # WHY `~> 6.56` rather than an exact `= 6.56.0` -- Trade-offs: the
     # pessimistic operator on the minor accepts 6.56 and any higher 6.x, so
     # provider patch and minor fixes arrive without editing this file, while
     # refusing 7.0.0 -- the major bump is where resource-schema removals and
@@ -74,7 +86,7 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHY `hashicorp/random` is deliberately absent (Alternatives Considered):
+    # WHY `hashicorp/random` is deliberately absent -- Alternatives Considered:
     # that provider belongs to infra/modules/secrets, which generates database
     # and seed-user credentials directly into Secrets Manager. Nothing in this
     # root generates a random value, and infra/.tflint.hcl enables
@@ -88,7 +100,7 @@ terraform {
   }
 
   # WHY there is deliberately NO `backend` block, which would belong exactly
-  # here (Assumption): this root is what creates the versioned S3 bucket and
+  # here -- Assumptions: this root is what creates the versioned S3 bucket and
   # the DynamoDB lock table that a `backend "s3"` stanza needs to already
   # exist. Configuring that backend here would point the root's state at
   # resources the root has not created yet, which cannot resolve on a clean
@@ -100,7 +112,7 @@ terraform {
 }
 
 # WHY the sole `provider "aws"` block lives in versions.tf rather than main.tf
-# (Alternatives Considered): versions.tf answers "which Terraform, which
+# Alternatives Considered: versions.tf answers "which Terraform, which
 # provider, and configured how", while main.tf answers "what does this root
 # create". Declaring the provider at the top of main.tf is equally idiomatic
 # and was rejected because it splits the provider's version constraint from
@@ -110,7 +122,7 @@ terraform {
 # is a duplicate-configuration error raised at init time.
 provider "aws" {
   # WHY the region is variable-driven rather than a literal or
-  # `data.aws_region` (Assumption): infra/bootstrap/outputs.tf reports the
+  # `data.aws_region` -- Assumptions: infra/bootstrap/outputs.tf reports the
   # region back so it can be written into each environment root's backend
   # configuration. Resolving both from this one variable makes it impossible
   # for the reported region to disagree with the region the state bucket was
@@ -120,7 +132,7 @@ provider "aws" {
   region = var.aws_region
 
   # WHY tags are applied through the provider rather than on each resource
-  # (Trade-off): the provider merges default_tags into every taggable resource
+  # Trade-offs: the provider merges default_tags into every taggable resource
   # it creates, so the common map is declared once instead of being copied
   # onto the bucket, its sub-resources and the lock table; resources in
   # main.tf then carry only their own distinguishing `Name` tag. The accepted
@@ -130,7 +142,7 @@ provider "aws" {
     tags = var.tags
   }
 
-  # WHY no credential argument appears in this block (Assumption): there is
+  # WHY no credential argument appears in this block -- Assumptions: there is
   # deliberately no access_key, secret_key, profile or assume_role. The
   # provider resolves credentials from the operator's ambient AWS
   # configuration, and in CI from short-lived OIDC role assumption, so no

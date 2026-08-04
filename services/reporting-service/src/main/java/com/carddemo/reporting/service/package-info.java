@@ -2,6 +2,24 @@
  * Business behaviour of the Reporting and Statement bounded context, expressed
  * as ordinary Java services rather than as CICS transactions or JCL job steps.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>The COBOL programs named below are the specification for everything in
  * this package. These services encode that specification; they do not redefine
  * it. Each significant COBOL paragraph becomes one named method, which is what
@@ -89,18 +107,43 @@
  *
  * <h2>What this context does not own</h2>
  *
- * <p>Assumptions: reporting owns no schema, no table, no index and no view, and
- * so has no write path at all. Its reads go through read-only cross-schema
- * views, and both those views and the privileges reaching across schemas are
- * bootstrapped by {@code data-migration/sql/V0__schemas_and_roles.sql}. Two
- * consequences follow, and both are to be acted on rather than worked around.
- * Nothing in this package emits a data-definition statement of any kind: no
- * table, view, schema or index creation, no alteration, no privilege change and
- * no removal. And a view missing at runtime is a data-migration defect to
- * report, not something to conjure from here; a
- * {@code src/main/resources/db/migration} directory in this module would be an
- * affirmative defect for the same reason, which is why Flyway is absent from
- * this module's dependency set.
+ * <p>Assumptions: this context owns no table, no index and no view, and so has no
+ * write path at all. It does own a schema, and the distinction matters because a
+ * flat "owns no schema" disagrees with the bootstrap DDL:
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} creates {@code reporting}
+ * as the eighth schema, owned in the database by the {@code NOLOGIN} role
+ * {@code carddemo_reporting_owner} rather than by the {@code carddemo_reporting}
+ * login this context connects as, and creates
+ * it EMPTY. It exists to give this context a home for the read-only cross-schema
+ * views it reads through, and to make the eight-schema post-state that every
+ * downstream artifact asserts literally true rather than seven-plus-a-footnote.
+ * What this context owns no instance of is a table, and that is what makes it a
+ * pure consumer.
+ *
+ * <p>Assumptions: the privileges reaching across schemas are created by that same
+ * file and reach FOUR schemas, not three -- {@code ledger}, {@code account},
+ * {@code card} and {@code reference} -- with {@code SELECT} and nothing else.
+ * {@code reference} is required by a direct baseline read: {@code CBTRN03C} opens
+ * {@code TRANTYPE} and {@code TRANCATG} to resolve a transaction's type and
+ * category description onto the report line.
+ *
+ * <p>Assumptions: the VIEWS are NOT created by that file, and the sequencing is
+ * the reason rather than an oversight. A view over {@code ledger.transactions}
+ * cannot be created before that table exists, and at the point the bootstrap DDL
+ * runs no table exists anywhere; that file therefore creates the schema and the
+ * grants and no view at all. This module also owns no migration directory -- a
+ * {@code src/main/resources/db/migration} directory here would be an affirmative
+ * defect, which is why Flyway is absent from its dependency set -- so the views
+ * cannot come from a service migration either. They belong to a data-migration
+ * step ordered AFTER the per-service migrations have created the tables they
+ * read. Neither those views nor most of the migrations they read exist at this
+ * checkpoint; each is authored at a later index of the same plan.
+ *
+ * <p>Two consequences follow, and both are to be acted on rather than worked
+ * around. Nothing in this package emits a data-definition statement of any kind:
+ * no table, view, schema or index creation, no alteration, no privilege change
+ * and no removal. And a view missing at runtime is a data-migration defect to
+ * report, not something to conjure from here.
  *
  * <p>Assumptions: this package also declares no Spring Batch job repository and
  * no queue listener configuration. The batch-service module owns the Spring
@@ -295,25 +338,19 @@
  *
  * <h2>Documentation canon for this tree</h2>
  *
- * <p>Alternatives Considered: adopt the repository's dominant singular idiom
- * for the four inline-comment labels. Measured on the source branch with
- * LC_ALL=C, the plural form Trade-offs: appears 5 times across 5 files, the
- * singular Trade-off appears 349 times across 80 files, and the parenthesised
- * WHY (Trade-off) appears 82 times across 25 files. On both the occurrence and
- * the file count the singular is the established idiom there by a wide margin.
- * The plural was chosen anyway, for one reason only: the project's
- * explainability rule states the four labels in the plural at L31 to L34, and
- * its Validation Gate at L43 is the sentence being audited. Matching the
- * majority idiom would read more consistently with the existing suite while
- * failing to match the rule actually being enforced.
- * Those three counts are source-branch measurements and will drift upward for
- * the plural as this migration lands, so a recount showing more plural
- * occurrences is expected and is not evidence that the canon changed.
+ * <p>Assumptions: the canonical labels are {@code Alternatives Considered:},
+ * {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:},
+ * written in the plural, unparenthesised, each keeping its trailing colon and
+ * using an ASCII hyphen-minus. That spelling is the only accepted one and it is
+ * mandatory in every language and every file of the migration trees. The
+ * project's explainability rule states the four labels in the plural at L31 to
+ * L34, and its Validation Gate at L43 is the sentence being audited, so the
+ * plural is the audited text itself. A singular, bracketed, heading-style or
+ * dash-terminated variant is not an alternative spelling: it is a label that a
+ * fixed-string search for the category will not find, which makes a documented
+ * rationale read as absent to the audit that looks for it.
  *
- * <p>The canonical labels are therefore Alternatives Considered:,
- * Refactoring Rationale:, Assumptions: and Trade-offs:, written in the plural,
- * unparenthesised, each keeping its trailing colon and using an ASCII
- * hyphen-minus. Assumptions: the label text has to be retyped from the rule
+ * <p>Assumptions: the label text has to be retyped from the rule
  * rather than copied out of {@code tests/README.md}, whose L548 renders that
  * token with a non-breaking hyphen, a closing parenthesis and no colon at all;
  * that file carries 106 such non-breaking hyphens across 77 lines, so a copied

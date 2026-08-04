@@ -33,14 +33,14 @@
 #       own provider configuration.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this directory is never initialised or applied on its own. It
+#   - Assumptions: this directory is never initialised or applied on its own. It
 #     is consumed as `source = "../../modules/sqs"` from infra/envs/dev and
 #     infra/envs/prod, and it is checked transitively when one of those roots
 #     runs `init -backend=false` and then `validate`. Every constraint below is
 #     therefore a contract imposed on those callers rather than a standalone
 #     build configuration, which is why a local check confined to this
 #     directory is not the authoritative one.
-#   - Trade-off: the module restates `required_providers` even though a calling
+#   - Trade-offs: the module restates `required_providers` even though a calling
 #     root already constrains the provider for the whole configuration. The
 #     restatement buys a contract that is explicit per directory, greppable and
 #     checkable by `tflint` without a root present; the cost is one more file
@@ -54,7 +54,7 @@
 
 terraform {
   # WHAT: the oldest Terraform CLI that a caller of this module may run.
-  # WHY : Assumption: the whole infra/ tree is authored against the 1.15
+  # WHY : Assumptions: the whole infra/ tree is authored against the 1.15
   #       language behaviour and is validated on 1.15.8 specifically. Declaring
   #       the floor makes an older CLI stop at `init` and name the version it
   #       needs, rather than failing further in with a parse error that points
@@ -66,8 +66,8 @@ terraform {
   required_providers {
     # WHAT: the single AWS provider constraint that every directory under
     #       infra/ repeats verbatim.
-    # WHY : Assumption: one identical constraint tree-wide means a root
-    #       resolves exactly one provider version for all sixteen modules at
+    # WHY : Assumptions: one identical constraint tree-wide means a root
+    #       resolves exactly one provider version for every module at
     #       once; constraints that drifted per module could leave a root unable
     #       to satisfy every child simultaneously. The 6.56 floor is carried
     #       even here, where no database is provisioned, because the
@@ -75,27 +75,26 @@ terraform {
     #       minimum Aurora Serverless capacity -- supported from 5.81.0 onward
     #       -- and a per-module floor would let a root satisfy this module
     #       while starving that one.
-    # WHY : Trade-off: `~>` against a two-part version pins the major line
+    # WHY : Trade-offs: `~>` against a two-part version pins the major line
     #       only, so this admits 6.56.0 and any later 6.x release while
     #       excluding 7.0.0, where the provider collects its breaking changes.
     #       Accepting 6.x minor releases lets upstream resource fixes reach
-    #       this tree without editing sixteen modules and three roots, and each
+    #       this tree without editing every module and all three roots, and each
     #       root's .terraform.lock.hcl records the version actually resolved so
     #       a run stays reproducible; the accepted cost is that a root with no
     #       lock entry yet may resolve a newer 6.x than the one last reviewed.
     #       An exact `=` pin would trade that away for a mandatory
-    #       sixteen-file edit per upstream patch, and a bare `>=` would admit
+    #       tree-wide edit per upstream patch, and a bare `>=` would admit
     #       7.0.0 without review.
     aws = {
       # WHAT: the fully-qualified registry address rather than the bare name.
-      # WHY : Assumption: tflint's terraform_required_providers rule expects an
+      # WHY : Assumptions: tflint's terraform_required_providers rule expects an
       #       explicit source, and naming the namespace removes any doubt over
       #       which `aws` provider a caller resolves through a mirror.
       source  = "hashicorp/aws"
       version = "~> 6.56"
     }
 
-    # WHAT: hashicorp/random is deliberately absent from this block.
     # WHY : Alternatives Considered: infra/README.md lists random alongside aws
     #       as a provider of this project, so declaring it here for uniformity
     #       is the obvious-looking choice. Nothing in this module generates a
@@ -113,8 +112,6 @@ terraform {
   }
 }
 
-# WHAT: this file ends with no provider configuration at all, and the omission
-#       is deliberate rather than an oversight.
 # WHY : Alternatives Considered: configuring the provider here would let this
 #       directory be applied by itself, which looks convenient. It would also
 #       end the module's reusability -- a caller could no longer choose the
@@ -122,7 +119,7 @@ terraform {
 #       compete with the root's own. Region and credentials therefore stay with
 #       infra/envs/dev and infra/envs/prod, which supply them from the
 #       configuration that calls this module.
-# WHY : Trade-off: infra/bootstrap/versions.tf does carry a provider block, and
+# WHY : Trade-offs: infra/bootstrap/versions.tf does carry a provider block, and
 #       correctly so, because bootstrap is a root and not a module. The
 #       difference between the two files is intentional and is recorded here so
 #       that a later reader does not "fix" it. The concrete consequence is that

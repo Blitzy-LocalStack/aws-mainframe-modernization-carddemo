@@ -19,6 +19,30 @@
 #   descriptions out of the HCL and into the README, so the two halves cannot
 #   disagree without the gate noticing.
 #
+#   State at this checkpoint, stated because the paragraph above describes a
+#   working gate and this file is authored ahead of the tree it governs:
+#     - NO README.md exists in any Terraform directory yet. They are a later
+#       deliverable of the same plan, so `--output-check` currently FAILS for
+#       want of anything to compare against, and the regenerate loop below has
+#       nothing to inject into. That is the expected state of a foundation, not
+#       a defect in this configuration.
+#     - Neither does .github/workflows/infra-ci.yml, so the "in CI" half of the
+#       drift gate is a contract rather than a running step. The check runs
+#       today only where an author runs it.
+#     - The module catalogue this migration plans is SIXTEEN modules; FIFTEEN
+#       module directories exist, so the traversal currently covers EIGHTEEN
+#       directories of a planned nineteen. infra/modules/step-functions-batch is
+#       the sixteenth and is authored at a later index of the same plan. The
+#       loops below iterate a glob, so nothing here changes when it lands.
+#
+#   What this file can and cannot decide, recorded so a green run is not read as
+#   a well-documented tree: it decides whether a README's generated region still
+#   MATCHES the HCL beside it, by byte comparison. It decides nothing about
+#   whether a description is informative, nothing about the hand-written prose
+#   outside the generated region, and nothing about the file-header blocks and
+#   why-comments that carry the rest of the obligation. Those are human-review
+#   obligations with no machine backing.
+#
 # Parameters -- the blocks below, and what each one controls:
 #   formatter   Output syntax of the generated region.
 #   version     The single terraform-docs release permitted to run it.
@@ -62,17 +86,17 @@
 #     beside it.
 #
 # Scope of the traversal:
-#   - Assumption: infra/bootstrap is governed alongside the sixteen modules and
-#     two environment roots, giving nineteen directories rather than eighteen.
-#     The rule-mandated list names sixteen module READMEs plus two
-#     environment-root READMEs, so bootstrap is a deliberate addition, not an
-#     accident of globbing: it is a Terraform root with its own variables.tf and
+#   - Assumptions: infra/bootstrap is governed alongside the module catalogue and
+#     the two environment roots, giving one more directory than the modules and
+#     environment roots alone. The rule-mandated list names a README per module
+#     plus two environment-root READMEs, so bootstrap is a deliberate addition,
+#     not an accident of globbing: it is a Terraform root with its own variables.tf and
 #     outputs.tf exactly like the environment roots, and its README carries the
 #     exact deploy and teardown commands for the remote-state backend that must
 #     exist before either environment can be initialised. Excluding it would
 #     leave the one README an operator reads FIRST as the only one nothing keeps
 #     honest.
-#   - Assumption: infra/README.md is deliberately EXCLUDED. It is the
+#   - Assumptions: infra/README.md is deliberately EXCLUDED. It is the
 #     hand-written package overview for the infra tree and contains no
 #     Terraform configuration of its own, so a generated region there would be
 #     permanently empty -- and an empty region still participates in the byte
@@ -85,11 +109,14 @@
 # Invocation contract:
 #   The traversal cannot be expressed in this file (see the recursive block),
 #   so it is recorded here instead and is part of the configuration's contract.
-#   Nineteen Terraform directories are governed: infra/bootstrap;
-#   infra/envs/dev and infra/envs/prod; and the sixteen modules network, kms,
+#   Every Terraform directory under infra/ is governed: infra/bootstrap;
+#   infra/envs/dev and infra/envs/prod; and the module catalogue network, kms,
 #   secrets, ecr, aurora-postgresql, ecs-cluster, ecs-service, alb,
 #   api-gateway-http, cognito, sqs, step-functions-batch,
-#   eventbridge-scheduler, s3-datasets, cloudfront-spa and observability.
+#   eventbridge-scheduler, s3-datasets, cloudfront-spa and observability --
+#   sixteen modules planned, of which fifteen exist at this checkpoint;
+#   step-functions-batch is named here as part of the catalogue and is authored
+#   at a later index of the same plan.
 #   Both loops require the terraform-docs release named in the version block
 #   below; any other release aborts before producing a document, for the reason
 #   recorded there.
@@ -105,10 +132,12 @@
 #         --output-check "$d" || exit 1
 #     done
 #
-#   Both loops iterate a GLOB, never a hand-written list of nineteen paths.
-#   That distinction is the whole safety property: a seventeenth module or a
-#   third environment is picked up by infra/modules/*/ and infra/envs/*/ the
-#   moment its directory exists, with no edit here and no edit in CI. The
+#   Both loops iterate a GLOB, never a hand-written list of paths. That
+#   distinction is the whole safety property, and it is load-bearing rather than
+#   theoretical here: the sixteenth module and any third environment are picked
+#   up by infra/modules/*/ and infra/envs/*/ the moment their directories exist,
+#   with no edit here and no edit in CI. Because the catalogue is not yet
+#   complete, a hand-written list would already be a list that goes stale. The
 #   hazard being avoided is ENUMERATION, and a glob is not an enumeration.
 #
 #   - Alternatives Considered: the CI loop is CHECK-ONLY and must never write.
@@ -123,33 +152,33 @@
 #     exit code, no continue-on-error. A stale README is a documentation defect,
 #     and the only correct response is that a human regenerates it with the
 #     first loop above and commits the result deliberately.
-#   - Trade-off: check-only means an author who forgets to regenerate gets a red
+#   - Trade-offs: check-only means an author who forgets to regenerate gets a red
 #     build rather than an automatic fix, which costs one extra push. Accepted:
 #     that push is the moment the author reads the regenerated table and notices
 #     if the change to the contract was not the change they intended, which is
 #     exactly the review value an auto-commit would discard.
 #
 # WHY this file exists at all:
-#   - Assumption: HCL has no docstring construct, so there is nowhere inside a
+#   - Assumptions: HCL has no docstring construct, so there is nowhere inside a
 #     .tf file to put the module-level explanation that a Java or Python module
 #     would carry in a docstring. The analogous obligation is therefore split
 #     across a header comment block plus a description on every variable and
 #     output, and a README per directory. That split is only safe if something
 #     mechanically ties the two together, which is what this file does.
-#   - Assumption: the sixteen module READMEs and both environment-root READMEs
-#     are a required deliverable, not a courtesy, because they are the only
+#   - Assumptions: a README per module directory and both environment-root
+#     READMEs are a required deliverable, not a courtesy, because they are the only
 #     place a consumer of a reusable module can read its input contract. A
 #     module whose variables.tf gains a variable while its README does not gain
 #     the matching row is publishing a contract that is now wrong, and a reader
 #     trusting it would be misled.
-#   - Alternatives Considered: hand-maintaining nineteen variable tables. It
+#   - Alternatives Considered: hand-maintaining one variable table per directory. It
 #     was rejected because it fails silently and asymmetrically -- adding a
 #     variable is a one-line diff that reviewers routinely approve without
 #     opening the README, so the table rots on first contact and nothing
 #     anywhere reports it. Generating the tables from the HCL makes the HCL the
 #     single source of truth; drift-checking the result makes staleness a build
 #     failure instead of a reviewer-attentiveness problem.
-#   - Assumption: this file is one third of a three-part design and is
+#   - Assumptions: this file is one third of a three-part design and is
 #     redundant on its own. infra/.tflint.hcl guarantees the raw material
 #     exists (its terraform_documented_variables and
 #     terraform_documented_outputs rules fail any variable or output with no
@@ -159,7 +188,7 @@
 #     publishing them, or a published table nobody keeps honest.
 # =============================================================================
 
-# WHY : Assumption: the explicit document-start marker sits here, after the
+# WHY : Assumptions: the explicit document-start marker sits here, after the
 #       header, rather than on line 1. A strict YAML linter requires the marker
 #       to be present somewhere, and both positions satisfy it and are accepted
 #       by the tool; this position is chosen because the header block above is
@@ -168,7 +197,6 @@
 #       configuration data it describes.
 ---
 
-# WHAT: emit the generated region as GitHub-flavoured Markdown tables.
 # WHY : Alternatives Considered: "markdown document" renders each input as a
 #       prose heading-and-paragraph stanza, and the asciidoc/json/xml/yaml/toml
 #       formatters do not compose with a README at all. A table wins for this
@@ -183,7 +211,7 @@ formatter: "markdown table"
 # WHAT: admit exactly one terraform-docs release, the one this configuration was
 #       verified against. The CI workflow that runs the check loop must install
 #       this same version, or every invocation aborts before producing anything.
-# WHY : Assumption: a drift check is a byte comparison, so the renderer's own
+# WHY : Assumptions: a drift check is a byte comparison, so the renderer's own
 #       output shape is part of the contract, not an incidental detail. This is
 #       the same reasoning the repository applies when it pins its test
 #       dependencies exactly rather than by range -- a floating dependency can
@@ -192,32 +220,30 @@ formatter: "markdown table"
 #       version rather than a constraint.
 # WHY : Alternatives Considered: a permissive range was written first and then
 #       withdrawn on measurement, which is worth recording because the range
-#       looks harmless. Rendering the same nineteen directories with two
-#       releases inside that range produced different bytes for EVERY table in
-#       EVERY document: one release emits a table separator as "|------|" and
-#       the other as "| ---- |". Nothing about the HCL changed, yet all nineteen
-#       READMEs would have been reported stale at once the moment the toolchain
-#       moved. A gate that fails nineteen documents for a reason no author
+#       looks harmless. Rendering the same directory set with two releases
+#       inside that range produced different bytes for EVERY table in EVERY
+#       document: one release emits a table separator as "|------|" and the
+#       other as "| ---- |". Nothing about the HCL changed, yet every README
+#       would have been reported stale at once the moment the toolchain moved. A
+#       gate that fails every document for a reason no author
 #       caused is the cry-wolf failure this configuration is designed to avoid,
 #       so a range is not merely imperfect here, it is unusable.
-# WHY : Trade-off: the cost of an exact pin is that adopting a newer
+# WHY : Trade-offs: the cost of an exact pin is that adopting a newer
 #       terraform-docs is no longer transparent -- it requires editing this line
-#       and regenerating all nineteen documents. Accepted deliberately: that is
+#       and regenerating every document. Accepted deliberately: that is
 #       precisely the reviewed, intentional act that a formatting change to
-#       nineteen committed files deserves, and the failure mode is loud and
+#       a tree-wide rewrite of committed files deserves, and the failure mode is loud and
 #       self-explaining ("current version: X, constraints: Y") rather than a
 #       silent wall of drift. The version named here is a real published
 #       release, verified by running this exact configuration against it over
-#       the full nineteen-directory shape -- not assumed, and not inferred from
+#       the full governed-directory shape -- not assumed, and not inferred from
 #       a changelog.
 version: "0.20.0"
 
-# WHAT: leave recursive traversal OFF; the invocation contract in the header
-#       walks the tree instead.
 # WHY : Alternatives Considered: recursion was the first choice, for exactly
 #       the reason the alternative is dangerous: one invocation walking the
-#       module tree cannot forget a module, whereas nineteen hand-written
-#       single-directory invocations would leave a seventeenth module silently
+#       module tree cannot forget a module, whereas one hand-written
+#       single-directory invocation per path would leave the next module silently
 #       unchecked while the gate still reported green. It was abandoned only
 #       after measuring that it cannot cover this tree, and the measurements
 #       are recorded here so nobody re-enables it expecting it to work:
@@ -237,7 +263,7 @@ version: "0.20.0"
 #            infra/envs/README.md and infra/modules/README.md, two files no
 #            author owns and which would then fail the check forever.
 #       Disabling recursion is the only shape in which one configuration
-#       governs all nineteen directories with nothing fabricated and nothing
+#       governs every directory with nothing fabricated and nothing
 #       silently skipped, and the glob in the header contract removes the
 #       forgotten-module risk that made recursion attractive in the first place.
 # WHY : Refactoring Rationale: path and include-main are kept here, at their
@@ -252,7 +278,7 @@ recursive:
 
 # WHAT: emit exactly these seven sections inside the generated region, and no
 #       others.
-# WHY : Assumption: each of the seven answers a question a consumer of a
+# WHY : Assumptions: each of the seven answers a question a consumer of a
 #       reusable module actually asks, and none of them can be answered from
 #       outside the HCL:
 #         requirements  the Terraform and provider version floors the directory
@@ -263,7 +289,7 @@ recursive:
 #         modules       which nested modules are composed. Nearly empty for a
 #                       leaf module, but it is the single most informative
 #                       section for the two environment roots, whose whole job
-#                       is to compose the sixteen modules -- so the section is
+#                       is to compose the module catalogue -- so the section is
 #                       shown for every directory rather than being reasoned
 #                       about per directory.
 #         resources     the managed resources created, i.e. the blast radius of
@@ -304,8 +330,6 @@ sections:
     - inputs
     - outputs
 
-# WHAT: inject the generated region into each directory's own README.md,
-#       between the two conventional terraform-docs markers.
 # WHY : Alternatives Considered: mode "replace" overwrites the ENTIRE target
 #       file with generated content. It is rejected outright, and this is the
 #       most consequential decision in this file: the hand-written prose in
@@ -318,8 +342,8 @@ sections:
 #       preserves every byte above and below it, so generated and hand-written
 #       content coexist in one file without either being able to destroy the
 #       other.
-# WHY : Assumption: the two marker lines are a hard contract with all
-#       nineteen READMEs, not a local formatting preference. Every governed
+# WHY : Assumptions: the two marker lines are a hard contract with all
+#       every README, not a local formatting preference. Every governed
 #       README must contain "<!-- BEGIN_TF_DOCS -->" and "<!-- END_TF_DOCS -->"
 #       character-for-character; a README missing them has nowhere for
 #       injection to write, which the drift check reports as a failure rather
@@ -340,7 +364,7 @@ sections:
 #       into the table, is deliberately not enabled. It is the one setting here
 #       that could put a credential into version control: several of these
 #       modules output secret references and generated endpoints, and injecting
-#       real values would commit them to nineteen READMEs on every run. The
+#       real values would commit them to every README on every run. The
 #       generated documents therefore describe the contract only -- names,
 #       types, descriptions, defaults -- and never a resolved value. This also
 #       keeps the documents independent of any particular deployment, so the
@@ -355,7 +379,7 @@ output:
     <!-- END_TF_DOCS -->
 
 # WHAT: sort rows, grouping required inputs ahead of optional ones.
-# WHY : Trade-off: a stable order is the precondition for the whole gate.
+# WHY : Trade-offs: a stable order is the precondition for the whole gate.
 #       Row order feeds a byte comparison, so an unstable order would report
 #       drift on runs where nothing changed, and a gate that cries wolf trains
 #       reviewers to stop reading it -- strictly worse than no gate, because it
@@ -375,7 +399,7 @@ sort:
   by: required
 
 settings:
-  # WHY : Assumption: required, type and default are what make the Inputs
+  # WHY : Assumptions: required, type and default are what make the Inputs
   #       table a usable contract rather than a list of names. Together they
   #       answer, per input, must I pass this, what shape must it be, and what
   #       happens if I omit it. This is the machine-generated counterpart to
@@ -386,10 +410,10 @@ settings:
   type: true
   default: true
 
-  # WHY : Trade-off: with hide-empty a directory that has, say, no data
+  # WHY : Trade-offs: with hide-empty a directory that has, say, no data
   #       sources omits that heading entirely instead of printing an empty one.
   #       Accepted because the alternative prints up to four hollow headings in
-  #       every one of nineteen documents, padding the generated region with
+  #       every one of the generated documents, padding the generated region with
   #       nothing and making a real contract change harder to see in a diff.
   #       The cost is that a reader cannot distinguish "this module has no
   #       outputs" from "the Outputs section was not generated", and that a
@@ -399,7 +423,7 @@ settings:
   #       hand-written prose above the markers.
   hide-empty: true
 
-  # WHY : Assumption: the injected region sits inside a README that already
+  # WHY : Assumptions: the injected region sits inside a README that already
   #       owns an H1 title and hand-written H2 prose sections, so generated
   #       headings start at H3 to nest beneath that structure. Left at the
   #       default of 2 they would render as H2 and read as siblings of the
@@ -408,7 +432,7 @@ settings:
   #       is.
   indent: 3
 
-  # WHY : Assumption: anchor requires html, so the two are set together;
+  # WHY : Assumptions: anchor requires html, so the two are set together;
   #       anchor alone silently produces no anchors. The anchors are what let
   #       the hand-written prose in a README, and the infra package overview,
   #       link to one specific input or output instead of to the table as a
@@ -419,22 +443,33 @@ settings:
   anchor: true
   html: true
 
-  # WHY : Assumption: variable and output names in this tree contain
+  # WHY : Assumptions: variable and output names in this tree contain
   #       underscores throughout, and an unescaped pair of them is interpreted
   #       by a Markdown renderer as emphasis, so a name would render with a
   #       word italicised and the underscores deleted. Escaping keeps the
   #       rendered name identical to the identifier a caller must actually type.
   escape: true
 
-  # WHY : Assumption: .terraform.lock.hcl is deliberately TRACKED in version
+  # WHY : Assumptions: .terraform.lock.hcl is deliberately TRACKED in version
   #       control, unlike .terraform/ and the state files, because it is the
   #       provider-checksum lock that makes terraform init reproducible. Reading
   #       it here means the Requirements table reports the provider version
   #       actually locked for the directory rather than only the range its
   #       constraint permits, so the generated document and a fresh init agree.
+  #       Assumptions: a lock exists only in a ROOT, and there are exactly three --
+  #       infra/bootstrap/.terraform.lock.hcl, infra/envs/dev/.terraform.lock.hcl
+  #       and infra/envs/prod/.terraform.lock.hcl, each written by a real
+  #       `terraform init` on the validated toolchain and committed. Terraform
+  #       writes no lock for a child module, because a module does not select a
+  #       provider version -- the root that calls it does. This setting therefore
+  #       enriches the three root documents and is inert for the sixteen module
+  #       documents, which continue to report the constraint from versions.tf; it
+  #       is enabled globally rather than per directory so that a fourth root
+  #       added later is documented against its lock without a configuration
+  #       change here.
   lockfile: true
 
-  # WHY : Trade-off: with read-comments left at its default, a variable with
+  # WHY : Trade-offs: with read-comments left at its default, a variable with
   #       no description silently borrows the comment above it and renders as
   #       though it were documented, while the linter still fails that same
   #       variable for the missing description. The two gates would then
@@ -447,7 +482,7 @@ settings:
   #       belongs in the description attribute, where the linter can require it.
   read-comments: false
 
-  # WHY : Assumption: colour is an ANSI-escape feature for an interactive
+  # WHY : Assumptions: colour is an ANSI-escape feature for an interactive
   #       terminal, and every consumer of these runs is either a file or a
   #       captured CI log. Left on, the escapes are written literally into the
   #       log around the "is out of date" line that a maintainer has to read to

@@ -41,11 +41,14 @@
        closed (optional set to false). config/checkstyle/suppressions.xml must
        be reachable from the build's working tree or validate aborts outright
        rather than silently continuing with no suppressions in force.
-    3. flyway-core on its own does not fail the build. It fails at application
+    3. spring-boot-starter-flyway without flyway-database-postgresql does not
+       fail the build. It fails at application
        startup instead. See the note on flyway-database-postgresql below.
-    4. CardRepositoryIT runs under Failsafe against a real database started by
-       Testcontainers, so a host with no working container runtime fails the
-       integration phase even when every unit test passes.
+    4. CardRepositoryIT is to run under Failsafe against a real database started
+       by Testcontainers, so a host with no working container runtime will fail
+       the integration phase even when every unit test passes. That class is
+       authored at a later index of the same plan and does not exist yet; the
+       Failsafe binding below is what will make it run when it lands.
 
   Provenance (all paths below are REFERENCE ONLY and are never modified):
     app/cbl/COCRDLIC.cbl   1459 lines  card list, the canonical CICS browse
@@ -71,10 +74,18 @@
     rediscovered.
 
   Documentation standard:
+    Governing rule:   user-specified Rule 1 (Explainability)
     Prose convention: docs/CODE_DOCUMENTATION_STANDARD.md
     Mechanical gate:  config/checkstyle/checkstyle.xml
-    Where the two disagree, the linter configuration is authoritative, because
-    it is the one that actually decides whether the build passes.
+    Alternatives Considered: an earlier revision of this header made the linter
+    configuration authoritative wherever it and the prose disagreed, on the
+    ground that the linter is what decides whether the build passes. That is
+    rejected. The rule and the prose standard are AUTHORITATIVE, and the gate
+    implements a subset of them: it checks Javadoc presence and completeness and
+    cannot read a rationale at all, so it passes code the rule fails. Treating
+    the gate as final would let one attribute value silently narrow the
+    obligation, which is how an undocumented member ships behind a green build.
+    Where the two disagree, the gate is what gets corrected.
   =============================================================================
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -262,17 +273,33 @@
       and code ownership live in the same deployable and cannot be applied out of
       step with each other.
 
+      Assumptions: the first artifact below is the STARTER, and naming it rather
+      than flyway-core is what actually activates migration. Spring Boot 4 split
+      its autoconfiguration into one module per technology, and
+      FlywayAutoConfiguration now ships in spring-boot-flyway, which only this
+      starter puts on the classpath. Declaring flyway-core alone resolves,
+      compiles and starts, and then applies no migration whatsoever: the
+      spring.flyway.* keys in application.yml bind to nothing, the schema history
+      table is never created, and the first card query fails on a missing
+      relation.
+
+      Refactoring Rationale: flyway-core is no longer declared in its own right.
+      The starter brings it transitively at the version the aggregator's
+      flyway.version property pins, so a direct declaration would add a second
+      place that version could be edited while adding nothing to the classpath.
+
       The second artifact below is a mandatory companion, not a redundant copy of
       the first. Flyway 10 moved database-specific support out of flyway-core into
-      one module per database. Declaring flyway-core alone compiles perfectly and
-      then fails at application startup, when Flyway cannot find an implementation
-      matching a postgresql JDBC URL. There is no compile-time signal for the
-      omission whatsoever, which is precisely why it is called out. It is not a
-      duplicate and it must not be removed as one.
+      one module per database, and the starter pulls no database module. Without
+      it the build compiles perfectly and then fails at application startup, when
+      Flyway cannot find an implementation matching a postgresql JDBC URL. There
+      is no compile-time signal for the omission whatsoever, which is precisely
+      why it is called out. It is not a duplicate and it must not be removed as
+      one.
     -->
     <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
@@ -391,6 +418,30 @@
       <scope>test</scope>
     </dependency>
 
+    <!--
+      Refactoring Rationale: the engine above is necessary and was not
+      sufficient, and the comment beside it states exactly why: a rule can only
+      analyse the classpath of the module whose tests execute it. The rule CLASS
+      still had to arrive here, and it did not. Maven resolution passes a
+      module's main classes to its consumers and never its test classes, so
+      com.carddemo.card was never analysed by anything; the engine sat here with
+      no rules to run. This artifact is the shared kernel's test jar, narrowed to
+      the architecture package, and the architecture-rules Surefire execution in
+      services/pom.xml is what scans it into this module's test run.
+
+      Assumptions: the rules remain authored exactly once, at
+      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
+      This declaration delivers that one class and adds no copy of it. Version
+      and scope come from the aggregator's managed set, so neither is written
+      here and neither can drift away from the other seven services.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+
   </dependencies>
 
   <!--
@@ -497,10 +548,12 @@
     version and pre-binds its goals but never adds it to the build itself, so a
     module that stays silent about it gets no integration test phase at all. The
     include pattern was never the missing piece; the binding was. This was
-    verified by running the reactor both ways: with no entry, CardRepositoryIT is
-    never executed, no failsafe report directory is produced, and the build still
-    reports success, which is worse than having no integration test because it
-    looks like coverage that does not exist.
+    verified by running the reactor both ways against a probe class: with no
+    entry, an IT-suffixed class is never executed, no failsafe report directory is
+    produced, and the build still reports success, which is worse than having no
+    integration test because it looks like coverage that does not exist. That is
+    exactly the failure this entry exists to prevent for CardRepositoryIT, which
+    is authored at a later index of the same plan.
   -->
   <build>
     <!--
@@ -540,7 +593,7 @@
         version and no configuration is the minimum that activates it: the version
         and both goals still come from the parent, and the default include pattern
         for the integration test suffix is already exactly what CardRepositoryIT
-        needs, so no includes block is added and none should be.
+        will need, so no includes block is added and none should be.
 
         Trade-offs: this repeats a plugin coordinate that a reader might expect to
         be purely inherited, and the parent could later bind the plugin itself,

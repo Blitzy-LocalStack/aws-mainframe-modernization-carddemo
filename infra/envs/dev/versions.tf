@@ -13,7 +13,7 @@
 #
 #     2. Sole ownership of `provider "aws"`. This is the ONE place in this
 #        root's entire module graph where the AWS provider is configured. Each
-#        of the sixteen modules under `infra/modules/` declares its own provider
+#        module under `infra/modules/` declares its own provider
 #        version constraints but deliberately omits a `provider "aws"` block
 #        body, so every one of them inherits the region and the default tags
 #        configured here from whichever environment root calls it --
@@ -55,15 +55,30 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the oldest Terraform CLI release this root accepts.
-  # WHY : Assumption: both CI (`.github/workflows/infra-ci.yml` and
+  # WHAT: the Terraform CLI series this root accepts -- the 1.15 minor series,
+  #       any patch release within it.
+  # WHY : Assumptions: both CI (`.github/workflows/infra-ci.yml` and
   #       `deploy.yml`) and the operator run 1.15.8, so 1.15.8 is the release a
-  #       reviewed plan for this root was actually produced under. The
-  #       constraint is a floor rather than an exact `=` pin because pinning one
-  #       patch release would break every runner the moment its toolchain image
-  #       moved forward, while the floor still rejects a CLI too old to parse
-  #       this configuration at all.
-  required_version = ">= 1.15.0"
+  #       reviewed plan for this root was actually produced under.
+  # WHY : Refactoring Rationale: this was an open-ended `>= 1.15.0` floor, which
+  #       accepted every future 1.x release including minors that did not exist
+  #       when the plan was reviewed. A Terraform MINOR release is where language
+  #       behaviour, validation semantics and state handling change, so an
+  #       open floor let a reviewed plan be discharged by an unvalidated
+  #       toolchain. `~> 1.15.0` accepts 1.15.0 through 1.15.x and refuses
+  #       1.16.0 and 2.x, which is the supported-major/minor policy this package
+  #       is reviewed under.
+  # WHY : Trade-offs: not an exact `= 1.15.8`. Pinning one patch release would
+  #       break every runner the moment its toolchain image moved forward within
+  #       the same series, for no gain -- a patch release cannot change what this
+  #       file means. Moving to a new minor stays a deliberate, reviewed edit to
+  #       this one line.
+  # WHY : Assumptions: this constraint and the committed .terraform.lock.hcl
+  #       beside this file are one mechanism rather than two. The lock records
+  #       which provider versions and checksums were selected; a CLI from an
+  #       unvalidated minor could re-resolve or re-format it, so neither control
+  #       is sufficient on its own.
+  required_version = "~> 1.15.0"
 
   required_providers {
     # WHAT: the AWS provider, held inside the 6.x major line.
@@ -75,7 +90,7 @@ terraform {
     #       it blocks provider patch releases while buying nothing this root
     #       needs; and a bare `>= 5.81`, rejected because it has no upper bound
     #       and so would admit a 7.x major whose resource-schema changes would
-    #       land unreviewed across all sixteen modules simultaneously. The `~>`
+    #       land unreviewed across every module simultaneously. The `~>`
     #       operator accepts patch and minor releases within 6.x and stops
     #       short of 7.0, which is the behaviour wanted here.
     aws = {
@@ -85,7 +100,7 @@ terraform {
 
     # WHAT: the random provider, declared for this root's MODULE GRAPH rather
     #       than for any resource in this root's own configuration.
-    # WHY : Assumption: the `secrets` and `cognito` child modules are the two
+    # WHY : Assumptions: the `secrets` and `cognito` child modules are the two
     #       consumers. Each generates a value at apply time and writes it
     #       straight into Secrets Manager, which is the mechanism that keeps
     #       generated database and seed-user credentials out of source control
@@ -137,11 +152,11 @@ provider "aws" {
   region = var.aws_region
 
   # WHAT: the sole tagging mechanism for this root.
-  # WHY : Trade-off: every resource created here and inside all sixteen modules
+  # WHY : Trade-offs: every resource created here and inside every called module
   #       inherits these tags without carrying a `tags` argument of its own, so
   #       a reader of `main.tf` sees no tags anywhere and has to know to look in
   #       this file to find them. That opacity is accepted because the
-  #       alternative -- repeating a tag map at each of the sixteen module call
+  #       alternative -- repeating a tag map at each module call
   #       sites -- drifts the first time one call site is edited and the others
   #       are not. Each module additionally accepts its own `tags` input that it
   #       merges into its taggable resources, so the two mechanisms compose:

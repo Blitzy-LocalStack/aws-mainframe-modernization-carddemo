@@ -1,6 +1,6 @@
-// WHAT: this is the only package-info.java in the com/carddemo/authorization chain; there is
-//       deliberately none at java/com and none at java/com/carddemo.
-// WHY : Assumptions: Checkstyle's JavadocPackage is a Checker-level file-set check narrowed to
+// WHY : Assumptions: this is the only package-info.java in the com/carddemo/authorization
+//       chain, with deliberately none at java/com and none at java/com/carddemo.
+//       Checkstyle's JavadocPackage is a Checker-level file-set check narrowed to
 //       the java extension, so it audits only a directory that actually holds a processed source
 //       file. A directory holding nothing but subdirectories has no package declaration at all,
 //       and the module-entry-point obligation in user-specified Rule 1 (Explainability) L15
@@ -11,6 +11,25 @@
 //       oversight and add two files the gate never asked for.
 /**
  * Pending credit-card authorization bounded context of the migrated CardDemo system.
+ *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter
+ * describes the package's <b>target contract</b> as the migration plan assigns it,
+ * not the set of files present beside this one today. The migration lands its
+ * artifacts in plan order and this charter is authored first, so at the checkpoint
+ * that authored it this directory holds this charter and nothing else, and no subpackage of it
+ * exists yet. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
  *
  * <p>This package is the Java root of one of the eight bounded contexts the migration defines. The
  * context decides authorization requests arriving asynchronously from a point-of-sale channel,
@@ -95,13 +114,20 @@
  * a single reactor and builds unconditionally.
  *
  * <p><strong>Owned data.</strong> This context owns the PostgreSQL {@code authorization} schema
- * and exactly four persistent shapes within it: {@code pending_auth_summary} and
+ * and exactly four tables within it: {@code pending_auth_summary} and
  * {@code pending_auth_detail}, which carry the two IMS segment layouts;
- * {@code auth_fraud}, which carries what the baseline writes to its Db2 fraud table; and the
- * transactional-outbox table, which has no baseline counterpart and exists for the reason set out
- * under the first divergence below. The authoritative column lists are the Flyway migration under
- * this module's resources, not this overview, and that migration is authored elsewhere. No other
- * context may read or write this schema, and this context reads no other context's schema.
+ * {@code auth_fraud}, which carries what the baseline writes to its Db2 fraud table; and
+ * {@code auth_reply_outbox}, the transactional outbox, which has no baseline counterpart and
+ * exists for the reason set out under divergence D-5 below. Four is the count every authority
+ * states: {@code docs/architecture/service-catalog.md} lists the same four as this context's owned
+ * tables, and {@code docs/architecture/data-model-and-schema-mapping.md} specifies the outbox
+ * column by column, with its two partial indexes on unpublished rows, its publication state as a
+ * nullable {@code published_at}, and its retention bounded by the purge job migrated from
+ * {@code CBPAUP0C}. The authoritative column lists are the Flyway migration under this module's
+ * resources, not this overview, and that migration is authored elsewhere; the outbox is created
+ * there alongside the other three, because it holds no migrated data and so has nothing for the
+ * extract-transform-load path to load into it. No other context may read or write this schema,
+ * and this context reads no other context's schema.
  *
  * <p><strong>Messaging.</strong> Two queues are consumed, both of them ordered rather than
  * best-effort: a per-environment authorization request queue and a per-environment authorization
@@ -115,7 +141,8 @@
  *
  * <p><strong>Charter of the eight packages in this context.</strong> Each of the seven
  * subpackages carries its own {@code package-info.java} for exactly the reason this file exists,
- * so the module holds eight charters in total and a missing one fails the gate before compilation.
+ * so the module is to hold eight charters in total and a missing one fails the gate before
+ * compilation.
  * <ul>
  *   <li>{@code com.carddemo.authorization} - this charter and the entry point. Declares no type,
  *       which is what makes it a package charter rather than a class.</li>
@@ -152,7 +179,7 @@
  * {@code .batch}, {@code .authorization} and {@code .reporting}. The dependency arrow points
  * inward only: every context may depend on the shared kernel, and no context may depend on
  * another. The shared kernel depends on none of them. The only intra-reactor Maven dependency this
- * module declares is that kernel, which holds 17 production types across its {@code money},
+ * module declares is that kernel, whose target inventory is 17 production types across its {@code money},
  * {@code codec}, {@code error}, {@code web}, {@code security}, {@code observability},
  * {@code time} and {@code validation} packages.
  *
@@ -208,9 +235,12 @@
  * table with {@code EXEC SQL INSERT} at L141 and L142 and {@code EXEC SQL UPDATE} at L222 and
  * L223, under the Db2 plan bound to that same transaction at {@code csd/CRDDEMO2.csd} L69 and L75
  * to L77. Two managers in one commit is a two-phase commit, and the extension's README lists it
- * among the feature's capabilities. Here all three tables live in the one {@code authorization}
- * schema, so there is one resource manager and the two-phase commit is eliminated rather than
- * emulated: a single local transaction carries what the baseline coordinated across IMS and Db2.
+ * among the feature's capabilities. Here all three of the tables that work touches live in the
+ * one {@code authorization} schema, so there is one resource manager and the two-phase commit is
+ * eliminated rather than emulated: a single local transaction carries what the baseline
+ * coordinated across IMS and Db2. The schema's fourth table, {@code auth_reply_outbox}, joins that
+ * same local transaction when a reply is produced, which is what extends the guarantee to the
+ * message the baseline published outside its commit.
  * The difference is registered as D-6 in the same document.
  *
  * <p><strong>Decisions.</strong> What follows discharges the inline-comment half of

@@ -48,7 +48,7 @@
 #   configuration error in the calling root at init time.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this directory is a module, not a root, so provider
+#   - Assumptions: this directory is a module, not a root, so provider
 #     configuration -- region, default tags -- is inherited from whichever
 #     root calls it. `required_providers` states WHAT provider the module
 #     needs, while the root decides HOW it is configured. Note the deliberate
@@ -61,7 +61,7 @@
 #     one, and it would bind the module to a single region and tag set --
 #     defeating the reuse across the dev and prod roots that is the whole
 #     reason this code is a module.
-#   - Assumption: hashicorp/random is deliberately absent even though
+#   - Assumptions: hashicorp/random is deliberately absent even though
 #     infra/README.md pins it for the package and infra/modules/secrets
 #     genuinely uses it to generate credentials at apply time. Nothing here
 #     draws a random value: the bucket name is composed deterministically in
@@ -74,7 +74,7 @@
 # =============================================================================
 
 terraform {
-  # Trade-off: a floor, not an exact pin. It admits any newer 1.x CLI so a
+  # Trade-offs: a floor, not an exact pin. It admits any newer 1.x CLI so a
   # developer or runner already on a later patch is not blocked, while still
   # rejecting a CLI too old to parse this configuration. 1.15.8 is the version
   # the whole infra/ package was validated on and the version CI installs; the
@@ -85,7 +85,7 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # Assumption: `~>` on a two-segment constraint resolves to >= 6.56, < 7.0,
+    # Assumptions: `~>` on a two-segment constraint resolves to >= 6.56, < 7.0,
     # admitting 6.56.x and any later 6.y minor while excluding the 7.0 major.
     # Major provider releases rename and remove resource arguments, so that
     # upgrade stays a deliberate, reviewable edit instead of arriving with the

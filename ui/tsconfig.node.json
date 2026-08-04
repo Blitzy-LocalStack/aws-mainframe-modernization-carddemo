@@ -7,13 +7,33 @@
 //   at start-up, in Node, before any browser bundle exists -- so they are the
 //   only TypeScript in this tree that may legitimately reach for a Node API.
 //   This project type-checks them (it never emits) and grants them the Node
-//   type definitions that ui/tsconfig.json deliberately withholds from the
-//   browser sources under ui/src.
+//   type definitions that ui/tsconfig.json withholds from the browser sources
+//   under ui/src.
 //
-//   Two callers consume it: an explicit `tsc --noEmit -p tsconfig.node.json`
-//   check, and ui/eslint.config.js, which lists this project alongside
-//   ui/tsconfig.json so both config files are linted WITH type information
-//   rather than falling out of the lint gate entirely.
+//   Two callers are to consume it: an explicit `tsc --noEmit -p
+//   tsconfig.node.json` check, and ui/eslint.config.js, which is to list this
+//   project alongside ui/tsconfig.json so both config files are linted WITH
+//   type information rather than falling out of the lint gate entirely.
+//
+//   STATE AT THIS CHECKPOINT. This file is authored ahead of the rest of the ui
+//   tree, and the migration lands its artifacts in plan order, so every file
+//   named in this document except ui/package.json is absent today and is
+//   authored at a later index of the same plan: its own two members
+//   vite.config.ts and vitest.config.ts, the sibling project ui/tsconfig.json,
+//   the lint configuration ui/eslint.config.js, and the workflow
+//   .github/workflows/ui-ci.yml. Two consequences, neither of them a defect.
+//   Running `tsc --noEmit -p tsconfig.node.json` today reports that the include
+//   list matched no input file and exits non-zero, because the list is a closed
+//   two-entry list by deliberate design (see the note on `include` at the foot
+//   of this file) rather than a glob that quietly matches nothing. And
+//   ui/eslint.config.js cannot yet name this project, so the lint gate this
+//   document describes is a contract that configuration must satisfy when it
+//   lands rather than a gate running now. Nothing here asserts that any of those
+//   files is present. The project is authored first on purpose: whether Node
+//   globals reach browser code is settled by which of two sibling projects owns
+//   a file, and that split has to exist before the first config file is written,
+//   because retrofitting it means auditing every `process` reference already in
+//   the tree.
 //
 // WHY (non-obvious design decisions):
 //   - Alternatives Considered: one combined tsconfig spanning ui/src and these
@@ -30,14 +50,15 @@
 //     `composite: true`, was rejected because here it is silently inert.
 //     `tsc -p` does not traverse project references; only `tsc -b` does, and
 //     nothing in this tree invokes `-b`. All three consumers of the browser
-//     project run the literal `tsc --noEmit -p tsconfig.json`
-//     (ui/package.json's `typecheck` and `build` scripts, and the type-check
-//     gate in .github/workflows/ui-ci.yml). Under a references-only root that
+//     project are to run the literal `tsc --noEmit -p tsconfig.json`
+//     (ui/package.json's `typecheck` and `build` scripts, which are declared
+//     today, and the type-check gate in .github/workflows/ui-ci.yml, which is
+//     authored at a later index). Under a references-only root that
 //     owns no files of its own, each of those three commands would check ZERO
 //     files and still exit 0 -- a gate that reports success having verified
 //     nothing. The two projects are therefore siblings, each reached by its own
 //     invocation, and neither references the other.
-//   - Assumption: the compiler is typescript 6.0.3 as pinned in
+//   - Assumptions: the compiler is typescript 6.0.3 as pinned in
 //     ui/package.json, and it stays there. typescript-eslint 8.65.0
 //     peer-declares `typescript >=4.8.4 <6.1.0`; raising the compiler past that
 //     ceiling stops the type-aware lint pass -- and with it the JSDoc
@@ -46,14 +67,18 @@
 // =============================================================================
 {
   "compilerOptions": {
-    // WHY (Assumption): ES2022 is the language level of the Node line this
-    // tree is validated on -- ui/package.json requires node >=22.12.0 and the
-    // UI build stage runs node:22.23.1-alpine. No older Node runtime has to be
-    // supported, and nothing here is shipped to a browser, so the
-    // down-levelling that a lower target would cost buys nothing back.
+    // WHY : Assumptions: ES2022 is the language level of the Node line this
+    // tree is validated on -- ui/package.json requires node
+    // `^22.22.0 || >=24.0.0` and the UI build stage runs node:22.23.1-alpine.
+    // That floor is set by react-router 8.3.0, whose own published `engines`
+    // demand node >=22.22.0, and the Node-23 hole is set by eslint 10.8.0,
+    // eslint-plugin-jsdoc 63.3.0, jsdom 29.1.1 and vitest 4.1.10, which each
+    // declare `^22.13.0 || >=24`. No older Node runtime has to be supported,
+    // and nothing here is shipped to a browser, so the down-levelling that a
+    // lower target would cost buys nothing back.
     "target": "ES2022",
 
-    // WHY (Trade-off): the library set is ES2022 alone -- no browser library is
+    // Trade-offs: the library set is ES2022 alone -- no browser library is
     // listed. These files run in Node before any browser exists, so admitting
     // DOM types would let `document` or `window` appear in a config file and
     // type-check, only to fail the moment Vite loaded it -- the mirror image of
@@ -62,7 +87,7 @@
     // no reason to do.
     "lib": ["ES2022"],
 
-    // WHY (Assumption): ui/package.json declares "type": "module", so both
+    // WHY : Assumptions: ui/package.json declares "type": "module", so both
     // files are ESM. Resolution is "bundler" rather than "nodenext" because
     // Vite and Vitest never hand these files to Node's own resolver -- each is
     // bundled with esbuild first and the result executed, so specifiers that
@@ -72,7 +97,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
 
-    // WHY (Assumption): Node executes these two files, so the APIs they reach
+    // WHY : Assumptions: Node executes these two files, so the APIs they reach
     // for -- resolving a path against the project root, reading the process
     // environment -- genuinely exist for them. @types/node 26.1.1 supplies the
     // declarations, pinned in ui/package.json. The counterpart matters just as
@@ -81,14 +106,14 @@
     // `import.meta.env` instead of `process.env`.
     "types": ["node"],
 
-    // WHY (Assumption): Vite and Vitest transpile these files through their
+    // WHY : Assumptions: Vite and Vitest transpile these files through their
     // own loaders, so no consumer anywhere reads a tsc output. Emitting would
     // leave a JavaScript tree beside the sources that nothing imports and that
     // the root .gitignore does not name -- untracked clutter bought for
     // nothing. The compiler's whole role here is to check.
     "noEmit": true,
 
-    // WHY (Trade-off): full strictness is applied to configuration code, not
+    // WHY : Trade-offs: full strictness is applied to configuration code, not
     // only to application code. The ceremony costs little across two short
     // files, and it buys something specific: a misspelled or wrongly-typed
     // Vite or Vitest option is caught by this check, rather than surfacing
@@ -97,7 +122,7 @@
     // failures present a long way from their cause.
     "strict": true,
 
-    // WHY (Trade-off): the four checks below are not implied by `strict`. In
+    // WHY : Trade-offs: the four checks below are not implied by `strict`. In
     // files whose entire job is to assemble an options object, an unused local
     // or a case that falls through is almost always an edit left half-finished,
     // so failing on one is more useful than tolerating it.
@@ -106,7 +131,7 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitReturns": true,
 
-    // WHY (Assumption): esbuild -- which is what actually transforms these
+    // WHY : Assumptions: esbuild -- which is what actually transforms these
     // files under Vite and Vitest -- compiles one file at a time and cannot
     // look across a module boundary to tell whether an imported name is a type
     // or a value. These two flags make tsc reject precisely the constructs
@@ -115,31 +140,31 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
 
-    // WHY (Trade-off): declaration files shipped by dependencies are not
+    // WHY : Trade-offs: declaration files shipped by dependencies are not
     // re-checked. The alternative spends the check re-validating third-party
     // .d.ts files this project cannot edit, where a conflict inside a
     // transitive dependency of the Vite or Vitest chain would block a check
     // whose real subject is two local files.
     "skipLibCheck": true,
 
-    // WHY (Assumption): parts of the Vite and Vitest dependency chain are
+    // WHY : Assumptions: parts of the Vite and Vitest dependency chain are
     // still published as CommonJS, so a default import of one has to be
     // interoperable for these files to consume it the way the loader will.
     "esModuleInterop": true,
 
-    // WHY (Assumption): the CI runner and the container build stage use a
+    // WHY : Assumptions: the CI runner and the container build stage use a
     // case-sensitive filesystem, so a specifier whose casing differs from the
     // file on disk has to fail here -- on a developer's case-insensitive
     // machine it would otherwise resolve locally and break only in CI.
     "forceConsistentCasingInFileNames": true,
 
-    // WHY (Assumption): a build config legitimately reads declarative data --
+    // WHY : Assumptions: a build config legitimately reads declarative data --
     // deriving a value from ui/package.json, for instance -- and typing that
     // import from the file's real shape is what keeps it from drifting away
     // from a hand-written declaration of the same data.
     "resolveJsonModule": true,
 
-    // WHY (Assumption): every file here is a module, so each is treated as one
+    // WHY : Assumptions: every file here is a module, so each is treated as one
     // unconditionally instead of being classified by whether it happens to
     // carry a top-level import or export. Left to that inference, a config file
     // that exported nothing would be read as a global script and its
@@ -147,7 +172,7 @@
     "moduleDetection": "force"
   },
 
-  // WHY (Assumption): the two files are named literally rather than matched by
+  // WHY : Assumptions: the two files are named literally rather than matched by
   // a glob such as `*.ts`. This project is the one place in the ui tree that
   // hands out Node types, so its membership has to stay a deliberate list:
   // under a glob the next root-level .ts file anyone adds would join it
@@ -155,5 +180,12 @@
   // chosen. Widening it should require editing this line. No `exclude`
   // accompanies it -- a two-entry list is already closed, and a second bound
   // would only raise the question of which one wins.
+  // WHY : Trade-offs: neither file exists yet: both are authored at a later index
+  // of the same plan, so `tsc -p` run against this project today reports that
+  // no input was found rather than checking nothing and exiting 0. That noisy
+  // failure is the accepted cost of a literal list, and it is the cost the
+  // rejected references-only layout above would have avoided by being silently
+  // inert -- which is precisely the failure mode this project is shaped to
+  // prevent.
   "include": ["vite.config.ts", "vitest.config.ts"]
 }

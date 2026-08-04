@@ -1,6 +1,25 @@
 /**
  * Reporting and Statement bounded context of the migrated CardDemo system.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and two
+ * subpackages, {@code dto} and {@code service}, each of which holds only its own charter. A type or
+ * test named below that has no file yet is therefore <b>planned</b>, not missing, and a count below
+ * is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>This package is the Java root of one of the eight bounded contexts the migration
  * defines, and it carries three deliverables: the 133-column daily transaction report, the
  * account statement in its two output shapes, and on-demand report execution. The baseline
@@ -83,7 +102,8 @@
  * <p><strong>Charter of the eight packages in this context.</strong>
  * <ul>
  *   <li>{@code com.carddemo.reporting} - this charter, the entry point, and the decisions
- *       stated at the foot of this file. Owns no schema.</li>
+ *       stated at the foot of this file. Owns no table: the {@code reporting} schema is
+ *       dedicated to this context and holds views only.</li>
  *   <li>{@code .api} - REST adapters only: transport validation, HTTP status mapping and
  *       delegation. No business rule and no persistence access.</li>
  *   <li>{@code .service} - business behaviour transcribed paragraph by paragraph from the
@@ -107,10 +127,16 @@
  *       client used to start a report execution.</li>
  * </ul>
  *
- * <p><strong>Not owned here.</strong> This context owns no schema, no table, no index, no
- * view, no constraint, no grant, no Flyway artifact and no {@code db/migration} directory;
- * such a directory appearing under this module would itself be a defect. Every schema it
- * reads belongs to another context: {@code auth} to auth-service; {@code account}, holding
+ * <p><strong>Not owned here.</strong> This context owns no table, no index, no view, no
+ * constraint, no grant, no Flyway artifact and no {@code db/migration} directory; such a
+ * directory appearing under this module would itself be a defect. It does own a schema,
+ * {@code reporting}, created empty by {@code data-migration/sql/V0__schemas_and_roles.sql}
+ * as the eighth of eight and owned in the database by the {@code NOLOGIN} role
+ * {@code carddemo_reporting_owner} rather than by this context's own login role -- a home for the
+ * read-only cross-schema views this context reads through, and the reason the
+ * eight-schema post-state is literally true rather than seven-plus-a-footnote. Owning no
+ * TABLE, not owning no schema, is what makes this context a pure consumer. Every schema
+ * holding data it reads belongs to another context: {@code auth} to auth-service; {@code account}, holding
  * {@code accounts}, {@code customers} and {@code card_xref} with
  * {@code idx_card_xref_account_id}, to account-service; {@code card}, holding {@code cards}
  * with {@code idx_cards_account_id}, to card-service; {@code ledger}, holding
@@ -118,13 +144,20 @@
  * {@code transaction_category_balances} with {@code idx_transactions_proc_ts} and
  * {@code idx_transactions_card_num}, to transaction-service; {@code reference}, holding six
  * tables, to reference-service; {@code batch}, holding {@code batch_run} alongside the batch
- * job repository tables, to batch-service; and {@code authorization}, holding three tables,
- * to authorization-service.
+ * job repository tables, to batch-service; and {@code authorization}, holding four tables --
+ * {@code pending_auth_summary}, {@code pending_auth_detail}, {@code auth_fraud} and the
+ * net-new {@code auth_reply_outbox} -- to authorization-service.
  *
- * <p>The views this context reads, and the narrowly-scoped grant that lets it read them,
- * are bootstrapped by {@code data-migration/sql/V0__schemas_and_roles.sql}, cited here and
- * authored elsewhere. A view absent at runtime is a defect to report against that file,
- * never to work around from here. Agreement with the other contexts therefore runs through
+ * <p>The narrowly-scoped grants that let this context read are created by
+ * {@code data-migration/sql/V0__schemas_and_roles.sql}, cited here and authored elsewhere,
+ * and they reach FOUR schemas with {@code SELECT} and nothing else: {@code ledger},
+ * {@code account}, {@code card} and {@code reference}. The VIEWS themselves are NOT created
+ * by that file, and the reason is sequencing rather than omission -- a view over
+ * {@code ledger.transactions} cannot precede that table, and no table exists at the point
+ * that file runs. They belong to a data-migration step ordered after the per-service
+ * migrations, and neither those views nor most of those migrations exist at this
+ * checkpoint. A view absent at runtime is a defect to report against data-migration, never
+ * to work around from here. Agreement with the other contexts therefore runs through
  * the physical views and that grant, never through code: no module in this reactor declares
  * a Maven dependency on another service module, and the only intra-reactor dependency
  * permitted is the shared kernel.
@@ -178,8 +211,8 @@
  *
  * <p><strong>Never brought into existence in this subtree.</strong> Nothing is being
  * removed; the following simply never appear. A local exception type. A local pagination
- * type, superseded by {@code common.web.PageResponse}. A local error type, superseded by
- * {@code common.error.ApiError}. A message-catalogue type. A properties companion. A
+ * type, because {@code common.web.PageResponse} is the canonical one. A local error type,
+ * because {@code common.error.ApiError} is the canonical one. A message-catalogue type. A properties companion. A
  * standalone value-set file where a nested one belongs. A second layering test. A README. An
  * ignore file for git or for the image build. A {@code module-info.java}, since this build
  * is classpath-based and not modular. A {@code package.html}. A Lombok configuration. A
@@ -225,17 +258,15 @@
  * the one package that owns the contract - which is the reason the shared kernel module
  * exists at all.
  *
- * <p>Alternatives Considered: the four labels in this section are written in the plural,
- * un-parenthesised, colon-terminated spelling that user-specified Rule 1 L31-L34 uses,
- * against a repository majority that runs the other way. Measured across the pre-migration
- * baseline, the singular spelling appears 349 times in 80 files and a bracketed singular
- * variant 82 times in 25 files, against 5 occurrences of the canonical plural
- * {@code Trade-offs:} in 5 files; the other three labels appear 42 times in 27 files, 7
- * times in 7 files and 6 times in 3 files respectively. The sibling shell, XML, YAML and
- * HCL artifacts use the singular legitimately, so the majority is not an error to be chased
- * down. This Java tree follows the rule document instead of the majority, and the counts are
- * stated here so that a reader who notices the plural is outnumbered does not normalise it
- * back.
+ * <p>Assumptions: the four labels in this section are written in the plural,
+ * un-parenthesised, colon-terminated spelling that user-specified Rule 1 L31-L34 uses, and
+ * that spelling is the only accepted one. It is mandatory in every language and every file
+ * of the migration trees -- the sibling shell, XML, YAML and HCL artifacts included -- so it
+ * must never be normalised to anything else. A singular, bracketed, heading-style or
+ * dash-terminated variant is not an alternative spelling: it is a label that a fixed-string
+ * search for the category will not find, which makes a documented rationale read as absent
+ * to the audit that looks for it. {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the
+ * full statement of the convention and enumerates the rejected shapes.
  *
  * <p>Assumptions: the four labels were retyped by hand from user-specified Rule 1 L31-L34,
  * which is pure 7-bit ASCII, rather than copied from {@code tests/README.md}, which is not.

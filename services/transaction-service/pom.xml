@@ -237,19 +237,23 @@
     </dependency>
 
     <!--
-      Assumptions: Flyway 10 moved database-specific support out of the core
-      artifact into per-database modules, and that split persists at the 13.0.0
-      the parent manages. `flyway-core` alone therefore compiles and starts but
-      fails at run time when it tries to resolve the PostgreSQL database type,
-      because no implementation is on the classpath to claim the jdbc:postgresql
-      URL. Both artifacts are required, and neither is re-pinned here: the
+      Refactoring Rationale: flyway-core is no longer declared directly. The
+      starter above brings it transitively at the version the aggregator's
+      flyway.version property pins, so a direct declaration would add a second
+      place that version could be edited while contributing nothing to the
+      classpath. The seven other schema owners in this reactor declare the same
+      pair, so the shape is uniform rather than per module.
+
+      Assumptions: flyway-database-postgresql stays declared in its own right and
+      is NOT redundant beside the starter. Flyway 10 moved database-specific
+      support out of the core artifact into per-database modules, and that split
+      persists at the 13.0.0 the parent manages, so core on its own does not fail
+      the build: it fails when the service first opens a connection and tries to
+      resolve the PostgreSQL database type, because nothing on the classpath
+      claims the jdbc:postgresql URL. Neither artifact is re-pinned here; the
       parent overrides the Spring Boot default of 12.4.0 up to 13.0.0, and
       restating a version in this file would fork that decision.
     -->
-    <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
-    </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-database-postgresql</artifactId>
@@ -306,17 +310,40 @@
     <!--
       Assumptions: the layering rules this module is held to are authored once,
       at
-      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java,
-      but they cannot be inherited as a dependency: common-lib's POM binds no
-      maven-jar-plugin `test-jar` goal, so no test-jar artifact is produced and
-      a dependency declaring that type would fail to resolve. Re-declaring the
-      engine test-scoped here lets this module run its own copy of the rules
-      instead. Version 1.4.2 is managed by the parent, since Spring Boot does
-      not manage ArchUnit.
+      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
+      The engine below is the assertion API those rules are written against, and
+      it is test scoped so it can never reach the production classpath of the
+      module it polices. Version 1.4.2 is managed by the parent, since Spring
+      Boot does not manage ArchUnit.
     -->
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the comment above this pair previously recorded that
+      the rules could NOT be delivered as a dependency, because common-lib bound
+      no test-jar goal, and concluded that the engine alone would let this module
+      "run its own copy of the rules". There was no copy to run: the engine
+      supplies an assertion API and no rules, and Maven resolution passes a
+      module's main classes to its consumers and never its test classes, so
+      nothing ever analysed com.carddemo.transaction. common-lib now binds that
+      goal, before its `package` phase so a plain `mvn test` sees a real file, and
+      this declaration consumes the artifact it produces. The architecture-rules
+      Surefire execution in services/pom.xml scans it into this module's own test
+      run, which is what puts this module's compiled classes in front of the
+      rules.
+
+      Assumptions: the artifact carries the architecture package alone, so
+      nothing else from the shared kernel's test tree arrives with it, and its
+      version and scope come from the aggregator's managed set.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
 
@@ -335,9 +362,11 @@
       keyset access paths and the deliberately NON-UNIQUE index over the
       processing timestamp, which stands in for the batch alternate index over
       app/cpy/CVTRA05Y.cpy field TRAN-PROC-TS at zero-based offset 304, cannot
-      be exercised on H2. The RepositoryIT suite that Failsafe runs exists
-      precisely to prove those paths, so it must run against real PostgreSQL or
-      it proves nothing.
+      be exercised on H2. The RepositoryIT suite Failsafe is bound to run exists
+      precisely to prove those paths, so it must run against real PostgreSQL or it
+      proves nothing. That suite is authored at a later index of the same plan;
+      this dependency and that binding are what let it run against a real engine
+      on its first execution rather than being retrofitted afterwards.
     -->
     <dependency>
       <groupId>org.testcontainers</groupId>

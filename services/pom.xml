@@ -23,6 +23,13 @@
     mvn -f services/<module>/pom.xml verify
         Builds one module standalone. The gates resolve identically; see the
         checkstyle configuration directory profiles at the foot of this file.
+        Assumptions: a standalone module build resolves the shared kernel from
+        the local repository rather than from the reactor, so it requires
+        `mvn -f services/common-lib/pom.xml install` to have been run first.
+        That installs BOTH of the shared kernel's artifacts, its jar of main
+        classes and its test artifact carrying the shared architecture rules,
+        and a standalone build now needs both. The reactor command above needs
+        neither, which is why it is the canonical one.
 
   Modules:
     Declaration order is dependency order, shared kernel first.
@@ -48,6 +55,13 @@
       enforce-toolchain-and-pins      JDK and Maven floor, plus a ban on
                                       dynamic (range or snapshot) dependency
                                       versions outside this reactor
+    A third gate is bound to the `test` phase, because it needs compiled
+    classes to look at:
+      architecture-rules              the shared ArchUnit layering rules,
+                                      published by common-lib as a test
+                                      artifact and scanned into every module so
+                                      they are evaluated against that module's
+                                      own compiled classes
     Test execution is split across the standard phases: Surefire runs the
     `*Test` classes in `test`, Failsafe runs the `*IT` classes in
     `integration-test` and asserts their results in `verify`.
@@ -55,6 +69,27 @@
     Exit status of this build is BINARY: it either passes or it fails. There is
     no tolerated warning level. See the note beside `failOnViolation` for why
     that is stated explicitly rather than left implied.
+
+  TEST SUITE STATE, and how to read every test comment in this reactor:
+    Assumptions: the migration lands its artifacts in plan order, and the build
+    descriptors are authored ahead of the code they build so that the code can
+    be written against them. At this checkpoint NO `*Test` and NO `*IT` class
+    exists anywhere in this reactor, and neither does the ArchUnit rule class
+    named in the `archunit.version` note below. Every comment in this POM and in
+    the nine module POMs that names a test class, describes what Surefire or
+    Failsafe runs, or reasons about what a suite proves is therefore describing
+    the TARGET test suite and the configuration prepared for it, NOT a suite
+    that runs today. A test tree lands at a later index of the same plan, at
+    which point that configuration is what makes it execute correctly on the
+    first run.
+    Alternatives Considered: configuring the test plugins only once the tests
+    exist. Rejected because the plugin split, the include patterns and the
+    report locations are exactly the decisions a test author needs to have
+    settled BEFORE writing the first class - an integration test named for the
+    wrong suffix runs in the wrong phase, and a suite whose reports land
+    outside the collected directory passes locally while the pipeline reports
+    nothing. Stating the state here, once, is what keeps that configuration from
+    reading as a claim that it is currently exercising anything.
 
   WHY (non-obvious design decisions):
     Each decision is justified in a comment adjacent to the element it
@@ -83,8 +118,6 @@
   <modelVersion>4.0.0</modelVersion>
 
   <!--
-    WHAT: Spring Boot 4.1.0 supplies dependency management, plugin management
-          and the sensible resource filtering defaults for all nine modules.
     WHY :
       Assumptions: Boot 4.1.0 carries Spring Framework 7, which relocated retry
         support into the framework core as
@@ -138,7 +171,6 @@
   </description>
 
   <!--
-    WHAT: the nine modules of the migrated service tree.
     WHY :
       Assumptions: Maven derives the actual reactor order from the dependency
         graph, so this list does not control build order. It is written shared
@@ -174,7 +206,6 @@
   <properties>
 
     <!--
-      WHAT: Java 21 as both the language level and the compiled API surface.
       WHY :
         Assumptions: the Boot parent defines maven.compiler.release as
           ${java.version} and defaults java.version to 17. Setting java.version
@@ -195,7 +226,6 @@
     <maven.compiler.release>21</maven.compiler.release>
 
     <!--
-      WHAT: UTF-8 for sources and for generated reports.
       WHY :
         Assumptions: config/checkstyle/checkstyle.xml declares charset UTF-8 at
           Checker level. Checkstyle reads each source file with the charset the
@@ -211,7 +241,6 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
     <!--
-      WHAT: every third party version this build pins, named once here.
       WHY :
         Assumptions: this mirrors the reproducibility doctrine the repository
           already applies to its Python test dependencies, which are pinned to
@@ -273,7 +302,6 @@
     <testcontainers.version>2.0.5</testcontainers.version>
 
     <!--
-      WHAT: two DELIBERATE overrides of versions the Boot parent manages.
       WHY :
         Trade-offs: Boot 4.1.0 manages postgresql at 42.7.11 and the Flyway
           family at 12.4.0; the migration targets 42.7.13 and 13.0.0. Advancing
@@ -308,12 +336,22 @@
       WHY :
         Assumptions: the architectural prohibitions of this migration are
           enforced as TESTS, not as review conventions, in
-          common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
-          which every module inherits: no AWS SDK or web type inside a domain
-          package, no service importing another service's domain package, and
-          no float or double anywhere in the money path. Expressing them as a
-          test is what stops them rotting, because a violation fails the build
-          instead of surviving a review.
+          common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java:
+          no AWS SDK or web type inside a domain package, no service importing
+          another service's domain package, and no float or double anywhere in
+          the money path. Expressing them as a test is what stops them rotting,
+          because a violation fails the build instead of surviving a review.
+        Assumptions: this property pins the ENGINE and delivers nothing. Maven
+          resolution carries a module's MAIN classes to its consumers and never
+          its test classes, so a rule class authored in one module's test tree is
+          invisible to the other eight unless it is packaged and scanned
+          deliberately. That delivery is three coupled declarations and all three
+          are required: common-lib binds the jar plugin's test-jar goal (see
+          services/common-lib/pom.xml), each service declares that test-jar at
+          test scope, and the architecture-rules Surefire execution further down
+          this file scans it. Giving a module this engine without those three
+          leaves it holding an assertion API and no rules, which reports success
+          while checking nothing.
         Alternatives Considered: Checkstyle's ImportControl module was
           evaluated for the layering half and deliberately left out of the
           ruleset. Two engines enforcing overlapping halves of one rule means a
@@ -335,7 +373,6 @@
     <checkstyle.version>13.8.0</checkstyle.version>
 
     <!--
-      WHAT: directory holding checkstyle.xml and its companion suppressions.xml.
       WHY :
         Assumptions: this default is the value correct for THIS aggregator, one
           level below the repository root. Modules sit one level deeper, so the
@@ -352,8 +389,6 @@
   </properties>
 
   <!--
-    WHAT: the managed version set every module inherits, so a module declares a
-          coordinate without a version and cannot pick its own.
     WHY :
       Assumptions: the Boot parent already manages spring-boot-starter-web,
         data-jpa, validation, security, oauth2-resource-server, actuator, test
@@ -368,9 +403,6 @@
     <dependencies>
 
       <!--
-        WHAT: the reactor's own shared kernel, so the eight service modules name
-              com.carddemo:common-lib without a version and always get the
-              sibling built alongside them.
         WHY :
           Assumptions: this entry is REQUIRED, not a convenience. common-lib is
             the only first-party artifact any module depends on, and it is
@@ -401,6 +433,40 @@
         <groupId>com.carddemo</groupId>
         <artifactId>common-lib</artifactId>
         <version>${project.version}</version>
+      </dependency>
+
+      <!--
+        WHAT: the same shared kernel a second time, now as its TEST artifact, so
+              the eight service modules can name it without a version and
+              receive the one architecture rule class it publishes for them.
+        WHY :
+          Assumptions: a managed dependency is keyed by group id, artifact id,
+            TYPE and classifier, so the entry above does not cover this one. That
+            entry manages type jar; this one manages type test-jar, whose implied
+            classifier is tests. Both are needed, and without this one a module
+            naming the test artifact without a version fails during project
+            scanning with 'dependencies.dependency.version' for
+            com.carddemo:common-lib:test-jar is missing, before a goal executes.
+          Assumptions: this is the delivery half of the architectural gate. The
+            rules live in ONE class and stay there, so the class has to travel as
+            a published artifact rather than as a copy per module. common-lib
+            binds the jar plugin's test-jar goal to produce it, narrowed to the
+            architecture package alone, and the architecture-rules Surefire
+            execution further down this file is what executes it inside each
+            service, on that service's own test classpath.
+          Trade-offs: test scope is fixed here rather than at each of the eight
+            declaration sites. The compromise is that a reader of one service POM
+            cannot see the scope without opening this file. What it buys is that
+            no service can quietly widen a test artifact to compile scope and put
+            the rule engine on its production classpath, which would make the
+            boundary checker part of the thing it checks.
+      -->
+      <dependency>
+        <groupId>com.carddemo</groupId>
+        <artifactId>common-lib</artifactId>
+        <version>${project.version}</version>
+        <type>test-jar</type>
+        <scope>test</scope>
       </dependency>
 
       <!--
@@ -437,8 +503,6 @@
       </dependency>
 
       <!--
-        WHAT: SQS listener and Parameter Store integration for the queue backed
-              flows and for reading configuration at startup.
         WHY :
           Assumptions: imported as a BOM rather than pinned artifact by artifact
             because the listener, the messaging core and the Parameter Store
@@ -456,8 +520,6 @@
       </dependency>
 
       <!--
-        WHAT: real PostgreSQL and AWS emulator containers for the repository and
-              messaging integration tests.
         WHY :
           Assumptions: Testcontainers 2.x renamed every module to the
             testcontainers-<module> form, so a module POM must declare
@@ -495,7 +557,6 @@
       </dependency>
 
       <!--
-        WHAT: versioned schema migration, owned per service.
         WHY :
           Assumptions: flyway-database-postgresql is NOT redundant beside
             flyway-core and must not be deleted as though it were. Flyway 10 and
@@ -569,7 +630,6 @@
   </dependencyManagement>
 
   <!--
-    WHAT: the single dependency every one of the nine modules inherits.
     WHY :
       Alternatives Considered: adding spring-boot-starter-web here was
         considered and rejected. Eight of the nine modules do serve HTTP, so it
@@ -616,9 +676,6 @@
     <plugins>
 
       <!--
-        WHAT: the Javadoc documentation gate. This is the mechanical enforcement
-              of the project's Explainability rule for Java, and it is the most
-              load bearing element in this file.
         WHY :
           Trade-offs: declared in <plugins> and not merely in
             <pluginManagement>. Plugin management only supplies defaults to a
@@ -707,7 +764,6 @@
               <configLocation>${carddemo.checkstyle.config.dir}/checkstyle.xml</configLocation>
 
               <!--
-                WHAT: supplies the config_loc property the ruleset expands.
                 WHY :
                   Assumptions: config/checkstyle/checkstyle.xml wires its
                     companion file itself, with a SuppressionFilter whose file is
@@ -806,8 +862,6 @@
       </plugin>
 
       <!--
-        WHAT: turns the exact pin doctrine and the Java 21 toolchain from
-              conventions into build failures.
         WHY :
           Assumptions: the version is inherited from the Boot parent's plugin
             management, so it is not restated here; the parent manages this
@@ -894,6 +948,71 @@
       </plugin>
 
       <!--
+        WHAT: the execution that carries the ONE shared architecture rule class
+              into every module's own test run.
+        WHY :
+          Refactoring Rationale: this build previously described those rules as
+            inherited by every module, and Maven cannot do that. Dependency
+            resolution hands a module's MAIN classes to its consumers and never
+            its test classes, so a rule class sitting in the shared kernel's test
+            tree was compiled once, evaluated against the shared kernel alone and
+            never saw a single service class. Each service POM carried the
+            ArchUnit engine, which supplies an assertion API and no rules at all,
+            so a cross-service domain import, an AWS SDK type inside a domain
+            package or a binary floating point amount in the money path could all
+            enter a service while the reactor stayed green. This execution closes
+            that gap by scanning the artifact the shared kernel now publishes for
+            precisely that purpose.
+          Assumptions: dependenciesToScan makes Surefire collect test classes
+            from a resolved dependency IN ADDITION to the module's own test
+            output, and run them on the module's test classpath. That last part is
+            the entire point: the rules then see the classes of the module they
+            are running in, which is what a rule about that module's packages
+            must have in front of it. The pattern is matched against group id and
+            artifact id, so it selects the shared kernel's test artifact wherever
+            the reactor resolved it from.
+          Assumptions: the include narrows the scan to the single rule class and
+            is required rather than tidy. Without it this execution would also
+            collect whatever else the scanned artifact carried, and a module
+            cannot widen it back, because Maven resolves an execution's own
+            configuration ahead of the plugin level configuration a module
+            declares. That is what keeps this execution narrow even in the two
+            modules that set their own include patterns.
+          Trade-offs: the rule class name appears here as a literal, which couples
+            this file to that one file name; the shared kernel's test descriptor
+            records the same name as a fixed contract for the same reason. The
+            alternative, scanning every test class of the shared kernel, was
+            rejected because it would re-run that module's codec, money and
+            timestamp suites once per service, and one defect in one module would
+            then be reported eight times in eight places.
+          Assumptions: no reportsDirectory is set, so both executions of this
+            plugin write to target/surefire-reports, which is where the services
+            pipeline collects results from. Relocating either would make the build
+            green while the pipeline published nothing.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>architecture-rules</id>
+            <phase>test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <dependenciesToScan>
+                <dependency>com.carddemo:common-lib</dependency>
+              </dependenciesToScan>
+              <includes>
+                <include>**/LayeringRulesTest.java</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
         WHAT: activates the integration test half of the test split.
         WHY :
           Assumptions: neither a version nor an executions block is declared.
@@ -923,12 +1042,11 @@
         <artifactId>maven-failsafe-plugin</artifactId>
       </plugin>
 
+
     </plugins>
   </build>
 
   <!--
-    WHAT: locates config/checkstyle, which sits beside this aggregator at the
-          repository root, from whichever project Maven is currently building.
     WHY :
       Trade-offs: two profiles rather than one property, because the aggregator
         and the modules sit at different depths and no single Maven expression is

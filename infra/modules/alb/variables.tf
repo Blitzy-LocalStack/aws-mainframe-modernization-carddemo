@@ -3,17 +3,20 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The COMPLETE input surface of the `alb` module -- the internal Application
-#   Load Balancer that fronts the eight Spring Boot services replacing the CICS
-#   region's transaction dispatch, its single HTTPS listener, and the
-#   per-service listener rules that route to those services. Everything main.tf
+#   Load Balancer that fronts the SEVEN ONLINE Spring Boot services replacing
+#   the CICS region's transaction dispatch, its single HTTPS listener, and the
+#   per-service listener rules that route to those services. The eighth
+#   deployable, batch-service, is not fronted by it at all: its ecs-service
+#   instantiation creates no service and no target group, and Step Functions
+#   invokes it directly through the synchronous run-task integration. Everything main.tf
 #   consumes is declared here, and everything a caller must supply is defined
 #   here; the module reads no configuration from anywhere else.
 #
 #   The callers are the two environment roots, infra/envs/dev and
 #   infra/envs/prod, and they WIRE these values rather than author them:
 #   `subnet_ids` and `alb_security_group_id` come from the network module, the
-#   `target_group_arn` inside each `service_routes` entry from the eight
-#   ecs-service instantiations, `certificate_arn` from ACM, and
+#   `target_group_arn` inside each `service_routes` entry from the seven
+#   load-balanced ecs-service instantiations, `certificate_arn` from ACM, and
 #   `access_logs_bucket` from the module that owns the logging bucket.
 #
 # Parameters:
@@ -59,16 +62,16 @@
 #   variable", naming it. That is precisely what carrying no default buys.
 #
 # WHY (non-obvious design decisions):
-#   - Alternatives Considered (`internal` is NOT an input; main.tf fixes it to
-#     true): an internet-facing load balancer, and a boolean letting the
+#   - Alternatives Considered: `internal` is NOT an input, and main.tf fixes it
+#     to true -- an internet-facing load balancer, and a boolean letting the
 #     caller choose, were both evaluated and rejected. The only public entry
 #     points in the target architecture are the API Gateway HTTP API, which
 #     enforces a Cognito JWT authorizer at the edge, and the CloudFront
 #     distribution in front of the single-page application; this load balancer
 #     sits behind that HTTP API through a VPC Link. Reaching a service
 #     directly would skip the authorizer entirely, and expressed as a BOOLEAN
-#     that outcome is one wrong line in a tfvars file away, with eight
-#     services exposed and nothing in the module able to detect it. A failure
+#     that outcome is one wrong line in a tfvars file away, with every online
+#     service exposed and nothing in the module able to detect it. A failure
 #     mode reachable by editing one value is worth removing rather than
 #     documenting, so the choice is not offered.
 #     Lineage: every one of the eighteen DEFINE TRANSACTION stanzas in
@@ -77,7 +80,7 @@
 #     dispatch. Centralising authentication at a single managed edge is the
 #     decision that closes that gap, and it holds only while the load balancer
 #     behind it is unreachable from the internet.
-#   - Alternatives Considered (no HTTP-listener input): a plaintext listener
+#   - Alternatives Considered: no HTTP-listener input -- a plaintext listener
 #     redirecting to HTTPS was evaluated and rejected, so no
 #     `create_http_listener`, `http_port` or `redirect_http_to_https` variable
 #     exists and main.tf creates no such listener. The sole client is the API
@@ -86,7 +89,7 @@
 #     accepting connections. It also means the policy scan's checks against
 #     plaintext load-balancer listeners pass BY CONSTRUCTION rather than by a
 #     suppression a reviewer would have to adjudicate.
-#   - Assumption (no `vpc_id`): an aws_lb takes no VPC -- it derives one from
+#   - Assumptions: no `vpc_id` -- an aws_lb takes no VPC; it derives one from
 #     its subnets. The resource that does need a VPC is aws_lb_target_group,
 #     and this module owns none: target groups belong to the ecs-service
 #     module, beside the task definition, task role and log group they scale
@@ -95,7 +98,7 @@
 #     terraform_unused_declarations and fails the build on. It is recorded as
 #     a decision because nearly every load-balancer example declares one, so
 #     its absence reads as an oversight until explained.
-#   - Assumption (no port, protocol, CIDR, ingress or egress input): the
+#   - Assumptions: no port, protocol, CIDR, ingress or egress input -- the
 #     load-balancer security group is created and owned by the network module
 #     and is only CONSUMED here, so this module declares no
 #     aws_security_group and no aws_security_group_rule. The permitted matrix
@@ -104,20 +107,48 @@
 #     -- and an input accepting an arbitrary or unrestricted range would make
 #     that matrix a per-caller decision, which is the thing owning the group
 #     in one module exists to prevent.
-#   - Trade-off (declaration order is required-then-defaulted, not
-#     alphabetical): alphabetical is the obvious alternative and is easier to
+#   - Trade-offs: declaration order is required-then-defaulted rather than
+#     alphabetical. Alphabetical is the obvious alternative and is easier to
 #     scan for one known name, but it interleaves the inputs a caller MUST
 #     supply with the ones it may ignore, so the minimum call cannot be read
 #     off the file. Grouping puts that minimum first. The cost is that a
 #     reader hunting a single name may look in two places, and the generated
 #     Inputs table in README.md gives them a sorted view anyway.
-#   - Assumption (nothing here is marked `sensitive`): none of these inputs
+#   - Assumptions: nothing here is marked `sensitive`, because none of these inputs
 #     carries a secret. The certificate is referenced by ARN and its private
 #     key never leaves ACM, the logging bucket is named rather than
 #     credentialed, and no password, token or key material is accepted at all.
 #     `sensitive` is therefore withheld deliberately -- applying it would
 #     redact these values from plan output, which is exactly where a reviewer
 #     confirms that the subnets and routes are the intended ones.
+#   - Assumption (the hop OUT of this load balancer is encrypted too, and this
+#     module is not where that is configured): traffic arrives on the single
+#     HTTPS listener under the TLS 1.2 floor `ssl_policy` pins, and it leaves
+#     for a task over HTTPS as well, because the ecs-service module fixes its
+#     target group and health check at `target_protocol = "HTTPS"` and each
+#     service terminates TLS on 8080 through the `server.ssl` block in its
+#     application.yml. So the encrypted path runs viewer to edge to load
+#     balancer to task, with no cleartext segment anywhere -- which matters
+#     because the segment this module hands off to crosses the private
+#     application subnets carrying the Authorization header and account, card
+#     and transaction data, and being inside a VPC bounds who can observe that
+#     traffic without making it unreadable.
+#     Recorded HERE, in the module that owns the listener, because this is
+#     where a reader looks to find out how far encryption reaches and it is the
+#     one thing about the path this file cannot show them: `service_routes`
+#     names target groups it does not create, so the protocol of the onward hop
+#     is invisible from this module even though the module is the reason the
+#     hop exists. Two wrong conclusions are available without this note --
+#     that terminating TLS at the listener is the end of the requirement, or
+#     that this module should own the target groups so it can set their
+#     protocol -- and the second would split target-group ownership across two
+#     modules, which the `vpc_id` note above rejects for the same reason.
+#     Trade-offs: an Application Load Balancer does not verify the certificate a
+#     target presents, so the onward hop is encrypted but not mutually
+#     authenticated. That residual is accepted because target registration is
+#     controlled by the ecs-service module and the load-balancer security group
+#     admits nothing else, and it is stated so that HTTPS on the back end is
+#     not read as more than it is.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -131,7 +162,7 @@ variable "environment" {
   description = "Environment discriminator composed into the load-balancer name and tags, distinguishing one environment's load balancer from another's."
   type        = string
 
-  # WHY : Assumption: this value is composed into the load-balancer name, and
+  # WHY : Assumptions: this value is composed into the load-balancer name, and
   #       an aws_lb name accepts only alphanumerics and hyphens and may not
   #       begin or end with one -- which is what the anchors reject. Lowercase
   #       is narrower than AWS requires and is narrowed on purpose: the same
@@ -146,7 +177,7 @@ variable "environment" {
     error_message = "environment must be lowercase alphanumerics with interior hyphens only, and must neither begin nor end with a hyphen."
   }
 
-  # WHY : Assumption: main.tf composes the load-balancer name from this value
+  # WHY : Assumptions: main.tf composes the load-balancer name from this value
   #       and `name_prefix`, and an aws_lb name is capped at 32 characters, so
   #       the cap binds on the PAIR rather than on either value alone -- 32
   #       less the four characters of the "-alb" suffix and one separator
@@ -171,7 +202,7 @@ variable "subnet_ids" {
   description = "Ids of the subnets the load balancer places its nodes in, one per availability zone, supplied from the network module."
   type        = list(string)
 
-  # WHY : Assumption: the module is tier-agnostic. It places the load balancer
+  # WHY : Assumptions: the module is tier-agnostic. It places the load balancer
   #       in whatever subnets the caller passes and asserts nothing about
   #       which tier they belong to. In this package the caller passes the
   #       public subnets, which carry only the load balancer and the NAT
@@ -187,7 +218,7 @@ variable "subnet_ids" {
     error_message = "subnet_ids must contain at least two subnet ids, because an Application Load Balancer requires two or more availability zones."
   }
 
-  # WHY : Trade-off: a second condition for what looks like the same check,
+  # WHY : Trade-offs: a second condition for what looks like the same check,
   #       accepted because the first one can pass while delivering nothing it
   #       exists to guarantee. Two copies of one id satisfy "at least two" and
   #       still land every node in ONE zone, so the count only means what it
@@ -202,14 +233,14 @@ variable "alb_security_group_id" {
   description = "Id of the load-balancer security group created and owned by the network module; attached to the load balancer and never modified here."
   type        = string
 
-  # WHY : Assumption: the permitted traffic matrix is fixed for the whole
+  # WHY : Assumptions: the permitted traffic matrix is fixed for the whole
   #       package and is expressed once, in the network module that creates
   #       this group. This module only ATTACHES it -- no aws_security_group,
   #       no aws_security_group_rule, and no port, protocol or CIDR input --
   #       so there is no path through this module by which the group could be
   #       widened or opened to unrestricted ingress. The constraint is stated
   #       on the input so that it travels with the value a reader is holding.
-  #       Assumption: the network module publishes several opaque identifier
+  #       Assumptions: the network module publishes several opaque identifier
   #       strings -- subnet ids, a VPC id and this group id -- and Terraform
   #       type-checks all of them as `string`, so a crossed wire between two
   #       of its outputs is invisible until the API rejects it mid-apply. The
@@ -228,7 +259,7 @@ variable "certificate_arn" {
   description = "ARN of the ACM certificate the HTTPS listener presents, provisioned and validated outside this module."
   type        = string
 
-  # WHY : Assumption: the certificate is issued and its domain validated
+  # WHY : Assumptions: the certificate is issued and its domain validated
   #       outside this module, and only its ARN crosses the boundary -- the
   #       private key never leaves ACM, so nothing secret is passed here and
   #       the value needs no `sensitive` marking. It is an input rather than a
@@ -248,7 +279,7 @@ variable "access_logs_bucket" {
   description = "Name of the S3 bucket that receives the load balancer's access logs. A bucket NAME, not a bucket ARN."
   type        = string
 
-  # WHY : Trade-off: no null value and no `enabled` companion, so access
+  # WHY : Trade-offs: no null value and no `enabled` companion, so access
   #       logging cannot be switched off through this module. A nullable input
   #       was considered and rejected: the policy scan gates load-balancer
   #       access logging at HIGH severity (checkov CKV_AWS_91), so an off path
@@ -261,13 +292,13 @@ variable "access_logs_bucket" {
   #       file resources in app/csd/CARDDEMO.CSD are defined RECOVERY(NONE)
   #       JOURNAL(NO), so nothing recorded access or supported reconstructing
   #       it.
-  #       Assumption: the bucket already carries the policy admitting the
+  #       Assumptions: the bucket already carries the policy admitting the
   #       regional log-delivery principal to write to it. That is a property of
   #       the bucket, owned by whichever module creates it -- a load balancer
   #       cannot grant itself the write -- so if the policy is absent the apply
   #       fails on the delivery test rather than on anything declared here.
 
-  # WHY : Assumption: this attribute takes a bucket NAME. The module that owns
+  # WHY : Assumptions: this attribute takes a bucket NAME. The module that owns
   #       the bucket exposes both a name and an ARN, both typed `string`, so
   #       passing the ARN type-checks, plans clean, and fails only during the
   #       delivery test at apply -- after the load balancer itself has been
@@ -282,33 +313,46 @@ variable "access_logs_bucket" {
 }
 
 variable "service_routes" {
-  description = "Per-service listener rules keyed by service name; each entry gives the rule priority, the path patterns to match and the target group to forward to."
+  description = "Per-service listener rules keyed by service name; each entry gives the rule priority, the path patterns to match and the target group to forward to. Keyed by the SEVEN online bounded contexts and only those: batch has no target group to forward to."
 
-  # WHY : Assumption: the environment root supplies one entry per bounded
+  # WHY : Assumptions: the environment root supplies one entry per bounded
   #       context -- eight of them: auth, account, card, transaction,
   #       reference, batch, authorization and reporting -- and each
   #       `target_group_arn` is the target-group output of that context's
   #       ecs-service instantiation. main.tf iterates this map with `for_each`,
   #       so the map KEY becomes each listener rule's resource key and appears
   #       in plan output as the service name.
-  #       Alternatives Considered (a) hard-coding the eight service names and
+  #       Refactoring Rationale: batch is NOT one of them, and the count here is
+  #       seven rather than eight for a mechanical reason rather than a policy
+  #       one. The batch instantiation of infra/modules/ecs-service is created
+  #       with attach_load_balancer and create_service both false, so it produces
+  #       no target group at all and its target-group output is null. A batch
+  #       entry in this map could therefore only carry a null or a fabricated
+  #       ARN: the null fails at apply while creating a listener rule, and a
+  #       fabricated one creates a rule that resolves to nothing. Batch is
+  #       invoked exclusively by the Step Functions synchronous run-task
+  #       integration, which does not traverse this load balancer, so there is
+  #       nothing for a rule to route to. The edge modules agree by construction:
+  #       infra/modules/api-gateway-http publishes no /batch route either.
+  #       Alternatives Considered (a) hard-coding the seven service names and
   #       their path patterns inside the module: rejected because a routing
   #       change would then be a change to the module every environment
   #       shares, and the module would stop being reusable; routing policy
-  #       belongs in the environment root beside the rest of the wiring.
+  #       belongs in the environment root beside the rest of the wiring. What is
+  #       fixed inside the module instead is the SET of keys, which is topology
+  #       rather than policy and must be identical in dev and prod.
   #       (b) list(object(...)) instead of a map: rejected because `for_each`
-  #       over a list keys each rule by its INDEX, so inserting a ninth
-  #       service anywhere but the end shifts every later index and Terraform
-  #       plans to destroy and recreate rules that did not change. A map key is
-  #       stable, so a ninth service is one rule added and nothing else
-  #       touched.
+  #       over a list keys each rule by its INDEX, so reordering the entries
+  #       shifts every later index and Terraform plans to destroy and recreate
+  #       rules that did not change. A map key is stable, so a routing edit
+  #       touches one rule and nothing else.
   type = map(object({
     priority         = number
     path_patterns    = list(string)
     target_group_arn = string
   }))
 
-  # WHY : Assumption: an empty map satisfies the type constraint and produces a
+  # WHY : Assumptions: an empty map satisfies the type constraint and produces a
   #       listener with no per-service rule at all, which plans and applies
   #       cleanly. Without this check the one failure that looks like success
   #       -- a load balancer that resolves but carries no service traffic --
@@ -318,7 +362,38 @@ variable "service_routes" {
     error_message = "service_routes must contain at least one route; routing to the services is the whole purpose of this module."
   }
 
-  # WHY : Assumption: a listener rule requires at least one condition, and
+  # WHY : Assumptions: the KEY SET is topology, not policy, and the AAP fixes it
+  #       at seven online bounded contexts. dev and prod are required to differ
+  #       only in sizing and retention, so a root that routed six services, or
+  #       eight, would produce a load balancer whose reach differs between the
+  #       environment a change is tested in and the one it runs in -- and the
+  #       missing one presents as a 404 from the edge for a service that is
+  #       running and healthy. Set equality is asserted in both directions here:
+  #       a missing key and an unexpected key are equally wrong.
+  #       Trade-offs: this closes an input the earlier revision left open, so
+  #       standing up a genuinely new bounded context now needs a module change
+  #       as well as a root change. Accepted, and cheap: a ninth context needs an
+  #       ECR repository, a schema, a role and a secret, every one of which is
+  #       likewise enumerated in the module that owns it, so this file is not the
+  #       place the addition would be noticed.
+  #       Assumptions: the batch key cannot appear here at all, for the mechanical
+  #       reason recorded above -- it has no target group. The set below is
+  #       therefore the seven online contexts exactly.
+  #       Assumptions: equality needs both halves of the test. The setunion
+  #       comparison alone proves only that every key supplied is one of the
+  #       seven, so a root routing a single service would satisfy it; pairing it
+  #       with the count closes that, because map keys are already unique, so
+  #       seven distinct keys drawn from a set of seven is that set exactly.
+  validation {
+    condition = length(var.service_routes) == 7 && setunion(keys(var.service_routes), [
+      "auth", "account", "card", "transaction", "reference", "authorization", "reporting",
+      ]) == toset([
+      "auth", "account", "card", "transaction", "reference", "authorization", "reporting",
+    ])
+    error_message = "service_routes must be keyed by exactly the seven online bounded contexts: auth, account, card, transaction, reference, authorization and reporting. \"batch\" is not among them because its ECS instantiation creates no service and no target group, so no listener rule can forward to it."
+  }
+
+  # WHY : Assumptions: a listener rule requires at least one condition, and
   #       `list(string)` is satisfied by the empty list, so the type constraint
   #       alone admits an entry describing a rule that cannot be built.
   validation {
@@ -326,7 +401,7 @@ variable "service_routes" {
     error_message = "every service_routes entry must list at least one path pattern; a listener rule cannot be created without a condition."
   }
 
-  # WHY : Assumption: `priority` is supplied by the caller rather than derived
+  # WHY : Assumptions: `priority` is supplied by the caller rather than derived
   #       from map ordering, because priorities must be unique on a listener
   #       and are evaluated lowest-first -- they ARE the routing precedence.
   #       Deriving them from the map would silently renumber every existing
@@ -342,7 +417,7 @@ variable "service_routes" {
     error_message = "every service_routes priority must be between 1 and 50000, the range an Application Load Balancer listener rule accepts."
   }
 
-  # WHY : Trade-off: four separate conditions on one variable rather than one
+  # WHY : Trade-offs: four separate conditions on one variable rather than one
   #       compound condition, accepted because a compound condition can carry
   #       only ONE error_message -- a caller who duplicated a priority would be
   #       told to check their routes instead of being told which invariant
@@ -366,7 +441,7 @@ variable "name_prefix" {
   description = "Name prefix composed into the load-balancer name and tags, shared with the rest of the CardDemo infrastructure package."
   type        = string
 
-  # WHY : Assumption: "carddemo" is the name the application already carries
+  # WHY : Assumptions: "carddemo" is the name the application already carries
   #       throughout the repository -- every CICS resource in
   #       app/csd/CARDDEMO.CSD is defined GROUP(CARDDEMO), and the load library
   #       it dispatches from is named for it -- so defaulting to it means the
@@ -375,7 +450,7 @@ variable "name_prefix" {
   #       accident.
   default = "carddemo"
 
-  # WHY : Assumption: the same charset reasoning as `environment` -- an aws_lb
+  # WHY : Assumptions: the same charset reasoning as `environment` -- an aws_lb
   #       name admits only alphanumerics and hyphens and forbids a leading or
   #       trailing one -- with lowercase narrowed deliberately, because this
   #       same prefix is composed into S3 bucket names elsewhere in the package
@@ -385,7 +460,7 @@ variable "name_prefix" {
     error_message = "name_prefix must be lowercase alphanumerics with interior hyphens only, and must neither begin nor end with a hyphen."
   }
 
-  # WHY : Assumption: 20 leaves at least 7 of the 27-character budget shared
+  # WHY : Assumptions: 20 leaves at least 7 of the 27-character budget shared
   #       with `environment` for the environment name -- see that variable's
   #       joint check for where 27 comes from. The cap is stated here as well
   #       as there so that an over-long prefix is reported AGAINST THE PREFIX,
@@ -401,7 +476,7 @@ variable "ssl_policy" {
   description = "Predefined ELB security policy the HTTPS listener negotiates with, fixing the protocol versions and ciphers it will accept."
   type        = string
 
-  # WHY : Assumption: this policy negotiates TLS 1.3 with a TLS 1.2 FLOOR, so
+  # WHY : Assumptions: this policy negotiates TLS 1.3 with a TLS 1.2 FLOOR, so
   #       it satisfies the policy scan's HIGH-severity check that a
   #       load-balancer listener accepts nothing below TLS 1.2 (checkov
   #       CKV_AWS_103). The default carries more weight than a default usually
@@ -410,7 +485,7 @@ variable "ssl_policy" {
   #       default is the 2016-vintage policy, which still accepts TLS 1.0 and
   #       1.1 and fails that same check. Stating the policy explicitly is the
   #       only way the negotiated floor is knowable from the configuration.
-  #       Trade-off: a policy admitting TLS 1.0 or 1.1 was rejected outright
+  #       Trade-offs: a policy admitting TLS 1.0 or 1.1 was rejected outright
   #       rather than offered for compatibility. The only client is the API
   #       Gateway private integration reaching this listener over the VPC
   #       Link, and it negotiates modern TLS, so there is no legacy client
@@ -431,7 +506,7 @@ variable "access_logs_prefix" {
   description = "Key prefix under which the load balancer writes access-log objects inside the logging bucket."
   type        = string
 
-  # WHY : Assumption: the logging bucket is shared with other producers, and
+  # WHY : Assumptions: the logging bucket is shared with other producers, and
   #       the load balancer writes beneath "<prefix>/AWSLogs/...". A prefix is
   #       what makes these objects addressable as a set, so a lifecycle rule
   #       can expire load-balancer logs on their own schedule without matching
@@ -439,7 +514,7 @@ variable "access_logs_prefix" {
   #       that separation exists even when the caller says nothing about it.
   default = "alb"
 
-  # WHY : Assumption: the load balancer supplies its own separator between the
+  # WHY : Assumptions: the load balancer supplies its own separator between the
   #       prefix and the rest of the key. A trailing slash therefore produces a
   #       doubled separator in every object key, and a leading one produces an
   #       empty first path segment. Neither fails the write -- what fails,
@@ -455,12 +530,12 @@ variable "enable_deletion_protection" {
   description = "Whether the load balancer refuses deletion until the protection is cleared."
   type        = bool
 
-  # WHY : Assumption: true is the value the HIGH-severity policy scan expects
+  # WHY : Assumptions: true is the value the HIGH-severity policy scan expects
   #       on a load balancer (checkov CKV_AWS_150), and it is the default so
   #       that an OMISSION lands on the safe side -- forgetting this input
   #       costs one deliberate step before a delete, whereas defaulting to
   #       false would make forgetting it indistinguishable from choosing it.
-  #       Trade-off: the dev root overrides this to false in its
+  #       Trade-offs: the dev root overrides this to false in its
   #       terraform.tfvars, which is one of the few differences the two
   #       environments are permitted -- they differ in sizing, retention and
   #       protection flags, never in topology. The reason is concrete rather
@@ -476,7 +551,7 @@ variable "idle_timeout" {
   description = "Seconds the load balancer holds an idle connection open before closing it."
   type        = number
 
-  # WHY : Assumption: 60 is the service's own default and it is retained
+  # WHY : Assumptions: 60 is the service's own default and it is retained
   #       deliberately rather than by inertia. Every route behind this listener
   #       is a synchronous request-and-response API; the long-poll behaviour
   #       this migration preserves belongs to the queue consumers, which reach
@@ -485,7 +560,7 @@ variable "idle_timeout" {
   #       it would only keep failed connections occupying a node for longer.
   default = 60
 
-  # WHY : Assumption: 1 to 4000 seconds is the range the load balancer accepts,
+  # WHY : Assumptions: 1 to 4000 seconds is the range the load balancer accepts,
   #       and 0 is the value most likely to be tried to mean "no timeout" --
   #       it is refused. Naming the range at plan time is what keeps that from
   #       surfacing as an attribute rejection during creation.
@@ -496,29 +571,40 @@ variable "idle_timeout" {
 }
 
 variable "health_check_path" {
-  description = "HTTP path the target groups and container health checks probe. Republished by outputs.tf; this module creates no target group."
+  description = "Path the target groups and container health checks probe, requested over HTTPS by the ecs-service target groups. Republished by outputs.tf; this module creates no target group."
   type        = string
 
-  # WHY : Assumption: NO resource in this module reads this value. The module
+  # WHY : Assumptions: NO resource in this module reads this value. The module
   #       creates no aws_lb_target_group -- target groups belong to the
   #       ecs-service module, beside the tasks they track -- so this variable
   #       is consumed by outputs.tf alone. It is declared here because the
-  #       health-check path has to be ONE value across all eight services, and
-  #       republishing it as an output is what lets the environment root feed
-  #       the identical string to every ecs-service instantiation and to the
-  #       container health check in each image. That output is also what makes
+  #       health-check path has to be ONE value across the seven online services
+  #       this load balancer fronts, and republishing it as an output is what
+  #       lets the environment root feed the identical string to every one of
+  #       those ecs-service instantiations and to the container health check in
+  #       each image. The batch instantiation is not among them and takes no
+  #       health-check path: it creates no target group, declares neither a web
+  #       server nor an actuator, and reports its outcome through the task's
+  #       process exit status, which the invoking state machine reads. That output is also what makes
   #       this a referenced declaration rather than an unused one, which the
   #       lint gate would otherwise fail on. This is recorded because the next
   #       reader has exactly two wrong moves available: delete the variable as
   #       unused, or add a target group here and split its ownership across two
   #       modules.
-  #       Assumption: the default is "/actuator/health" because every service
+  #       Assumptions: the default is "/actuator/health" because every service
   #       depends on Spring Boot Actuator for precisely this endpoint -- that
   #       health endpoint being consumed by the target group and the container
   #       health check is the reason the dependency is in the build at all.
+  #       Assumptions: this is a PATH and carries no scheme, which is what lets
+  #       one string serve two consumers that reach it differently. The
+  #       ecs-service target groups probe it over HTTPS, per the encrypted-hop
+  #       note in this file's header; each image's own HEALTHCHECK probes it
+  #       from inside the container. Adding a scheme here would break one of
+  #       the two, and it is the reason no protocol input appears beside this
+  #       one -- the protocol belongs to whoever creates the target group.
   default = "/actuator/health"
 
-  # WHY : Assumption: the value is used verbatim as an absolute request path,
+  # WHY : Assumptions: the value is used verbatim as an absolute request path,
   #       so a value such as "actuator/health" is not corrected -- it probes a
   #       path that does not exist, which presents as every target failing its
   #       health check rather than as a configuration error, and sends a
@@ -533,14 +619,14 @@ variable "tags" {
   description = "Additional tags merged onto the resources this module creates, beyond the provider-level default tags."
   type        = map(string)
 
-  # WHY : Assumption: the environment root's provider block already applies
+  # WHY : Assumptions: the environment root's provider block already applies
   #       `default_tags` to every resource in the run, and resource-level tags
   #       MERGE with those rather than replacing them. This input therefore
   #       exists for keys a root-level default cannot express -- one naming the
   #       load-balancer tier, for instance, which is true of this module's
   #       resources and of nothing else in the root. Without that distinction
   #       the variable reads as a duplicate of `default_tags`.
-  #       Trade-off: the default is an empty map, so the module contributes no
+  #       Trade-offs: the default is an empty map, so the module contributes no
   #       tag of its own unless asked. Having it default to a tag of the
   #       module's own choosing was the alternative and was rejected, because a
   #       tag added unconditionally cannot be removed by a caller without a
@@ -548,4 +634,3 @@ variable "tags" {
   #       overrides it silently.
   default = {}
 }
-

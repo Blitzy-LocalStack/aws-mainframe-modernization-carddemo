@@ -100,7 +100,6 @@
     <modelVersion>4.0.0</modelVersion>
 
     <!--
-    WHAT: resolves the aggregator at services/pom.xml as this module's parent.
     WHY : Assumptions: the explicit ../pom.xml relative path records that this
           module is only ever built inside the nine module reactor rooted at
           services/pom.xml. It is never resolved from a remote repository,
@@ -118,7 +117,6 @@
     </parent>
 
     <!--
-    WHAT: this module's own coordinates, deliberately reduced to artifactId.
     WHY : Assumptions: groupId and version are omitted ON PURPOSE because both
           are inherited from the parent above. Restating either here would
           create a second place that has to be edited at every version bump,
@@ -130,7 +128,6 @@
     <artifactId>account-service</artifactId>
 
     <!--
-    WHAT: a Spring Boot executable jar rather than a plain library jar or a war.
     WHY : Assumptions: the deployment unit is a container image whose runtime
           stage copies one self contained jar and starts it with "java -jar".
           A war would require a servlet container in the image, and the plain
@@ -157,8 +154,6 @@
         =============================================================================
          Shared kernel: the ONE permitted intra reactor dependency
         =============================================================================
-        WHAT: the com.carddemo shared kernel, resolved at the reactor's own
-              version.
         WHY : Assumptions: common-lib is the only sibling module this one is
               allowed to depend on, and it supplies every shared contract this
               module consumes: money/Money and money/MoneyModule,
@@ -191,9 +186,15 @@
         NOTE: there is deliberately NO dependency on auth-service,
               card-service, transaction-service, reference-service,
               batch-service, authorization-service or reporting-service.
-              Importing another service's domain package is forbidden and is
-              enforced mechanically, not by review, in
+              Importing another service's domain package is forbidden and is to
+              be enforced mechanically rather than by review, by the rule set
+              authored at
               services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+              and re-run per module against its own classes. That class is
+              authored at a later index of the same plan and does not exist yet,
+              so at this checkpoint the boundary is carried by review; the
+              test-scoped ArchUnit declaration further down is what lets this
+              module run its own copy when it lands.
         -->
         <dependency>
             <groupId>com.carddemo</groupId>
@@ -205,8 +206,6 @@
         =============================================================================
          Spring Boot starters: declared explicitly, versions inherited
         =============================================================================
-        WHAT: the six starters this module's controllers, repositories and
-              security configuration need, each with no version element.
         WHY : Assumptions: NOTHING in this block arrives transitively.
               services/common-lib/pom.xml marks its own copies of
               spring-boot-starter-web, spring-boot-starter-validation,
@@ -303,9 +302,6 @@
         =============================================================================
          AWS integration: SQS plus wholly externalised configuration
         =============================================================================
-        WHAT: the three io.awspring.cloud starters, versions supplied by the
-              spring-cloud-aws-dependencies 4.1.0 bill of materials the parent
-              imports.
         WHY : Alternatives Considered: the legacy
               org.springframework.cloud:spring-cloud-aws-* coordinate was
               evaluated and rejected because it is unmaintained and publishes
@@ -346,8 +342,6 @@
         =============================================================================
          Persistence driver and schema migration
         =============================================================================
-        WHAT: the PostgreSQL JDBC driver plus the Flyway pair that applies this
-              module's one migration, all versions inherited.
         WHY : Assumptions: the driver is runtime scope because no application
               class names a PostgreSQL type. Keeping it off the compile
               classpath means a stray import of a vendor specific class cannot
@@ -382,9 +376,25 @@
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
+        <!--
+        WHY : Assumptions: the STARTER is what activates migration, and naming it
+              rather than flyway-core is the load bearing half of this pair.
+              Spring Boot 4 split its autoconfiguration into one module per
+              technology, and FlywayAutoConfiguration now ships in
+              spring-boot-flyway, which only this starter puts on the classpath.
+              flyway-core alone resolves, compiles and starts, and then applies
+              no migration at all: the spring.flyway.* keys bind to nothing, the
+              schema history table is never created, and the first query fails on
+              a missing relation. Nothing in the build reports it.
+        WHY : Refactoring Rationale: flyway-core is no longer declared directly.
+              The starter brings it transitively at the version the aggregator's
+              flyway.version property pins, so a direct declaration would add a
+              second editable version site while contributing nothing to the
+              classpath.
+        -->
         <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
@@ -395,8 +405,6 @@
         =============================================================================
          Published API contract and metric export
         =============================================================================
-        WHAT: springdoc, which serves this module's OpenAPI document, and the
-              Prometheus meter registry, both versions inherited.
         WHY : Assumptions: springdoc serves the OpenAPI 3.1 contract kept at
               src/main/resources/openapi/account-api.yaml. That contract is the
               artifact ui/src/api/accounts.ts is written against, so it is a
@@ -424,13 +432,17 @@
          Test scope: unit, security, integration and architecture
         =============================================================================
         WHAT: the six test only artifacts the *Test and *RepositoryIT classes
-              of this module need, every version inherited.
+              of this module will need, every version inherited. None of those
+              classes exists yet; the module's test tree is authored at a later
+              index of the same plan, and these declarations are what let it run
+              on its first execution rather than being retrofitted then.
         WHY : Assumptions: the parent already splits the two test phases, so
               nothing below needs a plugin binding here. Surefire runs *Test in
               the test phase and Failsafe runs *RepositoryIT in integration
               test and verify, writing to target/surefire-reports and
               target/failsafe-reports. Those two directories are collected by
-              .github/workflows/services-ci.yml and must never be relocated.
+              .github/workflows/services-ci.yml, itself authored at a later index
+              of the same plan, and must never be relocated.
         -->
 
         <!--
@@ -461,9 +473,8 @@
         </dependency>
 
         <!--
-        WHAT: the three Testcontainers modules that back the integration tests.
         WHY : Alternatives Considered: an in memory database, H2 in particular,
-              was evaluated and rejected because the *RepositoryIT classes must
+              was evaluated and rejected because the *RepositoryIT classes are to
               exercise real PostgreSQL behaviour that H2 does not reproduce:
               NUMERIC(12,2) fixed point semantics, BYTEA columns, a genuine
               non unique secondary index standing in for the CXACAIX alternate
@@ -515,6 +526,33 @@
         <dependency>
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+        WHAT: the shared kernel's TEST artifact, which carries the one rule
+              class those three boundaries are written in.
+        WHY : Refactoring Rationale: the engine above was declared on its own,
+              on the understanding that the rule class authored in common-lib
+              applied here by inheritance. It did not. Maven resolution passes a
+              module's main classes to its consumers and never its test classes,
+              so the class was evaluated against common-lib alone and the engine
+              here had no rules to run; a float on a balance field in this
+              module's domain package would have entered a green build. This
+              artifact is how the class travels, and the architecture-rules
+              Surefire execution in services/pom.xml is what runs it here,
+              against this module's own compiled classes.
+              Assumptions: ownership does not move. The rules stay authored once,
+              at
+              services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java,
+              and this declaration adds no second copy. Version and scope are
+              managed by the aggregator, so neither appears here and neither can
+              drift module by module.
+        -->
+        <dependency>
+            <groupId>com.carddemo</groupId>
+            <artifactId>common-lib</artifactId>
+            <type>test-jar</type>
             <scope>test</scope>
         </dependency>
 
@@ -586,8 +624,6 @@
     <build>
         <plugins>
             <!--
-            WHAT: the sole plugin this module declares, version inherited from
-                  the Boot parent's plugin management.
             WHY : Assumptions: the repackage goal rewrites the plain library
                   jar into the executable jar whose manifest names the boot
                   launcher, and that jar is the single artifact the runtime

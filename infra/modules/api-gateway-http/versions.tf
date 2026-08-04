@@ -52,21 +52,21 @@
 terraform {
   # WHAT: the oldest Terraform CLI release this configuration is declared to
   #       load and evaluate correctly.
-  # WHY : (1) Trade-off: a floor, not the exact release CI installs. Nineteen
-  #       directories carry this same constraint -- sixteen modules, the
+  # WHY : (1) Trade-offs: a floor, not the exact release CI installs. Every
+  #       directory carries this same constraint -- each module, the
   #       bootstrap root and the two environment roots -- so `= 1.15.8` would
   #       make every CLI bump an edit in all of them, and would break the
   #       moment the pipeline's pinned CLI moved off that patch. The accepted
   #       cost is that a floor does not record which CLI a reader actually
   #       ran, which is what (2) states explicitly.
-  #       (2) Assumption: 1.15.0 is a COMPATIBILITY claim -- the oldest
+  #       (2) Assumptions: 1.15.0 is a COMPATIBILITY claim -- the oldest
   #       release permitted -- while 1.15.8 is a VERIFICATION claim: it is the
   #       release .github/workflows/infra-ci.yml installs, so it is the only
   #       one this configuration is exercised on. Read the gap between the two
   #       as permitted-but-unexercised, not as verified.
   required_version = ">= 1.15.0"
 
-  # WHY : Assumption: no `backend` block belongs beside required_version here.
+  # WHY : Assumptions: no `backend` block belongs beside required_version here.
   #       Terraform applies one selected backend to the whole configuration,
   #       so a backend block inside a called module is not honoured; state for
   #       these resources lands in the calling root's backend, configured in
@@ -75,29 +75,28 @@ terraform {
   #       a reader looking for where this module's state is kept.
 
   required_providers {
-    # WHAT: the one provider this module's resources are written against.
     # WHY : (1) Alternatives Considered: `>= 6.56` was rejected because it
     #       admits a 7.x provider, and a provider major release may rename or
     #       remove resource arguments, so the HTTP API, JWT authorizer and VPC
     #       Link arguments main.tf sets could change meaning inside an
     #       otherwise untouched plan. `= 6.56.0` was rejected because adopting
-    #       a patch would then be a code change in all nineteen directories.
+    #       a patch would then be a code change in every directory.
     #       `~> 6.56` admits 6.56.x and any later 6.x minor and refuses 7.x,
     #       which is the boundary that carries the risk.
-    #       (2) Trade-off: a minor-release regression can still reach a plan
+    #       (2) Trade-offs: a minor-release regression can still reach a plan
     #       under `~>`. That is accepted because the .terraform.lock.hcl each
     #       environment root commits records the version actually selected, so
     #       the constraint is deliberately a range and the lock file is the
     #       reproducible pin.
-    #       (3) Assumption: the 6.x-era floor is inherited infra-wide, not
+    #       (3) Assumptions: the 6.x-era floor is inherited infra-wide, not
     #       required by anything in this module. It exists because a provider
     #       at 5.81.0 or later is needed to accept a zero minimum Aurora
     #       capacity, recorded in docs/adr/ADR-003-datastore-targets.md, and
     #       `~> 6.56` clears that. Every module and root repeats the identical
     #       constraint so a provider upgrade is one decision rather than
-    #       nineteen divergent ones -- the pinning discipline recorded in
+    #       one per directory -- the pinning discipline recorded in
     #       docs/adr/ADR-009-iac-tool.md.
-    #       (4) Assumption: `source` is written out even though a bare `aws`
+    #       (4) Assumptions: `source` is written out even though a bare `aws`
     #       would resolve to hashicorp/aws by registry default. Stating it
     #       drops the dependence on that default and gives tflint's
     #       terraform_required_providers rule an explicit value to check, so
@@ -107,7 +106,7 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHY : Assumption: `hashicorp/random` is pinned infra-wide, and its
+    # WHY : Assumptions: `hashicorp/random` is pinned infra-wide, and its
     #       absence from this map is deliberate -- nothing in this module
     #       generates a value. The seed-user and database passwords are
     #       produced by the `secrets` and `cognito` modules and written to

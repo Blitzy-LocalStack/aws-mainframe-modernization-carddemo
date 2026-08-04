@@ -127,7 +127,7 @@ Assumptions:
     this tree would change how the parity oracle resolves its own imports.
 """
 
-# WHY (Alternatives Considered): the plainer ``from importlib.metadata import version``
+# WHY : Alternatives Considered: the plainer ``from importlib.metadata import version``
 # was written first and then rejected, because it binds a name called ``version`` INTO
 # this package's root namespace. That is a re-export this package does not intend and a
 # specific trap: ``from carddemo_migration import version`` would then succeed and hand
@@ -137,7 +137,7 @@ Assumptions:
 # name at all, which is what the no-re-export contract in the docstring above claims.
 import importlib.metadata as _metadata
 
-# WHY (Assumptions): the metadata lookup below is keyed on the DISTRIBUTION name declared
+# WHY : Assumptions: the metadata lookup below is keyed on the DISTRIBUTION name declared
 # in the sibling pyproject.toml, which is hyphenated, whereas the import package this file
 # belongs to is underscored. The two spellings can never be unified -- a hyphen is not a
 # legal Python identifier -- so this constant is what ties them together, and mistaking one
@@ -147,7 +147,7 @@ import importlib.metadata as _metadata
 # characters instead of having to know that normalisation exists.
 _DISTRIBUTION_NAME = "carddemo-migration"
 
-# WHY (Trade-offs): a source tree that was never installed reports this sentinel instead
+# WHY : Trade-offs: a source tree that was never installed reports this sentinel instead
 # of raising. That is the whole point -- a copybook-only import must not fail merely
 # because nothing has been installed yet, which is the state a bare checkout and the
 # codec tests both run in. The accepted cost is that a caller which logs the version can
@@ -209,7 +209,7 @@ def _resolve_version() -> str:
     try:
         return _metadata.version(_DISTRIBUTION_NAME)
     except _metadata.PackageNotFoundError:
-        # WHY (Assumptions): absence of the distribution is an ordinary, expected state
+        # WHY : Assumptions: absence of the distribution is an ordinary, expected state
         # here rather than an error -- the package is imported directly from the src tree
         # during local iteration and in the codec tests, which the sibling pyproject.toml
         # supports by placing "src" on pytest's import path. Only this one exception is
@@ -221,7 +221,7 @@ __version__ = _resolve_version()
 
 # The module's public surface is complete at the line above, so this is the point a reader
 # looking for ``__all__`` reaches and finds none.
-# WHY (Trade-offs): no ``__all__`` is declared, and the omission is deliberate rather than
+# WHY : Trade-offs: no ``__all__`` is declared, and the omission is deliberate rather than
 # an oversight. A package-level ``__all__`` naming subpackages is not inert: measured
 # against this interpreter, a plain ``import`` of a package leaves a subpackage named in
 # ``__all__`` out of ``sys.modules``, but ``from <package> import *`` imports every name

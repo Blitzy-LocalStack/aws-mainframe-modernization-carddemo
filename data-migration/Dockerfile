@@ -22,14 +22,51 @@
 #   docker build -t carddemo-migration:local .
 #   docker run --rm carddemo-migration:local --help
 #
+# State at this checkpoint:
+#   This file is authored ahead of most of the package it packages, and the
+#   migration lands its artifacts in plan order. `src/carddemo_migration/`
+#   currently holds exactly two modules, `__init__.py` and `config.py`; the
+#   `cli.py` module this image's ENTRYPOINT names, together with the `copybook/`,
+#   `readers/`, `loaders/` and `verify/` subpackages and this package's README,
+#   are authored at later indexes of the same plan. Measured consequences, so the
+#   two commands above are not read as a promise:
+#     - The BUILD succeeds. Both stages complete, the pinned closure installs,
+#       and the distribution installs into /opt/venv from the two modules present
+#       -- verified by building the wheel those instructions build and installing
+#       it, which produced an importable `carddemo_migration`.
+#     - The SMOKE TEST does not. `docker run ... --help` resolves ENTRYPOINT plus
+#       CMD to `python -m carddemo_migration.cli --help`, which exits 1 with
+#       `ModuleNotFoundError: No module named 'carddemo_migration.cli'`. That is
+#       the correct, loud failure for a missing module, not a defect in this file,
+#       and it turns green the moment `cli.py` lands.
+#   No instruction below is to be read as a claim that the CLI it names exists
+#   today. Every one of them is written now on purpose: ENTRYPOINT in exec form
+#   carrying only the invariant argv is an orchestration contract the batch state
+#   machine is written against, and changing that contract after the state machine
+#   exists is a breaking change rather than a completion.
+#
 # WHY (non-obvious design decisions):
-#   - Assumptions: the interpreter tag is pinned for CORRECTNESS, not tidiness.
-#     The ETL's decimal and codec behaviour has to agree with the COBOL parity
-#     oracle that validates its output, which is why one tag is named
-#     identically by both stages. Stated in full at the builder's FROM.
+#   - Assumptions: the base image is pinned by DIGEST as well as tag, for
+#     CORRECTNESS rather than tidiness. A tag is a mutable pointer, and the ETL's
+#     decimal and codec behaviour has to agree with the COBOL parity oracle that
+#     validates its output -- so a silently republished base would present as a
+#     data-parity failure. Both stages name the identical digest. Stated in full
+#     at the builder's FROM.
+#   - Assumptions: NOTHING enters this image unverified. Three separate supply
+#     chains are each locked by digest: the base image (by manifest digest), every
+#     Python distribution (by artifact sha256 under `--require-hashes`), and the
+#     Aurora certificate bundle (by a pinned content sha256). The one deliberate
+#     exception is the libpq5 apt package, whose version is governed by the pinned
+#     base image's suite; the reason it cannot itself be version-pinned is
+#     recorded at that instruction.
 #   - Trade-offs: two stages, so the shipped image carries the INSTALLED
 #     distribution and nothing that produced it: neither the source tree nor
-#     the build backend. Stated in full at the builder stage banner.
+#     the build backend. Stated in full at the builder stage banner. The build
+#     backend additionally lives in its own environment inside that stage, so it
+#     cannot reach the environment that is copied forward.
+#   - Assumptions: the image installs the RUNTIME manifest only. The lint-and-test
+#     closure is a separate file which is never copied into the build context, so
+#     no linter, test runner or coverage tool is present in a shipped artifact.
 #   - Trade-offs: the dependency manifest is copied and installed before any
 #     application source, which costs an extra COPY and buys a dependency layer
 #     that an ordinary source edit does not invalidate.
@@ -47,8 +84,6 @@
 # -----------------------------------------------------------------------------
 # STAGE 1 -- builder: resolve the pinned closure, install the distribution.
 # -----------------------------------------------------------------------------
-# WHAT: this stage exists only to produce one populated virtual environment at
-#   /opt/venv, which the runtime stage adopts wholesale.
 # WHY : Trade-offs: a single-stage image would be shorter to read and was
 #   rejected for what it would LEAVE BEHIND rather than for its size. A PEP 517
 #   install resolves a build backend (setuptools) into the image and needs the
@@ -63,7 +98,6 @@
 #   stage and none is being excluded here.
 # -----------------------------------------------------------------------------
 
-# WHAT: the interpreter both stages are built on, pinned to an exact patch tag.
 # WHY : Assumptions: this pin is a PARITY decision. The ETL decodes money with
 #   the standard library's `decimal`, `codecs` and `struct` modules, and its
 #   output is verified against the COBOL test suite that serves as this
@@ -86,15 +120,37 @@
 #   wheel-only install for a toolchain this image otherwise has no use for. A
 #   Debian slim base keeps the driver on prebuilt artifacts and one runtime
 #   shared library.
-# WHY : Assumptions: BOTH stages name this tag and must go on naming the SAME
-#   one. It is not duplication that can be tidied into a single place: the
+# WHY : Assumptions: BOTH stages name this reference and must go on naming the
+#   SAME one. It is not duplication that can be tidied into a single place: the
 #   runtime stage adopts this stage's virtual environment by copying it, and a
 #   virtual environment records the absolute path of the interpreter that
 #   created it. Two different bases would build against one interpreter and
 #   execute against another, failing at import time rather than at build time.
-FROM python:3.13.14-slim-trixie AS builder
+# WHY : Refactoring Rationale: the reference carries a DIGEST as well as the tag,
+#   and the digest is what actually pins it. A tag is a mutable pointer: Docker
+#   Hub republishes `3.13.14-slim-trixie` whenever the Debian trixie base beneath
+#   it is rebuilt, so two builds of this identical Dockerfile could resolve
+#   different bytes -- different OpenSSL, different libpq5 candidate, in principle
+#   a different CPython patch build -- with nothing in the file or the build log
+#   distinguishing them. For this image that is not merely an irreproducibility:
+#   the ETL's decimal and codec behaviour has to agree with the COBOL parity
+#   oracle that validates its output, and the oracle compares by record checksum
+#   and money total, so a silent interpreter or library change would present as a
+#   DATA-PARITY failure whose actual cause is the base image. A digest makes the
+#   base image as reviewable as every pinned dependency in this tree.
+#   Assumptions: the digest names an OCI image INDEX, not one platform's manifest,
+#   so it stays correct for every architecture this image is built for -- pinning
+#   a per-platform manifest digest instead would silently restrict the build to
+#   one architecture.
+#   Trade-offs: a security rebuild of the base now requires editing this file
+#   twice rather than rebuilding against a moving tag. That is the intended cost:
+#   adopting a new base becomes a reviewed commit that says which bytes were
+#   adopted, and the tag is retained beside the digest so a reader can still see
+#   WHICH release the digest belongs to. 3.13.14 was confirmed to be the newest
+#   3.13 slim-trixie release at the time of pinning, so this is a current base and
+#   not a frozen old one.
+FROM python:3.13.14-slim-trixie@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS builder
 
-# WHAT: the directory this stage assembles and builds the distribution in.
 # WHY : Assumptions: it is deliberately NOT the environment's own path. Keeping
 #   the checkout at /opt/carddemo while the environment sits at /opt/venv stops
 #   the two from overlapping, which is precisely what lets the runtime stage
@@ -104,8 +160,6 @@ FROM python:3.13.14-slim-trixie AS builder
 #   along with it.
 WORKDIR /opt/carddemo
 
-# WHAT: an isolated environment, rather than the base image's own
-#   site-packages.
 # WHY : Assumptions: the runtime stage relocates exactly ONE directory, so
 #   holding the installed set inside a single self-contained prefix is what
 #   reduces that hand-off to one instruction with nothing to enumerate.
@@ -125,20 +179,23 @@ RUN python -m venv /opt/venv
 #   instead of stating it once.
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# WHAT: the dependency manifest on its own, ahead of any application source.
+# WHAT: the two build-time manifests on their own, ahead of any application
+#   source.
 # WHY : Trade-offs: this is the deliberate layer ordering, and an extra COPY
 #   instruction is what it costs. A build invalidates every layer from the
 #   first one whose inputs changed onwards, so copying the source first would
 #   re-run the entire dependency install on every edit to a reader or a codec
-#   -- the files that change most often -- while requirements.txt changes
+#   -- the files that change most often -- while these manifests change
 #   rarely. Ordered this way, an ordinary source edit reuses the cached
 #   dependency layer. The accepted costs are that the build context is read in
 #   two passes and that pyproject.toml has to be copied separately further down
 #   even though it also carries dependency metadata.
-COPY requirements.txt ./
+# WHY : Assumptions: requirements-dev.txt is deliberately NOT copied. It is the
+#   lint-and-test closure, this image runs neither, and a manifest absent from the
+#   build context cannot be installed by a later edit that reaches for it out of
+#   convenience. Continuous integration installs it in a checkout instead.
+COPY requirements.txt requirements-build.txt ./
 
-# WHAT: install the pinned closure, accepting prebuilt artifacts only and
-#   keeping no download cache.
 # WHY : Assumptions: requirements.txt is the AUTHORITATIVE version set -- exact
 #   `==` pins throughout -- whereas pyproject.toml states compatibility FLOORS
 #   for an installer that resolves this package on its own. Installing the
@@ -157,53 +214,158 @@ COPY requirements.txt ./
 #   only pays off across repeated installs in one environment and this layer
 #   installs once, so retaining it would merely leave archives inside the
 #   layer.
-# WHY : Trade-offs: the WHOLE manifest is installed, including the three
-#   development distributions it groups separately (a linter, a test runner and
-#   a coverage tool). Selecting only the runtime group would need either a
-#   second manifest, which the migration plan does not define, or filtering a
-#   comment-delimited block inside this build -- a step that would silently
-#   drop a pin the day that block's wording changed. requirements.txt names
-#   this Dockerfile as one of its three consumers precisely so that one file
-#   governs all of them, and the price of honouring that is three pure-Python
-#   distributions carried in the image.
-RUN pip install --no-cache-dir --only-binary :all: -r requirements.txt
+# WHY : Refactoring Rationale: `--require-hashes` is the point of this
+#   instruction. It previously installed the manifest with exact version pins and
+#   no digests, which authenticates nothing -- a version pin names a version, the
+#   index names an artifact, and a compromised index or hijacked maintainer
+#   account can answer that name with different bytes, silently, in an image that
+#   then holds a database credential and every account, customer, card and
+#   transaction row it loads. With every artifact hashed, the install either
+#   reproduces the reviewed bytes or fails. The flag is passed explicitly even
+#   though pip enters hash-checking mode on its own once any requirement carries a
+#   hash, because the explicit form is what makes a future unhashed addition an
+#   immediate error instead of a silent downgrade of the whole manifest to
+#   version-only pinning.
+# WHY : Refactoring Rationale: the manifest installed here is now the RUNTIME
+#   closure alone. It previously installed the whole file including a linter, a
+#   test runner and a coverage tool, on the reasoning that selecting one group
+#   would need either a second manifest the plan did not define or the filtering
+#   of a comment-delimited block -- and that filtering objection was correct,
+#   which is why the split is a separate FILE rather than a parsed section: a file
+#   boundary cannot be moved by an edit to a comment. What the old arrangement
+#   cost was not image size but attack surface, code present in a production image
+#   that no production run imports.
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r requirements.txt
 
-# WHAT: the packaging metadata and the importable tree, brought in only now
-#   that the dependency layer above has settled.
 # WHY : Assumptions: this package uses a src layout -- pyproject.toml declares
 #   `where = ["src"]` -- so the directory below is the whole importable tree
 #   and there is nothing further to bring in for the build. pyproject.toml
 #   declares neither a `readme` nor a `license` file, which is what allows
-#   these two paths alone to constitute a complete, buildable source
-#   distribution.
+#   these two paths alone to constitute a buildable source distribution --
+#   verified by building the wheel rather than assumed. "Complete" here means
+#   complete as BUILD INPUT: pyproject.toml plus the src tree are everything the
+#   backend needs, with no third path to remember. It says nothing about how many
+#   modules that src tree currently holds, which at this checkpoint is two; see
+#   State at this checkpoint in the header.
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-# WHAT: install the distribution itself, without letting it resolve
-#   dependencies.
-# WHY : Assumptions: `--no-deps` is what protects the pin doctrine.
-#   pyproject.toml declares its dependencies as lower bounds on purpose, so the
-#   package stays installable beside other software -- which means a
-#   dependency-resolving install here would be free to satisfy those bounds
-#   with NEWER releases than the exact versions installed above, silently
-#   replacing them and defeating the reproducibility this closure exists to
-#   provide. The layer above already installed the authoritative set, so this
-#   instruction has exactly one thing left to add: the package.
-RUN pip install --no-cache-dir --no-deps .
+# WHAT: build the wheel with a hash-verified backend that never enters the
+#   shipped environment, then install that wheel offline.
+# WHY : Refactoring Rationale: this was one instruction, `pip install --no-deps .`,
+#   and it left the build's own supply chain unverified. An ordinary PEP 517
+#   install resolves the build backend named in pyproject.toml into an isolated
+#   environment by fetching it from the network -- previously at an unbounded
+#   `setuptools>=80`, so whichever release was current that day, checked against
+#   nothing. A build backend executes arbitrary code during the build and produces
+#   the artifact that is then installed and shipped, so it is the component with
+#   the broadest reach in the whole image and it was the only one not pinned. The
+#   three instructions below close that: the backend is installed from a
+#   hash-locked manifest, `--no-build-isolation` makes THAT copy the one that runs
+#   rather than a freshly fetched one, and the wheel is then installed with
+#   `--no-index` so the final step provably reaches no network at all.
+# WHY : Assumptions: the backend goes into a SEPARATE environment at /opt/build,
+#   not into /opt/venv, and that separation is the whole reason there are two
+#   environments. `--no-build-isolation` requires the backend to be present in the
+#   environment running the build, so installing it into /opt/venv would satisfy
+#   pip and then ship setuptools inside the runtime image -- reintroducing exactly
+#   the build tooling the two-stage split exists to keep out, and reintroducing it
+#   into the one environment that IS copied forward. Two environments cost one
+#   extra directory in a discarded stage and buy a shipped environment containing
+#   only what the ETL imports.
+# WHY : Assumptions: `--no-deps` on the wheel install is what protects the pin
+#   doctrine. pyproject.toml declares its dependencies as floors on purpose, so
+#   the package stays installable beside other software -- which means a
+#   dependency-resolving install here would be free to satisfy those floors with
+#   NEWER releases than the exact versions installed above, silently replacing
+#   them and defeating the reproducibility this closure exists to provide. The
+#   layer above already installed the authoritative set, so this has exactly one
+#   thing left to add: the package.
+# WHY : Trade-offs: the three steps are one RUN instruction rather than three. A
+#   separate layer per step would read more clearly and would leave /opt/build and
+#   the wheel file inside the image's layer history -- harmless in a discarded
+#   build stage, and the reason for combining them is different: the wheel path is
+#   produced by the first step and consumed by the third, so splitting them would
+#   require naming that path in two instructions instead of one shell variable.
+RUN python -m venv /opt/build \
+ && /opt/build/bin/pip install --no-cache-dir --require-hashes --only-binary :all: \
+      -r requirements-build.txt \
+ && /opt/build/bin/pip wheel --no-cache-dir --no-deps --no-build-isolation \
+      --wheel-dir /tmp/wheel . \
+ && pip install --no-cache-dir --no-deps --no-index \
+      --find-links /tmp/wheel carddemo-migration
+
+# WHAT: the AWS-published Aurora certificate bundle, verified against a pinned
+#   digest, staged for the runtime stage to adopt.
+# WHY : Assumptions: this file is REQUIRED, not optional. The ETL connects with
+#   `sslmode=verify-full` and an explicit `sslrootcert`, and
+#   src/carddemo_migration/config.py resolves that path from
+#   DEFAULT_SSL_ROOT_CERT -- the literal target below -- and REFUSES to produce
+#   connection settings when the file is absent. So an image built without this
+#   layer does not degrade to an unverified connection; it fails to run, which is
+#   the intended direction of failure and is why the path is pinned in both files
+#   rather than discovered.
+# WHY : Alternatives Considered: trusting the operating system's CA store instead,
+#   by pointing `sslrootcert` at the system bundle. Rejected as too broad: the
+#   system store trusts every publicly trusted authority, so a certificate issued
+#   by any one of them for the cluster's endpoint name would verify, whereas this
+#   bundle trusts only the authorities that can legitimately certify an Aurora
+#   endpoint. Also considered: baking no bundle and mounting one at run time.
+#   Rejected because it makes a security-critical file an operator step that can
+#   be forgotten, and the failure would surface as a broken batch window.
+# WHY : Assumptions: the download is VERIFIED against a pinned sha256, computed
+#   from the bundle AWS publishes -- 165,408 bytes containing 108 certificates. An
+#   unverified fetch would be self-defeating in the most literal way: a trust
+#   anchor obtained over an unauthenticated channel anchors nothing, and this file
+#   is the sole thing standing between the ETL and an impersonated database
+#   endpoint. The digest is checked with the standard library rather than with
+#   curl, sha256sum or gpg, so this layer adds no package to the build stage.
+#   Trade-offs: AWS republishes this bundle when a certificate authority is
+#   rotated, and on that day this build fails with a digest mismatch until the
+#   value is refreshed. That is the correct behaviour and the same trade-off the
+#   pinned base-image digest and the pinned wheel hashes make: a change in bytes
+#   this repository did not review stops the build instead of entering the image.
+#   Refreshing it is one command whose output goes on the line below --
+#   `python -c "import hashlib,urllib.request as u;
+#   print(hashlib.sha256(u.urlopen(URL).read()).hexdigest())"`.
+RUN python - <<'PYVERIFY'
+import hashlib
+import urllib.request
+
+URL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
+EXPECTED = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3"
+TARGET = "/tmp/aws-rds-global-bundle.pem"
+
+with urllib.request.urlopen(URL, timeout=120) as response:
+    payload = response.read()
+
+actual = hashlib.sha256(payload).hexdigest()
+if actual != EXPECTED:
+    raise SystemExit(
+        f"Aurora CA bundle digest mismatch: expected {EXPECTED}, got {actual}. "
+        "AWS republishes this bundle when a certificate authority is rotated; "
+        "verify the new bundle and update EXPECTED in data-migration/Dockerfile."
+    )
+if b"-----BEGIN CERTIFICATE-----" not in payload:
+    raise SystemExit("Aurora CA bundle contains no PEM certificate block.")
+
+with open(TARGET, "wb") as handle:
+    handle.write(payload)
+PYVERIFY
 
 
 # -----------------------------------------------------------------------------
 # STAGE 2 -- runtime: the shipped image.
 # -----------------------------------------------------------------------------
-# WHY : Assumptions: the tag here is the SAME pin as the builder stage, for the
-#   reason recorded there in full -- the virtual environment copied in below
-#   records its creating interpreter's absolute path, so the two stages cannot
-#   be allowed to diverge. Changing one obliges changing the other in the same
-#   commit.
-FROM python:3.13.14-slim-trixie
+# WHY : Assumptions: the reference here is the SAME tag AND the SAME digest as the
+#   builder stage, for the reason recorded there in full -- the virtual environment
+#   copied in below records its creating interpreter's absolute path, so the two
+#   stages cannot be allowed to diverge. Changing one obliges changing the other
+#   in the same commit, and with a digest present that obligation is now
+#   mechanically checkable by comparing two strings rather than trusting that one
+#   mutable tag resolved the same way twice.
+FROM python:3.13.14-slim-trixie@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91
 
-# WHAT: add the libpq CLIENT SHARED LIBRARY, and nothing else, from the suite
-#   the base image already tracks.
 # WHY : Assumptions: the plain psycopg distribution is pure Python and loads
 #   libpq at run time through ctypes instead of shipping it, so without this
 #   package `import psycopg` fails outright with "libpq library not found" --
@@ -231,8 +393,6 @@ RUN apt-get update \
       libpq5 \
  && rm -rf /var/lib/apt/lists/*
 
-# WHAT: two interpreter settings that shape how this container behaves under
-#   the batch orchestrator.
 # WHY : Assumptions: PYTHONUNBUFFERED is load-bearing rather than cosmetic. A
 #   container task's stdout is its only progress channel, and Python interposes
 #   a buffered writer whenever stdout is a pipe rather than a terminal -- which
@@ -259,7 +419,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   the only one that can see the installed distribution.
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# WHAT: a dedicated unprivileged account with fixed numeric identifiers.
 # WHY : Assumptions: the identifiers are stated explicitly because they form
 #   part of the image's interface, not an implementation detail. A task
 #   definition or an admission policy asserting "this container does not run as
@@ -278,7 +437,6 @@ RUN groupadd --gid 10001 carddemo \
  && useradd --uid 10001 --gid 10001 --no-create-home \
       --shell /usr/sbin/nologin carddemo
 
-# WHAT: the directory the container starts in, reusing the builder's path.
 # WHY : Assumptions: the SQL assets further down are copied to a path RELATIVE
 #   to this line, so this is what decides where they come to rest and what any
 #   code resolving them from the process working directory depends on. Reusing
@@ -309,14 +467,38 @@ WORKDIR /opt/carddemo
 #   quietly break.
 # -----------------------------------------------------------------------------
 
-# WHAT: adopt the builder's virtual environment, left owned by root.
+# WHAT: adopt the builder's RUNTIME virtual environment, left owned by root.
 # WHY : Trade-offs: no `--chown` is applied, so the account that runs the ETL
 #   can read and execute the installed code but cannot modify it. Handing
 #   ownership to that account is the more common idiom and buys nothing here,
 #   because nothing in a single-shot run writes to its own installation; what
 #   it would cost is the guarantee that a compromised ETL process cannot
 #   rewrite the code its next invocation will execute.
+# WHY : Assumptions: /opt/venv holds the runtime closure and the installed package
+#   and NOTHING that produced them. The builder deliberately keeps its
+#   hash-verified build backend in a second environment at /opt/build, which is not
+#   copied here and dies with that stage, and the lint-and-test manifest is never
+#   copied into the build context at all. So this one directory is the whole of
+#   what ships, and a vulnerability scan of this image reports on code the ETL
+#   actually imports rather than on tooling it never runs.
 COPY --from=builder /opt/venv /opt/venv
+
+# WHAT: the verified Aurora certificate bundle, at the exact path the ETL resolves.
+# WHY : Assumptions: the destination is the literal value of DEFAULT_SSL_ROOT_CERT
+#   in src/carddemo_migration/config.py. The two must agree, and the coupling is
+#   one-directional and fails closed: resolve_ssl_root_cert() confirms the file
+#   exists and is readable and raises a named configuration error otherwise, so a
+#   path typo here stops the ETL at start-up rather than producing a connection
+#   that skips verification. The override CARDDEMO_DB_SSL_ROOT_CERT exists for a
+#   deployment that materialises the bundle elsewhere, and it can only name another
+#   absolute path -- it cannot weaken the mode, which is a module constant.
+# WHY : Trade-offs: copied from the builder rather than downloaded again here. The
+#   fetch and its digest check happen once, in the stage that is discarded, so the
+#   runtime stage needs no network access during its build and no HTTP client at
+#   all -- and the bytes that were verified are provably the bytes that ship,
+#   rather than a second download that happened to have the same name.
+COPY --from=builder /tmp/aws-rds-global-bundle.pem \
+                    /etc/ssl/certs/aws-rds-global-bundle.pem
 
 # WHAT: the schema-and-role bootstrap and the verification queries.
 # WHY : Assumptions: these are data files sitting outside the src layout, so
@@ -344,7 +526,10 @@ COPY sql/ ./sql/
 #   advertising none. That structural check IS worth having, and it belongs in
 #   continuous integration as a one-shot assertion that `--help` exits zero,
 #   where a failure blocks the image from being published rather than being
-#   sampled and discarded at run time.
+#   sampled and discarded at run time. That assertion has no home yet: the
+#   workflow that would carry it is authored at a later index of the same plan,
+#   and until `cli.py` lands the assertion would fail by design, for the reason
+#   recorded in State at this checkpoint in the header.
 # -----------------------------------------------------------------------------
 
 # WHY : Assumptions: dropping privilege BEFORE the entry point is what makes
@@ -353,9 +538,53 @@ COPY sql/ ./sql/
 #   identity. The numeric form is used rather than the account name so that a
 #   policy which cannot read the image's /etc/passwd can still verify the
 #   process is not root.
+# -----------------------------------------------------------------------------
+# HEALTHCHECK: a structural import probe, not a liveness claim.
+# -----------------------------------------------------------------------------
+# WHAT: import the installed package in a subprocess and exit non-zero if the
+#   import fails. No network, no database, no object store, no CLI parsing.
+# WHY : Refactoring Rationale: this instruction was previously OMITTED, with the
+#   argument that a health check describes a long-running process while this
+#   image runs to completion, and that a probe answering only "does the package
+#   still import" would advertise a liveness guarantee the image cannot provide.
+#   Both halves of that are true and neither one supports omission, because the
+#   premise it rests on is wrong: an image-level HEALTHCHECK is NOT what the
+#   batch orchestrator reads. Amazon ECS takes its container health check from
+#   the task definition's own `healthCheck` field and ignores the one baked into
+#   the image, and the batch task definition declares none -- the state machine
+#   observes the task's terminal state and exit code through the synchronous
+#   run-task integration, exactly as the earlier note said. So this instruction
+#   cannot keep a one-shot task alive, cannot delay its completion, and cannot
+#   displace exit-status monitoring: on the deployed path it is inert.
+#   Where it is NOT inert is every other runtime that reads image metadata --
+#   `docker run`, Compose, a local smoke test, a registry scan -- and there its
+#   presence is what the frozen Dockerfile requirement asks for: a multi-stage
+#   build, a non-root user, and a health check. The requirement is not satisfied
+#   by an argument for why one is unnecessary.
+#   Assumptions: the probe is deliberately the WEAKEST useful one. Importing
+#   `carddemo_migration` exercises the interpreter, the virtual environment on
+#   PATH, and the installed distribution's own import graph -- which is precisely
+#   the class of failure a broken image has (a wheel that did not install, a
+#   stage-copy that missed the environment, a Python that cannot find it) and
+#   which no amount of correct configuration can mask. It answers nothing about
+#   whether a load is succeeding, and it is not intended to: `--interval` and
+#   `--retries` are set so a run-to-completion container reports its status once
+#   and quickly rather than being sampled repeatedly.
+#   Alternatives Considered: probing the CLI's `--help`, which exercises argument
+#   parsing as well. Rejected because `--help` writes to standard output and
+#   exits through argparse's own SystemExit path, so a probe would either pollute
+#   the container's log stream on every interval or need a shell redirect, and
+#   the exec form is preferred here for the same reason it is on ENTRYPOINT.
+#   Alternatives Considered: a probe that opens a database connection or reads a
+#   parameter. Rejected outright: it would make container health depend on
+#   another service's availability, so a transient Aurora failover would mark a
+#   healthy image unhealthy, and it would need credentials at probe time.
+# -----------------------------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=2 \
+    CMD ["python", "-c", "import carddemo_migration"]
+
 USER 10001:10001
 
-# WHAT: the invariant half of the invocation, in exec form.
 # WHY : Assumptions: this is an orchestration contract with the batch state
 #   machine. The `StageSeedDatasets` Map state starts one synchronous container
 #   task per dataset via `ecs:runTask.sync` and supplies that task's arguments
@@ -371,14 +600,25 @@ USER 10001:10001
 #   documents for exactly this case, because a `python -m` argv is valid
 #   whether or not the installed distribution's generated script wrappers are
 #   present on PATH, whereas a bare script name silently depends on them.
+# WHY : Assumptions: the module this names is authored at a later index of the
+#   same plan, so today this ENTRYPOINT resolves to an import that fails with
+#   ModuleNotFoundError and exit 1. It is written now, unchanged, because the
+#   argv split between ENTRYPOINT and a container override is the contract the
+#   batch state machine is authored against; both spellings fail identically
+#   while the module is absent, so there is nothing to be gained by deferring the
+#   choice and a contract to lose.
 ENTRYPOINT ["python", "-m", "carddemo_migration.cli"]
 
 # WHAT: a default argument list, so a bare `docker run` is informative.
-# WHY : Assumptions: `--help` is chosen because it is the one argument the CLI
-#   is guaranteed to accept. The catalogue of subcommands belongs to this
-#   package's README, and naming one here would create a second place for that
-#   contract to be stated and to drift out of step. This default is never what
-#   the batch orchestrator runs, since its container override replaces CMD
-#   outright, so it documents the image for a human rather than configuring it
-#   for production.
+# WHY : Assumptions: `--help` is chosen because it is the one argument the CLI is
+#   to be guaranteed to accept, which also makes it the argument this default can
+#   keep across every later change to the subcommand set. The catalogue of
+#   subcommands belongs to this package's README, and naming one here would create
+#   a second place for that contract to be stated and to drift out of step.
+#   Neither the CLI nor that README exists at this checkpoint, so a bare
+#   `docker run` today is informative about the missing module rather than
+#   about the subcommands; see State at this checkpoint in the header. This
+#   default is never what the batch orchestrator runs, since its container
+#   override replaces CMD outright, so it documents the image for a human rather
+#   than configuring it for production.
 CMD ["--help"]

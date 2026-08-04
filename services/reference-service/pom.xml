@@ -51,16 +51,23 @@
           Considered, Refactoring Rationale, Assumptions and Trade-offs, and the
           pre-existing house gate at tests/README.md line 544 to line 549 names the
           same four for every test, helper, mock and runner routine. The two
-          authorities agree. Sibling files including .github/workflows/tests.yml
-          write the singular forms Assumption and Trade-off; those denote exactly
-          the same categories. Stated once here, this file uses the canonical
-          plural labels throughout and never mixes the two forms.
+          authorities agree, and their plural spelling is the only accepted one.
+          Every rationale label in this repository is written in that spelling and
+          terminated by a colon; docs/CODE_DOCUMENTATION_STANDARD.md sets it out
+          and enumerates the rejected shapes. A singular, bracketed, heading-style
+          or dash-terminated variant is not an alternative spelling of a label, it
+          is a label that a fixed-string search for the category will not find.
         - Assumptions: the parent owns all version management and the Checkstyle
           binding, so this file deliberately carries no properties block, no
-          dependencyManagement, no version element on any dependency, no
-          repositories or pluginRepositories, and no build section re-declaring
-          maven-checkstyle-plugin or spring-boot-maven-plugin. Duplicating any of
+          dependencyManagement, no version element on any dependency, and no
+          repositories or pluginRepositories. Duplicating any of
           them would create a second source of truth that drifts silently. The
+          build section at the end of this file is the one exception, and it exists
+          because plugin MANAGEMENT is not plugin ACTIVATION: the Boot parent only
+          pins spring-boot-maven-plugin's version, and services/pom.xml activates
+          checkstyle, enforcer and failsafe but not that plugin, so a module needing
+          an executable archive must declare the coordinate itself. The reasoning is
+          recorded in full above that block rather than repeated here. The
           parent already overrides Spring Boot 4.1.0's own Flyway 12.4.0 and
           PostgreSQL 42.7.11 to 13.0.0 and 42.7.13, so a local copy of either
           number would quietly diverge the next time the parent moves.
@@ -184,14 +191,28 @@
          status 23, and line 455 to line 458 shows the fallback is not graceful:
          it displays ERROR READING DEFAULT DISCLOSURE GROUP and performs
          9999-ABEND-PROGRAM. A missing seed row hard abends the nightly interest
-         run rather than degrading. -->
+         run rather than degrading.
+         Assumptions: the coordinate below is the STARTER, and naming it rather
+         than flyway-core is what actually activates migration. Spring Boot 4 split
+         its autoconfiguration into one module per technology, and
+         FlywayAutoConfiguration now ships in spring-boot-flyway, which only this
+         starter puts on the classpath. flyway-core alone resolves, compiles and
+         starts, and then applies no migration at all, so the DEFAULT
+         disclosure-group row the paragraph above depends on is never seeded and
+         the nightly interest run abends for a reason that has nothing to do with
+         the data.
+         Refactoring Rationale: flyway-core is no longer declared directly. The
+         starter brings it transitively at the version the parent's flyway.version
+         property pins, so a direct declaration would add a second editable
+         version site while contributing nothing to the classpath. -->
     <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
 
     <!-- Assumptions: Flyway 10 and later moved PostgreSQL support out of
-         flyway-core into this companion artifact. flyway-core alone resolves and
+         flyway-core into this companion artifact, and the starter above pulls no
+         database module of its own. Without this coordinate the build resolves and
          compiles perfectly and then fails at run time on the first migration
          because no database type matches the JDBC url. This dependency is not
          optional and must never be pruned as apparently unused. -->
@@ -296,12 +317,38 @@
          operands in app/cbl/CBACT04C.cbl line 464 to line 465, which computes
          WS-MONTHLY-INT as ( TRAN-CAT-BAL * DIS-INT-RATE ) / 1200, so a float or a
          double anywhere on the rate path would change cents on real balances.
-         ArchUnit turns that prohibition, and the ban on importing another
+         ArchUnit is to turn that prohibition, and the ban on importing another
          service's domain package, into a build failure rather than a note a
-         reviewer might miss. -->
+         reviewer might miss. The rule set is authored once in common-lib's test
+         tree and re-run per module, not inherited as an artifact; it lands at a
+         later index of the same plan, so this declaration prepares for it and
+         until then the prohibition rests on review. -->
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- WHAT: the shared kernel's test artifact, which carries the single class
+         those prohibitions are written in.
+         WHY : Refactoring Rationale: the engine above was declared on its own, on
+         the understanding that a rule class authored in common-lib's test tree
+         reached this module by inheritance. Maven resolution passes a module's
+         MAIN classes to its consumers and never its test classes, so nothing
+         analysed com.carddemo.reference at all and the rate path prohibition
+         cited above was unenforced here. common-lib now publishes that class as
+         a test artifact narrowed to the architecture package, and the
+         architecture-rules Surefire execution in services/pom.xml scans it into
+         this module's own test run, where this module's compiled classes are the
+         ones the rules see.
+         Assumptions: the rules stay authored exactly once, at
+         services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java;
+         this adds delivery and not a copy. Version and scope are managed by the
+         aggregator, so neither is stated here. -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
 
@@ -341,5 +388,44 @@
          sequential input, not a chunk-oriented job needing a job repository. -->
 
   </dependencies>
+
+  <!-- =============================================================================
+       Build
+       ~~~~~
+       WHAT: exactly one plugin coordinate, and nothing else.
+       WHY (non-obvious design decisions):
+          - Assumptions: the Spring Boot parent only MANAGES spring-boot-maven-plugin
+            in its pluginManagement; it does not run it. The reactor parent at
+            services/pom.xml activates maven-checkstyle-plugin, maven-enforcer-plugin
+            and maven-failsafe-plugin in its own build/plugins, which every module
+            inherits, and it deliberately does NOT activate this one there, because
+            common-lib is a library consumed on eight compile classpaths and must stay
+            a plain archive: a consumer's compiler does not look inside BOOT-INF and
+            would see none of its types. A module that needs an executable archive
+            therefore has to name the coordinate itself, and this module does need
+            one, because its container runtime stage launches a single self-contained
+            jar. Without this block `mvn package` produces an ordinary jar with no
+            Main-Class and no BOOT-INF layout, and the image's `java -jar` fails with
+            "no main manifest attribute" at container start, from a build that
+            reported success and a plan that showed nothing.
+          - Trade-offs: nothing else is declared here, and the omissions are the same
+            ones the header above records for the rest of the file. No version, since
+            the parent chain pins it in lockstep with the framework; no executions
+            block, since the Boot parent already binds the repackage goal and a local
+            block would replace its configuration rather than extend it; no
+            maven-checkstyle-plugin, maven-enforcer-plugin or maven-failsafe-plugin,
+            since all three are inherited already active from services/pom.xml and
+            re-declaring one would silently override whichever settings the
+            re-declaration omitted, and weakening the documentation gate is a breach
+            of the project's Explainability rule rather than a build preference.
+       ============================================================================= -->
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
 
 </project>

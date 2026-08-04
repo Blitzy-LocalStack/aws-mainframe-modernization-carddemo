@@ -86,8 +86,6 @@
   <modelVersion>4.0.0</modelVersion>
 
   <!--
-    WHAT: the coordinates that place this module inside the nine module reactor,
-          second in build order, immediately after common-lib.
     WHY : Assumptions: the artifact identifier below has to match the aggregator's
           own module entry character for character, because Maven correlates the
           two by string equality and reports a module it cannot correlate as
@@ -116,8 +114,6 @@
   <dependencies>
 
     <!--
-      WHAT: the shared kernel this context builds on, and the only sibling
-            module this descriptor is permitted to name.
       WHY : (1) Assumptions: the sibling is built inside this same reactor, so
             its version is by definition the reactor's own, and the property
             below is what keeps the two in lockstep. A literal pin would go on
@@ -137,8 +133,6 @@
     </dependency>
 
     <!--
-      WHAT: the framework surface this context compiles against, declared in
-            full rather than leaned on transitively.
       WHY : Assumptions: common-lib marks its own starters optional, so nothing
             reaches this module through it. That single fact is why the list
             below is long, and it is deliberate: a library that exported its
@@ -167,8 +161,6 @@
     </dependency>
 
     <!--
-      WHAT: token validation for the identity provider that replaces the
-            baseline's own sign-on check.
       WHY : Refactoring Rationale: the COBOL sign-on read a user record and
             compared an eight character password held in clear text, so the
             credential itself travelled and was stored in the open. This context
@@ -179,6 +171,42 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!--
+      WHAT: the identity provider client this context calls OUTBOUND, as
+            distinct from the resource server above, which only validates
+            tokens arriving inbound.
+      WHY : Assumptions: the two are not substitutes and the difference is the
+            reason this coordinate exists. The resource server verifies a
+            signature and reads the group claim off a token somebody else
+            minted; it can neither mint one nor administer the user pool. This
+            context has to do both: COSGN00C's sign-on paragraph
+            (app/cbl/COSGN00C.cbl L211-L256) becomes a token exchange, which is
+            an InitiateAuth call, and the four user-administration programs
+            COUSR00C through COUSR03C become create, update and delete calls
+            against the pool. Without a provider client, every one of those five
+            behaviours has no implementation available to it, and the omission
+            presents as a service that starts cleanly and cannot sign anyone in.
+      WHY : Refactoring Rationale: this module previously declared no cloud SDK
+            at all, on the reasoning that configuration arrives as environment
+            variables the platform has already resolved. That reasoning is sound
+            for CONFIGURATION and was kept below; it does not cover an outbound
+            API call, which is a different concern that the same absence was
+            silently also denying.
+      WHY : Trade-offs: exactly one service module of the SDK is declared, not
+            the aggregate SDK artifact and not a second module "while we are
+            here". One module per API keeps the image small and keeps the task
+            role's policy legible: the only calls this context can make are the
+            ones this coordinate makes reachable, so least privilege is
+            expressible as the sign-on and user-administration actions on one
+            pool and nothing else. The version is inherited from the AWS SDK
+            bill of material the aggregator imports, so it cannot drift from the
+            other services' SDK modules.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>cognitoidentityprovider</artifactId>
     </dependency>
 
     <!--
@@ -200,17 +228,36 @@
 
     <!--
       WHAT: schema migration for the auth schema, as a matched pair.
-      WHY : Assumptions: Flyway 10 moved PostgreSQL support out of the core
-            artifact into a separate one, so core on its own does not fail the
-            build, it fails when the service first opens a connection to a real
-            database. That is precisely what makes the second coordinate easy to
-            drop and expensive to omit: the mistake is invisible until
-            deployment, where it presents as a database the service cannot
-            migrate rather than as anything a build would have caught.
+      WHY : Assumptions: the STARTER is what activates migration, and naming it
+            rather than flyway-core is the load bearing half of this pair. Spring
+            Boot 4 split its autoconfiguration into one module per technology, and
+            FlywayAutoConfiguration now ships in spring-boot-flyway, which only
+            this starter puts on the classpath. Declaring flyway-core alone
+            resolves, compiles and starts perfectly, and then applies no
+            migration at all: the spring.flyway.* keys in application.yml bind to
+            nothing, the schema history table is never created, and the first
+            query fails on a missing relation. Nothing in the build reports it,
+            which is why the starter is named here explicitly instead of being
+            left to arrive with something else.
+      WHY : Refactoring Rationale: flyway-core is no longer declared directly. The
+            starter brings it transitively at the version the aggregator's
+            flyway.version property pins, so a direct declaration would add a
+            second place that version could be edited while contributing nothing
+            to the classpath.
+      WHY : Assumptions: flyway-database-postgresql stays declared in its own
+            right and is NOT redundant beside the starter. Flyway 10 moved
+            PostgreSQL support out of the core artifact into this companion, and
+            the starter does not pull a database module, so core on its own does
+            not fail the build, it fails when the service first opens a
+            connection to a real database. That is precisely what makes this
+            coordinate easy to drop and expensive to omit: the mistake is
+            invisible until deployment, where it presents as a database the
+            service cannot migrate rather than as anything a build would have
+            caught.
     -->
     <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
@@ -218,8 +265,6 @@
     </dependency>
 
     <!--
-      WHAT: the two artifacts this module needs present when it runs but must
-            never reference when it compiles.
       WHY : Assumptions: no source file names the driver or the metrics registry.
             The driver is reached through the connection URL and the registry is
             picked up by autoconfiguration, with the common tags contributed by
@@ -240,8 +285,6 @@
     </dependency>
 
     <!--
-      WHAT: the container harness behind this module's repository integration
-            test.
       WHY : (1) Alternatives Considered: an embedded or in-memory database was
             rejected because V1__auth.sql declares a UUID column and a check
             constraint that restricts the user type to the two values the
@@ -277,6 +320,44 @@
     </dependency>
 
     <!--
+      WHAT: the two artifacts that bring the shared architecture rules to bear
+            on THIS module: the assertion engine, and the shared kernel's test
+            artifact that carries the one rule class.
+      WHY : (1) Refactoring Rationale: this POM previously named neither, on the
+            stated grounds that layering has exactly one owner and that the
+            single rule class in common-lib therefore covered this module too.
+            Single ownership is right and the conclusion drawn from it was wrong.
+            Maven resolution passes a module's main classes to its consumers and
+            never its test classes, so that class was evaluated against
+            common-lib alone; this module was the one service where not even the
+            engine was present, so no architectural boundary was checked here at
+            all. (2) Assumptions: ownership is unchanged by this pair. The rules
+            are still authored once, at
+            services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java;
+            the test artifact merely delivers that class, and the
+            architecture-rules Surefire execution in services/pom.xml runs it
+            here against this module's own compiled classes, which is the only
+            way a rule about com.carddemo.auth can be evaluated. (3) Assumptions:
+            neither carries a version, both being managed by the aggregator, and
+            both stay at test scope so the engine can never reach the production
+            classpath of the module it polices. (4) Trade-offs: two dependencies
+            and their documentation are the price of an enforced boundary; the
+            alternative previously taken, naming neither, cost nothing and
+            enforced nothing.
+    -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
       WHAT: the dependencies this module is required NOT to have. Each absence
             below is a decision with a reasonable alternative, so each is
             recorded here rather than left for a reader to infer from silence.
@@ -285,12 +366,6 @@
         declares it once, at test scope, in its own dependencies element, so it
         already applies to all nine modules. Repeating it would add a second
         declaration whose scope could later be edited independently.
-
-      Alternatives Considered: the ArchUnit test support is not named above
-        either. A module local architecture test was considered and rejected
-        because layering has exactly one owner, the single layering test in
-        common-lib, and every dependency added here brings a further obligation
-        to document it under this project's explainability rule.
 
       Alternatives Considered: no annotation processor for boilerplate
         generation is used. The obvious candidate generates accessors, and
@@ -306,14 +381,17 @@
         names. Every one of those needs a justification recorded at the mapping
         site, which a generated mapper has nowhere to put.
 
-      Alternatives Considered: no cloud SDK and no external configuration
-        property source are declared. Configuration arrives as environment
-        variables that the task definition injects from Parameter Store and
-        Secrets Manager, SPRING_DATASOURCE_URL among them, so the framework's
-        own relaxed environment binding already reads it. Adding a property
-        source library would pull in an SDK and open a second privileged read
-        path for configuration the platform has already resolved before the
-        process starts.
+      Alternatives Considered: no external configuration property source is
+        declared, and no cloud SDK module beyond the identity provider client
+        named above. Configuration arrives as environment variables that the
+        task definition injects from Parameter Store and Secrets Manager,
+        SPRING_DATASOURCE_URL among them, so the framework's own relaxed
+        environment binding already reads it. Adding a property source library
+        would open a second privileged read path for configuration the platform
+        has already resolved before the process starts. The distinction to hold
+        onto is between reading configuration, which the platform does, and
+        calling an API, which only this context can do: the first needs no SDK,
+        the second needs exactly one module of it.
 
       Assumptions: nothing for messaging is declared, because this context
         neither publishes nor consumes a message; queue configuration belongs to
@@ -344,8 +422,6 @@
   <build>
     <plugins>
       <!--
-        WHAT: the single plugin this module adds; every other plugin it runs,
-              Checkstyle and the two test runners included, is inherited.
         WHY : Alternatives Considered: this plugin is present here and is
               deliberately absent from common-lib. The asymmetry is the point.
               This module is one of the eight deployables, and its Dockerfile

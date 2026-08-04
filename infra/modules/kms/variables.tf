@@ -55,15 +55,15 @@
 #     four. Rejected -- it would grant every trusted principal use of every key,
 #     erasing the per-domain boundary that provisioning four keys instead of one
 #     exists to create.
-#   - Assumption: the four trust lists default to empty so the keys can exist
+#   - Assumptions: the four trust lists default to empty so the keys can exist
 #     before the task roles that use them do. Those roles come from the
 #     `ecs-service` module, which consumes this module's key ARNs, so a
 #     non-empty requirement would make the grant a precondition of the key the
 #     grant depends on.
-#   - Assumption: the calling root owns the baseline tag set through its
+#   - Assumptions: the calling root owns the baseline tag set through its
 #     provider's `default_tags`, so `tags` here is a layer above that set rather
 #     than the whole of it.
-#   - Trade-off: `environment` has no default at all, and the deletion window
+#   - Trade-offs: `environment` has no default at all, and the deletion window
 #     defaults to the shortest the service accepts. Both lean toward a caller
 #     that states what it wants over a caller that receives a silent guess.
 #   Each bullet is expanded, with its mechanism, at the variable it applies to.
@@ -77,16 +77,23 @@
 #
 #   Where a comment below reasons about `terraform apply` or `terraform destroy`
 #   it is describing what an input means at those points, not reporting on a
-#   provisioned stack. This tree is authored and statically validated --
-#   formatted, validated, planned, linted and policy-scanned; applying it to a
-#   live account is an operator action outside this scope.
+#   provisioned stack. This tree is authored to a foundation state and checked to
+#   the extent that state admits: HCL parse and `terraform fmt -check -recursive
+#   infra/` pass today, and every variable carries a type and a description.
+#   `terraform validate` and `terraform plan` are not runnable until the
+#   composition files land and `terraform init` can populate a provider cache; the
+#   recursive lint and the generated-documentation drift check likewise report
+#   findings until each directory has its main.tf, outputs.tf and README.md. The
+#   per-check state is tabulated in docs/architecture/service-catalog.md under its
+#   deployment boundary. Applying any of it to a live account is an operator action
+#   outside this scope.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Naming and environment
 # -----------------------------------------------------------------------------
 
-# WHY this is the one input with no `default` (Trade-off): a defaulted
+# WHY this is the one input with no `default` -- Trade-offs: a defaulted
 # environment name is the precise mechanism by which a key meant for one
 # environment ends up carrying the other environment's alias -- the caller omits
 # the argument, the module supplies a name regardless, and the mistake stays
@@ -94,7 +101,7 @@
 # Requiring the value costs each root one line and converts that failure into a
 # missing-required-argument error before any key is created.
 #
-# WHY the accepted values are exactly two (Assumption): two environment roots
+# WHY the accepted values are exactly two -- Assumptions: two environment roots
 # exist, infra/envs/dev and infra/envs/prod, and this module is called only from
 # those two. A third value would mint aliases for an environment whose state no
 # root tracks, so the check asserts the shape of the tree rather than a naming
@@ -109,7 +116,7 @@ variable "environment" {
   }
 }
 
-# WHY the characters are checked here rather than trusted (Trade-off): this
+# WHY the characters are checked here rather than trusted -- Trade-offs: this
 # prefix is concatenated into each alias name, and an alias name accepts only
 # alphanumerics, hyphens, underscores and forward slashes. A prefix carrying a
 # space, a dot or an uppercase letter is caught by neither the type system nor
@@ -122,7 +129,7 @@ variable "environment" {
 # appended.
 #
 # WHY the name and the default match infra/bootstrap/variables.tf instead of
-# being chosen here (Assumption): every directory in this tree takes its prefix
+# being chosen here -- Assumptions: every directory in this tree takes its prefix
 # through a variable of this name with this default, which is what lets a root
 # pass one value to every module it calls rather than each module negotiating
 # its own. A `prefix` or `resource_prefix` variant would read as a different
@@ -142,7 +149,7 @@ variable "name_prefix" {
 # Key rotation
 # -----------------------------------------------------------------------------
 
-# WHY this is an input at all when the answer is already settled (Assumption):
+# WHY this is an input at all when the answer is already settled -- Assumptions:
 # rotation-on is the module's design intent, not a caller preference. The target
 # architecture specifies four customer-managed keys WITH rotation, so `true` is
 # the only value either environment root is expected to pass. The variable
@@ -154,7 +161,7 @@ variable "name_prefix" {
 # is exactly the class of finding it raises, so `false` reddens the pipeline.
 # That is the mechanism, not an opinion about how the key ought to be set.
 #
-# WHY no companion rotation-interval input (Alternatives Considered): exposing
+# WHY no companion rotation-interval input -- Alternatives Considered: exposing
 # the interval as well was considered and rejected. Enabling rotation applies
 # the service's own interval, nothing in the target architecture asks for a
 # different one, and an input that is never varied is one more knob a reader
@@ -169,7 +176,7 @@ variable "enable_key_rotation" {
 # Teardown and recovery window
 # -----------------------------------------------------------------------------
 
-# WHY the range is asserted locally (Assumption): the service accepts a window
+# WHY the range is asserted locally -- Assumptions: the service accepts a window
 # of 7 to 30 days and nothing outside it, and the `number` type additionally
 # admits a fractional value the service does not take. Neither is visible to
 # `terraform plan` without this block, so both surface as a service rejection
@@ -177,7 +184,7 @@ variable "enable_key_rotation" {
 # other resources. Checking here converts an apply-time rejection into a
 # plan-time error.
 #
-# WHY the default leans to the floor of that range (Trade-off): the two ends of
+# WHY the default leans to the floor of that range -- Trade-offs: the two ends of
 # the range buy different things. A short window lets `terraform destroy`
 # release the keys sooner, which is what the acceptance criterion of a stack
 # that tears down cleanly asks for, and it stops a torn-down environment from
@@ -191,7 +198,7 @@ variable "enable_key_rotation" {
 # state outright rather than inherit.
 #
 # WHY setting it differently per environment does not fork the topology
-# (Assumption): the two environment roots are required to be identical in shape
+# Assumptions: the two environment roots are required to be identical in shape
 # and to differ only in sizing and retention values. This is a retention value,
 # so infra/envs/dev/terraform.tfvars and infra/envs/prod/terraform.tfvars may
 # legitimately disagree on it while still describing the same stack.
@@ -211,7 +218,7 @@ variable "deletion_window_in_days" {
 # -----------------------------------------------------------------------------
 
 # WHY an empty default here reads as complete rather than as an oversight
-# (Assumption): the baseline tag set is not this module's to supply. Each
+# Assumptions: the baseline tag set is not this module's to supply. Each
 # calling root configures `default_tags` on its own `provider "aws"` block, and
 # the provider merges that map into every taggable resource it creates, so the
 # four keys carry the root's common tags whether or not this variable is passed.
@@ -235,7 +242,7 @@ variable "tags" {
 # are the last four in this file -- because the reasoning is identical across
 # them and repeating it four times would let the copies drift apart.
 #
-# WHY four lists rather than one (Alternatives Considered): a single
+# WHY four lists rather than one -- Alternatives Considered: a single
 # `key_user_role_arns` applied to all four policies is the obvious
 # simplification, and it is rejected. It would grant every trusted principal use
 # of every key, so a service trusted only to read queue payloads could also
@@ -244,7 +251,7 @@ variable "tags" {
 # Keeping the lists separate confines a trust entry added to the wrong list to a
 # single data class instead of letting it reach all four.
 #
-# WHY each defaults to empty (Assumption): the principals these lists name are
+# WHY each defaults to empty -- Assumptions: the principals these lists name are
 # the ECS task roles, and those roles are created by the `ecs-service` module --
 # which itself consumes this module's key ARNs. Requiring a non-empty list would
 # therefore make the grant a precondition of the key that the grant depends on.
@@ -254,16 +261,17 @@ variable "tags" {
 # exist. An empty default that looks like an oversight is worse than none, so it
 # is recorded here as deliberate.
 #
-# WHY no default may ever carry an example value (Alternatives Considered,
-# Trade-off): seeding one of these defaults with a specimen ARN, so a reader can
-# see the shape the input expects, is the alternative and it is refused. An ARN
-# embeds an AWS account identifier, and no account identifier belongs in this
-# repository -- the project's no-secrets-in-source constraint admits no
-# exception. These four lists are inputs the caller supplies from its own state,
-# while the key ARNs this module produces travel the other way, as outputs. The
-# trade accepted is that the expected shape is conveyed in prose, by the `type`
-# and the description, instead of by a specimen value; the empty defaults are
-# therefore load-bearing rather than placeholders awaiting one.
+# WHY no default may ever carry an example value.
+# Alternatives Considered: seeding one of these defaults with a specimen ARN, so
+# that a reader can see the shape the input expects, is the alternative and it is
+# refused. An ARN embeds an AWS account identifier, and no account identifier
+# belongs in this repository -- the project's no-secrets-in-source constraint
+# admits no exception. These four lists are inputs the caller supplies from its
+# own state, while the key ARNs this module produces travel the other way, as
+# outputs.
+# Trade-offs: the expected shape is therefore conveyed in prose, by the `type`
+# and the description, instead of by a specimen value. The empty defaults are
+# load-bearing rather than placeholders awaiting one.
 
 variable "aurora_key_user_role_arns" {
   description = "IAM role ARNs the Aurora key's policy grants cryptographic use of that key to -- the principals that read or write the encrypted database cluster and its automated backups; empty by default, since those roles are created by the module that consumes this key's ARN."

@@ -1,6 +1,24 @@
 /**
  * JPA keyed operations plus exactly two keyset browse queries. No offset paging.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>This package holds the Testcontainers-backed integration test for the auth bounded context's
  * persistence layer. It exercises the main-tree {@code com.carddemo.auth.repository.UserRepository}
  * and the {@code com.carddemo.auth.domain.User} entity against a real PostgreSQL container, and
@@ -155,7 +173,8 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Exactly two {@code .java} files: {@code UserRepositoryIT.java}, which holds the integration
+ * <p>Target contract -- exactly two {@code .java} files: {@code UserRepositoryIT.java},
+ * which holds the integration
  * test described above, and this descriptor. There is deliberately no abstract base class, no suite
  * aggregator and no separate fixture builder, because a package containing one test class needs none
  * of them; introducing a base class for a single subclass would spread one test's setup across two

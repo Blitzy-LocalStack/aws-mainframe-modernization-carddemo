@@ -2,6 +2,25 @@
  * Batch bounded context of the CardDemo mainframe-to-AWS migration: the Spring
  * Batch re-expression of the nightly z/OS batch pipeline.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and one
+ * subpackage, {@code job}, which itself holds only its own charter. A type or test named below that
+ * has no file yet is therefore <b>planned</b>, not missing, and a count below is a target total
+ * rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> This package and its seven subpackages own the migrated
  * form of the batch work that ran under JCL and JES2 against VSAM: the
  * daily-transaction preflight, transaction posting, interest accrual, the
@@ -12,14 +31,27 @@
  * deliberately. The platform underneath it changed; the observable behaviour
  * on top of it did not.</p>
  *
- * <p><b>This module is argument-driven, not request-driven.</b> A job here is
- * started by an AWS Step Functions state that runs an ECS Fargate task through
- * the synchronous run-task integration, and the state's container overrides
- * carry the job token and the business date as process arguments. There is no
- * business HTTP surface at all: no controller, no published interface
- * contract, and no route by which anything outside that state machine can
- * start work. The one endpoint the container serves is the actuator health
- * probe that the image's own health check reads.</p>
+ * <p><b>This module is argument-driven, not request-driven, and it is not a
+ * server at all.</b> A job here is started by an AWS Step Functions state that
+ * runs an ECS Fargate task through the synchronous run-task integration, and
+ * the state's container overrides carry the job token and the business date as
+ * process arguments. There is no HTTP surface of any kind: no controller, no
+ * published interface contract, no route by which anything outside that state
+ * machine can start work, and <em>no listening socket</em>. The task runs to
+ * completion, the JVM exits, and the invoking state reads the process exit
+ * status described under <em>The exit-status contract</em> below.</p>
+ *
+ * <p><strong>Assumptions:</strong> the absence of a web stack is the mechanism
+ * as well as the intent, which is why it is stated this early. This is the one
+ * deployable in the reactor whose {@code pom.xml} declares neither
+ * {@code spring-boot-starter-web} nor {@code spring-boot-starter-actuator}. With
+ * no servlet API on the classpath Spring Boot deduces a non-web application by
+ * itself, so no {@code spring.main.web-application-type} property is set and
+ * none is needed. An embedded servlet container would be a non-daemon listener
+ * that keeps the process alive after the final step has finished, so the task
+ * would never reach a terminal state, the synchronous run-task integration would
+ * never return, and the nightly chain would stall on a step that had in fact
+ * completed correctly.</p>
  *
  * <p><b>This is the only module measured directly against the golden-master
  * parity oracle, which raises the bar for everything inside it.</b> The COBOL
@@ -87,8 +119,10 @@
  *       {@code FILLER} and the baseline field-name misspellings. Everything
  *       downstream of a mapper works with clean domain objects.</li>
  *   <li><b>{@code config}</b> -- exactly three classes:
- *       {@code BatchConfig}, {@code DataSourceConfig} and
- *       {@code SqsConfig}.</li>
+ *       {@code BatchConfig}, {@code DataSourceConfig} and {@code SqsConfig}.
+ *       There is deliberately no {@code SecurityConfig}: this module opens no
+ *       listener, so there is no filter chain for one to configure. The reason
+ *       is recorded below under "Boundaries this package does not cross".</li>
  * </ul>
  *
  * <p>Each of those seven carries its own package charter, so this subtree
@@ -253,30 +287,67 @@
  * contract, no {@code OpenApiConfig} and no {@code SecurityConfig}.</b> Of the
  * eight service rows in the migration plan's transformation mapping, this is
  * the single row that omits the published-contract directory, and the module's
- * own {@code pom.xml} matches that by declaring no API documentation starter
- * and neither security starter.</p>
+ * own {@code pom.xml} matches that by declaring no API documentation starter,
+ * no web starter, no actuator and neither security starter. There is also no
+ * route for this module at the managed edge: {@code infra/modules/}
+ * {@code api-gateway-http} creates none and refuses one by validation.</p>
+ *
+ * <p><strong>Assumptions:</strong> the absent {@code SecurityConfig} is not an
+ * unguarded surface, because there is no surface. An authorization filter chain
+ * defends a listener, and this module opens none: with no servlet web
+ * application on the classpath both the security and the resource-server
+ * autoconfigurations stay inactive, so declaring either starter would add an
+ * artifact that installs no filter while leaving a reader convinced something
+ * was being defended. The concern those starters would answer is real and is
+ * answered one level further in. An unauthenticated caller inside the private
+ * application tier reaches an actuator endpoint by opening a socket to a
+ * listening port, and this container has none to open, so the health, info and
+ * metrics data the other eight modules publish has no analogue here that could
+ * be read without a token. The edge reaches the same conclusion from the other
+ * side, which is why the validation cited above refuses a {@code /batch} route
+ * rather than merely omitting one.</p>
+ *
+ * <p><strong>Trade-offs:</strong> an operator endpoint cannot be added here
+ * without first adding the web starter, which would mean reversing the one-shot
+ * lifecycle argument recorded below. That is the intended cost rather than an
+ * oversight: it keeps the single invocation path the state machine's synchronous
+ * run-task call, so there is no second authorization surface to design and no
+ * second argument source that could disagree with the first.</p>
  *
  * <p><strong>Alternatives Considered:</strong> an administrative endpoint that
  * would let an operator trigger a job over HTTP was evaluated and rejected,
  * and {@code services/batch-service/pom.xml} records that rejection alongside
- * the three starters it declines to declare. The only invocation path in the
- * target architecture is the synchronous run-task call from a state machine
- * state, which already passes job selection and the business date as container
- * command arguments. An HTTP trigger would add a second invocation path and,
- * with it, a second authorization surface to design, test and defend, for no
- * operational gain -- and it would give the same job two argument sources that
- * could disagree.</p>
+ * the API documentation starter it declines to declare. The only invocation
+ * path in the target architecture is the synchronous run-task call from a state
+ * machine state, which already passes job selection and the business date as
+ * container command arguments. An HTTP trigger would add a second invocation
+ * path and, with it, a second authorization surface to design, test and
+ * defend, for no operational gain -- and it would give the same job two
+ * argument sources that could disagree.</p>
  *
- * <p><strong>Trade-offs:</strong> the embedded web stack is nevertheless a
- * declared dependency, which looks contradictory until the reason is named. It
- * is present solely so that the actuator health endpoint is reachable over
- * HTTP for the container image's health check to probe inside the task's own
- * network namespace -- the sole purpose
- * {@code services/batch-service/pom.xml} records for it at its lines 205 to
- * 209. The cost accepted is a servlet container running in a process that
- * serves no business traffic; the alternative, a bespoke health mechanism
- * unique to this one module, was rejected because it would diverge from the
- * probe every other service uses.</p>
+ * <p><strong>Alternatives Considered:</strong> keeping the embedded web stack so
+ * that an actuator health endpoint would be reachable over HTTP inside the
+ * task's own network namespace, which is what the seven online services do.
+ * Rejected, and the dependency removed from
+ * {@code services/batch-service/pom.xml} along with the actuator itself. A
+ * servlet container is a non-daemon listener, so it holds the JVM open once the
+ * last step has finished; under {@code ecs:runTask.sync} the invoking state
+ * waits for a terminal task state, so the process outliving its work is not
+ * merely surplus but a stall in the nightly chain. An actuator without a web
+ * server would meanwhile serve nothing over HTTP and sit in the build with no
+ * consumer.</p>
+ *
+ * <p><strong>Trade-offs:</strong> health for this module is therefore the
+ * process exit status and nothing else, which is a genuine divergence from the
+ * shared {@code /actuator/health} convention and is matched on the
+ * infrastructure side rather than left inconsistent: the batch instantiation of
+ * {@code infra/modules/ecs-service} sets {@code attach_load_balancer} and
+ * {@code create_service} to false, so no target group and no long-running
+ * service exists to probe, and neither {@code infra/modules/alb} nor
+ * {@code infra/modules/api-gateway-http} publishes a batch route. What is given
+ * up is a periodic liveness signal during a run; what that signal would have
+ * reported is only that the interpreter was still up, including while a load was
+ * failing, so its absence removes a guarantee this container never provided.</p>
  *
  * <p><b>No ignore files.</b> Neither a {@code .gitignore} nor a
  * {@code .dockerignore} belongs in this module or anywhere in this tree;
@@ -337,13 +408,30 @@
  * divides and it carries no {@code ROUNDED} phrase.</p>
  *
  * <p><strong>Assumptions:</strong> the Java therefore forms the product at
- * full precision and only then divides, with an explicit scale and
- * {@code RoundingMode.DOWN} to match the absent {@code ROUNDED} phrase, which
- * truncates. The arithmetic order is part of the behavioural contract and not
- * an implementation detail: dividing first and multiplying second yields a
- * different final cent on many balances, and the golden-master comparison
- * would report it as a parity failure -- correctly, but only after the
- * fact.</p>
+ * full precision and only then divides, applying scale 2 with
+ * {@code RoundingMode.HALF_UP} at that single point. The arithmetic order is
+ * part of the behavioural contract and not an implementation detail: dividing
+ * first and multiplying second yields a different final cent on many balances,
+ * and the golden-master comparison would report it as a parity failure --
+ * correctly, but only after the fact.</p>
+ *
+ * <p><strong>Assumptions:</strong> the rounding mode is pinned by the migration
+ * plan's transformation rule T3, which fixes Java money at scale 2 with
+ * {@code RoundingMode.HALF_UP} and admits no exception, and it is stated for
+ * this accrual specifically in
+ * {@code docs/architecture/data-model-and-schema-mapping.md}. The absent
+ * {@code ROUNDED} phrase means the reference statement discards its surplus
+ * digits instead, so the two differ by one cent on a quotient that lands
+ * exactly on a half cent: a category balance of {@code 1000.80} at a rate of
+ * {@code 2.50} gives {@code 2.0850} exactly, where this module returns
+ * {@code 2.09}. That is a behavioural divergence rather than a difference of
+ * expression, so it is registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md} with every other
+ * intentional divergence. Assumptions: a single mode across the whole money
+ * path is what makes it checkable; a second mode for this one job would put an
+ * undocumented exception inside the module least able to afford one, since a
+ * posting or accrual figure that is wrong in the cents still looks
+ * plausible.</p>
  *
  * <p><b>The business date is a job parameter, never a wall-clock read.</b>
  * {@code app/jcl/INTCALC.jcl:22} injects {@code PARM='2022071800'}, and the
@@ -484,8 +572,7 @@
  * mistaken the oracle's honest accounting of an immutable baseline defect for
  * damage.</p>
  *
- * <p><b>Divergence D-3: the final-account interest flush, recorded
- * in-repository as finding MA-22.</b> The read paragraph
+ * <p><b>Divergence D-3: the final-account interest flush.</b> The read paragraph
  * {@code 1000-TCATBALF-GET-NEXT} spans {@code app/cbl/CBACT04C.cbl:325-348},
  * and on end of file it does exactly one thing --
  * {@code MOVE 'Y' TO END-OF-FILE} at line 340 -- and never performs
@@ -495,8 +582,8 @@
  * {@code ELSE PERFORM 1050-UPDATE-ACCOUNT} at lines 219 to 220 is unreachable.
  * The accrued interest of the last account in the file is consequently never
  * written back. The house fixture document states this independently:
- * {@code tests/fixtures/interest/happy_path/README.md:9} names finding MA-22,
- * lines 93 to 97 identify the trailing branch as dead code and state that the
+ * {@code tests/fixtures/interest/happy_path/README.md:9} records this
+ * divergence, lines 93 to 97 identify the trailing branch as dead code and state that the
  * last account is never written back, and lines 221 to 222 record the measured
  * outcome -- the final account is not flushed, it remains at its opening
  * figure with its cycle fields unchanged -- describing the behaviour as
@@ -604,8 +691,8 @@
  * {@code '2022071800'}, while committed golden fixtures exercise the ISO form
  * as well. A job here passes the token through as received. Reformatting it
  * into one canonical layout would change the deterministic transaction
- * identifiers derived from it and break the golden comparison on scenarios
- * that pass today.</p>
+ * identifiers derived from it and break the golden comparison on the committed
+ * scenarios, which exercise both accepted forms of the token.</p>
  *
  * <h2>Authoring notes</h2>
  *

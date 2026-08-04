@@ -4,6 +4,24 @@
  * carries validation failures inside it, and the structured equivalent of the
  * baseline abend data block.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> Three questions have exactly one answer each across all
  * eight bounded contexts, and this package is where those three answers live.
  * What does a failed request look like on the wire? What does a field-level
@@ -26,18 +44,20 @@
  * Exceptions or errors -- exactly one applies to this compilation unit, and the
  * paragraph above discharges it.
  *
- * <h2>What this package holds</h2>
+ * <h2>What this package is to hold</h2>
  *
  * <pre>
- * file                          holds
- * package-info.java             this charter
- * ApiError.java                 the problem shape, with the per-field array
- * GlobalExceptionHandler.java   the one advice that renders every failure
- * AbendDetail.java              the structured abend data equivalent
+ * file                          holds                                          landed
+ * package-info.java             this charter                                      yes
+ * ApiError.java                 the problem shape, with the per-field array        no
+ * GlobalExceptionHandler.java   the one advice that renders every failure          no
+ * AbendDetail.java              the structured abend data equivalent               no
  * </pre>
  *
  * <p>Three production classes and one charter, four compilation units, and the
- * set is closed. There is no fourth production class here and none is to be
+ * set is closed. The landed column is the state at the checkpoint that authored
+ * this charter; the three production classes are authored at later indexes of the
+ * same plan. There is no fourth production class here and none is to be
  * added: anything that would have been a fourth top-level type is a nested type
  * inside one of the three instead. The per-field entry nests inside
  * {@code ApiError}, beside the array that holds it, and any exception type this
@@ -154,21 +174,19 @@
  * it is not a fifth message-width regime and is recorded here only because the
  * string that carries it is so easily mistaken for the fifty-character one.
  *
- * <p>Refactoring Rationale: the abend fields of {@code app/cpy/CSMSG02Y.cpy}
- * occupy lines 21 to 29. An earlier citation in circulation places them at
- * lines 45 to 53, and that citation cannot be right: the file is 35 lines long,
- * so the range it names does not exist. The extent recorded here was read from
- * the file. Line 21 opens {@code 01 ABEND-DATA.}; then
+ * <p>Assumptions: the abend fields of {@code app/cpy/CSMSG02Y.cpy} occupy
+ * <strong>lines 21 to 29</strong> of a <strong>35-line</strong> file, and the
+ * extent is stated with its full arithmetic because that arithmetic is what
+ * makes it verifiable. Line 21 opens {@code 01 ABEND-DATA.}; then
  * {@code ABEND-CODE PIC X(4)} at line 22 with its {@code VALUE SPACES} at line
  * 23, {@code ABEND-CULPRIT PIC X(8)} at lines 24 and 25,
  * {@code ABEND-REASON PIC X(50)} at lines 26 and 27, and
  * {@code ABEND-MSG PIC X(72)} at lines 28 and 29. Four components, two lines
  * each, which is precisely why eight declarations occupy nine lines from the
  * group item. The four sum to 134 bytes, and all four are initialised to
- * blanks. The stale range is recorded rather than quietly replaced because the
- * arithmetic is what settles it, and a reader who meets the old citation
- * elsewhere needs to know it was checked and found impossible rather than
- * merely disagreed with.
+ * blanks. Because the file is 35 lines long, any citation placing this block
+ * beyond line 35 names a range that does not exist and is refuted by the file
+ * itself; the line numbers above are the ones read from it.
  *
  * <p>Assumptions: that same copybook announces itself as a different file. Its
  * line 2 reads {@code 000800* CABENDD.CPY}, which is not the name the file is
@@ -519,7 +537,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>Assumptions: the shared kernel holds 17 production classes and 9 package
+ * <p>Assumptions: the shared kernel's target inventory is 17 production classes and 9 package
  * charter files, for 26 compilation units in total. This package contributes 3
  * of those production classes and 1 of those charters, so the directory holds
  * 3 + 1 = 4 compilation units when complete. The arithmetic is recorded so that
@@ -722,16 +740,17 @@
  * <p>Assumptions: the labelled sentences throughout this file use the four
  * category names in the plural, unparenthesised form the Explainability rule
  * itself uses at its lines 31 to 34, with the trailing colon retained and no
- * emphasis markers. A reader who searches the wider repository meets the
- * singular form more often, and inside comments meets a parenthesised singular
- * most often of all, so the form here could be mistaken for a departure from
- * house style. It is not. The rule's line 43 makes its own wording the sentence
- * this tree is audited against, and forms are never mixed inside one file: this
- * Java tree uses the plural labels exclusively, while the shell, infrastructure
- * and COBOL-adjacent artifacts keep the singular in-file forms they were
- * authored with. The rule's inline twin-comment idiom has no application here,
- * because a charter has one declaration and no statements to annotate; the
- * labelled sentence is its in-Javadoc equivalent.
+ * emphasis markers. That spelling is the only accepted one and it is mandatory
+ * in every language and every file of the migration trees, shell,
+ * infrastructure and markup artifacts included. The rule's line 43 makes its own
+ * wording the sentence this tree is audited against, and a singular, bracketed,
+ * heading-style or dash-terminated variant is not an alternative spelling of a
+ * label: it is a label that a fixed-string search for the category will not
+ * find. {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full statement
+ * of the convention and enumerates the rejected shapes. The rule's inline
+ * twin-comment idiom has no application here, because a charter has one
+ * declaration and no statements to annotate; the labelled sentence is its
+ * in-Javadoc equivalent.
  *
  * <p>Assumptions: two identifier namespaces collide by number and are kept
  * textually distinct throughout. The single user-specified rule is
@@ -747,11 +766,11 @@
  * <p>Assumptions: every citation in this charter names a file and a line, a
  * declared width or a measured byte count, because the rule's line 41 forbids a
  * vague rationale and a labelled sentence with nothing to open would be one.
- * Where a figure here disagrees with a figure in circulation upstream -- the
- * extent of the abend block, and the length of the conflict message -- the
- * figure recorded is the one read or measured from the file, and the
- * disagreement is stated in the paragraph concerned so that a later reader can
- * re-derive it rather than choose between two unsourced numbers.
+ * Every figure recorded here is the one read or measured directly from the cited
+ * file, and each is stated together with the citation and the arithmetic that
+ * produces it -- the extent of the abend block and the length of the conflict
+ * message among them -- so that a later reader re-derives the figure from the
+ * source rather than choosing between two unsourced numbers.
  *
  * <p>Assumptions: nothing beneath {@code app} is altered by this migration,
  * this package included. The copybooks and programs cited throughout are

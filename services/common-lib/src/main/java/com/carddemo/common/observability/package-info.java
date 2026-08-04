@@ -1,6 +1,24 @@
 /**
  * Owns the Micrometer common tag set that every migrated CardDemo service attaches to every meter.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> A common tag is a dimension the registry applies to each meter it publishes,
  * without the emitting code naming it at the call site. This package declares exactly three of them
  * -- {@code service}, {@code environment} and {@code version} -- and nothing else. Those three are
@@ -177,19 +195,23 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>This package holds exactly one production class, {@code MetricsConfig}, which contributes the
- * three tags named above to the meter registry. With this descriptor beside it the directory holds
- * exactly two {@code .java} files and no subdirectory. Across {@code com.carddemo.common} as a whole
- * the production classes number seventeen, distributed as two in {@code money}, five in
+ * <p>This package's target inventory is exactly one production class,
+ * {@code MetricsConfig}, which contributes the three tags named above to the meter
+ * registry; with this descriptor beside it the directory is to hold exactly two
+ * {@code .java} files and no subdirectory. That class is authored at a later index of
+ * the same plan, so at this checkpoint the directory holds this descriptor alone.
+ * Across {@code com.carddemo.common} as a whole the target production classes number seventeen,
+ * distributed as two in {@code money}, five in
  * {@code codec}, three in {@code error}, two in {@code web}, one in {@code security}, one here in
  * {@code observability}, one in {@code time} and two in {@code validation}, which is
  * 2 + 5 + 3 + 2 + 1 + 1 + 1 + 2 = 17. Adding the nine package descriptors, one for the package root
  * and one for each of its eight subpackages, gives twenty-six {@code .java} files in total.</p>
  *
  * <p>Assumptions: that canon is arithmetic, and it is restated per package on purpose so that a
- * class which is missing stays distinguishable from a class that was never planned. An earlier draft
- * of the migration plan carried a higher production-class figure; it is superseded, and seventeen,
- * nine and twenty-six are the figures to propagate. Note also that no package descriptor exists at
+ * class which is missing stays distinguishable from a class that was never planned. The
+ * authoritative figures are <strong>seventeen production classes, nine package descriptors and
+ * twenty-six compilation units</strong>; a production-class figure that does not reproduce the sum
+ * above is wrong on its face. Note also that no package descriptor exists at
  * {@code com} or at {@code com/carddemo}: the canon counts nine, and the Checkstyle module that
  * requires a descriptor fires only for a directory holding an audited source file, which neither of
  * those two directories does.</p>

@@ -4,6 +4,24 @@
  * data business rule in the module, and it is the only layer in the module
  * that holds one.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>Purpose. Each significant paragraph of the baseline COBOL programs
  * named below becomes one named method here, so that the register at
  * {@code docs/architecture/cobol-to-service-traceability.md} can cite
@@ -17,11 +35,11 @@
  * {@code com.carddemo.reference.dto} and
  * {@code com.carddemo.reference.mapper}, and on the
  * {@code com.carddemo.common.*} packages published by the
- * {@code common-lib} module. They are consumed by
- * {@code com.carddemo.reference.api}, which is not yet authored, and in the
- * case of {@code DateConversionMessageListener} by that class's own SQS
- * entry point. Nothing here reads a request or writes a response, and
- * nothing here calls back into a controller.
+ * {@code common-lib} module. Their consumers are
+ * {@code com.carddemo.reference.api} and, in the case of
+ * {@code DateConversionMessageListener}, that class's own SQS entry point.
+ * The dependency runs one way only: nothing here reads a request or writes a
+ * response, and nothing here calls back into a controller.
  *
  * <p>No class in this package may import another service module's types.
  * The only intra-reactor Maven dependency {@code reference-service}

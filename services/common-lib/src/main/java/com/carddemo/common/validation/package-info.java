@@ -2,6 +2,24 @@
  * Owns the date edit rules and the three-state field validation flag triad that
  * together produce every per-field error the migrated CardDemo services report.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> This package is the shared-kernel home for two contracts
  * that the reference baseline keeps in separate files and that every bounded
  * context has to apply identically. The first is the date edit algorithm: a
@@ -250,7 +268,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds 17 production classes and 9 package charter files,
+ * <p>The shared kernel's target inventory is 17 production classes and 9 package charter files,
  * for 26 compilation units in total. This package contributes 2 of those
  * production classes and 1 of those charters. The arithmetic is recorded so
  * that a later reader can tell a class that is missing from one that was never
@@ -266,11 +284,11 @@
  * charters is 26. All three paths agree, and this file is one of the nine
  * charters.
  *
- * <p>Assumptions: a figure of 18 production classes appears in earlier drafts
- * of the migration plan. It is superseded and must not be propagated. Stating
- * the total beside a breakdown that re-derives it is what allowed the stale
- * figure to be caught at all, which is why both are kept here instead of the
- * total alone.
+ * <p>Assumptions: the authoritative totals are <strong>17 production classes and
+ * 26 compilation units, 9 of them charters</strong>. The total is always stated
+ * beside a breakdown that re-derives it, which is why both are kept here instead
+ * of the total alone: a figure that does not reproduce all three sums above is
+ * rejected on sight rather than adopted.
  *
  * <h2>The documentation scope boundary</h2>
  *
@@ -334,16 +352,17 @@
  * the documentation gate's charset, so ASCII is a strict subset of what is
  * configured and nothing is lost mechanically.
  *
- * <p>Assumptions: the four justification labels used above -- Alternatives
- * Considered, Refactoring Rationale, Assumptions and Trade-offs -- are taken
- * from lines 31 to 34 of the Explainability rule, and are emitted in the
- * plural, unparenthesised form that rule itself uses, because its line 43 makes
- * that wording the sentence this tree is audited against. They are deliberately
- * not copied from the house guide, which renames two of the four docstring
- * elements and writes one of the labels with a non-breaking hyphen. Forms are
- * never mixed inside a single file: this Java tree uses the plural labels
- * exclusively, while the repository's shell, infrastructure and markup
- * artifacts keep the singular in-file forms they were authored with.
+ * <p>Assumptions: the four justification labels used above -- {@code Alternatives
+ * Considered:}, {@code Refactoring Rationale:}, {@code Assumptions:} and
+ * {@code Trade-offs:} -- are taken from lines 31 to 34 of the Explainability
+ * rule, and are emitted in the plural, unparenthesised, colon-terminated form
+ * that rule itself uses, because its line 43 makes that wording the sentence
+ * this tree is audited against. That spelling is the only accepted one and it is
+ * mandatory in every language and every file of the migration trees, shell,
+ * infrastructure and markup artifacts included. The labels are deliberately not
+ * copied from the house guide, which renames two of the four docstring elements
+ * and writes one of the labels with a non-breaking hyphen -- a form a
+ * fixed-string search for the label would miss.
  *
  * <p>Trade-offs: this file holds one Javadoc block and one package declaration
  * and nothing else -- no type, no annotation, no import and no line comment.

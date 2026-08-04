@@ -1,227 +1,298 @@
 # =============================================================================
-# data-migration/requirements.txt  --  CardDemo ETL Python toolchain
+# data-migration/requirements.txt  --  CardDemo ETL RUNTIME closure (hash-locked)
 # =============================================================================
 #
 # Purpose:
-#   Pinned dependency closure for the `carddemo_migration` ETL package, the
-#   component that carries CardDemo's mainframe data into the migrated stack.
-#   It decodes the eleven fixed-width record layouts declared by the COBOL
-#   copybooks (USRSEC 80, ACCTDATA 300, CARDDATA 150, CUSTDATA 500,
-#   CARDXREF 50, DALYTRAN 350, TRANSACT 350, DISCGRP 50, TRANCATG 60,
-#   TRANTYPE 60 and TCATBALF 50 bytes per record), bulk-loads each record set
-#   into its owning Aurora PostgreSQL schema, stages the ten
-#   generation-dataset families into versioned S3, and then verifies the load
-#   three independent ways: row counts per dataset, record checksums, and
-#   money-total parity against the source files.
+#   The hash-locked transitive closure of everything `carddemo_migration` imports
+#   WHEN IT RUNS, and nothing else. This is the set installed into the container
+#   image the batch orchestrator invokes: nine distributions, each pinned to one
+#   version and verified against the sha256 of every artifact PyPI publishes for
+#   that version.
 #
-#   This is a pin list of the DIRECT dependency set, not a hash-locked
-#   transitive closure. See "No artifact digests" under WHY below, where that
-#   difference is stated as a deliberate choice rather than an omission.
+#   The ETL decodes the eleven fixed-width record layouts declared by the COBOL
+#   copybooks (USRSEC 80, ACCTDATA 300, CARDDATA 150, CUSTDATA 500, CARDXREF 50,
+#   DALYTRAN 350, TRANSACT 350, DISCGRP 50, TRANCATG 60, TRANTYPE 60 and
+#   TCATBALF 50 bytes per record), bulk-loads each record set into its owning
+#   Aurora PostgreSQL schema, stages the ten generation-dataset families into
+#   versioned S3, and then verifies the load three independent ways: row counts
+#   per dataset, record checksums, and money-total parity against the source
+#   files.
+#
+# The three manifests, and why this tree has three rather than one:
+#   requirements-build.txt .. the PEP 517 build backend. Installed into a
+#                             throwaway environment that builds the wheel and is
+#                             then discarded, so no build tooling reaches the
+#                             shipped image.
+#   requirements.txt ....... THIS FILE. The runtime closure, and the only set
+#                            installed into the environment the image ships.
+#   requirements-dev.txt ... this file plus the lint and test tooling. Installed
+#                            by continuous integration and by a developer, never
+#                            by the image.
+#   Each file is independently hash-complete, so any one of them can be installed
+#   under pip hash-checking mode on its own.
 #
 # Reference platform:
-#   CPython 3.13 on Linux x86_64. Two interpreters matter here and they are
-#   NOT the same build: the ETL container image is python:3.13.14-slim-trixie,
-#   while the existing COBOL test suite was validated on CPython 3.13.7
-#   (tests/README.md, section 3 Prerequisites). Neither number is adjusted to
-#   match the other, because each is correct for its own context. The parity
-#   this file claims is therefore at the 3.13 MINOR series level only: every
-#   pin below is compatible across that series. Do not read it as a claim that
-#   the two interpreters are identical at the patch level, and do not "fix"
-#   either version to make them agree.
+#   CPython 3.13 on Linux. Two interpreters matter here and they are NOT the same
+#   build: the ETL container image is python:3.13.14-slim-trixie, pinned by
+#   DIGEST in data-migration/Dockerfile, while the existing COBOL test suite was
+#   validated on CPython 3.13.7 (tests/README.md, section 3 Prerequisites).
+#   Neither number is adjusted to match the other, because each is correct for
+#   its own context. The parity this file claims is therefore at the 3.13 MINOR
+#   series level only. Do not read it as a claim that the two interpreters are
+#   identical at the patch level, and do not "fix" either version to make them
+#   agree.
+#
+#   Every distribution below is pure Python and publishes a single `py3-none-any`
+#   wheel, so this closure is platform-independent and the hash set below is
+#   complete for every platform. That is a property of the chosen set rather than
+#   a coincidence, and it is why psycopg is pinned PLAIN rather than as the
+#   `psycopg[binary]` extra -- see its own note.
 #
 # Virtual environment:
-#   Install into the repository-root .venv the existing suite already uses, so
-#   the ETL and the harness that validates it share one interpreter:
+#   Install into the repository-root .venv the existing suite already uses, so the
+#   ETL and the harness that validates it share one interpreter:
 #       source .venv/bin/activate
 #   A current system Python is PEP 668 externally managed and refuses a direct
-#   install, which is why an environment is required rather than advisable. If
-#   the root .venv is absent, it is created without the bundled pip seed and
-#   pip is then bootstrapped into it; tests/requirements-test.txt documents
-#   that recovery procedure in full and remains its authority:
+#   install, which is why an environment is required rather than advisable. If the
+#   root .venv is absent, it is created without the bundled pip seed and pip is
+#   then bootstrapped into it; tests/requirements-test.txt documents that recovery
+#   procedure in full and remains its authority:
 #       python3 -m venv .venv --without-pip
 #
 # Installing:
-#       pip install -r data-migration/requirements.txt
+#       pip install --require-hashes -r data-migration/requirements.txt
+#   The flag is not decoration. pip enters hash-checking mode on its own as soon
+#   as ANY requirement carries a hash, so omitting it happens to behave the same
+#   today; passing it explicitly is what makes the intent auditable in the command
+#   a reader sees, and what turns a future unhashed addition into an immediate
+#   error rather than a silent downgrade of the whole file to version-only
+#   pinning.
 #
-# What consumes this file (a change here changes all three):
-#   - data-migration/Dockerfile   -- its dependency-install layer
-#   - data-migration/README.md    -- the documented developer setup
-#   - MIGRATION_README.md         -- the Build section's published command
+# What consumes this file (a change here changes all of these):
+#   - data-migration/requirements-dev.txt -- includes this file
+#   - data-migration/Dockerfile ........... its runtime dependency layer
+#   - data-migration/pyproject.toml ....... its `dependencies` floors mirror
+#                                           these versions exactly
+#   - data-migration/README.md ............ the documented developer setup
+#   - MIGRATION_README.md ................. the Build section published command
 #
 # WHY (non-obvious design decisions):
 #
-#   Exact pins, with no version ranges anywhere in this file
-#     Trade-offs: every entry is an exact-equality pin, so this closure never
-#     picks up a patch release on its own. The accepted cost is that bumps
-#     become manual and land in review. That cost is worth paying for the
-#     reason tests/requirements-test.txt gives for its own pins -- a floating
-#     dependency "could silently break the byte-deterministic golden
-#     comparisons" -- and this tree makes the risk concrete rather than
-#     theoretical. The ETL's verification step compares loaded data against
-#     the COBOL seed files by record checksum and by money total, so a change
-#     to decimal handling or to a codec, arriving on its own, would present as
-#     a data-parity failure whose actual cause is a dependency rather than the
-#     data. Pinning moves that class of surprise out of the run and into a
-#     reviewed commit.
+#   Every artifact is hash-locked, and the transitive closure is complete
+#     Refactoring Rationale: this file previously listed the DIRECT dependency set
+#     with exact versions and no digests, and argued that as a deliberate choice.
+#     Two consequences made it the wrong one. First, "the same seven
+#     distributions at the same seven versions on every install" was not what it
+#     delivered: boto3 alone pulls jmespath, python-dateutil, s3transfer, six and
+#     urllib3, none of which were named, so the resolver was free to move five
+#     unlisted distributions between two installs of an identically pinned
+#     manifest -- and urllib3 and s3transfer are the two that carry every byte of
+#     a staged dataset generation to S3. Second, with no digest an exact version
+#     pin authenticates nothing: it names a version, PyPI names an artifact, and a
+#     compromised index or a hijacked maintainer account can answer that name with
+#     different bytes. The previous note was right that a fabricated hash would be
+#     worse than none; the fix is not to omit hashes but to RESOLVE them, which is
+#     what has now been done -- read from the PyPI metadata API for each pinned
+#     version, including the sdist alongside the wheel so an installer that
+#     legitimately prefers a source distribution still verifies.
+#     Trade-offs: an upgrade now requires re-resolving hashes rather than editing
+#     one number, and a distribution that yanks and re-uploads an artifact breaks
+#     the install until the hash is refreshed. Both are accepted: they are the
+#     cost of the install failing loudly when the bytes are not the reviewed
+#     bytes, which is the entire point.
 #
-#   No artifact digests on any entry
-#     Trade-offs: digest locking is the stronger option, and the sibling
-#     manifest tests/requirements-test.txt uses it -- installed under pip's
-#     hash-checking mode, the option that forces every requirement to be both
-#     pinned and hashed and rejects any artifact whose digest does not match.
-#     It is deliberately NOT partially imitated here. Carrying digests in this
-#     file would mean transcribing them rather than resolving and verifying
-#     each artifact on this platform, and the reference manifest states the
-#     doctrine plainly: a fabricated or partial hash is worse than an honest
-#     lock, because it presents as supply-chain verification while supplying
-#     none. What exact-equality pins still guarantee without digests is
-#     version reproducibility -- the same seven distributions at the same
-#     seven versions on every install. What is knowingly given up is
-#     artifact-integrity verification. Should digests be resolved and verified
-#     on this platform, adding them changes no version below.
+#   Development tooling is NOT in this file
+#     Refactoring Rationale: a linter, a test runner and a coverage tool were
+#     previously grouped in a comment-delimited block at the bottom of this same
+#     file, and the container build installed the whole manifest -- so the shipped
+#     image carried all three. The argument for that was that selecting one group
+#     would need a second manifest the plan did not define. A second manifest is
+#     the correct answer to that, and it now exists: requirements-dev.txt includes
+#     this file and adds the tooling, so one file still governs the versions while
+#     the image installs only what it runs. What the previous arrangement cost is
+#     not size but attack surface -- three distributions present in a production
+#     image that nothing in a production run imports, each one code a compromised
+#     process could reach for, and each one an entry a vulnerability scanner
+#     reports against an image that never uses it.
 #
 #   Oracle-matched versions for the four reused distributions
-#     Alternatives Considered: boto3, botocore, pytest and coverage are pinned
-#     to the exact versions the existing COBOL suite already locks, not to
-#     newer ones. A newer set was the obvious alternative and was rejected,
-#     because that suite is this migration's functional-parity oracle and
-#     AAP 0.6.1.6 requires that zero version drift be introduced into it.
-#     Since the oracle cannot move, the ETL matches it. The payoff is
-#     diagnostic rather than cosmetic: the ETL and the harness that validates
-#     the ETL exercise identical library behaviour, so a discrepancy in
-#     verification output cannot be attributed to a version difference and has
-#     to be investigated as a real one. Each of the four repeats the specific
-#     reasoning at its own pin, because that is where someone bumping it looks.
+#     Alternatives Considered: boto3, botocore, pytest and coverage are pinned to
+#     the exact versions the existing COBOL suite already locks, not to newer
+#     ones. A newer set was the obvious alternative and was rejected, because that
+#     suite is this migration functional-parity oracle and AAP 0.6.1.6 requires
+#     that zero version drift be introduced into it. Since the oracle cannot move,
+#     the ETL matches it. The payoff is diagnostic rather than cosmetic: the ETL
+#     and the harness that validates the ETL exercise identical library behaviour,
+#     so a discrepancy in verification output cannot be attributed to a version
+#     difference and has to be investigated as a real one. Each pin repeats the
+#     specific reasoning at its own entry, because that is where someone bumping
+#     it looks. The two test-only members of that group now live in
+#     requirements-dev.txt and carry the same note there.
 #
-#   Those four versions are duplicated here, not inherited by file include
+#   Those versions are duplicated here, not inherited by file include
 #     Alternatives Considered: the tidy move is to have this file include
-#     tests/requirements-test.txt, so the four shared versions live in exactly
-#     one place instead of two. That was tried and rejected on two independent
-#     grounds. It does not work: the oracle manifest carries digests, and pip
-#     switches into hash-checking mode automatically as soon as any single
-#     requirement has one, so the include turns the three unhashed pins below
-#     into a hard error instead of an install. It would also be wrong even if
-#     it worked, because an include drags the ENTIRE closure behind it -- the
-#     whole test and AWS-emulation set -- into an image that needs none of it,
-#     and it would couple this container's contents to a file the migration is
-#     required to leave untouched. Four duplicated lines, each annotated with
-#     the reference line it mirrors, is the cheaper and more honest coupling.
+#     tests/requirements-test.txt, so the shared versions live in exactly one
+#     place instead of two. Rejected on scope: it drags the ENTIRE oracle closure
+#     behind it -- the whole test and AWS-emulation set -- into an image that needs
+#     none of it, and it would couple this container contents to a file the
+#     migration is required to leave untouched. Note that the original second
+#     objection no longer applies: both manifests are now hash-locked, so an
+#     include would not turn unhashed pins into a hard error. The scope objection
+#     alone is sufficient. Duplicated lines, each annotated with the reference line
+#     it mirrors, is the cheaper and more honest coupling.
 #
 #   Distributions deliberately absent: CLI framework, second linter, plugin
 #     Alternatives Considered: no click and no typer -- cli.py is driven by the
-#     standard library's argparse, which is sufficient for a container the
-#     batch orchestrator invokes non-interactively with fixed arguments, and a
-#     third-party CLI framework is not in the approved set. No mypy, black,
-#     isort, flake8 or pylint -- ruff already owns lint and the docstring gate,
-#     and a second overlapping tool creates two enforcement points for one
-#     obligation, which drift apart and then disagree in review. No pytest-cov
-#     -- coverage is pinned and invoked directly, matching how the existing
-#     suite measures coverage, so there is one way to produce a coverage
-#     number for this tree rather than two that can report differently.
+#     standard library argparse, which is sufficient for a container the batch
+#     orchestrator invokes non-interactively with fixed arguments, and a
+#     third-party CLI framework is not in the approved set. No mypy, black, isort,
+#     flake8 or pylint -- ruff already owns lint and the docstring gate, and a
+#     second overlapping tool creates two enforcement points for one obligation,
+#     which drift apart and then disagree in review. No pytest-cov -- coverage is
+#     pinned and invoked directly, matching how the existing suite measures
+#     coverage, so there is one way to produce a coverage number for this tree
+#     rather than two that can report differently.
 #
 #   Distributions deliberately absent: the AWS-emulation and golden-file layer
 #     Assumptions: localstack, awscli, awscli-local, moto and pytest-golden are
-#     NOT dependencies of this tree. They belong to the existing suite's
-#     optional AWS-emulation layer, which this file neither extends nor
-#     shadows. The ETL's own tests exercise the zoned and packed decimal
-#     codecs, the fixed-width readers, the loaders and the verification
-#     queries; where a test needs an object-store endpoint it reads that
-#     endpoint from configuration, which makes an emulator an environment
-#     concern rather than a pinned dependency. boto3 and botocore are the only
-#     AWS SDK present, by the same reasoning.
+#     NOT dependencies of this tree. They belong to the existing suite optional
+#     AWS-emulation layer, which neither of this tree manifests extends or
+#     shadows. The ETL own tests exercise the zoned and packed decimal codecs, the
+#     fixed-width readers, the loaders and the verification queries; where a test
+#     needs an object-store endpoint it reads that endpoint from configuration,
+#     which makes an emulator an environment concern rather than a pinned
+#     dependency. boto3 and botocore are the only AWS SDK present, by the same
+#     reasoning.
 #
 #   No virtual environment inside this directory
-#     Assumptions: the repository-root .gitignore already ignores .venv, venv
-#     and env, and those patterns are unanchored, so they cover those names at
-#     any depth -- including inside data-migration. That is a safety net, not
-#     a licence to rely on it: create the environment at the repository root as
-#     described above, so the ETL and the COBOL harness share one interpreter
-#     and one installed set instead of two that can disagree about a pin they
-#     are both supposed to hold.
+#     Assumptions: the repository-root .gitignore already ignores .venv, venv and
+#     env, and those patterns are unanchored, so they cover those names at any
+#     depth -- including inside data-migration. That is a safety net, not a licence
+#     to rely on it: create the environment at the repository root as described
+#     above, so the ETL and the COBOL harness share one interpreter and one
+#     installed set instead of two that can disagree about a pin they are both
+#     supposed to hold.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Runtime dependencies -- imported by src/carddemo_migration when the ETL runs,
-# and therefore present in the container image the batch orchestrator invokes.
-# Alphabetical within the block, so the set can be diffed mechanically.
+# DIRECT runtime dependencies -- imported by src/carddemo_migration when the ETL
+# runs. Alphabetical, so the set can be diffed mechanically.
 # -----------------------------------------------------------------------------
 
-# Alternatives Considered: a newer boto3 was evaluated and rejected. This
-# version is the one the parity oracle already locks
-# (tests/requirements-test.txt line 82), and AAP 0.6.1.6 forbids drifting it
-# there, so the ETL adopts it rather than asking the oracle to move. Practical
-# consequence: when the ETL stages a dataset generation to S3 and the harness
-# reads it back, both sides run identical SDK code, so a byte difference in
-# verification output cannot be explained away as an SDK version gap.
-boto3==1.43.50
+# Alternatives Considered: a newer boto3 was evaluated and rejected. This version
+# is the one the parity oracle already locks (tests/requirements-test.txt line
+# 82), and AAP 0.6.1.6 forbids drifting it there, so the ETL adopts it rather
+# than asking the oracle to move. Practical consequence: when the ETL stages a
+# dataset generation to S3 and the harness reads it back, both sides run
+# identical SDK code, so a byte difference in verification output cannot be
+# explained away as an SDK version gap.
+boto3==1.43.50 \
+    --hash=sha256:779eb5cfa8bd1d615f36051465f8182860219eef78b4ab8ca2c666bb56702325 \
+    --hash=sha256:a6865b9cd1d15511f6aad89cef964105acecff2160a3e29ae53c10d9821416af
 
-# Assumptions: botocore is boto3's own transitive dependency, yet it is named
+# Assumptions: botocore is boto3 own transitive dependency, yet it is named
 # explicitly and held at the SAME version because the two are released in
 # lockstep -- left unnamed, the resolver stays free to pair this boto3 with a
 # newer botocore, which is precisely the drift the oracle match is meant to
 # eliminate. Version-matched to tests/requirements-test.txt line 84.
-botocore==1.43.50
+botocore==1.43.50 \
+    --hash=sha256:4a57a1e0dd4a8be855c29183fc0e029c18e9ec84cd4ac172869f3e800f972528 \
+    --hash=sha256:7b07c423c44b1ab3815af103f11fa28ea317e28dda1335718a02ecde371a25e9
 
 # Assumptions: this distribution is imported PURELY for its codec-registration
 # side effect. It exposes nothing the ETL calls, so no symbol from it appears
 # anywhere in src/carddemo_migration, and both a linter and a person tidying
 # unused imports will read it as removable. It is not. What it registers is the
 # wider EBCDIC code-page family around cp037 -- 35 pages, including cp1047 and
-# the euro-updated cp1141 through cp1149 -- which CPython does not ship. Note
-# what this pin is therefore NOT: cp037 itself IS a standard-library codec, so
-# this is not what makes today's thirteen EBCDIC datasets under app/data/EBCDIC
-# decode. It is what lets a dataset in a sibling code page decode through the
-# identical per-field path by configuration alone, with no edit to
+# the euro-updated cp1141 through cp1149 -- which CPython does not ship. Note what
+# this pin is therefore NOT: cp037 itself IS a standard-library codec, so this is
+# not what makes today thirteen EBCDIC datasets under app/data/EBCDIC decode. It
+# is what lets a dataset in a sibling code page decode through the identical
+# per-field path by configuration alone, with no edit to
 # copybook/ebcdic_codec.py. Dropping it breaks nothing visible until the first
-# non-cp037 dataset appears, which is exactly why the reason it exists is
-# recorded here at the pin instead of being left to inference.
-ebcdic==2.0.1
+# non-cp037 dataset appears, which is exactly why the reason it exists is recorded
+# here at the pin instead of being left to inference.
+ebcdic==2.0.1 \
+    --hash=sha256:645034983a6f4837f0e46e4bfe59d67de0b19e7c4294d33beebe74565cdefae6 \
+    --hash=sha256:3a1bedfbeee76cab2d7e4de62409ac015cd7afb25d590fe1546105c32a065cf1
 
-# Alternatives Considered: psycopg2 and psycopg2-binary, the older
-# distribution, were rejected. The Aurora bulk loaders drive server-side COPY
-# through psycopg 3's copy context manager and its pipeline mode, and psycopg2
-# offers neither; its copy_from and copy_expert calls are a different API the
-# loaders would have to be written against instead. The two distributions also
-# install side by side under different import names, so switching by editing
-# this one line would leave the loaders importing a package that is not here.
-# Assumptions: the PLAIN distribution is pinned, not the psycopg[binary]
-# extra. Plain psycopg is pure Python and resolves the libpq client library at
-# RUNTIME through ctypes, so the image layer has to provide libpq itself
-# (package libpq5 on the Debian-slim base pinned for this tree), whereas the
-# binary extra would vendor its own copy of libpq inside the wheel. Plain is
-# chosen because AAP 0.6.1.3 names this distribution exactly, and because on
-# CPython 3.13 for Linux it resolves with no transitive dependencies at all,
-# which keeps the closure minimal and the image layer explicit.
-psycopg==3.3.4
+# Alternatives Considered: psycopg2 and psycopg2-binary, the older distribution,
+# were rejected. The Aurora bulk loaders drive server-side COPY through psycopg 3
+# copy context manager and its pipeline mode, and psycopg2 offers neither; its
+# copy_from and copy_expert calls are a different API the loaders would have to be
+# written against instead. The two distributions also install side by side under
+# different import names, so switching by editing this one line would leave the
+# loaders importing a package that is not here.
+# Assumptions: the PLAIN distribution is pinned, not the psycopg[binary] extra.
+# Plain psycopg is pure Python and resolves the libpq client library at RUNTIME
+# through ctypes, so the image layer has to provide libpq itself (package libpq5
+# on the Debian-slim base pinned for this tree), whereas the binary extra would
+# vendor its own copy of libpq inside the wheel. Plain is chosen because AAP
+# 0.6.1.3 names this distribution exactly, because on CPython 3.13 for Linux it
+# resolves with no transitive dependencies at all, and because a pure-Python wheel
+# is what keeps this whole closure platform-independent and its hash set complete
+# -- the binary extra publishes a different wheel per platform, so the hashes
+# below would then be correct only for the platform they were resolved on.
+psycopg==3.3.4 \
+    --hash=sha256:b6bbc25ccf05c8fad3b061d9db2ef0909a555171b84b07f29458a447253d679a \
+    --hash=sha256:e21207764952cff81b6b8bdacad9a3939f2793367fdac2987b3aac36a651b5bc
 
 # -----------------------------------------------------------------------------
-# Development and test dependencies -- required to lint the ETL and to run
-# data-migration/tests, and NOT required for the ETL itself to execute. A
-# runtime-only image can install the block above alone; CI installs both.
+# TRANSITIVE runtime dependencies -- not imported by this package directly, and
+# named here because a hash-checked install requires the CLOSURE to be complete.
+#
+# WHY : Refactoring Rationale: these five were absent, which is what made this
+#       file own reproducibility claim untrue -- the resolver chose them freshly
+#       on every install. They are pinned to the versions boto3 1.43.50 and
+#       psycopg 3.3.4 resolve to on CPython 3.13, so nothing here CHANGES what
+#       gets installed; what changes is that it is now written down and verified.
+#       Two of them are load-bearing rather than incidental: urllib3 carries every
+#       byte of a staged dataset generation, and s3transfer decides how a large
+#       object is chunked, so an unreviewed move in either is a move in the data
+#       path.
+# WHY : Assumptions: pip resolves these anyway, so listing them cannot pull in
+#       anything new -- an entry that stopped being required would simply go
+#       uninstalled, and one that gained a requirement would fail the install with
+#       the missing name rather than silently satisfying it. That failure is the
+#       desired behaviour: it turns a dependency-graph change into a reviewed edit
+#       of this file.
 # -----------------------------------------------------------------------------
 
-# Alternatives Considered: held at the oracle's coverage version
-# (tests/requirements-test.txt line 99) rather than a newer one, for the
-# zero-drift reason recorded above boto3. Measuring the ETL with the same
-# coverage build the COBOL harness uses keeps one reporting behaviour across
-# both suites instead of two whose numbers have to be reconciled by hand.
-coverage==7.15.2
+# Assumptions: required by botocore, which uses it to evaluate the query
+# expressions embedded in its own service models.
+jmespath==1.1.0 \
+    --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64 \
+    --hash=sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d
 
-# Alternatives Considered: held at the oracle's pytest version
-# (tests/requirements-test.txt line 147). Beyond zero drift, matching the
-# major line matters concretely here: the ETL's tests reuse fixture record
-# vectors derived from the same copybook layouts the COBOL fixtures use, and
-# running those vectors under a different pytest major would apply different
-# collection and fixture semantics to the two suites that share them.
-pytest==9.1.1
+# Assumptions: required by botocore for the timestamp parsing every AWS API
+# response is deserialised through. Named `python-dateutil` as a distribution and
+# imported as `dateutil`, which is why a search for the import name does not find
+# this line.
+python-dateutil==2.9.0.post0 \
+    --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427 \
+    --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3
 
-# Assumptions: ruff is present as the ENFORCEMENT MECHANISM for the project's
-# Explainability rule, not as a formatting preference. This tree's
-# pyproject.toml selects the pydocstyle "D" family under [tool.ruff.lint],
-# which is what turns "every module, class and function carries a docstring"
-# from an intention into a build failure. The coupling is easy to sever by
-# accident and runs in one direction only: removing this pin, or moving it to a
-# release whose "D" rules differ, disables the documentation gate while every
-# other check stays green and the build still passes. Treat this line as part
-# of that gate rather than as tooling that can be swapped freely.
-ruff==0.16.0
+# Assumptions: required by boto3, and is what actually performs a multipart upload
+# or download -- so it governs how the staged dataset generations are chunked and
+# retried. In the data path, not beside it.
+s3transfer==0.19.1 \
+    --hash=sha256:d5fd7005ee39307455ad5f310b5ea67f4b1960d7fed5b3671ee50c249de675de \
+    --hash=sha256:d3d6371dc3f1e5c5427b2b457bcf13bcf87bec334c95aed18642eae61f6926f3
+
+# Assumptions: required by python-dateutil. It is the one entry here whose
+# presence is purely historical -- a Python 2 and 3 compatibility shim on a
+# manifest that requires 3.13 -- and it is pinned rather than argued with, because
+# the alternative is patching a dependency this project does not own.
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
+    --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
+
+# Assumptions: required by botocore, and is the HTTP transport for every AWS API
+# call this package makes, including the Parameter Store and Secrets Manager
+# lookups that resolve the database credential. Version-matched to what botocore
+# 1.43.50 resolves to; botocore constrains this range itself, so a bump here
+# without a matching botocore bump is likely to be rejected rather than merely
+# untested.
+urllib3==2.7.0 \
+    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897 \
+    --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c

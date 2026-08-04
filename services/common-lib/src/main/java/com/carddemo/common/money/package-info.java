@@ -1,6 +1,24 @@
 /**
  * Owns exact fixed-point money and its JSON wire form for every migrated CardDemo service.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> Two production classes live here and nothing else. {@code Money} is the value
  * type that carries a monetary amount in memory and performs arithmetic on it; {@code MoneyModule}
  * is the Jackson module that decides how such an amount crosses an API boundary. Every monetary
@@ -68,50 +86,69 @@
  * search of either file for those type names returns nothing, so the two are consistent by
  * construction rather than by coincidence.</p>
  *
- * <h2>Contract two: two rounding modes, and why they are not one</h2>
+ * <h2>Contract two: one rounding mode, and why it is not two</h2>
  *
- * <p>This package exposes two distinct rounding behaviours, and the distinction is deliberate.
- * General money arithmetic reduces a result to scale 2 with {@code RoundingMode.HALF_UP}. The
- * interest accrual path does not: it forms the product at full precision, divides only then, and
- * reduces the quotient to scale 2 with {@code RoundingMode.DOWN}, which truncates toward zero.</p>
+ * <p>Every reduction of a monetary result to cents in this package uses scale 2 with
+ * {@code RoundingMode.HALF_UP}. There is one mode and there are no exceptions -- not for balances,
+ * not for bill payment, and not for interest accrual. The accrual path differs from the others only
+ * in the <em>order</em> of its operations, described below; it does not differ in its rounding.</p>
  *
- * <p>Assumptions: the interest behaviour is read off the reference program rather than chosen.
- * Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the accrual paragraph, whose statement is
- * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. Two facts about that one
- * statement settle the rounding question between them. First, the receiving field is declared at
- * line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.}, so the
- * result is stored at exactly two decimal places and any further precision has to go somewhere.
- * Second, the statement carries no {@code ROUNDED} phrase -- and neither does any other statement
- * in the program, because a search for that phrase across all 652 lines of the file returns no
- * match at all. A store into a fixed-scale field without that phrase discards the surplus digits
- * rather than rounding them, so the reference behaviour is truncation toward zero and the target
- * contract is {@code RoundingMode.DOWN}.</p>
+ * <p>Assumptions: the single mode is fixed by transformation rule T3 of the migration plan, which
+ * states the money contract as {@code NUMERIC(p,2)} in the database, {@code BigDecimal} at scale 2
+ * with {@code RoundingMode.HALF_UP} in Java, {@code Decimal} in the extract-transform-load code and
+ * a JSON string on the wire; the plan's file-by-file entry for {@code Money} restates it as
+ * "{@code BigDecimal} scale-2 arithmetic with {@code HALF_UP}; multiply-before-divide helper for the
+ * interest formula", which is the same sentence naming both halves and assigning the exception to
+ * the ORDER rather than to the mode. That plan is the frozen contract this migration is measured
+ * against, so it is what the code is aligned to. Every sibling descriptor in this repository and the
+ * illustrative Java example at line 226 of {@code docs/CODE_DOCUMENTATION_STANDARD.md} -- which
+ * applies half-up to a monthly-interest return value specifically -- state the same mode, so the
+ * whole tree now agrees rather than carrying one package that does not.</p>
  *
- * <p>Trade-offs: carrying two modes costs the package a uniform arithmetic surface. A caller has
- * to know which of the two calls it wants, and a reader comparing this descriptor against sibling
- * prose will find the general contract stated on its own. Sibling descriptors in this repository
- * state the money contract as scale 2 with {@code RoundingMode.HALF_UP}, which is correct as the
- * general contract and is what this package implements generally; the illustrative Java example at
- * line 226 of {@code docs/CODE_DOCUMENTATION_STANDARD.md} additionally applies half-up to a
- * monthly-interest return value specifically. For the accrual path this descriptor's contract
- * governs, and the difference is recorded here as correction <b>C-ROUNDING</b> so that a later
- * reader treats it as a resolved divergence rather than as an inconsistency to be reconciled by
- * collapsing the two calls back into one mode. The compromise accepted is a less uniform API in
- * exchange for accrual figures that match the reference program cent for cent.</p>
+ * <p>Refactoring Rationale: an earlier revision of this descriptor required {@code RoundingMode.DOWN}
+ * on the accrual path, derived from the reference program directly, and that derivation is worth
+ * preserving because it is accurate about the baseline and is the reason the divergence has to be
+ * recorded rather than merely dropped. Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the
+ * accrual paragraph, whose statement is
+ * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. The receiving field is
+ * declared at line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.},
+ * so the result is stored at exactly two decimal places and surplus precision has to go somewhere;
+ * and the statement carries no {@code ROUNDED} phrase, nor does any other statement in the program,
+ * because a search for that phrase across all 652 lines returns no match. A store into a
+ * fixed-scale field without that phrase discards the surplus digits rather than rounding them, so
+ * the <em>baseline</em> behaviour is truncation toward zero. The target implements half-up
+ * regardless, because the plan requires it, and the resulting one-cent difference is a documented
+ * behavioural divergence rather than a defect: it is registered as <b>C-ROUNDING</b> in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which is the migration's register of
+ * every intentional divergence, alongside the three baseline defects that are likewise not
+ * reproduced. A divergence recorded there is auditable; a package contract that contradicts the
+ * plan is not, which is the substance of the correction made here.</p>
  *
- * <p>Alternatives Considered: a single half-up mode for both paths was evaluated and rejected, and
- * it is worth recording why the choice is easy to get wrong. On the vectors the reference fixtures
- * actually carry, the two modes agree, so a single mode would pass those comparisons. The
- * happy-path interest fixture supplies a category balance of {@code 1000.00} and a disclosure-group
- * rate of {@code 15.00}; the formula yields {@code 12.5000} exactly, and both modes therefore
- * return {@code 12.50}. At a rate of {@code 2.50} against the same balance the quotient is
- * {@code 2.08333...} and both modes return {@code 2.08}. The two modes part company only where the
- * quotient lands exactly on a half cent, as with a balance of {@code 1000.80} at a rate of
+ * <p>Trade-offs: the accepted cost is precisely one cent, and only on the vectors where a quotient
+ * lands exactly on a half cent. The size of it is worth stating so that nobody mistakes the
+ * divergence for a rounding-mode question still open for debate. On the vectors the reference
+ * fixtures actually carry the two modes agree: the happy-path interest fixture supplies a category
+ * balance of {@code 1000.00} and a disclosure-group rate of {@code 15.00}, the formula yields
+ * {@code 12.5000} exactly and both modes return {@code 12.50}; at a rate of {@code 2.50} against
+ * the same balance the quotient is {@code 2.08333...} and both modes return {@code 2.08}. They part
+ * company only on an exact half cent, as with a balance of {@code 1000.80} at a rate of
  * {@code 2.50}: the quotient is {@code 2.0850} exactly, truncation returns {@code 2.08} and half-up
- * returns {@code 2.09}. Choosing half-up would therefore leave a defect that no existing fixture
- * detects and that a production balance would eventually expose one cent at a time, which is why
- * the mode is pinned to the reference behaviour rather than to the comparison that happens to be
- * available.</p>
+ * returns {@code 2.09}. What is bought with that cent is a single arithmetic surface -- one mode, no
+ * caller having to know which of two reductions applies, and one architecture rule that can be
+ * asserted mechanically instead of a rule with a carve-out that a future caller could apply to the
+ * wrong path.</p>
+ *
+ * <p>Alternatives Considered: keeping {@code RoundingMode.DOWN} for accrual and instead amending the
+ * migration plan to admit it was evaluated and rejected outright. The plan is frozen and is the
+ * agreed contract for this migration, so a package descriptor that overrode it would not resolve the
+ * disagreement -- it would relocate it, leaving the plan, every sibling descriptor and the
+ * documentation standard stating one mode while the shared kernel implemented another, with nothing
+ * to indicate which a reader should believe. Recording the baseline difference in the divergence
+ * register keeps both facts available and gives them one owner. Also considered: exposing both modes
+ * and letting the accrual caller select truncation. Rejected because the choice would then live at
+ * the call site, where the next accrual-adjacent caller would face a decision with no basis for
+ * making it, and because the architecture test could no longer assert a single money rounding
+ * contract at all.</p>
  *
  * <p>Assumptions: the multiply-before-divide order is part of the same contract and is not an
  * implementation detail, per transformation rule T4. The reference statement multiplies the balance
@@ -119,13 +156,25 @@
  * the order and dividing first forces an intermediate result to a scale before the multiplication
  * consumes it: on the balance and rate just given, multiplying first yields {@code 2.0850} while
  * dividing first at an intermediate scale of two yields {@code 2.0750}, a difference of two cents
- * from reordering alone. The order is therefore preserved literally.</p>
+ * from reordering alone, and no rounding mode recovers it. The order is therefore preserved
+ * literally, and the single half-up reduction happens after the division and nowhere else.</p>
  *
  * <h2>Contract three: a JSON string on the wire</h2>
  *
  * <p>{@code MoneyModule} serialises a monetary amount as a JSON string and deserialises it from
  * one. This is the third contract the package owns, and it is the one most often mistaken for
  * fussiness.</p>
+ *
+ * <p>Assumptions: the module is written against the Jackson 3 API, under the {@code tools.jackson}
+ * group, and that generation choice is load-bearing rather than incidental. Spring Boot 4.1 version
+ * manages both Jackson lines but builds its default HTTP message converter from the 3.x mapper, and
+ * a module implementing the 2.x module type is not a module that mapper recognises. Written against
+ * the older generation this class would compile, package and pass every unit test, then fail to be
+ * registered on the converter that actually serialises a response -- and the amount would fall back
+ * to a plain {@code BigDecimal} serialisation, which is a bare JSON number: exactly the outcome the
+ * paragraph below rejects, arrived at silently. {@code services/common-lib/pom.xml} therefore
+ * declares the {@code tools.jackson.core} coordinate, and no module in this tree declares the 2.x
+ * one, so a single mapper generation serves the whole migration.</p>
  *
  * <p>Alternatives Considered: emitting money as a JSON number was evaluated and rejected. A JSON
  * number carries no scale and no exactness guarantee, and the majority of clients parse one into an
@@ -177,18 +226,20 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>This package holds exactly two production classes, {@code Money} and {@code MoneyModule}, and
- * with this descriptor beside them the directory holds exactly three {@code .java} files. There is
- * no fourth file here. Across {@code com.carddemo.common} as a whole the distribution is two
- * production classes in {@code money}, five in {@code codec}, three in {@code error}, two in
- * {@code web}, one in {@code security}, one in {@code observability}, one in {@code time} and two
- * in {@code validation}, the package root contributing none. The two totals that follow are each
- * kept whole on one line so that either can be checked by eye and matched by a search without a
- * line break splitting it:</p>
+ * <p>Target contract: this package is to hold exactly two production classes,
+ * {@code Money} and {@code MoneyModule}, and with this descriptor beside them the directory is to
+ * hold exactly three {@code .java} files. There is no fourth file here and none is to be added.
+ * Both production classes are authored at later indexes of the same plan, so at this checkpoint the
+ * directory holds this descriptor alone. Across {@code com.carddemo.common} as a whole the target
+ * distribution is two production classes in {@code money}, five in {@code codec}, three in
+ * {@code error}, two in {@code web}, one in {@code security}, one in {@code observability}, one in
+ * {@code time} and two in {@code validation}, the package root contributing none. The two totals
+ * that follow are each kept whole on one line so that either can be checked by eye and matched by
+ * a search without a line break splitting it:</p>
  *
  * <pre>
  * production classes:  2 + 5 + 3 + 2 + 1 + 1 + 1 + 2 = 17
- * compilation units:   17 production + 9 package descriptors = 26
+ * compilation units:   17 production + 9 package descriptors = 26  (target)
  * </pre>
  *
  * <p>The nine descriptors are one for the package root and one for each of its eight subpackages.

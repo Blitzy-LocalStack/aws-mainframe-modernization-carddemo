@@ -13,37 +13,63 @@
 
     This document is not a static asset. Vite treats it as the BUILD INPUT: it
     parses this file, follows the module reference in the body, and derives the
-    whole application module graph from there. That is why ui/vite.config.ts
-    declares no explicit build input of its own, and why a wrong module path
+    whole application module graph from there. That is why ui/vite.config.ts is
+    to declare no explicit build input of its own, and why a wrong module path
     yields no build at all rather than a page that merely looks broken.
 
     The built copy of this file is also what ui/nginx.conf and the CloudFront
-    distribution return as the history fallback, so all 21 client side routes
-    (/signon, /menu, /account/update, /cards/:num, /authorizations/:key and the
-    rest) are served this one document, and the router then decides what
+    distribution are to return as the history fallback, so all 21 client side
+    routes (/signon, /menu, /account/update, /cards/:num, /authorizations/:key
+    and the rest) are served this one document, and the router then decides what
     renders.
 
+    STATE AT THIS CHECKPOINT, stated once here rather than repeated at every
+    element that names one of them. This document is authored ahead of the tree
+    it is the entry point of, and the migration lands its artifacts in plan
+    order, so EVERY FILE NAMED BELOW EXCEPT ui/.env.example AND
+    ui/src/messages/messages.ts IS ABSENT TODAY and is authored at a later index
+    of the same plan: ui/src/main.tsx (the module the body references),
+    ui/public/favicon.svg (the icon the head links), ui/vite.config.ts (the
+    build that consumes this file), ui/src/theme/antdTheme.ts (where styling
+    lives instead of here) and ui/nginx.conf (where response headers live
+    instead of here). Two consequences follow and neither is a defect. Opening
+    this file directly in a browser renders an empty page, because the module
+    reference resolves to nothing and the icon request 404s. And the three cross
+    file contracts described just below are, for now, contracts the later files
+    must be written to satisfy rather than agreements between files that both
+    exist. Nothing in this document is to be read as a claim that any of those
+    files is present or that a build of it currently succeeds. The document is
+    authored first on purpose: a mount node id, an entry module path and an icon
+    path are exactly the decisions the later modules have to be written against,
+    and every one of them is unchecked at build time, so settling them once here
+    is cheaper than reconciling two spellings later.
+
   WHY (non-obvious design decisions):
-    - Assumption: three cross file contracts are asserted by this document and
+    - Assumptions: three cross file contracts are asserted by this document and
       not one of them is checked while the bundle is built. The mount node id
       must match the lookup in ui/src/main.tsx, the module path must name the
       real entry module, and the icon path must match the file Vite emits out of
       ui/public. Each contract is documented at the element that asserts it.
-    - Trade-off: the document is deliberately minimal. Everything a richer entry
+      None of the three counterparties exists yet (see STATE AT THIS CHECKPOINT
+      above), which makes the absence of a build time check the reason to write
+      these contracts down rather than a detail to note in passing: there will
+      be no compiler error to catch a mismatch when they do land.
+    - Trade-offs: the document is deliberately minimal. Everything a richer entry
       document could hold is instead owned by a layer that is allowed to differ
       between environments, which this file is not: it is built once and served
-      byte for byte identically to dev and prod. Styling therefore lives in
-      ui/src/theme/antdTheme.ts, response headers in ui/nginx.conf and at the
+      byte for byte identically to dev and prod. Styling is therefore to live
+      in ui/src/theme/antdTheme.ts, response headers in ui/nginx.conf and at the
       CloudFront distribution, and runtime configuration in import.meta.env fed
-      from the variable names documented in ui/.env.example.
-    - Assumption: no comment in this file may contain two consecutive hyphens.
+      from the variable names documented in ui/.env.example, which is the one
+      file in that list that already exists.
+    - Assumptions: no comment in this file may contain two consecutive hyphens.
       The HTML grammar forbids that sequence inside a comment body, and a parser
       or minifier that meets it may close the comment early and spill the rest
       of the prose into the rendered page. The rules above therefore use '='
       where the house header template in .github/workflows/tests.yml uses a rule
       of hyphens, and this repository's double hyphen dash idiom, which occurs
       20 times in that one workflow, is spelled out in words here instead.
-    - Trade-off: the doctype is written in lower case. The HTML doctype is ASCII
+    - Trade-offs: the doctype is written in lower case. The HTML doctype is ASCII
       case insensitive, so both spellings select standards mode identically and
       nothing observable turns on the choice; but Prettier 3, which this package
       runs through its format script, normalises the doctype to lower case and
@@ -55,7 +81,7 @@
 -->
 
 <!--
-  WHY the document language is fixed rather than negotiated (Assumption): the
+  WHY the document language is fixed rather than negotiated; Assumptions: the
   migration carries every user visible string across character for character
   (AAP transformation rule T8), and every one of those strings is English: the
   three PIC X(40) title constants in app/cpy/COTTL01Y.cpy, the PIC X(50) common
@@ -67,7 +93,7 @@
 <html lang="en">
   <head>
     <!--
-      WHY the encoding declaration is the first thing in the head (Assumption):
+      WHY the encoding declaration is the first thing in the head; Assumptions:
       the parser has to know the encoding before it reads any byte that could be
       decoded wrongly, and byte for byte fidelity of the baseline's strings is
       this application's whole premise. The ETL half of the same migration
@@ -78,7 +104,7 @@
     <meta charset="UTF-8" />
 
     <!--
-      WHY a responsive viewport replaces a fixed grid (Trade-off): the 3270
+      WHY a responsive viewport replaces a fixed grid; Trade-offs: the 3270
       original is a fixed 24 by 80 character cell canvas, declared as
       DFHMDI SIZE=(24,80) in 17 of the 17 base mapsets, which between them
       position all 902 of their DFHMDF fields absolutely by POS=(row,column).
@@ -93,18 +119,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <!--
-      WHY the icon path names no directory (Assumption): Vite copies the
+      WHY the icon path names no directory; Assumptions: Vite copies the
       contents of ui/public verbatim to the root of the build output, so a
       favicon authored there is served as /favicon.svg and the directory it was
       authored in forms no part of any served path. Naming that directory in the
       path here is the single most common mistake with Vite's public directory,
       and it resolves in no environment at all, because such a path does not
-      exist once the bundle is built.
+      exist once the bundle is built. ui/public/favicon.svg is authored at a
+      later index of the same plan, so this link currently resolves to nothing
+      and a browser logs one 404 for it; the path is fixed now so that the file,
+      when it lands, has one correct home and no served path to renegotiate.
     -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 
     <!--
-      WHY this exact text (Assumption): it is the trimmed CCDA-TITLE02 constant
+      WHY this exact text; Assumptions: it is the trimmed CCDA-TITLE02 constant
       from app/cpy/COTTL01Y.cpy line 22, declared
       PIC X(40) VALUE '              CardDemo                  '. The 14 leading
       and 18 trailing spaces are the centring of a 40 column 3270 title field,
@@ -119,7 +148,7 @@
     <title>CardDemo</title>
 
     <!--
-      WHY no stylesheet is linked (Alternatives Considered): antd 6 defaults to
+      WHY no stylesheet is linked; Alternatives Considered: antd 6 defaults to
       pure CSS variables theming and injects the styles it needs at run time, so
       unlike its earlier majors it publishes no stylesheet for an application to
       import. Adding a reset sheet or a bespoke one was the alternative, and it
@@ -130,7 +159,7 @@
     -->
 
     <!--
-      WHY nothing else appears in this head (Trade-off): a progressive web app
+      WHY nothing else appears in this head; Trade-offs: a progressive web app
       manifest, an Apple touch icon, Open Graph and Twitter card metadata, and a
       tag manager or usage tracking snippet are all absent because this
       application sits behind a JWT authorizer at the gateway and is never a
@@ -147,19 +176,22 @@
 
   <body>
     <!--
-      WHY this id and no other (Assumption): ui/src/main.tsx resolves its mount
-      point with document.getElementById('root') and passes the result to
+      WHY this id and no other. Assumptions: ui/src/main.tsx is to resolve its
+      mount point with document.getElementById('root') and pass the result to
       createRoot. Nothing verifies that the two spellings agree while the bundle
       is built, so a rename fails at run time instead: React finds no container,
       mounts nothing, and the page renders blank with only a console error to
       account for it. The element is authored empty because the entire tree,
-      the antd ConfigProvider that applies the theme included, is constructed in
-      that module.
+      the antd ConfigProvider that applies the theme included, is to be
+      constructed in that module. That module is authored at a later index of
+      the same plan, so this id is at present one half of a contract whose other
+      half does not exist; it is fixed here so the module is written to match the
+      document rather than the reverse.
     -->
     <div id="root"></div>
 
     <!--
-      WHY the module path is root relative (Assumption): Vite resolves a leading
+      WHY the module path is root relative; Assumptions: Vite resolves a leading
       slash against the project root, which here is ui, making this the
       documented form and the entry of the module graph. The alternative, a
       document relative path written with a leading dot and slash, resolves
@@ -168,7 +200,11 @@
       and CloudFront history fallback does when it returns this document for a
       deep route such as /cards/:num. The module type is what makes the browser
       request the file as an ES module; the build rewrites this reference to the
-      content hashed bundle it emits.
+      content hashed bundle it emits. The module itself is authored at a later
+      index of the same plan, so until it lands this reference is the declared
+      entry of the module graph rather than a path that resolves; Vite fails the
+      build outright on an entry it cannot find, which is the loud failure this
+      form is chosen for.
     -->
     <script type="module" src="/src/main.tsx"></script>
   </body>

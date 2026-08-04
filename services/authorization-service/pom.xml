@@ -313,17 +313,33 @@
       about a column. The alternative of applying schema changes by hand
       leaves no record that a given running image expects a given column to
       exist.
+
+      Assumptions: the coordinate below is the STARTER, and naming it rather
+      than flyway-core is what actually activates that migration. Spring Boot 4
+      split its autoconfiguration into one module per technology, and
+      FlywayAutoConfiguration now ships in spring-boot-flyway, which only this
+      starter puts on the classpath. flyway-core alone resolves, compiles and
+      starts, and then applies nothing: the spring.flyway.* keys bind to
+      nothing and the schema history table is never written, so the
+      release-as-one-artifact guarantee stated above would be a claim this
+      module could not keep.
+
+      Refactoring Rationale: flyway-core is no longer declared in its own
+      right. The starter brings it transitively at the version the parent's
+      flyway.version property pins, so a direct declaration would add a second
+      editable version site while adding nothing to the classpath.
     -->
     <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
 
     <!--
       Assumptions: this companion artifact is MANDATORY and is not
-      interchangeable with the core artifact above. Flyway 10 moved
-      database-specific support out of core into per-database modules, so
-      flyway-core on its own resolves cleanly, compiles cleanly, and then
+      interchangeable with the starter above. Flyway 10 moved
+      database-specific support out of core into per-database modules and the
+      starter pulls no database module, so the build without this coordinate
+      resolves cleanly, compiles cleanly, and then
       fails at RUNTIME when the authorization migration is applied, reporting
       an unsupported database. The failure surfaces at application startup
       rather than during the build, which is exactly why it is called out
@@ -431,7 +447,7 @@
       conventions in the baseline and become assertions here. Expressing them
       as a test rather than as a review checklist is the entire point, because
       a rule that lives in a test cannot rot and a violation fails the build
-      instead of surviving until someone happens to notice it. Three inherited
+      instead of surviving until someone happens to notice it. Three shared
       rules bite in this context in particular. Domain types may not import
       cloud SDK or web types, which keeps the segment layouts free of
       transport concerns. No context may import another context's domain
@@ -444,6 +460,32 @@
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the three rules described above were said to be
+      inherited, and inheritance is not something Maven does with test classes.
+      It passes a module's MAIN classes to its consumers, so the rule class
+      authored in the shared kernel's test tree was evaluated against that module
+      alone and never against com.carddemo.authorization; the engine above sat
+      here with nothing to run. That mattered most for the third rule, since this
+      context's money arrives as packed decimal and has to stay exact fixed point
+      through every hop, and an IEEE-754 binary field would have entered a green
+      build. The shared kernel now publishes the class as a test artifact narrowed
+      to the architecture package, this declaration consumes it, and the
+      architecture-rules Surefire execution in services/pom.xml runs it here with
+      this module's own compiled classes in front of it.
+
+      Assumptions: the rules stay authored exactly once, at
+      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java,
+      so this is delivery rather than duplication. Version and scope are managed
+      by the aggregator and are therefore not restated here.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
 

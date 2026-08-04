@@ -57,8 +57,15 @@ How to add an entry:
        Do not reach for a reason attribute: the DTD has none, and the file
        stops parsing. See the DTD note under WHY below.
     2. Tag that justification with at least one of Rule 1's four categories,
-       written in the singular form the house uses in its own files:
-       Alternatives Considered, Refactoring Rationale, Assumption, Trade-off.
+       written in the ONE accepted spelling, plural and colon-terminated:
+       "Alternatives Considered:", "Refactoring Rationale:", "Assumptions:" or
+       "Trade-offs:". docs/CODE_DOCUMENTATION_STANDARD.md sets that spelling
+       out and enumerates the rejected shapes; a singular, bracketed,
+       heading-style or dash-terminated variant is not accepted here or
+       anywhere else in the repository. The reason is mechanical rather than
+       stylistic: these labels are searched for, so a second accepted
+       spelling is a rationale that reads as documented to a human and as
+       absent to the search.
     3. Narrow the entry with a checks attribute, naming only checks the ruleset
        actually configures. The list is directly below.
     4. Name the broader alternative you rejected AND the concrete consequence
@@ -76,7 +83,7 @@ Checks available to name, and only these ten:
   NonEmptyAtclauseDescription, SummaryJavadoc, AtclauseOrder,
   CommentsIndentation.
 
-  Assumption: that list is the complete set of checks checkstyle.xml enables,
+  Assumptions: that list is the complete set of checks checkstyle.xml enables,
     and naming anything outside it is worse than useless. A suppression for an
     unconfigured check never fires, so nothing reveals that it is dead, while
     the entry still reads to the next maintainer as evidence that the check is
@@ -87,7 +94,7 @@ Checks available to name, and only these ten:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 WHY (non-obvious design decisions):
-  - Assumption: the justification for every entry sits in an adjacent comment
+  - Assumptions: the justification for every entry sits in an adjacent comment
     because the DTD leaves no alternative. The suppress element is declared
     EMPTY and its attribute list admits exactly six names: files, checks,
     message, id, lines and columns. A reason attribute is not among them, so
@@ -100,7 +107,7 @@ WHY (non-obvious design decisions):
     carrying its reason is silently unusable. Upstream Checkstyle keeps the
     justifications for its own suppressions in adjacent comments for this
     reason, and so does this file.
-  - Assumption: every entry narrows by checks and none narrows by message.
+  - Assumptions: every entry narrows by checks and none narrows by message.
     Checkstyle's own documentation warns that "filtering by message is
     dependent on runtime locale", and the consequence is specific: a build
     running under a different locale silently stops matching, so an entry
@@ -108,7 +115,7 @@ WHY (non-obvious design decisions):
     something adjacent. Check names are stable identifiers and carry no such
     dependency. If a future entry genuinely cannot be expressed any other way,
     it must record that locale exposure next to itself.
-  - Trade-off: each checks value spells out all ten check names in full rather
+  - Trade-offs: each checks value spells out all ten check names in full rather
     than abbreviating them to a pattern such as Javadoc.* plus the leftovers.
     The pattern form is shorter and was rejected on two counts. First, a
     wildcard silently absorbs any check added to the ruleset later, so the
@@ -118,7 +125,7 @@ WHY (non-obvious design decisions):
     The cost accepted is a long attribute value; what is bought is that every
     alternative in it is literally one of the ten names listed above, which a
     reviewer can check against the ruleset by eye.
-  - Trade-off: exactly two entries are declared, and neither is speculative.
+  - Trade-offs: exactly two entries are declared, and neither is speculative.
     Pre-loading every path the architecture can be predicted to want was
     rejected, because a suppression for a tree that holds no files cannot be
     reviewed: nobody can tell whether it is still needed, whether its pattern
@@ -127,7 +134,7 @@ WHY (non-obvious design decisions):
     other direction, shipping its adjudications list empty on the stated
     ground that each suppression must be an owned decision rather than an
     opaque cutoff. Both entries below are honest about how much work they do.
-  - Trade-off: no entry will ever exempt production code, and the reason is
+  - Trade-offs: no entry will ever exempt production code, and the reason is
     worth stating as a cost rather than a principle. The tempting use of this
     file is to unblock a build by exempting whatever is failing. The
     consequence of doing that once is that the gate keeps reporting success
@@ -135,7 +142,7 @@ WHY (non-obvious design decisions):
     strictly worse than having no gate, because a green build is now evidence
     of nothing. Exempting a tree is therefore not available as a remedy; the
     remedy is to write the missing docstring.
-  - Assumption: this file failing closed is deliberate and is relied upon from
+  - Assumptions: this file failing closed is deliberate and is relied upon from
     two sides. checkstyle.xml sets optional to false, and services/pom.xml
     records that the flag "is relied upon and must not be worked around". With
     optional true and the file absent, Checkstyle's documented behaviour is
@@ -146,7 +153,7 @@ WHY (non-obvious design decisions):
     consequence for a future maintainer is narrow and important: emptying this
     file back to a bare suppressions element is correct and supported;
     deleting the file is not, and breaks every build that reads the ruleset.
-  - Assumption: the house comment idiom cannot be reproduced literally in XML,
+  - Assumptions: the house comment idiom cannot be reproduced literally in XML,
     so the adaptation here is deliberate rather than careless. XML 1.0 section
     2.5 forbids two consecutive hyphens anywhere inside a comment. The house
     files use a hyphen mid-rule and a spaced double hyphen as an em-dash;
@@ -163,13 +170,13 @@ WHY (non-obvious design decisions):
 
   <!--
     Generated sources: code emitted by a build plugin, never authored.
-      Assumption: this depends on Maven's standard layout, in which a plugin
+      Assumptions: this depends on Maven's standard layout, in which a plugin
         writes generated sources beneath target/generated-sources/, and on
         .gitignore ignoring target/ so that nothing matched here is ever
         committed. The pattern is scoped to that one directory segment pair
         rather than to target/ as a whole, so it cannot reach a hand-authored
         tree even if build output is ever redirected.
-      Assumption: the exemption is legitimate because Rule 1 governs AUTHORED
+      Assumptions: the exemption is legitimate because Rule 1 governs AUTHORED
         code. The rule asks an author to state a purpose, the parameters, the
         return value and the exceptions; generated code has no author to ask,
         so there is nothing for the gate to police and nothing a contributor
@@ -177,12 +184,12 @@ WHY (non-obvious design decisions):
         applicability, not a relaxation of it, and it mirrors the boundary the
         rule already draws around the reference-only COBOL baseline, which
         requires no retrofitted commentary either.
-      Assumption: it names all ten configured checks because a generated file
+      Assumptions: it names all ten configured checks because a generated file
         would trip the presence checks and the completeness checks alike, and
         CommentsIndentation reports on the placement of whatever comments the
         generator chose to emit. Naming a narrower family would leave the
         remaining checks firing on the same unfixable file.
-      Trade-off: this entry is a GUARD, not currently load-bearing, and saying
+      Trade-offs: this entry is a GUARD, not currently load-bearing, and saying
         so is the point. services/pom.xml binds the gate to the validate
         phase, which runs before generate-sources, so at the moment the audit
         executes no generator has added its output to the compile source roots
@@ -208,16 +215,16 @@ WHY (non-obvious design decisions):
 
   <!--
     Test fixture material: records derived from the copybook layouts.
-      Assumption: fixtures under src/test/resources/fixtures/ are DATA, not
+      Assumptions: fixtures under src/test/resources/fixtures/ are DATA, not
         behaviour. A fixture record is a fixed-width image of an app/cpy/
         copybook layout, and its meaning lives in that layout, at the declared
         record length, rather than in a docstring attached to it. Asking for a
         purpose, parameters and a return value from a 300-byte account image
         has no answer to give.
-      Assumption: it names all ten configured checks for the same reason as the
+      Assumptions: it names all ten configured checks for the same reason as the
         entry above, so that no member of the family is left firing on
         material that cannot answer it.
-      Trade-off: this entry is DEFENSIVE and may never fire, which is stated
+      Trade-offs: this entry is DEFENSIVE and may never fire, which is stated
         rather than glossed. checkstyle.xml sets fileExtensions to java, so
         the fixed-width fixture files under resources/ are already outside the
         audit set and need no exemption. What remains is the narrow case the
@@ -312,7 +319,7 @@ Alternatives Considered: every item below is a plausible entry that was
    list in one place. Adding one of those filters to the ruleset would take
    that property away, so the request belongs nowhere.
 
-Assumption: the entries above are ordered oldest first, so append new ones
+Assumptions: the entries above are ordered oldest first, so append new ones
   directly beneath the second entry and above this block. Do not delete the
   enclosing suppressions element when the last entry goes: the file must stay
   present and parseable, because the filter that reads it fails closed.

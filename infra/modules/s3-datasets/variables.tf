@@ -59,20 +59,20 @@
 #   where a reviewer will see it.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: TEN generation families, not six. Six is what
+#   - Assumptions: TEN generation families, not six. Six is what
 #     app/jcl/DEFGDGB.jcl yields on its own, and reading only that file is the
 #     trap; three more are defined in app/jcl/DEFGDGD.jcl and one in
 #     app/jcl/DALYREJS.jcl. Provisioning six would silently lose four
 #     retention policies -- the affected batch steps would still write
 #     objects, to a prefix with no lifecycle rule, so nothing would fail and
 #     generations would accumulate without limit.
-#   - Trade-off: the family and prefix inventories live in variable DEFAULTS
+#   - Trade-offs: the family and prefix inventories live in variable DEFAULTS
 #     rather than as literals inside main.tf. The cost is a large default
 #     block in a file that is otherwise pure contract. What it buys is that
 #     the inventory is legible to every caller and is rendered into the
 #     generated README, and that per-family retention can be overridden for
 #     one environment without altering the topology.
-#   - Assumption: this file is consumed by main.tf and outputs.tf in this same
+#   - Assumptions: this file is consumed by main.tf and outputs.tf in this same
 #     directory and by nothing else. Every variable below is read by one of
 #     them, because `terraform_unused_declarations` in infra/.tflint.hcl is
 #     gating: an input added here speculatively would fail the build rather
@@ -88,7 +88,7 @@ variable "name_prefix" {
   type        = string
   default     = "carddemo"
 
-  # Assumption: an S3 bucket name may not exceed 63 characters, and the
+  # Assumptions: an S3 bucket name may not exceed 63 characters, and the
   # composed form above spends 38 of them before this prefix is added -- ten
   # for the literal `-datasets-`, twelve for the account id, up to fourteen for
   # a region name, and two further hyphens. That leaves 25 characters to divide
@@ -124,7 +124,7 @@ variable "environment" {
   # a staging or ephemeral review environment that the plan permits. The
   # charset and length check below is therefore the strongest constraint
   # available that does not forbid something the plan allows.
-  # Assumption: the twelve-character cap is not cosmetic. It is the other half
+  # Assumptions: the twelve-character cap is not cosmetic. It is the other half
   # of the 63-character bucket-name budget computed on `name_prefix` above, so
   # relaxing one cap without recomputing the other reintroduces the overflow
   # that budget exists to rule out.
@@ -174,7 +174,7 @@ variable "dataset_families" {
     noncurrent_versions = optional(number)
   }))
 
-  # Assumption: there are TEN generation-dataset bases in the baseline, not six.
+  # Assumptions: there are TEN generation-dataset bases in the baseline, not six.
   # This is the highest-risk value in the module, because six is what a reader
   # gets from app/jcl/DEFGDGB.jcl alone and that file looks complete -- it is
   # headed "DEFINE GDG BASES NEEDED BY CARDDEMO PROJECT" and defines six bases
@@ -192,14 +192,14 @@ variable "dataset_families" {
   # data-migration/README.md -- so all three must agree, and a change made here
   # but not there leaves whichever is out of step defective.
   #
-  # Assumption: the `domain` values are derived from the owning bounded
+  # Assumptions: the `domain` values are derived from the owning bounded
   # context's schema rather than invented. transaction-service owns the
   # `ledger` schema, reference-service owns `reference`, and reporting-service
   # owns no tables but produces the 133-column report. The split is therefore
   # SIX ledger + THREE reference + ONE reporting = TEN, written out so a
   # reader can verify the count by adding it up instead of trusting a comment.
   #
-  # Trade-off: this inventory is a variable default rather than a hard-coded
+  # Trade-offs: this inventory is a variable default rather than a hard-coded
   # `for_each` list inside main.tf. The cost is a long default block in a
   # contract file; what it buys is that the inventory is readable by every
   # caller and appears in the generated README, and that a single family's
@@ -208,7 +208,7 @@ variable "dataset_families" {
   # Hard-coding it in main.tf was rejected because it would place a
   # behavioural contract in the one file no consumer of the module reads.
   #
-  # Assumption: `noncurrent_versions` is deliberately left UNSET on all ten, so
+  # Assumptions: `noncurrent_versions` is deliberately left UNSET on all ten, so
   # every family inherits `noncurrent_version_retention` below. The field
   # exists because the baseline is not self-consistent with itself:
   # app/jcl/REPTFILE.jcl:L25-L28 holds a SECOND, standalone DEFINE
@@ -271,6 +271,72 @@ variable "dataset_families" {
       description = "Daily transaction reject-stream generations, carrying the reject record the posting run writes for each of the four documented reject reasons. Replaces GDG base AWS.M2.CARDDEMO.DALYREJS named at app/jcl/DALYREJS.jcl:L25 inside the DEFINE opened at L24, with LIMIT(5) at L26 and SCRATCH at L27."
     }
   }
+
+  # Assumptions: the TEN family names are asserted, not merely defaulted, because
+  # this map IS the prefix topology and the topology is the one thing that must
+  # not vary between environments. Before this check the exact-ten default could
+  # be replaced wholesale by any map satisfying the object type, so a root could
+  # apply cleanly with six families -- the count a reader gets from
+  # app/jcl/DEFGDGB.jcl alone -- and nothing would fail: the four missing
+  # families' batch steps would still write their objects, into a prefix carrying
+  # no lifecycle rule, and generations would accumulate without limit. Two
+  # sibling documents publish the same ten independently
+  # (docs/architecture/batch-orchestration.md and data-migration/README.md), so an
+  # inventory that drifts here also puts this module out of step with both.
+  # Trade-offs: the retention KNOBS stay open while the KEY SET closes. A root may
+  # still override noncurrent_version_retention globally or per family through the
+  # optional noncurrent_versions member, which is the parameterization the two
+  # environments are meant to use; what it may no longer do is add, remove or
+  # rename a prefix, because that changes what exists rather than how long it is
+  # kept.
+  # Assumptions: equality needs both halves of the test. The setunion comparison
+  # alone proves only that every key supplied is one of the ten, so a six-family
+  # map would satisfy it; pairing it with the count closes that, because map keys
+  # are already unique, so ten distinct keys drawn from a set of ten is that set
+  # exactly.
+  validation {
+    condition = length(var.dataset_families) == 10 && setunion(keys(var.dataset_families), [
+      "transact-bkup", "transact-daly", "tranrept", "tcatbalf-bkup", "systran",
+      "transact-combined", "trantype-bkup", "trancatg-bkup", "discgrp-bkup", "dalyrejs",
+      ]) == toset([
+      "transact-bkup", "transact-daly", "tranrept", "tcatbalf-bkup", "systran",
+      "transact-combined", "trantype-bkup", "trancatg-bkup", "discgrp-bkup", "dalyrejs",
+    ])
+    error_message = "dataset_families must be keyed by exactly the ten generation-dataset families the baseline defines: transact-bkup, transact-daly, tranrept, tcatbalf-bkup, systran and transact-combined from app/jcl/DEFGDGB.jcl, trantype-bkup, trancatg-bkup and discgrp-bkup from app/jcl/DEFGDGD.jcl, and dalyrejs from app/jcl/DALYREJS.jcl. Six is the count DEFGDGB.jcl alone suggests, and provisioning six silently loses four retention policies."
+  }
+
+  # Assumptions: `domain` becomes the LEADING path segment of every object key, so
+  # an unrecognised value does not fail -- it writes a working prefix nobody
+  # queries and nothing else reads. The three accepted values are the owning
+  # bounded contexts' schema names: ledger for transaction-service, reference for
+  # reference-service, and reporting for the report output reporting-service
+  # produces. Constraining the domain is what keeps the six/three/one split
+  # recorded above verifiable by reading the map rather than by trusting the
+  # comment.
+  # Assumptions: `description` is required non-empty because each one carries the
+  # baseline lineage -- the generation-data-group base it replaces and the JCL
+  # line defining it -- and that lineage is the only record of why a prefix
+  # exists. An empty string satisfies the type and would erase it silently.
+  validation {
+    condition = alltrue([
+      for family in var.dataset_families :
+      contains(["ledger", "reference", "reporting"], family.domain) && length(trimspace(family.description)) > 0
+    ])
+    error_message = "Every dataset_families entry must carry a domain of ledger, reference or reporting -- the schema names of the bounded contexts that own the data -- and a non-empty description recording the baseline generation-data-group base it replaces."
+  }
+
+  # Assumptions: a per-family override of at least one is the same correctness
+  # bound the module-wide `noncurrent_version_retention` carries, and for the same
+  # reason: the batch chain addresses generations relatively, so a family retaining
+  # zero noncurrent versions has no preceding generation for a rerun to read.
+  # Unset is the normal case and inherits the module-wide value.
+  validation {
+    condition = alltrue([
+      for family in var.dataset_families :
+      family.noncurrent_versions == null || try(family.noncurrent_versions >= 1, false)
+    ])
+    error_message = "A dataset_families noncurrent_versions override must be at least 1 when it is set at all; zero would expire every noncurrent version of that family immediately and destroy the generation history the batch chain reads relatively."
+  }
 }
 
 variable "non_generation_prefixes" {
@@ -281,7 +347,7 @@ variable "non_generation_prefixes" {
     description = string
   }))
 
-  # Assumption: neither statement artifact has a GENERATIONDATAGROUP base
+  # Assumptions: neither statement artifact has a GENERATIONDATAGROUP base
   # anywhere in the baseline. An exhaustive search for DEFINE
   # GENERATIONDATAGROUP matches only four files -- app/jcl/DEFGDGB.jcl,
   # app/jcl/DEFGDGD.jcl, app/jcl/DALYREJS.jcl and app/jcl/REPTFILE.jcl -- and
@@ -300,7 +366,7 @@ variable "non_generation_prefixes" {
   # it as a generation limit would invent a generation contract the baseline
   # never had for these two datasets.
   #
-  # Trade-off: the baseline's own pattern here was delete-then-recreate -- an
+  # Trade-offs: the baseline's own pattern here was delete-then-recreate -- an
   # IEFBR14 step at app/jcl/CREASTMT.JCL:L66-L75 deletes both datasets before
   # CBSTM03A writes them fresh at L87-L96. Object versioning expresses that as
   # a new current version with the previous one becoming noncurrent, so the
@@ -317,6 +383,36 @@ variable "non_generation_prefixes" {
       description = "HTML customer statements. Replaces sequential dataset AWS.M2.CARDDEMO.STATEMNT.HTML, deleted by the IEFBR14 step at app/jcl/CREASTMT.JCL:L71 and rewritten by CBSTM03A at L96 with DCB=(LRECL=100,BLKSIZE=800,RECFM=FB) declared at L94. Not a generation data group: no GENERATIONDATAGROUP base for it exists in the baseline."
     }
   }
+
+  # Assumptions: these TWO keys are asserted for the same reason the ten families
+  # above are, and the assertion matters more here rather than less. The whole
+  # purpose of holding these prefixes in a separate variable is that they can
+  # never be counted as generation families; an unconstrained map defeats that,
+  # because a root could move a generation family into this variable, or add a
+  # third prefix here, and the twelve-prefix total would still plan cleanly while
+  # the ten-family count the AAP asserts and two sibling documents publish
+  # quietly stopped being true of the deployed bucket.
+  # Assumptions: the domain is fixed to reporting because both artifacts are
+  # written by the statement step, which belongs to reporting-service. The pair is
+  # the complete set: an exhaustive search of the baseline for DEFINE
+  # GENERATIONDATAGROUP matches four files and none of them defines a statement
+  # base, so no third non-generation prefix exists to add.
+  validation {
+    condition = length(var.non_generation_prefixes) == 2 && setunion(keys(var.non_generation_prefixes), [
+      "statement-text", "statement-html",
+      ]) == toset([
+      "statement-text", "statement-html",
+    ])
+    error_message = "non_generation_prefixes must be keyed by exactly statement-text and statement-html, the two sequential statement datasets the baseline writes. Adding a key here would raise the bucket's prefix count above the twelve the architecture documents publish, and moving a generation family into this variable would drop its LIMIT(5) analogue."
+  }
+
+  validation {
+    condition = alltrue([
+      for prefix in var.non_generation_prefixes :
+      prefix.domain == "reporting" && length(trimspace(prefix.description)) > 0
+    ])
+    error_message = "Every non_generation_prefixes entry must carry the reporting domain -- both statements are written by the statement step reporting-service owns -- and a non-empty description recording the baseline sequential dataset it replaces."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -329,7 +425,7 @@ variable "noncurrent_version_retention" {
   type        = number
   default     = 5
 
-  # Assumption: all ten baseline bases are defined LIMIT(5) with SCRATCH --
+  # Assumptions: all ten baseline bases are defined LIMIT(5) with SCRATCH --
   # app/jcl/DEFGDGB.jcl:L26, L32, L38, L44, L50 and L56; app/jcl/DEFGDGD.jcl:L29,
   # L52 and L75; and app/jcl/DALYREJS.jcl:L26. The two keywords carry separate
   # meanings and both are needed to justify this default. LIMIT(5) caps the
@@ -340,7 +436,7 @@ variable "noncurrent_version_retention" {
   # keeps exactly five is the pair's joint equivalent: versioning supplies the
   # generation stack, and the expiry supplies both the cap and the deletion.
   #
-  # Assumption: a value of zero would expire every version the moment it
+  # Assumptions: a value of zero would expire every version the moment it
   # stopped being current, collapsing a five-generation group to a single
   # object and destroying the retained history that LIMIT(5) exists to provide.
   # That history is load-bearing rather than decorative, because the batch
@@ -361,7 +457,7 @@ variable "noncurrent_version_transition_days" {
   type        = number
   default     = null
 
-  # Trade-off: this is one of the two lifecycle knobs the environment roots are
+  # Trade-offs: this is one of the two lifecycle knobs the environment roots are
   # expected to set differently, the other being the retention count above. It
   # defaults to null -- no transition -- because dev recreates these datasets
   # constantly and every transitioned object incurs a per-object transition
@@ -375,6 +471,29 @@ variable "noncurrent_version_transition_days" {
   # never asked for it, and the first symptom would be a retrieval-cost line
   # item rather than anything visible in the plan. Nullable with a null default
   # inverts that: the transition exists only where a root opted in.
+
+  # Assumptions: the null case must stay expressible, so the bound is written as an
+  # explicit null test rather than as a bare comparison. A plain `>= 30` condition
+  # on a nullable number fails when the value IS null, which would make the
+  # disabled path -- the default, and the one dev uses -- unreachable.
+  # Assumptions: S3 measures a lifecycle transition in WHOLE days and applies the
+  # rule to noncurrent versions once they are at least that old. A fractional or
+  # negative value is not corrected: the provider rejects it during apply, after
+  # the bucket, its versioning and its policy already exist, and the error names
+  # the lifecycle rule rather than this input. A value of zero is the one most
+  # likely to be tried to mean "immediately", and it is refused, because
+  # transitioning a version the moment it stops being current bills the
+  # destination class's minimum duration on an object that a five-generation
+  # retention may expire long before that duration elapses -- paying twice to
+  # store history the rule is about to delete.
+  # Trade-offs: no upper bound is imposed. A transition later than the retention
+  # window merely never fires, which costs nothing and is a legitimate way to stage
+  # a change ahead of raising retention, so refusing it would remove a usable
+  # configuration to prevent a harmless one.
+  validation {
+    condition     = var.noncurrent_version_transition_days == null || try(var.noncurrent_version_transition_days >= 1 && floor(var.noncurrent_version_transition_days) == var.noncurrent_version_transition_days, false)
+    error_message = "noncurrent_version_transition_days must be null to disable the transition, or a whole number of days of at least 1. S3 counts transition age in whole days, and zero would transition a version the moment it stopped being current, billing the destination class's minimum duration on history the retention rule may expire first."
+  }
 }
 
 variable "noncurrent_version_transition_storage_class" {
@@ -382,7 +501,7 @@ variable "noncurrent_version_transition_storage_class" {
   type        = string
   default     = "STANDARD_IA"
 
-  # Assumption: a rolled-off dataset generation is read only during an
+  # Assumptions: a rolled-off dataset generation is read only during an
   # investigation or a rerun, so it is genuinely infrequent-access data, but
   # when it IS read the read is interactive and someone is waiting on it.
   # Infrequent Access is the cheapest class that still serves a first byte in
@@ -395,6 +514,33 @@ variable "noncurrent_version_transition_storage_class" {
   # with a wait, exactly when someone is diagnosing a failed batch run. The
   # saving is real and is declined deliberately, in favour of keeping a restore
   # as fast as reading the current generation.
+
+  # Assumptions: the accepted set is the storage classes a lifecycle TRANSITION may
+  # name, and it is enumerated here because a misspelling or an unsupported class
+  # is refused by the API during apply, in an error that quotes the lifecycle rule
+  # rather than this variable. STANDARD is deliberately absent from the set: it is
+  # the class these objects are written to, so transitioning to it is a rule that
+  # can never do anything, and naming it here would read as a way to disable the
+  # transition -- which is what a null in noncurrent_version_transition_days is
+  # for.
+  # Trade-offs: enumerating a set AWS owns means a class added by the service is
+  # refused here until this list is extended, which is the objection that led the
+  # cloudfront-spa module to leave its TLS policy list to the provider. It is
+  # accepted here because this set has been stable for years and is short, and
+  # because the failure it prevents -- a typo that surfaces only at apply, partway
+  # through creating a bucket's lifecycle configuration -- is the more likely of
+  # the two.
+  validation {
+    condition = contains([
+      "STANDARD_IA",
+      "ONEZONE_IA",
+      "INTELLIGENT_TIERING",
+      "GLACIER_IR",
+      "GLACIER",
+      "DEEP_ARCHIVE",
+    ], var.noncurrent_version_transition_storage_class)
+    error_message = "noncurrent_version_transition_storage_class must be one of STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, GLACIER_IR, GLACIER or DEEP_ARCHIVE. STANDARD is excluded because it is the class these objects are already written to, so a transition into it can never act; disable the transition with a null noncurrent_version_transition_days instead."
+  }
 }
 
 variable "abort_incomplete_multipart_upload_days" {
@@ -402,7 +548,7 @@ variable "abort_incomplete_multipart_upload_days" {
   type        = number
   default     = 7
 
-  # Assumption: the batch exports write whole generations in one object, large
+  # Assumptions: the batch exports write whole generations in one object, large
   # enough that the SDK is expected to choose a multipart upload -- the
   # transaction backup carries 350-byte records (app/jcl/TRANBKP.jcl:L31) over
   # the full master, and the report is 133 columns per line for every selected
@@ -413,7 +559,7 @@ variable "abort_incomplete_multipart_upload_days" {
   # any object-level rule can reach them, and nothing but this rule ever
   # removes them. That is the specific failure this value exists to bound -- a
   # cost that grows with every interrupted run and that no listing reveals.
-  # Trade-off: seven days rather than one. A shorter window would reclaim the
+  # Trade-offs: seven days rather than one. A shorter window would reclaim the
   # parts sooner, but it would also abort a legitimately slow or retried upload
   # that is still in progress across a restart, and losing a real export costs
   # more than a few days of orphaned parts.
@@ -432,7 +578,7 @@ variable "access_log_bucket_name" {
   type        = string
   default     = null
 
-  # Trade-off: nullable with a null default rather than a required input. A
+  # Trade-offs: nullable with a null default rather than a required input. A
   # reusable module that required a log destination could not be instantiated
   # until the caller had provisioned one, which would make a logging bucket a
   # precondition of every consumer including a throwaway test root. The
@@ -445,7 +591,7 @@ variable "access_log_bucket_name" {
   # suppression, because the gates in this tree are satisfied by construction
   # rather than by exemption.
   #
-  # Assumption: the target must be a DIFFERENT bucket from this one. Aiming a
+  # Assumptions: the target must be a DIFFERENT bucket from this one. Aiming a
   # bucket's server access logs at itself makes each delivered log object a
   # loggable write, which generates a further log object, and the bucket grows
   # without bound from its own logging. Nothing in the type system prevents a
@@ -458,7 +604,7 @@ variable "force_destroy" {
   type        = bool
   default     = false
 
-  # Trade-off: false by default, accepting that `terraform destroy` will fail
+  # Trade-offs: false by default, accepting that `terraform destroy` will fail
   # on a populated bucket and require an explicit, documented purge first. The
   # alternative default would let a destroy aimed at any other resource in the
   # root take every retained dataset generation with it, silently and without a
@@ -469,7 +615,7 @@ variable "force_destroy" {
   # its `state_bucket_force_destroy`, and documents the matching manual purge
   # in docs/runbooks/teardown.md, so the two behave alike and an operator does
   # not learn one convention per bucket.
-  # Assumption: a versioned bucket is affected more than an unversioned one.
+  # Assumptions: a versioned bucket is affected more than an unversioned one.
   # Deleting the current version of every object is not enough -- each
   # noncurrent version and each delete marker must also be removed before the
   # bucket itself will delete, so the purge is a version-aware operation and
@@ -481,7 +627,7 @@ variable "tags" {
   type        = map(string)
   default     = {}
 
-  # Assumption: the calling root configures `default_tags` on its aws provider,
+  # Assumptions: the calling root configures `default_tags` on its aws provider,
   # the pattern infra/bootstrap/versions.tf establishes, so every resource in
   # this tree is already tagged with the account-wide set before this variable
   # is consulted. This input therefore exists only for tags meaningful to this
@@ -495,4 +641,3 @@ variable "tags" {
   # without an edit here, and the provider's default_tags already covers the
   # tags that genuinely apply everywhere.
 }
-

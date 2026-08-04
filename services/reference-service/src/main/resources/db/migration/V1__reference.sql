@@ -27,13 +27,13 @@
 --   KEYS(2 0), app/jcl/TRANCATG.jcl L40 KEYS(6 0) and app/jcl/DISCGRP.jcl L40
 --   KEYS(16 0), each against the RECORDSIZE on the following line.
 --
---   Baseline step replaced: the IDCAMS DEFINE CLUSTER of those same three jobs
---   (STEP10 at L33, its DEFINE CLUSTER at L36, INDEXED at L44). The REPRO of
---   STEP15 at L54/L61 loads rows rather than defining structure, so it
---   corresponds to V2__seed_reference.sql and not to this file. IDCAMS
---   BLDINDEX has no counterpart at all, because PostgreSQL maintains an index
---   inside the transaction that modifies the table rather than as a separate
---   rebuild job.
+--   Corresponding baseline contract: this file is the target analogue of the
+--   IDCAMS DEFINE CLUSTER of those same three jobs (STEP10 at L33, its DEFINE
+--   CLUSTER at L36, INDEXED at L44). The REPRO of STEP15 at L54/L61 loads rows
+--   rather than defining structure, so its target analogue is
+--   V2__seed_reference.sql and not this file. IDCAMS BLDINDEX has no target
+--   analogue at all, because PostgreSQL maintains an index inside the
+--   transaction that modifies the table rather than as a separate rebuild job.
 --
 -- Invocation:
 --   Flyway applies this script once, as a unit, resolved by its V1 version
@@ -65,14 +65,13 @@
 --     classification other than the two the baseline defines.
 --
 -- WHY (non-obvious design decisions):
---   - Assumptions: the four category labels used below are written in the
---     plural, colon-terminated form that Rule 1 gives -- Alternatives
---     Considered, Refactoring Rationale, Assumptions, Trade-offs -- and they
---     denote the same four categories as the singular parenthesised form used
---     elsewhere in this repository. docs/CODE_DOCUMENTATION_STANDARD.md states
---     that equivalence outright. One form is used throughout this file so that
---     a reader never has to decide whether a difference in spelling carries a
---     difference in meaning.
+--   - Assumptions: the rationale labels used below are the four Rule 1
+--     categories in the exact plural, colon-terminated form the standard
+--     mandates: "Alternatives Considered:", "Refactoring Rationale:",
+--     "Assumptions:" and "Trade-offs:". That form is the only accepted one,
+--     so a reader never has to decide whether a difference in spelling
+--     carries a difference in meaning, and a grep for a label finds every
+--     site that uses it. See docs/CODE_DOCUMENTATION_STANDARD.md.
 --   - Alternatives Considered: every object is schema-qualified rather than
 --     left to a search_path. Relying on the path would make the file's result
 --     depend on who invoked it, so the same script could create the tables in

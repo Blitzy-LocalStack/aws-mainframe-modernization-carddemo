@@ -34,11 +34,11 @@
 #   environment root called it.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: the AWS provider is floored at 6.56 because a provider of
+#   - Assumptions: the AWS provider is floored at 6.56 because a provider of
 #     5.81.0 or later is required before an Aurora Serverless v2 cluster will
 #     accept a zero minimum capacity, which the dev environment depends on to
 #     scale down to nothing while idle.
-#   - Trade-off: required_version is a floor rather than the exact 1.15.8 this
+#   - Trade-offs: required_version is a floor rather than the exact 1.15.8 this
 #     package is validated on, so that a shared module does not dictate a CLI
 #     patch level to the roots that consume it.
 #   - Alternatives Considered: a `provider "aws"` block was rejected here.
@@ -60,7 +60,7 @@
 terraform {
   # WHAT: the oldest Terraform CLI this configuration is contracted to be
   #       parsed and planned by.
-  # WHY : Trade-off -- this package is validated on 1.15.8, yet a floor is
+  # WHY : Trade-offs: this package is validated on 1.15.8, yet a floor is
   #       declared instead of that exact patch. A module is consumed by every
   #       root that calls it, so pinning one patch would reject any caller
   #       running a different one and force lockstep CLI upgrades across the
@@ -72,7 +72,7 @@ terraform {
   required_providers {
     # WHAT: the AWS provider range the module's Aurora Serverless v2
     #       resources are written against.
-    # WHY : Assumption -- a provider of 5.81.0 or later is required before an
+    # WHY : Assumptions: a provider of 5.81.0 or later is required before an
     #       Aurora Serverless v2 cluster will accept a zero minimum capacity,
     #       which the dev environment relies on to scale down to nothing while
     #       idle; 6.56 clears that floor. Holding the major at 6 keeps an

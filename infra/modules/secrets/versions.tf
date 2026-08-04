@@ -15,7 +15,7 @@
 #   provider is a genuine requirement here rather than an incidental one.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this directory is a reusable MODULE, not a root. It is
+#   - Assumptions: this directory is a reusable MODULE, not a root. It is
 #     invoked as `source = "../../modules/secrets"` from the dev and prod
 #     environment roots, and those roots own the only `provider` blocks. Hence
 #     the deliberate absence below of `provider "aws"`, `provider "random"`
@@ -23,7 +23,7 @@
 #     caller's configuration, and it would hard-wire a region into a module
 #     that has to stay reusable across regions. A module cannot declare a
 #     backend at all, because state belongs to the calling root.
-#   - Trade-off: because no provider block exists here, no `default_tags`
+#   - Trade-offs: because no provider block exists here, no `default_tags`
 #     exists either, so main.tf must apply tags PER RESOURCE from `var.tags`
 #     rather than inheriting them. The absence below is what creates that
 #     obligation, so the two files have to be read together.
@@ -32,14 +32,14 @@
 #     account, and declaring an alias would force every caller to pass an
 #     explicit provider map for no gain. `experiments`, `cloud` and
 #     `provider_meta` are absent for the same reason: nothing here needs them.
-#   - Trade-off: exactly two providers are declared and no more. A third entry
+#   - Trade-offs: exactly two providers are declared and no more. A third entry
 #     that no resource consumed would be reported by tflint's
 #     terraform_unused_required_providers rule, so this list is kept as a
 #     precise statement of what the module actually uses.
 # =============================================================================
 
 terraform {
-  # WHY : Assumption -- 1.15.0 is the language level this whole tree is
+  # WHY : Assumptions: 1.15.0 is the language level this whole tree is
   #       authored against and the tree is validated on 1.15.8, so the floor
   #       exists to turn a version mismatch into one clear error at `init`
   #       instead of a confusing parse or plan-time failure partway through a
@@ -51,7 +51,7 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHY : Assumption -- one AWS provider major.minor is pinned across the
+    # WHY : Assumptions: one AWS provider major.minor is pinned across the
     #       ENTIRE infra/ tree so that two modules composed into the same root
     #       can never disagree. Terraform has to select a single version
     #       satisfying every constraint in the configuration, so a divergent
@@ -61,7 +61,7 @@ terraform {
     #       zero-minimum Aurora Serverless capacity range; 6.56 clears that
     #       comfortably, and matching it here keeps this module composable
     #       with that sibling.
-    # WHY : Trade-off -- `~>` rather than an exact `=` pin. An exact pin would
+    # WHY : Trade-offs: `~>` rather than an exact `=` pin. An exact pin would
     #       freeze provider patch releases and require a commit for each one,
     #       whereas `~>` accepts a patch update but refuses a minor bump, so
     #       resource schemas cannot change underneath a plan that was reviewed
@@ -71,7 +71,7 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHY : Alternatives Considered -- the alternative was to omit this entry
+    # WHY : Alternatives Considered: the alternative was to omit this entry
     #       entirely, which is what infra/bootstrap correctly does, because
     #       nothing in that root generates a random value and an unused
     #       provider would be flagged by tflint's

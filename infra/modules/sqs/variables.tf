@@ -37,17 +37,17 @@
 #       expected.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: the variable NAMES in this file are the module's call
+#   - Assumptions: the variable NAMES in this file are the module's call
 #     contract. infra/envs/dev and infra/envs/prod reference them by name in
 #     their `module "sqs"` blocks, so renaming one is a breaking change to both
 #     roots rather than a local edit, and every name is chosen on that basis.
-#   - Trade-off: the tuning inputs are exposed one scalar at a time rather than
+#   - Trade-offs: the tuning inputs are exposed one scalar at a time rather than
 #     bundled into a single object variable. The object would be one entry in
 #     the generated module README instead of nine, but its sub-attributes would
 #     then have nowhere to carry a `description` of their own, and a caller
 #     wanting to change one value would have to restate the rest. Nine
 #     documented scalars are more to read and less to get wrong.
-#   - Trade-off: three separate retention inputs rather than one. This is the
+#   - Trade-offs: three separate retention inputs rather than one. This is the
 #     most surprising shape in the file and it is deliberate -- requests, of
 #     which the error sink is one, are retained for days; replies for the
 #     service floor; dead-letter queues for longer than either. The reasoning
@@ -69,7 +69,7 @@
 # WHAT: the environment token suffixed onto every queue name, which is what
 #       makes carddemo-inquiry-request-dev and carddemo-inquiry-request-prod
 #       two separate queues instead of one contested name.
-# WHY : Assumption: a queue name has to be unique only within one account and
+# WHY : Assumptions: a queue name has to be unique only within one account and
 #       region, and nothing prevents both environment roots from targeting the
 #       same account. This token is then the only thing keeping the two queue
 #       sets apart, which is why it deliberately has no default: a defaulted
@@ -81,7 +81,7 @@ variable "environment" {
   description = "Environment token appended to every queue name, keeping the dev and prod queue sets distinct within a single account and region. Consumed by the naming locals in main.tf that compose each aws_sqs_queue name."
   type        = string
 
-  # WHY : Assumption: the domain is genuinely two values rather than an open
+  # WHY : Assumptions: the domain is genuinely two values rather than an open
   #       string. infra/envs/ holds exactly two roots, and multi-region and
   #       disaster-recovery topology are out of scope, so there is no third
   #       environment for a third token to name. Closing the set here also
@@ -95,7 +95,7 @@ variable "environment" {
 }
 
 # WHAT: the leading token of every composed queue name.
-# WHY : Trade-off: an input rather than a literal in main.tf, even though both
+# WHY : Trade-offs: an input rather than a literal in main.tf, even though both
 #       environments are expected to pass the same value. The cost is one more
 #       parameter to document; what it buys is the ability to stand a second,
 #       independently named queue set up alongside the first in one account --
@@ -106,7 +106,7 @@ variable "name_prefix" {
   type        = string
   default     = "carddemo"
 
-  # WHY : Assumption: this is the most load-bearing validation in the file,
+  # WHY : Assumptions: this is the most load-bearing validation in the file,
   #       because the limit it guards belongs to the service and not to
   #       Terraform. An SQS queue name may be at most 80 characters, and on a
   #       FIFO queue the mandatory `.fifo` suffix counts toward that 80. The
@@ -128,7 +128,7 @@ variable "name_prefix" {
     error_message = "name_prefix must be 1 to 52 characters. The module appends up to 28 more characters (\"-pauth-request-\" + environment + \"-dlq.fifo\") and the SQS queue-name limit of 80 counts the .fifo suffix."
   }
 
-  # WHY : Assumption: SQS accepts only letters, digits, hyphens and
+  # WHY : Assumptions: SQS accepts only letters, digits, hyphens and
   #       underscores in a queue name. A dot is refused here even though every
   #       FIFO name this module creates contains one, because that dot belongs
   #       to the `.fifo` suffix main.tf appends; a prefix carrying its own dot
@@ -147,8 +147,6 @@ variable "name_prefix" {
 # a customer-managed key; the baseline's queues had no equivalent protection.
 # -----------------------------------------------------------------------------
 
-# WHAT: the ARN of the customer-managed KMS key that encrypts all ten queues,
-#       supplied by the caller rather than discovered by this module.
 # WHY : Alternatives Considered: the module could obtain the key itself, either
 #       by referring to `module.kms` directly or with a `data "aws_kms_key"`
 #       lookup against a known alias. Both were rejected. A module that names a
@@ -162,7 +160,7 @@ variable "name_prefix" {
 #       the ARN as an input leaves the wiring in the caller, where each
 #       environment root passes its own `kms` module's SQS key output, and
 #       keeps this module callable from any root.
-# WHY : Assumption: there is deliberately no default, not even `null`. Every
+# WHY : Assumptions: there is deliberately no default, not even `null`. Every
 #       queue here is required to be encrypted with a customer-managed key, and
 #       the policy scan in .github/workflows/infra-ci.yml checks exactly that.
 #       A default would make the requirement skippable by omission: a caller
@@ -174,7 +172,7 @@ variable "kms_key_arn" {
   description = "ARN of the customer-managed KMS key used for server-side encryption of every queue and dead-letter queue, of the form arn:aws:kms:<region>:<aws-account-id>:key/<key-id>. Passed in by the calling root from the kms module's SQS key output and applied as kms_master_key_id on each aws_sqs_queue."
   type        = string
 
-  # WHY : Assumption: a full key ARN is required, although the queue attribute
+  # WHY : Assumptions: a full key ARN is required, although the queue attribute
   #       would also accept a bare key id or an alias. Only the ARN is
   #       unambiguous about which account and region the key belongs to, and
   #       checking the shape here catches the likeliest wiring mistake -- the
@@ -191,7 +189,7 @@ variable "kms_key_arn" {
 }
 
 # WHAT: how long SQS may reuse a single KMS data key before calling KMS again.
-# WHY : Trade-off: a direct exchange between KMS request volume and the
+# WHY : Trade-offs: a direct exchange between KMS request volume and the
 #       lifetime of a cached data key, stated in both directions because
 #       neither end is obviously correct. Raising it means fewer GenerateDataKey
 #       and Decrypt calls -- KMS bills per request and enforces a per-account
@@ -222,7 +220,7 @@ variable "kms_data_key_reuse_period_seconds" {
 
 # WHAT: how many receives a message may accumulate on a source queue before SQS
 #       moves it to that queue's dead-letter queue.
-# WHY : Assumption: 5 is constrained at both ends rather than chosen. The
+# WHY : Assumptions: 5 is constrained at both ends rather than chosen. The
 #       messaging design fixes a dead-letter queue at a receive count of five
 #       for each of the five source queues, and the baseline corroborates that
 #       figure independently: app/scheduler/CardDemo.controlm sets
@@ -232,7 +230,7 @@ variable "kms_data_key_reuse_period_seconds" {
 #       already operated under. Carrying the same number means an operator who
 #       knew the Control-M configuration does not have to relearn the
 #       threshold, which is why this value is a citation and not a preference.
-# WHY : Trade-off: exposed as an input even though both environments pass the
+# WHY : Trade-offs: exposed as an input even though both environments pass the
 #       same number, because diagnosing a poison message sometimes needs the
 #       threshold lowered so the message reaches the dead-letter queue on the
 #       next attempt instead of the fifth. What is given up is that dev and
@@ -252,7 +250,7 @@ variable "max_receive_count" {
 
 # WHAT: how long a received message stays hidden from other consumers before it
 #       becomes visible again.
-# WHY : Assumption: this is the target's stand-in for a unit of work the
+# WHY : Assumptions: this is the target's stand-in for a unit of work the
 #       baseline expressed with syncpoint. Both inquiry programs receive under
 #       syncpoint -- MQGMO-SYNCPOINT at app/app-vsam-mq/cbl/CODATE01.cbl:296
 #       and app/app-vsam-mq/cbl/COACCT01.cbl:347 -- and reply under syncpoint
@@ -267,7 +265,7 @@ variable "max_receive_count" {
 #       receives against max_receive_count -- so a message can land in the
 #       dead-letter queue having in fact been processed successfully every time.
 #       That failure mode is the reason this input exists at all.
-# WHY : Trade-off: 60 rather than the service default of 30. These consumers
+# WHY : Trade-offs: 60 rather than the service default of 30. These consumers
 #       run on Fargate against an Aurora Serverless cluster whose dev capacity
 #       floor is zero, and a paused cluster takes on the order of fifteen
 #       seconds to resume, which the first message after an idle period pays
@@ -291,7 +289,7 @@ variable "visibility_timeout_seconds" {
 # WHAT: how long a receive call waits for a message to arrive before returning
 #       empty, which is what makes the receive a long poll rather than a short
 #       one.
-# WHY : Assumption: 5 is a measured baseline constant, and recognising it
+# WHY : Assumptions: 5 is a measured baseline constant, and recognising it
 #       requires a unit conversion. The authorization consumer sets
 #       MOVE 5000 TO WS-WAIT-INTERVAL at
 #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl:242 and passes it to
@@ -303,7 +301,7 @@ variable "visibility_timeout_seconds" {
 #       app/app-vsam-mq/cbl/COACCT01.cbl:337, so all three flows already waited
 #       the same interval. The value is therefore preserved rather than picked,
 #       and the consumers keep the polling rhythm the system was run with.
-# WHY : Trade-off: the same value independently suppresses empty receives, and
+# WHY : Trade-offs: the same value independently suppresses empty receives, and
 #       that deserves naming because it is what makes long polling differ in
 #       kind from short polling rather than merely in latency. At 0 a receive
 #       returns immediately whether a message exists or not, so an idle consumer
@@ -316,7 +314,7 @@ variable "receive_wait_time_seconds" {
   type        = number
   default     = 5
 
-  # WHY : Assumption: the ceiling is 20, the longest long-poll wait SQS
+  # WHY : Assumptions: the ceiling is 20, the longest long-poll wait SQS
   #       accepts, and it is worth validating because it is the one bound in
   #       this file a caller is likely to overshoot by analogy -- a value
   #       chosen to match a visibility timeout or a retention period would sail
@@ -336,7 +334,7 @@ variable "receive_wait_time_seconds" {
 
 # WHAT: how long the two request queues and the error queue keep a message that
 #       nothing has deleted.
-# WHY : Trade-off: four days, and pointedly not the same value the reply queues
+# WHY : Trade-offs: four days, and pointedly not the same value the reply queues
 #       get below -- the asymmetry is the whole design. A request IS the unit of
 #       work, so discarding one discards an authorization or an inquiry that was
 #       genuinely asked for, and the error sink is the same case in the extreme:
@@ -348,7 +346,7 @@ variable "receive_wait_time_seconds" {
 #       interruption, including one that begins at the end of a working week.
 #       What is accepted in exchange is paying to store messages that, in the
 #       worst case, nobody ever processes.
-# WHY : Assumption: reducing this on a live queue is not a neutral edit, which
+# WHY : Assumptions: reducing this on a live queue is not a neutral edit, which
 #       is why it is called out on the input rather than left to be discovered.
 #       SQS applies a lowered retention to messages ALREADY enqueued, so a value
 #       below the age of the current backlog deletes that backlog, and the
@@ -367,7 +365,7 @@ variable "request_message_retention_seconds" {
 
 # WHAT: how long the two reply queues keep a message that nothing has deleted.
 #       Deliberately the shortest retention in the module.
-# WHY : Assumption: the baseline put a hard expiry on its reply and SQS has no
+# WHY : Assumptions: the baseline put a hard expiry on its reply and SQS has no
 #       equivalent, so this input is one third of a three-part substitute.
 #       COPAUA0C sets MOVE 50 TO MQMD-EXPIRY at
 #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl:750, and MQ expresses
@@ -383,7 +381,7 @@ variable "request_message_retention_seconds" {
 #       configured from this module, so setting this value alone does not
 #       deliver the expiry. docs/adr/ADR-004-messaging.md is the decision record
 #       for the gap and owns the transport reasoning, which is not restated.
-# WHY : Assumption: 60 is the floor SQS permits, and that is what makes it the
+# WHY : Assumptions: 60 is the floor SQS permits, and that is what makes it the
 #       right value rather than merely the smallest available. Because the
 #       consumer's acceptance window is the five seconds derived above, and 60
 #       is twelve times that, this retention can never discard a reply the
@@ -391,13 +389,13 @@ variable "request_message_retention_seconds" {
 #       stale by the consumer's own test. Choosing the floor therefore costs
 #       nothing in correctness while keeping the queue as near the baseline's
 #       observable behaviour as the service allows.
-# WHY : Assumption: the baseline supports the short value a second time, and
+# WHY : Assumptions: the baseline supports the short value a second time, and
 #       independently of the expiry. The reply is published non-persistent --
 #       MOVE MQPER-NOT-PERSISTENT TO MQMD-PERSISTENCE at COPAUA0C.cbl:749 -- so
 #       it was never meant to survive a restart of the queue manager, let alone
 #       days of retention. A short-lived reply is what the system already chose;
 #       a long retention here would impose durability the baseline declined.
-# WHY : Trade-off: this is not parity and must not be read as parity. The
+# WHY : Trade-offs: this is not parity and must not be read as parity. The
 #       baseline's five seconds were enforced by the queue manager, which
 #       withheld an expired message from every consumer. The target's five
 #       seconds are enforced by the consumer, so a stale reply stays in the
@@ -420,7 +418,7 @@ variable "reply_message_retention_seconds" {
 #       deliberately LONGER than either source retention above, and the second
 #       validation below refuses any value that is shorter than the request
 #       retention.
-# WHY : Trade-off: the inequality looks backwards and is not. A message only
+# WHY : Trade-offs: the inequality looks backwards and is not. A message only
 #       arrives on a dead-letter queue after being received max_receive_count
 #       times on its source queue, so by definition it is already old when it
 #       lands -- it spent its entire failing life on the other queue. Give the
@@ -434,7 +432,7 @@ variable "reply_message_retention_seconds" {
 #       is bounded by the failure rate rather than by throughput. That is the
 #       compromise -- paying to store failed messages in exchange for the
 #       failure still being diagnosable when somebody looks.
-# WHY : Assumption: one value covers all five dead-letter queues, including the
+# WHY : Assumptions: one value covers all five dead-letter queues, including the
 #       two whose source queues retain for only sixty seconds. Widening those
 #       two so sharply is intentional: a reply that failed repeatedly is exactly
 #       the case where the deliberately short reply retention would otherwise
@@ -460,7 +458,7 @@ variable "dlq_message_retention_seconds" {
   #       values in the diagnostic, so the check names the conflict precisely.
   #       Only the request retention is compared: the reply retention sits at
   #       the service floor, so it can never be the greater of the two.
-  # WHY : Trade-off: the comparison is `>=` and not `>`, so an equal value is
+  # WHY : Trade-offs: the comparison is `>=` and not `>`, so an equal value is
   #       allowed even though the default is strictly longer. A strict
   #       inequality would make the service maximum of fourteen days
   #       unreachable here whenever a caller had already chosen it for the
@@ -479,7 +477,7 @@ variable "dlq_message_retention_seconds" {
 # -----------------------------------------------------------------------------
 
 # WHAT: tags applied to every queue and dead-letter queue this module creates.
-# WHY : Assumption: this input exists because versions.tf declares no `provider`
+# WHY : Assumptions: this input exists because versions.tf declares no `provider`
 #       block, and it must not declare one -- a module carrying its own provider
 #       configuration cannot be called with count, for_each or depends_on, and
 #       it takes the choice of region away from its caller. The consequence
@@ -491,7 +489,7 @@ variable "dlq_message_retention_seconds" {
 #       is deliberate, and it is recorded here so that it is not later
 #       "simplified" into a provider block that would break every call site
 #       using for_each.
-# WHY : Trade-off: an empty map is the default, which makes tagging optional. A
+# WHY : Trade-offs: an empty map is the default, which makes tagging optional. A
 #       module that required tags would be the stricter contract, but an
 #       untagged queue is plainly visible in the console and in cost reporting
 #       rather than silently wrong, and both environment roots pass a common tag

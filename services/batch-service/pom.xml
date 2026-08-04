@@ -86,9 +86,7 @@
 
   <modelVersion>4.0.0</modelVersion>
 
-  <!-- WHAT: Aggregator parent supplying the Java release level, the Spring Boot
-             parent, all dependencyManagement and all pluginManagement.
-       WHY : Assumptions: the parent is resolved from the reactor through
+  <!-- WHY : Assumptions: the parent is resolved from the reactor through
              relativePath rather than from a repository, because this module is
              never built or released independently of the aggregator. groupId
              and version are deliberately NOT restated below: Maven inherits
@@ -123,11 +121,7 @@
          SHARED KERNEL
          ==================================================================== -->
 
-    <!-- WHAT: The one and only intra-repository dependency of this module.
-               Supplies Money, the zoned and packed decimal codecs, the fixed
-               width codec, the error model, the timestamp formatter and the
-               validation flags.
-         WHY : Alternatives Considered: depending on transaction-service and
+    <!-- WHY : Alternatives Considered: depending on transaction-service and
                account-service in order to reuse their Transaction and Account
                JPA entities was evaluated and rejected on two grounds. First,
                the layering rules enforce that no service imports another
@@ -155,8 +149,7 @@
          APPLICATION FRAMEWORK
          ==================================================================== -->
 
-    <!-- WHAT: Chunk-oriented job execution with a durable JobRepository.
-         WHY : Refactoring Rationale: the baseline has NO checkpoint contract
+    <!-- WHY : Refactoring Rationale: the baseline has NO checkpoint contract
                to preserve. The only RESTART= anywhere in the tree is commented
                out at app/jcl/DEFGDGD.jcl:2, and there is no CHKPT= in any of
                the 38 JCL members. A failed step therefore had to be resubmitted
@@ -171,10 +164,7 @@
       <artifactId>spring-boot-starter-batch</artifactId>
     </dependency>
 
-    <!-- WHAT: Managed persistence for the entities this module maps, including
-               its own local mappings of the ledger and account tables it is
-               granted write access to.
-         WHY : Alternatives Considered: a plain JDBC template or an SQL mapping
+    <!-- WHY : Alternatives Considered: a plain JDBC template or an SQL mapping
                framework was evaluated, since a batch workload leans on
                set-based statements that an object mapper adds nothing to. JPA
                wins on the record-at-a-time paths, which are the ones
@@ -189,9 +179,7 @@
       <artifactId>spring-boot-starter-data-jpa</artifactId>
     </dependency>
 
-    <!-- WHAT: Declarative constraint annotations on the job parameter and
-               record types.
-         WHY : Assumptions: the posting reject reasons transcribed from
+    <!-- WHY : Assumptions: the posting reject reasons transcribed from
                app/cbl/CBTRN02C.cbl are short-circuit field checks whose exact
                message text is part of the observable contract. Expressing the
                structural half of those checks as declarative constraints keeps
@@ -202,40 +190,91 @@
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- WHAT: Health endpoint used as the container probe target.
-         WHY : Trade-offs: this module exposes no business REST surface, so the
-               actuator is carried solely to give the Dockerfile HEALTHCHECK
-               something to probe. Carrying it is accepted because the
-               alternative, a bespoke health mechanism unique to this one
-               module, would diverge from the convention the other eight
-               modules already follow. -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
+    <!-- WHAT: No web server and no actuator. This module is the one deployable
+               in the reactor that declares NEITHER
+               spring-boot-starter-web NOR spring-boot-starter-actuator, and the
+               absence is the load-bearing decision recorded here.
+         WHY : Assumptions: this is a ONE-SHOT task, not a server. Every job here
+               is started by a Step Functions state through the synchronous
+               ecs:runTask.sync integration, which passes the job token and the
+               business date as container command overrides, waits for the task
+               to REACH A TERMINAL STATE, and reads its exit status. An embedded
+               servlet container is a non-daemon listener: it keeps the JVM alive
+               after the last job step has finished, so the task never stops, the
+               state never completes, and the nightly chain stalls at the step
+               that ran correctly. That is not a cost to weigh against a
+               convenience. It breaks the invocation contract outright, which is
+               why the web starter is absent rather than merely discouraged.
+         WHY : Assumptions: leaving both starters out is also the MECHANISM, not
+               just the intent. With no servlet API and no reactive web stack on
+               the classpath, Spring Boot deduces WebApplicationType.NONE by
+               itself, runs the context to completion and exits, so no
+               spring.main.web-application-type property is needed and none is
+               set. A property would be a second, silently overridable
+               expression of the same decision.
+         WHY : Alternatives Considered: keeping the actuator for an HTTP health
+               probe, which is what the other eight modules do and what an
+               earlier revision of this file did. Rejected on two independent
+               grounds. First, an actuator with no web server serves nothing over
+               HTTP, so the dependency would sit in the build with no consumer.
+               Second, and decisively, health is not the right question to ask of
+               this container: there is no steady state to be healthy IN. Its
+               outcome is the process exit status (0 clean, 4 soft warn with
+               rejects, 8 or more hard failure), which the invoking state reads
+               directly and routes on, and which
+               src/main/java/com/carddemo/batch/package-info.java documents as
+               the whole of this module's outcome contract. Adding a periodic
+               probe alongside it would advertise a liveness guarantee this
+               image does not provide.
+         WHY : Trade-offs: this module therefore diverges from the shared
+               eight-service convention of an /actuator/health target, and that
+               divergence is deliberate and matched elsewhere: the batch
+               instantiation of infra/modules/ecs-service sets
+               attach_load_balancer and create_service to false, so no target
+               group and no long-running service exists to probe it, and the
+               edge modules publish no batch route. A reader comparing this POM
+               against a sibling service POM should find these two starters
+               missing and read this block rather than restore them. -->
 
-    <!-- WHAT: Embedded servlet container that serves the actuator endpoint.
-         WHY : Trade-offs: a servlet container is genuinely surplus to an
-               argument-driven batch container that answers no request, and its
-               startup cost and attack surface are the accepted price. The
-               alternative, omitting the web stack entirely and probing health
-               with a shell command against a marker file, was rejected because
-               both the container task definition and the target-group
-               convention shared with the other eight modules expect an
-               actuator endpoint reachable over HTTP; a one-off probe here
-               would have to be maintained separately from every other
-               module's. -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-web</artifactId>
-    </dependency>
+    <!-- ====================================================================
+         WHY THIS MODULE DECLARES NO SECURITY STARTER
+         ==================================================================== -->
+
+    <!-- WHAT: No spring-boot-starter-security and no
+               spring-boot-starter-oauth2-resource-server, deliberately.
+         WHY : Assumptions: an authorization filter chain defends a LISTENER, and
+               this module opens none. Both starters install their chains from
+               autoconfiguration that is conditional on a servlet web
+               application, so with the web starter absent above they contribute
+               no filter, no chain and no bean: they would be weight in the image
+               and, worse, a reader auditing this file would conclude a surface
+               was defended when the artifact defending it never activates.
+         WHY : Alternatives Considered: declaring the web and actuator starters
+               so the container could be probed over HTTP, and then declaring
+               these two so that surface would deny by default. Rejected because
+               it accepts a listener in order to secure it. The concern behind it
+               is real and is answered one level further in: with no listener at
+               all there is no path for an unauthenticated caller in the private
+               application tier to reach this task, so the actuator data, the
+               metrics and any endpoint a later change might add are unreachable
+               rather than merely denied. The edge agrees with this: the batch
+               prefix is refused by a validation in
+               infra/modules/api-gateway-http/variables.tf, so neither the edge
+               nor the interior publishes a route here.
+         WHY : Trade-offs: an operator endpoint cannot be added to this module
+               without first adding the web starter, and adding it would mean
+               reversing the one-shot lifecycle argument recorded above. That is
+               the intended cost. The one invocation path stays the state
+               machine's synchronous run-task call, which carries the job name
+               and the business date as container command arguments, so there is
+               no second authorization surface to design and no second argument
+               source that could disagree with the first. -->
 
     <!-- ====================================================================
          PERSISTENCE
          ==================================================================== -->
 
-    <!-- WHAT: PostgreSQL JDBC driver.
-         WHY : Trade-offs: scoped to runtime rather than compile so that no
+    <!-- WHY : Trade-offs: scoped to runtime rather than compile so that no
                compilation unit in this module can bind to a driver-specific
                type. Every table this module touches is reached through JPA or
                through set-based SQL, both of which stay portable; the driver is
@@ -246,27 +285,42 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- WHAT: Versioned schema migration for the owned batch schema.
-         WHY : Assumptions: migrations shipped by this module create and evolve
+    <!-- WHY : Assumptions: migrations shipped by this module create and evolve
                ONLY the batch schema. The ledger, account and reference schemas
                are created and evolved exclusively by the contexts that own
                them; this module reaches them through grants, so pointing a
                migration location at any of them would make two modules
-               authoritative for one table. -->
+               authoritative for one table.
+         WHY : Assumptions: the coordinate is the STARTER, and naming it rather
+               than flyway-core is what actually activates migration. Spring Boot
+               4 split its autoconfiguration into one module per technology, and
+               FlywayAutoConfiguration now ships in spring-boot-flyway, which
+               only this starter puts on the classpath. flyway-core alone
+               resolves, compiles and starts, and then applies no migration: the
+               spring.flyway.* keys bind to nothing and batch.batch_run, the
+               durable step ledger the whole redrive contract rests on, is
+               never created, so the first nightly run fails on a missing
+               relation.
+         WHY : Refactoring Rationale: flyway-core is no longer declared directly.
+               The starter brings it transitively at the version the parent's
+               flyway.version property pins, so a direct declaration would add a
+               second editable version site and contribute nothing to the
+               classpath. -->
     <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
 
     <!-- WHAT: The PostgreSQL dialect plugin for Flyway. Mandatory companion to
-               flyway-core, not an optional extra.
+               the starter above, not an optional extra.
          WHY : Assumptions: from Flyway 10 onward, per-database support was
-               moved OUT of flyway-core into a separate module per database.
-               flyway-core on its own therefore compiles, packages and passes
-               every test, then fails at first container start with a "no
+               moved OUT of flyway-core into a separate module per database, and
+               the Boot starter above pulls no database module of its own. The
+               build therefore compiles, packages and passes every test without
+               this coordinate, then fails at first container start with a "no
                database plugin found" error. That build-green / runtime-broken
                asymmetry is exactly why this coordinate is declared explicitly
-               and adjacent to flyway-core: omitting it produces a defect that
+               and adjacent to the starter: omitting it produces a defect that
                no build gate in this repository can catch. Both artifacts take
                their version from the parent, so they cannot drift apart. -->
     <dependency>
@@ -278,9 +332,7 @@
          AWS INTEGRATION
          ==================================================================== -->
 
-    <!-- WHAT: Queue producer and listener support for the jobs that exchange
-               messages, wired through SqsConfig.
-         WHY : Alternatives Considered: the legacy
+    <!-- WHY : Alternatives Considered: the legacy
                org.springframework.cloud:spring-cloud-aws-* coordinate was
                evaluated and rejected because it is no longer the maintained
                line; io.awspring.cloud is the group that receives releases
@@ -292,9 +344,7 @@
       <artifactId>spring-cloud-aws-starter-sqs</artifactId>
     </dependency>
 
-    <!-- WHAT: Resolves externalised configuration from AWS Parameter Store as
-               a Spring property source at startup.
-         WHY : Assumptions: the infrastructure layer publishes every runtime
+    <!-- WHY : Assumptions: the infrastructure layer publishes every runtime
                location (database endpoint, dataset bucket, queue destinations,
                encryption key identifiers) as parameters, and this module reads
                them from there. That is the mechanism by which no endpoint and
@@ -305,9 +355,7 @@
       <artifactId>spring-cloud-aws-starter-parameter-store</artifactId>
     </dependency>
 
-    <!-- WHAT: Object storage client used by DatasetGenerationService and the
-               backup, combine, export and import jobs.
-         WHY : Refactoring Rationale: the baseline addressed dataset
+    <!-- WHY : Refactoring Rationale: the baseline addressed dataset
                generations through relative generation numbers, for example the
                (0) and (+1) references at app/jcl/COMBTRAN.jcl:24, :26, :37 and
                :44, and retained five generations per base. Generation-data-group
@@ -326,8 +374,7 @@
          OBSERVABILITY
          ==================================================================== -->
 
-    <!-- WHAT: Metric export in the scrape format the monitoring stack reads.
-         WHY : Trade-offs: runtime scope only, because no code in this module
+    <!-- WHY : Trade-offs: runtime scope only, because no code in this module
                may reference a registry implementation directly. Instrumentation
                is expressed against the vendor-neutral facade that arrives with
                the actuator, so swapping the backend stays a dependency change
@@ -346,9 +393,7 @@
          TEST SCOPE
          ==================================================================== -->
 
-    <!-- WHAT: The aggregate test stack (test engine, assertions, mocking and
-               the Spring test context support).
-         WHY : Assumptions: the aggregate is declared instead of pinning each
+    <!-- WHY : Assumptions: the aggregate is declared instead of pinning each
                test library individually, so the test stack is version-aligned
                with the runtime by construction and cannot drift away from it
                when the parent moves the framework version. It also supplies the
@@ -360,9 +405,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHAT: Job and step launcher utilities plus step-scope support for the
-               job-level tests.
-         WHY : Assumptions: the jobs are argument-driven, so a test must be able
+    <!-- WHY : Assumptions: the jobs are argument-driven, so a test must be able
                to launch one with an explicit business date and assert on the
                resulting exit status. app/jcl/INTCALC.jcl:22 injects
                PARM='2022071800' for exactly the same reason, and a test that
@@ -374,9 +417,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHAT: Disposable PostgreSQL instance for the repository integration
-               tests.
-         WHY : Trade-offs: a real database container starts far more slowly than
+    <!-- WHY : Trade-offs: a real database container starts far more slowly than
                an in-memory engine, and that cost is accepted deliberately. The
                integration tests must prove that the three-write posting unit of
                work at app/cbl/CBTRN02C.cbl:440-442 both COMMITS and ROLLS BACK
@@ -404,7 +445,10 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHAT: Architecture assertions evaluated as ordinary tests.
+    <!-- WHAT: the engine that evaluates architecture assertions as ordinary
+               tests. The assertions themselves are authored in this module's own
+               test tree and land at a later index of this plan; this declaration
+               is what lets them run when they do.
          WHY : Refactoring Rationale: the two prohibitions this module depends on
                most, that the money path never uses a binary floating-point type
                and that no service imports another service's domain package,
@@ -412,12 +456,35 @@
                convention silently stops holding the first time a reviewer is in
                a hurry. Encoding them as executable assertions means a violation
                fails the build instead of reaching the branch. The rule set
-               itself is inherited from the layering rules published by
-               common-lib, so the rules are stated once and applied everywhere
-               rather than copied per module. -->
+               itself is the one published by common-lib as a test artifact, so
+               the rules are stated once and applied everywhere rather than
+               copied per module; the pair of declarations below is what applies
+               them here. -->
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- WHAT: the shared kernel's test artifact, carrying the one rule class.
+         WHY : Refactoring Rationale: the engine above was declared alone and the
+               comment above it said the rule set was inherited. Maven resolution
+               passes a module's MAIN classes to its consumers and never its test
+               classes, so no rule was ever evaluated against com.carddemo.batch
+               and the two prohibitions this module depends on most, exact fixed
+               point money and no cross context domain import, were unenforced
+               here. common-lib now publishes the class as a test artifact and the
+               architecture-rules Surefire execution in services/pom.xml scans it
+               into this module's test run, against this module's own classes.
+         WHY : Assumptions: ownership is unchanged, the rules remaining authored
+               once at
+               services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
+               Version and scope come from the aggregator's managed set, and test
+               scope keeps the engine off the classpath of the jobs it polices. -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
 
@@ -480,7 +547,7 @@
            failure. Keeping one local transaction over scoped cross-schema
            grants preserves atomicity and needs no coordinator at all.
 
-         No API documentation starter and no security starters.
+         No API documentation starter.
            Alternatives Considered: exposing an administrative endpoint to
            trigger a job over HTTP was evaluated and rejected. The only
            invocation path in the target architecture is a synchronous run-task
@@ -488,18 +555,54 @@
            business date as container command arguments. An HTTP trigger would
            add a second invocation path and, with it, a second authorization
            surface to design, test and defend, for no operational gain. There is
-           consequently no controller, no published contract, and no
-           OpenApiConfig or SecurityConfig class shipped under src; the module
-           README states the same, so the two cannot disagree. The actuator
-           endpoint IS served, but it is health-only and reachable solely inside
-           the task's own network namespace, where the container health check
-           probes it.
+           consequently no controller, no published contract and no
+           OpenApiConfig class shipped under src, and infra/modules/api-gateway
+           -http creates no route for this module and refuses one by validation;
+           the module README states the same, so they cannot disagree.
+
+           Refactoring Rationale: an earlier revision of this block also claimed
+           "and no security starters", and paired it with the assertion that the
+           actuator endpoint is "reachable solely inside the task's own network
+           namespace". That second claim was simply untrue. The listener binds
+           the container's network interface, not its loopback, because the
+           task definition and the target-group convention both expect a probe
+           reachable over the network; so the surface was reachable from the
+           whole private application tier with no filter chain in front of it.
+           A SecurityConfig class IS now shipped under src and both security
+           starters ARE declared, for the reasons recorded at their
+           declarations. What remains true is that this module publishes no
+           BUSINESS endpoint: the chain permits exactly the health endpoints the
+           two probes request and denies every other path, so the module gained
+           an access control rather than an API.
          ==================================================================== -->
 
   </dependencies>
 
   <build>
     <plugins>
+
+      <!-- WHAT: Repackages the module jar as an executable Spring Boot archive.
+           WHY : Assumptions: the Spring Boot parent only MANAGES this plugin, it
+                 does not activate it, and the reactor parent at services/pom.xml
+                 activates checkstyle, enforcer and failsafe but deliberately not
+                 this one, because common-lib is a library that must stay a
+                 plain archive. A module that needs an executable jar must
+                 therefore declare the coordinate itself. Without this
+                 declaration `mvn package` emits an ordinary jar with no
+                 Main-Class and no BOOT-INF layout, and the container image's
+                 `java -jar` entry point fails with "no main manifest attribute"
+                 at run time, from a build that reported success.
+           WHY : Assumptions: this module is a deployable even though it serves no
+                 HTTP surface. Step Functions starts it through ecs:runTask.sync
+                 and the image launches one self-contained archive, so the
+                 packaging requirement is identical to the seven online services;
+                 only the lifecycle differs. No version and no executions block
+                 are declared: the parent chain pins the version in lockstep with
+                 the framework and already binds the repackage goal. -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
 
       <!-- WHAT: Activates the integration-test runner for this module. Version,
                  lifecycle bindings and configuration all come from the

@@ -36,14 +36,31 @@
 > * the shared session structure [`app/cpy/COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy)
 >   L19–L44, which is why the target services hold no session state.
 >
-> **Delivers, and who consumes it.** It delivers the canonical service names, the
-> owned-data assignment per context, the dependency edges between contexts, and
-> the component reconciliation. Its declared consumers are the root
-> `README.md` and `MIGRATION_README.md`, which both link this file by exactly the
-> path `docs/architecture/service-catalog.md`; the eight sibling documents in this
+> **Delivers, and who will consume it.** It delivers the canonical service names,
+> the owned-data assignment per context, the dependency edges between contexts, and
+> the component reconciliation. Its declared consumers are the root `README.md` and
+> `MIGRATION_README.md`, which will each link this file by exactly the path
+> `docs/architecture/service-catalog.md`; the eight sibling documents in this
 > folder, which cite these service names; and the nine Maven module READMEs. The
 > path spelling is part of the contract — the root README's own validation gate
 > matches that string literally, so a single character of drift breaks it.
+>
+> **None of those consumers has landed yet, and that is stated rather than implied.**
+> This document is authored first among the nine in this folder precisely so the
+> others can cite it, which means at this checkpoint the consumer list is a contract
+> to be honoured rather than a set of existing references. Concretely: the root
+> `README.md` update is one of only three permitted modifications to a pre-existing
+> file and has not been made; `MIGRATION_README.md` does not exist; two of the eight
+> sibling documents in this folder exist
+> (`docs/architecture/data-model-and-schema-mapping.md` and
+> `docs/architecture/design-token-reference.md`); and no Maven module `README.md`
+> exists. Assumptions:  a path in this document that names a document not yet
+> authored is written as a plain code span rather than as a link, per the Markdown
+> convention in
+> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — a link
+> that resolves to nothing is a defect a reader finds by clicking, and a document
+> authored ahead of its siblings would otherwise publish a page of them. A code span
+> becomes a link when the file it names exists.
 >
 > **Caveats.** Three, stated up front rather than buried. First, this is a catalog
 > of a **target design**, not a report on a running system: the infrastructure is
@@ -63,6 +80,13 @@ catalog listing, the scheduler definitions and the seed data — is cited here b
 path and line, and is read-only. The same reference status applies to `tests/**`,
 `scripts/**` and `samples/**`.
 
+**Exactly three pre-existing files may be modified by this migration**, and naming
+them is what makes the additive claim above checkable rather than asserted. They are
+`README.md`, `CONTRIBUTING.md` and `.gitignore`; there is no fourth, and every other
+artifact of the migration is a new file in a new tree. At this checkpoint only
+`.gitignore` has been modified — which is why the root `README.md` link described in
+the header is a contract rather than an existing reference.
+
 
 ## WHY (non-obvious design decisions)
 
@@ -70,31 +94,35 @@ This section carries the reasoning for the choices made *by this document about
 itself*. Decisions about the architecture it catalogs are justified at the point
 where each is stated, under the same four category names.
 
-- **Assumptions:** the repository is authoritative and prose is not. Every count
+- Assumptions: the repository is authoritative and prose is not. Every count
   in [Baseline component inventory](#baseline-component-inventory-four-distinct-populations)
   was produced by measuring the files named in the header, and the measurement
   method is stated alongside each figure so a reader can repeat it. Where a
   narrative figure and a measured figure could differ, the measured one is
   recorded and the narrative one is not restated.
-- **Trade-offs:** this document reports **four separate component populations**
+- Trade-offs: this document reports **four separate component populations**
   instead of one headline number. One number would be shorter to read and would
   be wrong for three of the four questions a reader actually asks — how many
   transactions the base region defines, how many the whole repository defines,
   how many the README documents, and how many screens exist. The four figures
   disagree for structural reasons, so the accepted cost is a longer inventory
   section in exchange for every figure being answerable and checkable.
-- **Alternatives Considered:** the sibling documents could each have restated the
+- Alternatives Considered: the sibling documents could each have restated the
   service names and counts locally. That was rejected because nine independent
   copies of the same figure drift independently and there is then no authority to
   resolve the disagreement. Instead this document fixes them once and the siblings
   cite it — which is why the naming section below is explicit about canonical
   spellings rather than leaving them to be inferred.
-- **Refactoring Rationale:** the nine candidate service boundaries supplied as a
-  starting point are refined to eight here, and the refinement is recorded in
+- Alternatives Considered:  the architecture is **eight** bounded contexts. A
+  nine-context decomposition, one per candidate boundary supplied as a starting
+  point, is the alternative and is rejected: two of the candidates are alternate
+  transports over data another context already owns, so standing them up
+  separately would split ownership of a single table across two deployables —
+  precisely the failure a bounded context exists to prevent. All nine candidate
+  responsibilities are delivered; only the packaging differs.
   [Nine candidate boundaries, eight bounded contexts](#nine-candidate-boundaries-eight-bounded-contexts)
-  with the reason the original decomposition was changed rather than adopted
-  as-is.
-- **Assumptions:** the documentation convention this file follows is the one
+  carries the mapping context by context.
+- Assumptions:  the documentation convention this file follows is the one
   already established in the repository, not a new one. The in-repository
   precedent is [`tests/README.md`](../../tests/README.md) §12 (L544–L549), which
   requires every test, fixture builder, helper, mock and runner routine to carry
@@ -164,10 +192,24 @@ matching the README's breadth.
 | Resource definition | Lines | `TRANSACTION` | `PROGRAM` | `MAPSET` | Transaction identifiers |
 |---|---|---|---|---|---|
 | `app/csd/CARDDEMO.CSD` | 505 | 18 | 18 | 17 | the 18 listed above |
-| `app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd` | 78 | 3 | 4 | 2 | `CPVD`, `CPVS`, `CP00` |
-| `app/app-transaction-type-db2/csd/CRDDEMOD.csd` | 59 | 2 | 2 | 2 | `CTLI`, `CTTU` |
+| `app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd` | 78 † | 3 | 4 | 2 | `CPVD`, `CPVS`, `CP00` |
+| `app/app-transaction-type-db2/csd/CRDDEMOD.csd` | 59 † | 2 | 2 | 2 | `CTLI`, `CTTU` |
 | `app/app-vsam-mq/csd/CRDDEMOM.csd` | 41 | 2 | 2 | **0** | `CDRA`, `CDRD` |
 | **Repository-wide** | — | **25** | **26** | **21** | — |
+
+**Assumptions — the counting convention for the Lines column, and why two rows carry
+a dagger.** Every figure in that column is a **newline count**, as reported by
+`wc -l`. Two of the four files — the two marked † — have **no terminal newline**, so
+each holds one further *logical* line that a newline count does not see:
+`CRDDEMO2.csd` is 78 newlines and **79** logical lines, and `CRDDEMOD.csd` is 59
+newlines and **60** logical lines. `CARDDEMO.CSD` (505) and `CRDDEMOM.csd` (41) both
+end with a newline, so for those two the conventions agree. The convention is stated
+rather than the figures silently switched because the newline count is what the
+repeatable command reports, and a reader re-measuring with `wc -l` must land on the
+same number this table shows. **Nothing else in this document depends on the
+difference:** the resource counts in the remaining columns are parsed from `DEFINE`
+stanzas, not derived from line totals, so they are identical under either
+convention.
 
 The extension transaction-to-program pairs are `CPVD`→`COPAUS1C`,
 `CPVS`→`COPAUS0C`, `CP00`→`COPAUA0C`; `CTLI`→`COTRTLIC`, `CTTU`→`COTRTUPC`; and
@@ -307,9 +349,9 @@ implementation behind it, plus one corroborating absence:
 
 `COCRDSEC` therefore has **no target service**. It is documented here as a
 dangling resource definition and is registered as such in
-[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
+`docs/architecture/cobol-to-service-traceability.md`.
 
-> **Assumptions — resource-definition provenance operands carry no signal here.**
+> Assumptions: resource-definition provenance operands carry no signal here.
 > The `CHANGEAGENT` operand looks like it might distinguish this entry, and it
 > does not. Measured across `app/csd/CARDDEMO.CSD`, `CSDAPI` appears in 6 of 8
 > `FILE` stanzas, 1 of 2 `LIBRARY`, 16 of 17 `MAPSET`, 14 of 18 `PROGRAM`, the
@@ -377,7 +419,7 @@ export/import drivers, one report-print job and one text-to-PDF utility.
 Repository-wide the JCL accounting closes as 38 in `app/jcl` + 8 across the
 extension trees (5 authorization, 3 transaction-type, 0 VSAM/MQ) + 9 under
 `samples/**` = **55**. The job-to-orchestration mapping for the migrated members
-is the subject of [`batch-orchestration.md`](batch-orchestration.md).
+is the subject of `docs/architecture/batch-orchestration.md`.
 
 ### Program coverage: all 44 accounted for
 
@@ -394,7 +436,7 @@ extension trees. Every one is accounted for:
 | Transaction-type extension tree | **3** | `COTRTLIC`, `COTRTUPC`, `COBTUPDT` → `reference-service` |
 | **Total** | **44** | 28 + 2 + 1 = 31 under `app/cbl`; + 8 + 2 + 3 = 44 |
 
-> **Refactoring Rationale — why the two menu programs have no service owner.**
+> Refactoring Rationale: why the two menu programs have no service owner.
 > `COADM01C` and `COMEN01C` do nothing but present an option list and dispatch to
 > the chosen program, and the dispatch target travelled in the shared session
 > structure. That structure is eliminated: navigation moves to client-side
@@ -442,7 +484,7 @@ candidate list and the difference must not read as a dropped requirement.
 | **Account Inquiry** — from the VSAM/message-queue extension | **folded** | → `account-service` |
 | **Transaction-Type Ref** — from the Db2 extension | **folded** | → `reference-service` (added) |
 
-> **Refactoring Rationale — why two candidates were folded rather than stood up.**
+> Refactoring Rationale: why two candidates were folded rather than stood up.
 > The candidate decomposition would have split ownership of a single table across
 > two deployables, and the reason for changing it is stated in the migration plan
 > verbatim: *"standing them up as separate services would have split ownership of
@@ -485,7 +527,7 @@ package roots and by the per-service READMEs.
 | `reference-service` | `services/reference-service` | `com.carddemo.reference` | `reference` | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` |
 | `batch-service` | `services/batch-service` | `com.carddemo.batch` | `batch`, plus scoped cross-schema grants | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` |
 | `authorization-service` | `services/authorization-service` | `com.carddemo.authorization` | `authorization` | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` |
-| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | *none — read-only views* | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
+| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | `reporting` — **no tables**, read-only views only | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
 
 **Nine Maven modules, eight bounded contexts.** A ninth module, `common-lib`
 (package root `com.carddemo.common`), sits alongside the eight. It is the **shared
@@ -498,7 +540,7 @@ envelope, the correlation filter, the timestamp formatter and the date-edit
 validator. The distinction matters when counting: a build produces nine modules
 and deploys eight services.
 
-> **Alternatives Considered — a shared kernel versus duplicating the codecs.**
+> Alternatives Considered: a shared kernel versus duplicating the codecs.
 > The alternative was to let each service carry its own copy of the money type and
 > the record codecs. It was rejected because those types encode the baseline's wire
 > and storage contracts — sign overpunch, packed-decimal nibbles, exact
@@ -525,17 +567,17 @@ condition names in the session structure at
 [`app/cpy/COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy) L27–L28, and mapped to the two
 groups whose claim drives authorization everywhere else.
 
-> **Refactoring Rationale — the password field is not carried forward.** The
+> Refactoring Rationale: the password field is not carried forward. The
 > baseline user record stores an eight-character password in plain text and sign-on
 > compares it directly. The target `users` table has **no password column at all**;
 > credential handling moves to the managed identity provider, and the table keeps
 > only a subject reference. This is the one place where parity is deliberately
 > declined rather than preserved, and it is registered as a documented divergence
-> in [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md). The
+> in `docs/architecture/cobol-to-service-traceability.md`. The
 > alternative — porting the plaintext comparison so that behaviour matched
 > byte-for-byte — was rejected because it would carry a credential-storage defect
 > into a new system in order to reproduce it faithfully. Details are in
-> [`security-and-identity.md`](security-and-identity.md).
+> `docs/architecture/security-and-identity.md`.
 
 ### `account-service`
 
@@ -547,7 +589,7 @@ groups whose claim drives authorization everywhere else.
 | Owned tables | `accounts`, `customers`, `card_xref` |
 | Baseline data | `ACCTDAT` L1, `CUSTDAT` L50, `CCXREF` L37 and the `CXACAIX` alternate-index path L63, all in `app/csd/CARDDEMO.CSD` |
 | Synchronous dependencies | `reference-service`, for the seeded phone area-code, state and state/ZIP-prefix lookups that address validation reads |
-| Asynchronous dependencies | Consumes the inquiry request queue and publishes to the inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
+| Asynchronous dependencies | Consumes the inquiry request queue and publishes to the inquiry reply queue — see `docs/architecture/messaging-contracts.md` |
 
 The `CXACAIX` alternate-index path becomes a secondary index on the account-identifier
 column of `card_xref`, preserving it as a real access path rather than as a
@@ -573,7 +615,7 @@ The `CARDAIX` path becomes a secondary index on the account-identifier column of
 numbers are masked to the last four digits except on the administrative detail
 endpoint, and the card verification value is returned by no endpoint.
 
-> **Alternatives Considered — the card list pages by key, not by offset.** This is
+> Alternatives Considered: the card list pages by key, not by offset. This is
 > the clearest instance of a browse becoming keyset pagination, so the choice is
 > recorded at the context that exhibits it most plainly. Offset pagination was the
 > alternative and was rejected: under concurrent inserts an offset window skips and
@@ -612,7 +654,7 @@ timestamp, and a second index carries the by-card access path.
 | Owned tables | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` |
 | Baseline data | The transaction-type, transaction-category and disclosure-group datasets, and the lookup copybook's code lists |
 | Synchronous dependencies | None |
-| Asynchronous dependencies | Consumes the inquiry request queue for date conversion and publishes to the inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
+| Asynchronous dependencies | Consumes the inquiry request queue for date conversion and publishes to the inquiry reply queue — see `docs/architecture/messaging-contracts.md` |
 
 Two constraints on this context's data are load-bearing for parity elsewhere and
 so are recorded here. `transaction_categories` carries a foreign key to
@@ -642,7 +684,7 @@ golden-master comparison depends on. `batch_run` gives each step an idempotency
 key, so a resumed step that already completed is a no-op; the baseline has no
 checkpoint contract at all — its only restart directive is commented out — so this
 is documented as an addition rather than as a port. The state-by-state mapping
-lives in [`batch-orchestration.md`](batch-orchestration.md).
+lives in `docs/architecture/batch-orchestration.md`.
 
 ### `authorization-service`
 
@@ -651,18 +693,21 @@ lives in [`batch-orchestration.md`](batch-orchestration.md).
 | Responsibilities | Pending-authorization summary and detail, fraud marking, authorization request processing, expiry/purge, and the segment load and unload utilities |
 | Source programs | `COPAUS0C` (summary), `COPAUS1C` (detail), `COPAUS2C` (fraud marking), `COPAUA0C` (request processing), `CBPAUP0C` (purge), `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` (load and unload) — all eight from `app/app-authorization-ims-db2-mq` |
 | Owned schema | `authorization` |
-| Owned tables | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud` |
+| Owned tables | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` — four, of which the first three derive from baseline stores and the fourth has no baseline counterpart |
 | Baseline data | The two IMS segment layouts plus the Db2 fraud table |
 | Synchronous dependencies | None |
-| Asynchronous dependencies | Consumes the authorization request queue in order per card; publishes replies to the authorization reply queue through a transactional outbox — see [`messaging-contracts.md`](messaging-contracts.md) |
+| Asynchronous dependencies | Consumes the authorization request queue in order per card; publishes replies to the authorization reply queue through a transactional outbox — see `docs/architecture/messaging-contracts.md` |
 
 This is the only context that consolidates two different baseline datastores. The
-pending-authorization segments and the fraud table become three tables in **one**
-schema, which means the baseline's two-phase commit across the two stores is
-**eliminated rather than emulated**: the unit of work becomes a single local
-transaction.
+pending-authorization segments and the fraud table become three of the schema's
+four tables, all in **one** schema, which means the baseline's two-phase commit
+across the two stores is **eliminated rather than emulated**: the unit of work
+becomes a single local transaction. The fourth table, `auth_reply_outbox`, is
+net-new and is what makes that single transaction sufficient — it is described
+immediately below and its columns are specified in
+[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-> **Alternatives Considered — one schema rather than two, for data that arrived
+> **Alternatives Considered: one schema rather than two, for data that arrived
 > from two stores.** Keeping the pending-authorization data and the fraud data in
 > separate schemas — mirroring the baseline's split across a hierarchical store and
 > a relational one — was the alternative, and it was rejected. That split exists in
@@ -677,7 +722,7 @@ transaction.
 > recorded in
 > [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-> **Trade-offs — the reply is published from an outbox, not inline.** The baseline
+> Trade-offs: the reply is published from an outbox, not inline. The baseline
 > consumer commits its database work and publishes its reply as two separate
 > actions, so a failure between the two loses a reply that the committed data says
 > was produced. The target writes the reply as an outbox row inside the same
@@ -686,20 +731,69 @@ transaction.
 > exchange for the guarantee that a reply exists for every committed decision.
 > Publishing inline was the alternative and reproduces the original gap exactly.
 
+**The outbox is a table in this schema, not an implementation detail.** It is named
+`auth_reply_outbox`, it is owned by this context like the other three, and it is
+created by this module's own Flyway migration — so it is listed among the owned
+tables above rather than described only in prose. Its shape follows from the two
+jobs it has to do. It carries the reply exactly as the wire format states it, the
+six-field CSV, so that draining a row is a send and never a re-derivation. It
+carries the two identities the FIFO reply queue needs, the card number as the
+message group and the transaction identifier as the deduplication key, so that
+per-card ordering and exactly-once acceptance survive a retry of the drain. And it
+carries its publication state as a nullable `published_at`, so that the drain query
+is a partial index scan over unpublished rows rather than a full scan with a status
+filter. Retention is bounded: a published row is removed by the same purge job that
+expires pending authorizations, which is the migrated `CBPAUP0C`. The column list,
+the indexes and the retention rule are specified field by field in
+[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), and the
+queue attributes the two identity columns feed are in
+`docs/architecture/messaging-contracts.md`.
+
 ### `reporting-service`
 
 | Aspect | Detail |
 |---|---|
 | Responsibilities | Transaction reports and statement generation, plus on-demand report submission |
 | Source programs | `CORPT00C` (report request), `CBTRN03C` (transaction report), `CBSTM03A` and `CBSTM03B` (statements) |
-| Owned schema | **None** |
-| Owned tables | **None** — it reads through read-only cross-schema views |
-| Synchronous dependencies | Read-only access to `ledger`, `account` and `card` through views, under a database role holding `SELECT`-only grants |
+| Owned schema | `reporting` — dedicated to this context, **holds no table**, and owned in the database by the non-login `carddemo_reporting_owner` role rather than by this context's own login role |
+| Owned tables | **None** — the schema holds only read-only cross-schema views, created by `data-migration/sql/V1__reporting_views.sql` |
+| Synchronous dependencies | Read-only access to `ledger`, `account`, `card` and `reference` through those views. The `carddemo_reporting` login holds `USAGE` on the `reporting` schema plus `SELECT` on its views, and **no grant of any kind on a base table** |
 | Asynchronous dependencies | None. On-demand submission starts an orchestration execution, which replaces the baseline's transient-data-queue submission tunnel (`DEFINE TDQUEUE(JOBS)` with `DDNAME(INREADER)`, `app/csd/CARDDEMO.CSD` L499–L501) |
 
 **`reporting-service` owns no tables.** It is a pure consumer: every read goes
 through a read-only cross-schema view, and its database role holds `SELECT`-only
 grants, so the context cannot write to another context's schema even in error.
+
+**The eighth schema exists, and it is deliberately not owned by the reporting
+login.** The distinction is worth stating exactly, because "reporting owns no
+tables" and "there is no reporting schema" are different claims and only the first
+is true. `reporting` is created by
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+as the eighth of eight schemas, and it is the one schema whose owner is not the
+login role named after it: it is owned by `carddemo_reporting_owner`, a role created
+`NOLOGIN` and reachable only by a principal already holding membership in it.
+That asymmetry is the security property rather than an inconsistency. A schema's
+owner holds `CREATE` in it unconditionally, so owning `reporting` with
+`carddemo_reporting` would let the role a reporting process authenticates as
+create, replace or drop the very views that are meant to be its only reach into
+other contexts' data — which would make the context read-only by convention in
+code rather than in the database.
+
+The views themselves are created by one named artifact,
+`data-migration/sql/V1__reporting_views.sql`, applied **after** every per-service
+`V1__*.sql` has created the tables those views read; a view cannot be created over
+a table that does not yet exist, and V0 runs before any table exists anywhere. That
+artifact connects as the bootstrap principal and issues `SET ROLE carddemo_reporting_owner`
+before each `CREATE VIEW`, which is what makes `carddemo_reporting_owner` the views' owner —
+and it is why the views resolve their own reads: a view executes with its owner's
+privileges, so `carddemo_reporting_owner` holds `SELECT` on the four source schemas while
+`carddemo_reporting` holds none. V0's default privileges then grant `SELECT` on each
+new view to `carddemo_reporting` automatically, so the view artifact issues no
+`GRANT` and cannot get one wrong. `reporting-service` itself authors no
+data-definition statement at all and has no `db/migration` directory; one appearing
+under that module would be a defect. A view missing at run time is a defect to
+report against `V1__reporting_views.sql`, never something for a service to create
+for itself.
 
 > **Trade-offs — read-only views on the writer rather than a separate reporting
 > store.** The alternatives were a read replica or a dedicated reporting datastore
@@ -717,8 +811,10 @@ grants, so the context cannot write to another context's schema even in error.
 
 ## Owned data, and the one deliberate exception
 
-Ownership is schema-per-service. Six contexts own a schema outright, one owns a
-schema plus narrowly-scoped write grants outside it, and one owns nothing.
+Ownership is schema-per-service, and there are **eight schemas for eight contexts**.
+Six contexts own a schema and the tables in it; one owns a schema, its tables and
+narrowly-scoped write grants outside it; and one owns a schema that holds no table at
+all.
 
 | Schema | Owning context | Written by | Read by |
 |---|---|---|---|
@@ -726,10 +822,10 @@ schema plus narrowly-scoped write grants outside it, and one owns nothing.
 | `account` | `account-service` | `account-service`, **and `batch-service` under scoped grants** | `account-service`, `reporting-service` (views) |
 | `card` | `card-service` | `card-service` | `card-service`, `reporting-service` (views) |
 | `ledger` | `transaction-service` | `transaction-service`, **and `batch-service` under scoped grants** | `transaction-service`, `reporting-service` (views) |
-| `reference` | `reference-service` | `reference-service` | `reference-service`, `account-service`, `transaction-service` |
+| `reference` | `reference-service` | `reference-service` | `reference-service`, `account-service`, `transaction-service`, `reporting-service` (views) |
 | `batch` | `batch-service` | `batch-service` | `batch-service` |
 | `authorization` | `authorization-service` | `authorization-service` | `authorization-service` |
-| *(none)* | `reporting-service` | — | `reporting-service`, `SELECT`-only |
+| `reporting` | `reporting-service` | nothing — **no table, no write path** | `reporting-service`, `SELECT`-only, through the views held here |
 
 ### The exception: `batch-service` cross-schema write grants
 
@@ -739,7 +835,7 @@ database role that holds **narrowly-scoped cross-schema write grants on
 database-per-service purity in the whole design, and it exists for one specific
 reason.
 
-> **Trade-offs — a scoped grant, rather than a saga, for the posting unit of
+> **Trade-offs: a scoped grant, rather than a saga, for the posting unit of
 > work.** Transaction posting commits **three** writes as a single unit of work:
 > the transaction itself, the transaction-category balance, and the account. Those
 > three rows live in two schemas, so preserving one atomic commit requires that
@@ -777,7 +873,7 @@ inside the private network behind an internal load balancer, and every client is
 configured with **explicit connect and read timeouts** so a slow dependency
 surfaces as a bounded failure rather than as an exhausted connection pool.
 
-> **Alternatives Considered — no circuit breaker is fitted.** A circuit breaker
+> Alternatives Considered: no circuit breaker is fitted. A circuit breaker
 > was considered and is **deliberately omitted**. The only synchronous
 > service-to-service hops are in-network, behind an internal load balancer, with
 > bounded timeouts already in place, and the load balancer removes unhealthy
@@ -799,7 +895,7 @@ surfaces as a bounded failure rather than as an exhausted connection pool.
 
 The wire contracts — field order, delimiter, correlation identity, reply routing,
 ordering and deduplication guarantees, and the resolution of the message-expiry
-gap — are specified in [`messaging-contracts.md`](messaging-contracts.md) and are
+gap — are specified in `docs/architecture/messaging-contracts.md` and are
 deliberately **not** duplicated here. This catalog records only which context
 consumes and publishes what.
 
@@ -807,7 +903,7 @@ consumes and publishes what.
 
 Cross-service imports of another context's `domain` package are **forbidden**.
 
-> **Trade-offs — the prohibition is a test, not a convention.** The rule is
+> Trade-offs: the prohibition is a test, not a convention. The rule is
 > enforced by an architecture test that fails the build, rather than by a line in
 > a contributing guide. The alternative — documenting the boundary and relying on
 > review to catch violations — was rejected because an unenforced convention
@@ -838,7 +934,7 @@ graph TB
         REF["reference-service<br/>schema: reference"]
         BATCH["batch-service<br/>schema: batch"]
         AUTZ["authorization-service<br/>schema: authorization"]
-        REPT["reporting-service<br/>no owned schema"]
+        REPT["reporting-service<br/>schema: reporting (no tables)"]
     end
 
     LIB["common-lib<br/>shared kernel, not a service"]
@@ -865,13 +961,16 @@ graph TB
     REPT -->|"SELECT-only views"| TRAN
     REPT -->|"SELECT-only views"| ACCT
     REPT -->|"SELECT-only views"| CARD
+    REPT -->|"SELECT-only views"| REF
     REPT -->|"starts execution"| ORCH
 
     LIB -.->|"compiled into all eight"| contexts
 %% Solid edges are synchronous or transactional; dashed edges are asynchronous or
 %% build-time. The two BATCH edges are the single documented exception to
 %% database-per-service ownership, and they are write grants on two named schemas
-%% rather than service-to-service calls.
+%% rather than service-to-service calls. The four REPT edges are the four SELECT-only
+%% grants in data-migration/sql/V0__schemas_and_roles.sql section 5 -- ledger,
+%% account, card and reference -- and no other schema is reachable from REPT.
 ```
 
 ### Why every context is stateless
@@ -890,7 +989,7 @@ decomposes into four different target mechanisms, none of them server-side state
 | `CDEMO-CUST-ID` L33, `CDEMO-ACCT-ID` L38, `CDEMO-ACCT-STATUS` L39, `CDEMO-CARD-NUM` L41 | What record is selected | Request path and query parameters |
 | `CDEMO-PGM-CONTEXT` L29 with `CDEMO-PGM-ENTER` and `CDEMO-PGM-REENTER` at L30–L31 | First entry versus re-entry | **Eliminated.** A stateless handler returning a field-error array has no turn to remember |
 
-> **Refactoring Rationale — moving identity out of the passed structure is a
+> **Refactoring Rationale: moving identity out of the passed structure is a
 > correctness fix, not a transport change.** In the baseline the session structure
 > is storage the client receives and echoes back, so the user-type field that
 > decides administrative access arrives from the client. In the target the client
@@ -904,14 +1003,37 @@ decomposes into four different target mechanisms, none of them server-side state
 
 ### The deployment boundary
 
-The infrastructure for this architecture is **authored and statically validated** —
-formatting, validation, planning, linting and policy scanning. Applying it to a
-live account is an **operator action outside this scope**. Consequently **no claim
-is made anywhere in this document that a provisioned environment exists**, and no
-figure in it was measured on a running system, load-tested or benchmarked. Every
-count here comes from the repository; every architectural statement describes a
-target design. The exact commands for provisioning and teardown are in the
-runbooks under `docs/runbooks/`.
+The infrastructure for this architecture is **authored to a foundation state** and
+**checked to the extent that state admits**. Applying it to a live account is an
+**operator action outside this scope**. Consequently **no claim is made anywhere in
+this document that a provisioned environment exists**, and no figure in it was
+measured on a running system, load-tested or benchmarked. Every count here comes from
+the repository; every architectural statement describes a target design. The exact
+commands for provisioning and teardown belong to the runbooks under
+`docs/runbooks/`, which are authored at later indexes of the same plan.
+
+**Assumptions — "statically validated" is a claim with a measurable state, so the
+measured state is given rather than the phrase.** At this checkpoint the Terraform
+tree holds each directory's `versions.tf` and, for fourteen of them, its
+`variables.tf`; no `main.tf`, `outputs.tf` or `README.md` has landed in any
+directory, and neither has `infra/modules/step-functions-batch`. What that admits,
+and what it does not, is exact:
+
+| Check | State at this checkpoint |
+|---|---|
+| HCL parse of every `.tf` file | **passes** |
+| `terraform fmt -check -recursive infra/` | **passes** |
+| every `variable` carries a `type` and a `description` | **passes** |
+| provider constraints consistent across every directory | **passes** |
+| `terraform validate` | **not runnable** — requires `terraform init`, which requires a provider cache and a resource graph to validate |
+| `terraform plan` | **not runnable** — same precondition, plus credentials |
+| recursive `tflint` | **reports findings, by design** — `terraform_unused_declarations` fires for every variable no `main.tf` consumes yet, and `terraform_standard_module_structure` fires for every directory whose `main.tf` and `outputs.tf` have not landed. Both rule families clear as those files land; neither indicates a defect in the HCL authored so far, and `infra/.tflint.hcl` records the second one as an accepted, transient consequence at the rule itself |
+| `terraform-docs --output-check` | **fails** — there is no `README.md` in any directory to compare a generated table against |
+| policy scan | **not run** — it is a step in `.github/workflows/infra-ci.yml`, which does not exist yet |
+
+The four checks that pass are the four that a provider-constraint-and-input-surface
+foundation can pass; the rest become meaningful, and gating, as the composition files
+land. Nothing above is asserted as green that is not.
 
 ### Explicitly out of scope
 
@@ -938,14 +1060,14 @@ rather than an apparent omission:
 a state transition in the batch orchestration rather than a program. `COCRDSEC` has
 no target because it has no implementation to migrate, as established in
 [Reconciling the populations](#reconciling-the-populations). Both are registered in
-[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
+`docs/architecture/cobol-to-service-traceability.md`.
 
 ### Behavioural divergences are registered, not resolved here
 
 Where a target implementation deliberately behaves differently from the baseline —
 and there are such cases, including the credential handling noted under
 `auth-service` — the divergence is recorded in
-[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), which is
+`docs/architecture/cobol-to-service-traceability.md`, which is
 the register for all of them. This catalog names the ones that affect service
 boundaries or owned data and defers the complete list to that document.
 
@@ -960,15 +1082,23 @@ oracle, and the existing mainframe deployment path is left exactly as it is.
 
 ## Related documents
 
+**A linked row exists; a code-span row does not exist yet.** Six of the nine
+documents in this folder are authored at later indexes of the same plan, so their
+paths appear below — and everywhere above — as plain code spans rather than as links,
+per the Markdown convention in
+[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each becomes
+a link when the file it names exists. The distinction is mechanical and deliberate: it
+lets a reader tell a document that is written from a document that is contracted,
+without clicking to find out.
+
 | Document | What it covers that this one does not |
 |---|---|
-| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | The current-state and target-state architecture diagrams |
+| `docs/architecture/context-and-container-diagrams.md` | The current-state and target-state architecture diagrams |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Field-by-field derivation of every table named here, from copybook to column |
-| [`batch-orchestration.md`](batch-orchestration.md) | The job-to-state mapping, condition-code semantics and generation-dataset handling |
-| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, wire format, correlation, ordering and deduplication |
-| [`security-and-identity.md`](security-and-identity.md) | Identity mapping, authorization model, encryption and network isolation |
-| [`observability.md`](observability.md) | Logs, metrics, traces and alarms |
+| `docs/architecture/batch-orchestration.md` | The job-to-state mapping, condition-code semantics and generation-dataset handling |
+| `docs/architecture/messaging-contracts.md` | Queue mapping, wire format, correlation, ordering and deduplication |
+| `docs/architecture/security-and-identity.md` | Identity mapping, authorization model, encryption and network isolation |
+| `docs/architecture/observability.md` | Logs, metrics, traces and alarms |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from the 21 mapsets to screen routes and tokens |
-| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The authoritative program-by-program matrix and the register of documented divergences |
+| `docs/architecture/cobol-to-service-traceability.md` | The authoritative program-by-program matrix and the register of documented divergences |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |
-

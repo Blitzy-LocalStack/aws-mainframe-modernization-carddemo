@@ -1,0 +1,69 @@
+# =============================================================================
+# data-migration/requirements-build.txt  --  the PEP 517 build backend, locked
+# =============================================================================
+#
+# Purpose:
+#   The one distribution needed to BUILD the `carddemo-migration` wheel, pinned
+#   exactly and verified by artifact digest. It is installed into a throwaway
+#   environment in the container build's first stage, used to produce the wheel,
+#   and then discarded -- so no build tooling reaches the shipped image and no
+#   part of the build is fetched unverified.
+#
+# Relationship to the other two manifests:
+#   requirements-build.txt .. THIS FILE. Build time only.
+#   requirements.txt ....... the runtime closure, installed into the environment
+#                            the image ships.
+#   requirements-dev.txt ... the runtime closure plus lint and test tooling.
+#   The three sets are disjoint in purpose and this one is disjoint in contents
+#   too: setuptools appears in neither of the others, and neither of theirs
+#   appears here.
+#
+# Installing (build stage only; see data-migration/Dockerfile):
+#       pip install --require-hashes -r data-migration/requirements-build.txt
+#
+# WHY (non-obvious design decisions):
+#
+#   Why a manifest for one distribution
+#     Refactoring Rationale: pyproject.toml declared `requires = ["setuptools>=80"]`
+#     and the image ran an ordinary PEP 517 install, so every build resolved a
+#     build backend from the network -- an unbounded version, whichever release was
+#     current that day, verified by nothing. That is the one component with the
+#     broadest reach in the whole build: a build backend executes arbitrary code
+#     during the build and produces the artifact that is then installed and
+#     shipped, so a compromised or merely changed backend can alter what ends up
+#     in the image without touching a single line of this repository. Pinning it
+#     in pyproject.toml fixes the VERSION; only a hash fixes the BYTES, and a hash
+#     cannot be expressed in pyproject.toml at all. Hence a file: it is the only
+#     place pip will accept a digest for a build requirement.
+#     Assumptions: the version here and the `requires` pin in pyproject.toml must
+#     be the SAME number. They are kept in agreement by rule, and the Dockerfile
+#     passes `--no-build-isolation` so this installed copy IS the backend used --
+#     if the two disagreed, the build would still succeed using this one, which is
+#     why the agreement is stated rather than left to be inferred.
+#
+#   Why setuptools rather than a build front end
+#     Alternatives Considered: adding the `build` distribution and invoking
+#     `python -m build --wheel --no-isolation`. Rejected because it adds a second
+#     build-time distribution -- and its own dependencies -- to lock and to keep
+#     patched, in exchange for a nicer command line. `pip wheel --no-deps
+#     --no-build-isolation` calls the same PEP 517 hooks with nothing extra to
+#     pin.
+#     Alternatives Considered: hatchling as the backend, which pyproject.toml
+#     evaluated and rejected in full. That reasoning is unchanged and is recorded
+#     there rather than repeated here.
+#
+#   Why `wheel` is not pinned alongside it
+#     Assumptions: setuptools has vendored the wheel-building machinery since 70.1
+#     and no longer declares `wheel` as a build requirement, so adding it would
+#     pin a distribution the backend does not use. Verified against the pinned
+#     version rather than assumed: a wheel builds from this manifest alone.
+# =============================================================================
+
+# WHY : Assumptions: pinned EXACTLY, not floored. A floor on a build backend is
+#       the loosest constraint in a tree that pins everything else exactly, and it
+#       governs the component that generates the shipped artifact. Both published
+#       artifacts for this version are hashed -- the wheel and the source
+#       distribution -- so the pin holds whichever one an installer selects.
+setuptools==83.0.0 \
+    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3 \
+    --hash=sha256:025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef

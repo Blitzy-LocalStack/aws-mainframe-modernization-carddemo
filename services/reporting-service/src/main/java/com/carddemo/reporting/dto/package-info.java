@@ -1,6 +1,24 @@
 /**
  * API request and response types of the CardDemo reporting and statement bounded context.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>Every type in this package is declared as a Java 21 {@code record} carrying an explicit
  * constructor, and its component order and declared widths are read from the BMS symbolic
  * maps and the copybooks rather than chosen. That is how the 3270 field-length contract
@@ -87,10 +105,14 @@
  *       L29 and any citation past L35 is a dead reference rather than a detail to look up.</li>
  * </ul>
  *
- * <p><strong>Ownership.</strong> This context owns no schema, no table, no index and no
- * database migration artifact, and the shape of these types follows from that. They describe
- * read-only projections over cross-schema views that other contexts populate, reached under a
- * database role holding {@code SELECT} alone; the ledger indexes those queries rely on belong
+ * <p><strong>Ownership.</strong> This context owns no table, no index and no database
+ * migration artifact, and the shape of these types follows from that. It does have a schema:
+ * {@code reporting} is dedicated to it, holds views rather than tables, and is owned in the
+ * database by the {@code NOLOGIN} role {@code carddemo_reporting_owner} rather than by the login role
+ * the service authenticates as. These types therefore describe read-only projections over
+ * cross-schema views that other contexts populate -- views created by
+ * {@code data-migration/sql/V1__reporting_views.sql} and reached under a database role holding
+ * {@code SELECT} on them alone; the ledger indexes those queries rely on belong
  * to transaction-service. So no type here carries a version marker for optimistic
  * concurrency, a creation or deletion payload, or an identifier a caller is expected to supply
  * for a new row, because there is nothing in this context to write.
@@ -183,20 +205,15 @@
  * along per group, 17 bytes too far by the end of the map, which is why the overlays are
  * excluded from the calculation rather than trusted to cancel out.
  *
- * <p>Alternatives Considered: the four labels in this section are written in the plural,
- * bracket-free, colon-terminated spelling that user-specified Rule 1 uses at L31 to L34, and
- * the alternative considered was the spelling this repository itself favours. Measured
- * byte-exactly with the C locale forced over the pre-migration baseline, the canonical plural
- * {@code Trade-offs:} appears 5 times in 5 files; the same word shorn of its plural ending
- * appears 349 times in 80 files when every occurrence of the token is counted; and a bracketed
- * form of that shorter spelling, closing bracket included, appears at 82 sites in 25 files. So
- * the canonical form is outnumbered roughly seventy to one by occurrence and sixteen to one by
- * file. Each count is stated with the rule that produced it because narrower readings give
- * different answers, and a figure nobody can reproduce is not evidence.
- * The majority is not an error to be chased down, because the sibling shell, YAML and
- * HCL artifacts use the singular legitimately in prose of their own. What an audit reads is the
- * rule document, so this file follows it, and the counts are recorded here once so that a
- * reader who notices the minority spelling does not normalise it back.
+ * <p>Assumptions: the four labels in this section are written in the plural, bracket-free,
+ * colon-terminated spelling that user-specified Rule 1 uses at L31 to L34, and that spelling
+ * is the only accepted one. It is mandatory in every language and every file of the migration
+ * trees -- the sibling shell, YAML and HCL artifacts included -- so it must never be
+ * normalised to anything else. A singular, bracketed, heading-style or dash-terminated variant
+ * is not an alternative spelling: it is a label that a fixed-string search for the category
+ * will not find, which makes a documented rationale read as absent to the audit that looks for
+ * it. {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full statement of the convention
+ * and enumerates the rejected shapes.
  *
  * <p>Refactoring Rationale: no type here carries a first-entry-against-repeat-entry
  * discriminator, where the baseline carries one. {@code app/cbl/CORPT00C.cbl} reaches the
@@ -265,8 +282,9 @@
  *       each of those needs a justification at the mapping site, which a generated mapper has
  *       nowhere to hold.</li>
  *   <li>No {@code module-info.java}, because this build is classpath-based; no
- *       {@code package.html}, superseded by this file; no ignore file for either git or the
- *       image build; and no module-local copy of the ruleset or of its suppressions
+ *       {@code package.html}, because {@code package-info.java} is the canonical carrier of
+ *       package documentation and the ruleset audits that file; no ignore file for either git
+ *       or the image build; and no module-local copy of the ruleset or of its suppressions
  *       companion.</li>
  *   <li>No author, revision or version at-clause. The ruleset requires none, the house
  *       convention names four docstring elements and no such tag is among them, and version

@@ -63,7 +63,7 @@
 #   them are raised before any resource exists and before any credential is
 #   resolved, so an invalid input fails closed rather than half-applied.
 #   Because a module is never planned on its own, each message surfaces through
-#   the environment root that supplied the value. The blocks guard five classes
+#   the environment root that supplied the value. The blocks guard six classes
 #   of defect:
 #
 #     1. Shape ..... an identifier, ARN, engine version, time window or log
@@ -77,12 +77,19 @@
 #     5. Coupling .. the two conditional rules that only bite when the minimum
 #                    capacity is zero. These are the ones a reader is most
 #                    likely to get wrong, so see the capacity section below.
+#     6. Security .. the one rule that requires a value to be PRESENT rather
+#                    than well shaped: cluster_parameters must carry
+#                    rds.force_ssl = "1", so no cluster this module creates can
+#                    accept an unencrypted connection. It is the only
+#                    validation here that exists to stop a silent weakening
+#                    rather than an apply-time rejection, because AWS accepts a
+#                    parameter map that omits it perfectly happily.
 #
 #   Each `error_message` names the constraint that was violated and the shape
 #   that would satisfy it, because a message reading only "invalid value"
 #   tells an operator nothing they did not already know from the failure.
 #
-#   WHEN a rule is checked is not uniform across the five classes, and the
+#   WHEN a rule is checked is not uniform across the six classes, and the
 #   difference was measured against this file rather than assumed. A
 #   `validation` whose condition reads only its own variable is evaluated by
 #   `terraform validate`. A `validation` whose condition reads ANOTHER variable
@@ -95,11 +102,24 @@
 #   invariant: both are pre-apply gates and `apply` always plans first, so no
 #   resource is ever created from a pair that violates it. It does mean a
 #   pipeline step that runs `validate` and never `plan` exercises the other
-#   twenty-four rules but not those three, which is worth knowing before a
+#   twenty-five rules but not those three, which is worth knowing before a
 #   green `validate` is read as proof that the capacity pair is sound.
 #
+#   The transport-security rule needs one further distinction, measured on
+#   Terraform v1.15.8 rather than assumed, because a reader could otherwise
+#   over-trust a green `validate`. `terraform validate` evaluates a rule against
+#   the variable's DEFAULT and does not load variable VALUES: a directory
+#   carrying a terraform.tfvars that sets cluster_parameters to a map without
+#   rds.force_ssl still reports "the configuration is valid", while `terraform
+#   plan` in the same directory loads that file and fails with the rule's
+#   message. So `validate` proves this module's default is sound, and `plan` is
+#   what proves a particular root's override is -- which is why
+#   .github/workflows/infra-ci.yml runs `fmt -check`, `validate` AND `plan`
+#   rather than stopping at `validate`, and why `plan` is the step that gates an
+#   override.
+#
 # WHY (non-obvious design decisions):
-#   - Assumption: the capacity invariant is enforced HERE, in HCL, rather than
+#   - Assumptions: the capacity invariant is enforced HERE, in HCL, rather than
 #     described in the module README. The four capacity facts this file
 #     encodes -- the 0-to-256 ACU range, the half-unit granularity, the
 #     300-to-86,400-second auto-pause window, and the rule that a zero minimum
@@ -117,7 +137,7 @@
 #     rule is therefore enforced in exactly one place -- this file -- and
 #     main.tf adds no precondition that would restate one, because the same
 #     rule checked twice is two things to keep in step.
-#   - Assumption: the cross-variable references all point ONE WAY, into
+#   - Assumptions: the cross-variable references all point ONE WAY, into
 #     min_capacity. max_capacity and seconds_until_auto_pause each read
 #     var.min_capacity, and min_capacity reads neither of them. Terraform
 #     builds a dependency graph across variable validations, so a mutual
@@ -137,6 +157,25 @@
 #     secret lives; it is not the secret, which is why
 #     master_credential_secret_arn is a legitimate input and a password would
 #     not be.
+#   - Refactoring Rationale: two cluster parameters are deliberately NOT
+#     inputs. main.tf merges rds.force_ssl=1 and
+#     password_encryption=scram-sha-256 over var.cluster_parameters, and that
+#     variable's own validation refuses a map that names either one, so no
+#     caller can lower them. They were separated out from the general tuning
+#     map because their default is not neutral: rds.force_ssl defaults to 0 on
+#     Aurora PostgreSQL 16 and earlier, so an empty parameter map yields a
+#     cluster that ACCEPTS a cleartext connection and streams account,
+#     customer, card and transaction rows in the clear to any client that did
+#     not ask for TLS -- with nothing in the plan output saying so, because the
+#     parameter was never mentioned. Isolating the data tier in subnets with no
+#     internet route bounds who can observe that traffic but does not make it
+#     unreadable. password_encryption is the companion because md5 stores every
+#     service credential as an unsalted, offline-brute-forceable verifier and
+#     does so silently. The same two requirements are asserted from the
+#     database side by data-migration/sql/V0__schemas_and_roles.sql before any
+#     credential exists, and the client half of the transport requirement lives
+#     in data-migration/src/carddemo_migration/config.py as
+#     sslmode=verify-full; each of the three catches what the others cannot.
 #   - Alternatives Considered: a `region` or `aws_region` input, which many
 #     published modules accept. Rejected, and its absence is load-bearing
 #     rather than an oversight: this directory is a module, and provider
@@ -155,7 +194,7 @@
 #     deployment is single-region across three availability zones; and the
 #     baseline has no cache tier, so adding one could only introduce a
 #     staleness window that the golden-master parity suite would observe.
-#   - Trade-off: `nullable = false` is declared on every input except the
+#   - Trade-offs: `nullable = false` is declared on every input except the
 #     three where a null is meaningful -- seconds_until_auto_pause,
 #     preferred_backup_window and preferred_maintenance_window, for each of
 #     which null means "not set" rather than "empty". The cost is three lines
@@ -182,7 +221,7 @@ variable "name_prefix" {
   type        = string
   nullable    = false
 
-  # WHY : Assumption: the grammar checked here is the RDS DB cluster
+  # WHY : Assumptions: the grammar checked here is the RDS DB cluster
   #       identifier grammar, not a naming preference, and RDS enforces it on
   #       the composed identifier rather than on this prefix. A single regex
   #       covers all four of its clauses at once: `[a-z]` fixes the leading
@@ -196,7 +235,7 @@ variable "name_prefix" {
     error_message = "The name_prefix must consist of lower-case letters, digits and hyphens, must begin with a letter, and must contain no consecutive or trailing hyphen."
   }
 
-  # WHY : Trade-off: the ceiling is 40 rather than the 63 RDS itself allows,
+  # WHY : Trade-offs: the ceiling is 40 rather than the 63 RDS itself allows,
   #       because this is a prefix and the module appends to it. The longest
   #       suffix it composes reserves roughly twenty characters, so 40 leaves
   #       headroom for all four composed names while still accommodating a
@@ -223,7 +262,7 @@ variable "environment" {
   type        = string
   nullable    = false
 
-  # WHY : Assumption: the domain is closed at two values because the
+  # WHY : Assumptions: the domain is closed at two values because the
   #       infrastructure defines exactly two environment roots, infra/envs/dev
   #       and infra/envs/prod, and several defaults in this file are chosen
   #       around that pair -- deletion_protection and skip_final_snapshot in
@@ -249,7 +288,7 @@ variable "tags" {
   nullable    = false
   default     = {}
 
-  # WHY : Assumption: tagging responsibility is split, and the split is not
+  # WHY : Assumptions: tagging responsibility is split, and the split is not
   #       visible from this module. The calling root configures `default_tags`
   #       on its provider, which the AWS provider applies to every taggable
   #       resource without this module doing anything, so a tag repeated in
@@ -285,7 +324,7 @@ variable "isolated_subnet_ids" {
   type        = list(string)
   nullable    = false
 
-  # WHY : Assumption: this module assumes, and cannot verify, that the subnets
+  # WHY : Assumptions: this module assumes, and cannot verify, that the subnets
   #       it is handed have NO internet route at all -- no default route to an
   #       internet gateway and none to a NAT gateway. That isolation is the
   #       strongest blast-radius control in the whole design, and it is the
@@ -301,7 +340,7 @@ variable "isolated_subnet_ids" {
     error_message = "At least two isolated subnet identifiers are required, because an RDS DB subnet group must span at least two availability zones."
   }
 
-  # WHY : Assumption: a repeated identifier is a real defect rather than
+  # WHY : Assumptions: a repeated identifier is a real defect rather than
   #       untidiness. A DB subnet group derives its zone coverage from the
   #       distinct zones of its members, so a list of three ids in which two
   #       are the same covers fewer zones than its length suggests -- and it
@@ -335,7 +374,7 @@ variable "security_group_ids" {
   #       that no single plan checks against each other, and a group defined
   #       here could not reference an application group defined there without
   #       one module reaching into the other's state.
-  # WHY : Assumption: the group handed in restricts ingress to the application
+  # WHY : Assumptions: the group handed in restricts ingress to the application
   #       tier on the database port. This module attaches whatever it is
   #       given, so it cannot check that; the check that DOES belong here is
   #       that the list is not empty, because an empty list is not a no-op --
@@ -363,7 +402,7 @@ variable "kms_key_arn" {
   #       (lines 9, 21, 33, 46, 59, 72, 84 and 96) with no key management of
   #       any kind, so encrypting the replacement cluster is a correction of a
   #       baseline gap rather than a port of existing behaviour.
-  # WHY : Assumption: this input is deliberately required rather than
+  # WHY : Assumptions: this input is deliberately required rather than
   #       null-defaulted. A nullable key would let the cluster fall back to the
   #       AWS-managed aws/rds key, which still reports as "encrypted" to every
   #       policy scan while giving up the key policy, the rotation schedule and
@@ -400,7 +439,7 @@ variable "master_credential_secret_arn" {
   #       Taking an ARN instead means no credential value appears anywhere in
   #       this repository, which is what makes the no-secrets-in-source
   #       constraint structurally true rather than merely observed.
-  # WHY : Assumption: an ARN is not itself sensitive. It names a location and
+  # WHY : Assumptions: an ARN is not itself sensitive. It names a location and
   #       confers no access -- reading the secret it points at requires an IAM
   #       policy that this module does not grant -- so marking it sensitive
   #       would only redact it from plan output where a reviewer needs to see
@@ -427,7 +466,7 @@ variable "engine_version" {
   type        = string
   nullable    = false
 
-  # WHY : Assumption: scaling to zero capacity is not available on every
+  # WHY : Assumptions: scaling to zero capacity is not available on every
   #       Aurora PostgreSQL minor release, and this module cannot check which
   #       release the caller named against that list. The pairing therefore has
   #       to be honoured by whoever sets the two values: an environment root
@@ -459,7 +498,7 @@ variable "parameter_group_family" {
   type        = string
   nullable    = false
 
-  # WHY : Assumption: this value is coupled to engine_version and the coupling
+  # WHY : Assumptions: this value is coupled to engine_version and the coupling
   #       is not enforceable here. A family naming a different major version
   #       than the engine is accepted by `terraform validate`, survives the
   #       plan, and fails only when RDS is asked to attach the group to the
@@ -480,14 +519,38 @@ variable "parameter_group_family" {
 variable "cluster_parameters" {
   description = <<-EOT
     Cluster-level PostgreSQL parameter overrides, as a map of parameter name to
-    value. Defaults to an empty map, which is the intended configuration: the
-    module ships no opinionated tuning and runs the engine defaults for the
-    chosen family.
+    value. Defaults to the two parameters this module REQUIRES and will not let a
+    caller weaken: rds.force_ssl = "1", which makes the engine refuse an
+    unencrypted connection, and password_encryption = "scram-sha-256", so no
+    service credential is ever stored as a weaker verifier. No performance tuning
+    is shipped: everything else runs the engine defaults for the chosen family.
+    An override REPLACES this map rather than merging into it, so a root adding a
+    tuning parameter must restate both security parameters; the validation below
+    rejects a map that omits either or sets either to anything else.
   EOT
   type        = map(string)
   nullable    = false
-  default     = {}
 
+  # WHY : Refactoring Rationale: this default was an EMPTY map, and the emptiness
+  #       was the defect rather than the neutral choice it read as. PostgreSQL's
+  #       own default permits an unencrypted connection, so an empty parameter
+  #       map meant transport encryption was whatever each client happened to ask
+  #       for -- and a client that asked for nothing got a cleartext session
+  #       carrying a credential and card data, with nothing anywhere reporting
+  #       it. Forcing it server-side is the only half of the requirement that
+  #       cannot be defeated from the client, which is why it belongs in the
+  #       default rather than in a root's tfvars where one environment could
+  #       carry it and another not.
+  # WHY : Assumptions: this is the SERVER half of a two-sided requirement, and the
+  #       client half is stated in the services' own configuration -- each
+  #       service's application.yml sets the driver to verify-full with an
+  #       explicit certificate bundle, and the ETL emits the same two settings
+  #       from carddemo_migration.config. Neither half is redundant. Without this
+  #       parameter a misconfigured client could downgrade to cleartext; without
+  #       the client settings a forced-TLS server would still accept a connection
+  #       that verified no certificate at all, which stops a passive listener and
+  #       not an active one. Both are required for the connection to be both
+  #       encrypted and authenticated.
   # WHY : Alternatives Considered: shipping a set of tuned defaults here, which
   #       is the usual expectation of a database module. Rejected because this
   #       cluster's correctness is measured against golden-master outputs
@@ -498,10 +561,22 @@ variable "cluster_parameters" {
   #       comparison is byte-deterministic -- so a tuning change would surface
   #       as a parity failure whose cause is nowhere near the test that
   #       reports it. Performance tuning beyond what parity requires is out of
-  #       scope, so the empty default is the deliberate configuration rather
-  #       than a placeholder waiting to be filled in. The input still exists
+  #       scope, so the single security parameter below is the whole default
+  #       rather than the first entry of a tuning set. The input still exists
   #       so that a specific, reviewed override can be made from an
   #       environment root without editing this module.
+  default = {
+    "rds.force_ssl"       = "1"
+    "password_encryption" = "scram-sha-256"
+  }
+
+  validation {
+    condition = (
+      lookup(var.cluster_parameters, "rds.force_ssl", "") == "1" &&
+      lookup(var.cluster_parameters, "password_encryption", "") == "scram-sha-256"
+    )
+    error_message = "cluster_parameters must set \"rds.force_ssl\" to \"1\" and \"password_encryption\" to \"scram-sha-256\". Neither is offered as a lowerable knob: a value that can be reduced in a tfvars file is not a control. rds.force_ssl is the server half of the transport-security requirement whose client half is the verify-full driver setting in each service's application.yml, and it defaults to 0 on Aurora PostgreSQL 16 and earlier. password_encryption keeps credentials out of md5, which stores an unsalted verifier that is brute-forceable offline. An override REPLACES this variable's default rather than merging into it, so a root adding a tuning parameter has to restate both."
+  }
 }
 
 variable "database_name" {
@@ -515,7 +590,7 @@ variable "database_name" {
   nullable    = false
   default     = "carddemo"
 
-  # WHY : Assumption: the boundary of this module ends at the database, and
+  # WHY : Assumptions: the boundary of this module ends at the database, and
   #       this is the single most likely misunderstanding about it. The eight
   #       schemas the application uses -- auth, account, card, ledger,
   #       reference, batch and authorization, plus the read-only cross-schema
@@ -528,7 +603,7 @@ variable "database_name" {
   #       follows the service that owns the data, so a module that created all
   #       eight would make every service's schema change an infrastructure
   #       change, and Flyway could no longer version what it did not create.
-  # WHY : Assumption: lower case is required rather than merely conventional.
+  # WHY : Assumptions: lower case is required rather than merely conventional.
   #       PostgreSQL folds an unquoted identifier to lower case, so a name
   #       containing capitals is only reachable when quoted -- which would have
   #       to be got right in every JDBC URL, every Flyway migration and every
@@ -553,11 +628,11 @@ variable "master_username" {
   nullable    = false
   default     = "carddemo_admin"
 
-  # WHY : Assumption: "rdsadmin" is reserved by RDS for its own management
+  # WHY : Assumptions: "rdsadmin" is reserved by RDS for its own management
   #       user and is rejected at apply time, so it is rejected here where the
   #       message can say why. It is a plausible thing for someone to try,
   #       which is what makes it worth a check rather than a comment.
-  # WHY : Assumption: the same lower-case requirement as database_name, for
+  # WHY : Assumptions: the same lower-case requirement as database_name, for
   #       the same reason -- PostgreSQL folds unquoted identifiers, so a role
   #       name with capitals only matches when quoted, and a GRANT that
   #       silently addresses a different role than the one that connects is
@@ -584,7 +659,7 @@ variable "port" {
   nullable    = false
   default     = 5432
 
-  # WHY : Assumption: this value is coupled to an ingress rule this module does
+  # WHY : Assumptions: this value is coupled to an ingress rule this module does
   #       not own. The network module admits application-tier traffic to the
   #       data tier on 5432, so the default is not an arbitrary convention --
   #       it is the value that matches the rule already written there. A port
@@ -651,7 +726,7 @@ variable "min_capacity" {
   type        = number
   nullable    = false
 
-  # WHY : Trade-off: a minimum of 0 buys the cluster paying nothing while idle
+  # WHY : Trade-offs: a minimum of 0 buys the cluster paying nothing while idle
   #       and accepts a resume delay on the order of fifteen seconds for the
   #       first connection that arrives after a pause. That cost lands
   #       differently on the two workloads this cluster serves, which is why
@@ -676,7 +751,7 @@ variable "min_capacity" {
     error_message = "The min_capacity must be between 0 and 256 Aurora Capacity Units."
   }
 
-  # WHY : Assumption: the half-unit rule is tested arithmetically -- doubling
+  # WHY : Assumptions: the half-unit rule is tested arithmetically -- doubling
   #       the value must yield a whole number -- rather than by listing the
   #       permitted values. An enumeration of every half-unit from 0 to 256
   #       would be 513 entries that a reader cannot check and that would have
@@ -707,7 +782,7 @@ variable "max_capacity" {
     error_message = "The max_capacity must be between 0 and 256 Aurora Capacity Units."
   }
 
-  # WHY : Assumption: the same arithmetic half-unit test as min_capacity, and
+  # WHY : Assumptions: the same arithmetic half-unit test as min_capacity, and
   #       deliberately the same expression rather than a shared local. HCL has
   #       no way to share a validation condition between two variables, and a
   #       local in main.tf cannot be referenced from a `validation` block here,
@@ -717,7 +792,7 @@ variable "max_capacity" {
     error_message = "The max_capacity must be a multiple of 0.5, such as 0.5, 1, 4 or 64."
   }
 
-  # WHY : Assumption: rule 4, the ordering constraint, is hosted on
+  # WHY : Assumptions: rule 4, the ordering constraint, is hosted on
   #       max_capacity rather than on min_capacity, and the choice is not
   #       arbitrary. Only one of the two variables may reference the other
   #       without creating a validation dependency cycle, and putting the
@@ -731,7 +806,7 @@ variable "max_capacity" {
     error_message = "The max_capacity must be greater than or equal to min_capacity."
   }
 
-  # WHY : Assumption: this is half of rule 5, the coupling rule, and it is
+  # WHY : Assumptions: this is half of rule 5, the coupling rule, and it is
   #       split from the auto-pause half on purpose. Both halves fire only when
   #       min_capacity is 0, and a single combined block would have to name two
   #       different inputs in one message, leaving the operator to work out
@@ -756,7 +831,7 @@ variable "seconds_until_auto_pause" {
   type        = number
   default     = null
 
-  # WHY : Assumption: null is a meaningful value here rather than an oversight,
+  # WHY : Assumptions: null is a meaningful value here rather than an oversight,
   #       which is why this is one of only three inputs in the file without
   #       `nullable = false`. The setting applies solely to a cluster that can
   #       pause, so a prod cluster holding min_capacity above 0 has no correct
@@ -765,7 +840,7 @@ variable "seconds_until_auto_pause" {
   #       therefore short-circuits on null through a conditional expression
   #       rather than a boolean chain, so the range and whole-number tests are
   #       never applied to a null.
-  # WHY : Trade-off: the delay is what decides how often the resume cost
+  # WHY : Trade-offs: the delay is what decides how often the resume cost
   #       described on min_capacity is actually paid. A short delay pauses
   #       eagerly and saves the most, at the price of paying the resume more
   #       often; a long one rarely pauses and rarely resumes. The module takes
@@ -782,7 +857,7 @@ variable "seconds_until_auto_pause" {
     error_message = "The seconds_until_auto_pause must be a whole number of seconds between 300 and 86400, or null when min_capacity is above 0."
   }
 
-  # WHY : Assumption: this is the other half of rule 5, and it is the rule most
+  # WHY : Assumptions: this is the other half of rule 5, and it is the rule most
   #       likely to be missed, because nothing about a null default suggests
   #       that another input can make it compulsory. A cluster configured to
   #       scale to zero with no auto-pause delay set does not fail obviously --
@@ -829,7 +904,7 @@ variable "backup_retention_period" {
   #       was recoverable only from whatever static backup had last been taken
   #       out of band. Retaining automated backups gives the replacement a
   #       continuous recovery window the original never had.
-  # WHY : Assumption: the floor is 1 rather than 0, and that is the API's own
+  # WHY : Assumptions: the floor is 1 rather than 0, and that is the API's own
   #       constraint rather than a policy choice -- Aurora has no notion of
   #       disabled automated backups, and 0 is simply rejected. Stating the
   #       floor here means the module cannot be configured into a
@@ -852,7 +927,7 @@ variable "preferred_backup_window" {
   type        = string
   default     = null
 
-  # WHY : Assumption: this window must not overlap the nightly batch window,
+  # WHY : Assumptions: this window must not overlap the nightly batch window,
   #       and that window is defined outside this module -- it is a scheduler
   #       cron expression driving a state machine whose first and last steps
   #       quiesce and resume online writes. The overlap matters because the
@@ -870,7 +945,7 @@ variable "preferred_backup_window" {
   #       honestly unspecified. The accepted cost is that an RDS-assigned
   #       window could itself overlap, which is why the roots set it and why
   #       the description says so rather than leaving it to be inferred.
-  # WHY : Assumption: the format differs from preferred_maintenance_window and
+  # WHY : Assumptions: the format differs from preferred_maintenance_window and
   #       the two are easy to confuse, so each is checked against its own
   #       pattern. This one takes no day prefix; the maintenance window
   #       requires one. Pasting either value into the other input is a common
@@ -893,7 +968,7 @@ variable "preferred_maintenance_window" {
   type        = string
   default     = null
 
-  # WHY : Assumption: the same non-overlap requirement as the backup window and
+  # WHY : Assumptions: the same non-overlap requirement as the backup window and
   #       for a stronger reason. Maintenance can restart the cluster, so a
   #       window that intersects the batch chain risks interrupting a run
   #       between its quiesce and resume steps -- leaving online writes held off
@@ -917,14 +992,14 @@ variable "deletion_protection" {
   nullable    = false
   default     = true
 
-  # WHY : Trade-off: the default is true because the two ways of being wrong
+  # WHY : Trade-offs: the default is true because the two ways of being wrong
   #       are not symmetric. Defaulting to false and forgetting to raise it in
   #       prod loses a financial ledger to a mistyped destroy and is
   #       unrecoverable beyond the backup window; defaulting to true and
   #       forgetting to lower it in dev produces a failed destroy and a clear
   #       error message. The recoverable failure is the correct one to default
   #       into.
-  # WHY : Assumption: dev genuinely needs false, and the reason is specific
+  # WHY : Assumptions: dev genuinely needs false, and the reason is specific
   #       rather than a matter of taste. The infrastructure is required to tear
   #       down cleanly with `terraform destroy`, and that is the documented
   #       teardown path. Deletion protection makes the destroy fail outright,
@@ -946,7 +1021,7 @@ variable "skip_final_snapshot" {
   nullable    = false
   default     = false
 
-  # WHY : Trade-off: the same asymmetry as deletion_protection and defaulted the
+  # WHY : Trade-offs: the same asymmetry as deletion_protection and defaulted the
   #       same way for the same reason -- forgetting to take a final snapshot in
   #       prod is unrecoverable, whereas forgetting to skip one in dev leaves a
   #       cheap artefact behind. The two flags are nonetheless separate inputs
@@ -954,7 +1029,7 @@ variable "skip_final_snapshot" {
   #       blocks the destroy entirely, while a final snapshot lets it proceed
   #       and leaves a retained copy. Dev needs both relaxed to tear down
   #       cleanly, and collapsing them into a single flag would hide that.
-  # WHY : Assumption: RDS requires a final snapshot identifier whenever this is
+  # WHY : Assumptions: RDS requires a final snapshot identifier whenever this is
   #       false, and this module composes that identifier from name_prefix
   #       rather than accepting it as an input. No final_snapshot_identifier
   #       variable is declared, deliberately: an operator-supplied identifier
@@ -975,7 +1050,7 @@ variable "copy_tags_to_snapshot" {
   nullable    = false
   default     = true
 
-  # WHY : Assumption: a snapshot outlives the cluster it was taken from, which
+  # WHY : Assumptions: a snapshot outlives the cluster it was taken from, which
   #       is what makes this worth defaulting on. An untagged snapshot appears
   #       in cost allocation attributed to nothing and in an inventory owned by
   #       nobody, and once the cluster is gone there is no longer any resource
@@ -997,7 +1072,7 @@ variable "apply_immediately" {
   nullable    = false
   default     = false
 
-  # WHY : Trade-off: false is chosen and the cost of choosing it is real, so it
+  # WHY : Trade-offs: false is chosen and the cost of choosing it is real, so it
   #       is named rather than glossed. Deferring means the running cluster
   #       does not match the plan a reviewer approved until the maintenance
   #       window passes, so a subsequent plan can show a pending change that
@@ -1044,7 +1119,7 @@ variable "performance_insights_enabled" {
   #       look back through. Performance Insights keeps a continuous per-query
   #       record, which is what makes a regression in a migrated batch job
   #       diagnosable at all rather than reproducible only by rerunning it.
-  # WHY : Assumption: the retention period below is coupled to this flag and is
+  # WHY : Assumptions: the retention period below is coupled to this flag and is
   #       ignored while this is false, so the pair is set together. The
   #       telemetry is also encrypted with the cluster's own customer-managed
   #       key rather than a separate one, because query text can echo the
@@ -1062,13 +1137,13 @@ variable "performance_insights_retention_period" {
   nullable    = false
   default     = 7
 
-  # WHY : Assumption: the permitted values are a genuinely irregular set rather
+  # WHY : Assumptions: the permitted values are a genuinely irregular set rather
   #       than a range, which is why the check is written as it is -- two
   #       discrete values plus a multiple-of-31 band. Aurora rejects anything
   #       else, including apparently reasonable numbers like 30, 90 or 365, and
   #       it does so at apply time. Encoding the set here turns a puzzling
   #       API rejection into a message that names the accepted values.
-  # WHY : Trade-off: 7 is the default because it is the tier that carries no
+  # WHY : Trade-offs: 7 is the default because it is the tier that carries no
   #       additional charge, and the cost of that choice is a short lookback --
   #       a regression noticed more than a week after it appeared cannot be
   #       traced to its onset. That is accepted as the default because an
@@ -1105,14 +1180,14 @@ variable "enabled_cloudwatch_logs_exports" {
   #       statement failures at the storage layer. The engine log is that
   #       account, and it is exported rather than left on the instance so that
   #       it survives the instance.
-  # WHY : Assumption: ownership is split, and the split is the reason no
+  # WHY : Assumptions: ownership is split, and the split is the reason no
   #       retention input appears next to this one. Naming a log type here is
   #       what causes RDS to create the log group; how long that group keeps
   #       its data, and what alarms read it, belong to the observability
   #       module, which owns log groups, dashboards and alarms across the whole
   #       tree. A retention input here would compete with that module for the
   #       same setting, and whichever applied last would win silently.
-  # WHY : Assumption: the accepted set is engine-specific, so the check is a
+  # WHY : Assumptions: the accepted set is engine-specific, so the check is a
   #       set-subtraction against the two values Aurora PostgreSQL supports
   #       rather than a non-empty check. A plausible-looking value borrowed
   #       from another engine -- "audit" and "error" are MySQL log types -- is

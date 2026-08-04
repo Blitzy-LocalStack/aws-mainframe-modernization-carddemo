@@ -49,7 +49,7 @@
 #     CLI 1.15.8 rather than assumed.
 #
 # WHY (non-obvious design decisions):
-#   - Alternatives Considered (no `provider "aws"` block here): configuring
+#   - Alternatives Considered: no `provider "aws"` block here -- configuring
 #     the provider inside the module was evaluated and rejected on two
 #     concrete grounds. (a) The environment root owns `region` and
 #     `default_tags`; a module-level provider configuration would shadow them,
@@ -64,14 +64,14 @@
 #     `provider "aws"` block in its tree: bootstrap is a Terraform ROOT, this
 #     is a reusable MODULE. A reader arriving from bootstrap should read the
 #     omission here as the rule, not as an oversight.
-#   - Assumption (no `backend` block here): state is configured only at the
+#   - Assumptions: no `backend` block here -- state is configured only at the
 #     root. `backend.tf` exists solely in infra/envs/dev and infra/envs/prod,
 #     pointing at the versioned S3 bucket and the DynamoDB lock table that
 #     infra/bootstrap provisions. Terraform does not error on a backend block
 #     in a child module -- it silently IGNORES it (reproduced on CLI 1.15.8),
 #     which is exactly why one must not be written here: it would be inert
 #     configuration implying this module manages state that it cannot manage.
-#   - Assumption (no `hashicorp/random` provider): this module generates no
+#   - Assumptions: no `hashicorp/random` provider -- this module generates no
 #     random value -- every name it uses is supplied by its caller. The wider
 #     package does pin `hashicorp/random ~> 3.9` where random values are
 #     genuinely produced, but declaring it here would leave a requirement no
@@ -84,7 +84,7 @@
 
 terraform {
   # WHAT: a floor on the Terraform CLI rather than an exact pin.
-  # WHY : Assumption: the infra/ package is authored and validated on Terraform
+  # WHY : Assumptions: the infra/ package is authored and validated on Terraform
   #       1.15.8, and 1.15.0 is the earliest release that validation covers.
   #       Alternatives Considered: an exact `= 1.15.8` pin was rejected because
   #       adopting even a patch release would then require an identical edit in
@@ -95,12 +95,12 @@ terraform {
 
   required_providers {
     # WHAT: the AWS provider, addressed explicitly and bounded to the 6.x line.
-    # WHY : Assumption: hashicorp/aws 6.56.0 is published, so `~> 6.56`
+    # WHY : Assumptions: hashicorp/aws 6.56.0 is published, so `~> 6.56`
     #       resolves; it admits >= 6.56.0 and < 7.0.0, taking provider bug
     #       fixes and newly exposed resource attributes while refusing a major
     #       version whose breaking changes would have to be absorbed across all
-    #       sixteen modules at once.
-    #       Trade-off: this one constraint is reused package-wide instead of
+    #       every module at once.
+    #       Trade-offs: this one constraint is reused package-wide instead of
     #       narrowing the range per module. A `>= 5.81` floor is required
     #       elsewhere in the package (Aurora accepts a zero minimum capacity
     #       only from that provider release onward) and `~> 6.56` clears it, so

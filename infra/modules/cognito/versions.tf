@@ -43,14 +43,14 @@
 #     random_* resource.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this directory is a reusable child module, invoked as
+#   - Assumptions: this directory is a reusable child module, invoked as
 #     source = "../../modules/cognito" by infra/envs/dev and infra/envs/prod
 #     and validated transitively when one of those roots runs init and then
 #     validate. It is never applied on its own, which is why it declares
 #     provider REQUIREMENTS and carries no provider CONFIGURATION.
-#   - Trade-off: the two provider constraints are ranges rather than exact
+#   - Trade-offs: the two provider constraints are ranges rather than exact
 #     pins, so two checkouts can resolve different provider builds. Accepted
-#     because exact pins force a lockstep edit across all nineteen Terraform
+#     because exact pins force a lockstep edit across every Terraform
 #     directories in this package for every patch release, while the lock file
 #     committed in each root restores exact reproducibility without that cost.
 #   - Refactoring Rationale: the baseline authenticated by comparing a
@@ -63,8 +63,6 @@
 #     this repository.
 # =============================================================================
 
-# WHAT: one terraform block and nothing else -- no provider block, no remote
-#       state configuration, no variable, no resource, no output.
 # WHY : Terraform resolves provider REQUIREMENTS per module but provider
 #       CONFIGURATION only per root, so a provider block here would shadow the
 #       region, credentials and default tags that infra/envs/dev and
@@ -77,19 +75,18 @@
 #       environment roots that differ in precisely the values such a block
 #       would freeze.
 terraform {
-  # WHAT: admits any Terraform CLI from 1.15.0 upward.
   # WHY : a floor rather than a pin. This package is authored and validated on
   #       1.15.8, so the constraint states the oldest CLI that can parse this
   #       configuration and claims nothing narrower.
   #       Alternatives Considered: `= 1.15.8`, rejected because pinning one
-  #       patch would force an edit in all nineteen Terraform directories of
+  #       patch would force an edit in every Terraform directory of
   #       this package before anyone could adopt 1.15.9; and `~> 1.15`, which
   #       admits later 1.x but refuses a 2.0 CLI outright -- rejected because
   #       the CLI is operator-selected and shared by every directory here,
   #       unlike the providers below, which Terraform resolves per
   #       configuration and where a major bump genuinely can rename or remove
   #       arguments this module sets.
-  #       Trade-off: an open upper bound accepts a CLI newer than any this
+  #       Trade-offs: an open upper bound accepts a CLI newer than any this
   #       package has been exercised on. Accepted because the constraint still
   #       raises the one failure it exists for -- an unsupported-version error
   #       at init, before any resource is planned -- against a CLI too old to
@@ -97,11 +94,10 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: hashicorp/aws from 6.56 up to, but excluding, 7.0.
     # WHY : 6.56.0 is the release this package is verified against, and any 6.x
     #       also clears the 5.81.0 minimum that zero-capacity Aurora needs
     #       elsewhere in this package, so every module can share one
-    #       constraint. Trade-off: the range admits later 6.x releases, which
+    #       constraint. Trade-offs: the range admits later 6.x releases, which
     #       lets a provider fix reach this module with no edit here but means
     #       init alone does not guarantee an identical build -- the lock file
     #       committed in each calling root is what does that. The upper bound
@@ -112,7 +108,6 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHAT: hashicorp/random from 3.9 up to, but excluding, 4.0.
     # WHY : main.tf generates each seed user's initial password with
     #       random_password during apply and hands it straight to Secrets
     #       Manager. Alternatives Considered: accepting those passwords as
@@ -121,7 +116,7 @@ terraform {
     #       the "no secrets committed to the repository" constraint this module
     #       exists to satisfy and exactly the defect the baseline exhibits at
     #       app/jcl/DUSRSECJ.jcl L35-L44.
-    #       Assumption: this entry is load-bearing, not defensive. tflint's
+    #       Assumptions: this entry is load-bearing, not defensive. tflint's
     #       unused-declaration checks are enabled in infra/.tflint.hcl and gate
     #       CI, and terraform_unused_required_providers is the one that fires
     #       here -- it reports a provider declared in required_providers but

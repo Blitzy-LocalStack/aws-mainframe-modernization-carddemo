@@ -5,7 +5,7 @@
 #   Toolchain and provider contract for the CardDemo PRODUCTION environment
 #   root. It fixes the minimum Terraform CLI version, constrains every provider
 #   this root's module graph is allowed to resolve, and configures the single
-#   AWS provider that all sixteen child modules inherit.
+#   AWS provider that every child module inherits.
 #
 #   SOLE OWNER OF `provider "aws"`. This file holds the ONLY AWS provider
 #   configuration in the entire production module graph. Every module under
@@ -28,33 +28,51 @@
 #     - no variable, output, resource, module, locals or data block
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this root is structurally identical to infra/envs/dev by
+#   - Assumptions: this root is structurally identical to infra/envs/dev by
 #     design, so the `terraform` block and both provider constraints are the
 #     same in both roots. Production differs from development only in sizing and
 #     retention values, and every one of those lives in terraform.tfvars, never
 #     here. A reader tempted to narrow a constraint "because production does not
 #     need it" should read the per-pin rationale below first: at least one of
 #     these floors is set by a requirement this root does not itself exercise.
-#   - Trade-off: the backend configuration sits in its own file rather than
+#   - Trade-offs: the backend configuration sits in its own file rather than
 #     nested in this `terraform` block. That costs one extra file per root, and
 #     buys the ability to run `terraform init -backend=false` so CI can resolve
 #     and validate exactly this contract without any AWS credential.
 # =============================================================================
 
 terraform {
-  # WHAT: floor for the Terraform CLI permitted to plan or apply this root.
-  # WHY : Trade-off: a floor rather than an exact pin. CI validates on 1.15.8,
-  #       so an exact `= 1.15.8` would need editing for every patch release even
-  #       though no patch release can change what this file means. The floor is
-  #       still restrictive where it matters: 1.15.0 is the oldest CLI this
-  #       configuration has been validated against, so an unvalidated older
-  #       binary fails at init rather than producing a plan nobody reviewed.
-  required_version = ">= 1.15.0"
+  # WHAT: the Terraform CLI series permitted to plan or apply this root -- the
+  #       1.15 minor series, any patch release within it.
+  # WHY : Refactoring Rationale: this was `>= 1.15.0`, an open-ended floor, and
+  #       the openness was the defect. A bare floor admits every future release
+  #       of the 1.x line, so the CLI that produced the reviewed plan and the CLI
+  #       an operator runs six months later need not be the same MINOR at all --
+  #       and a Terraform minor release is exactly where language behaviour,
+  #       validation semantics and state-format handling change. The reviewed
+  #       artifact for this root is a plan produced on 1.15.8; admitting 1.16 or
+  #       1.20 would let that review be discharged by a toolchain nobody
+  #       validated against.
+  # WHY : Trade-offs: `~> 1.15.0` rather than an exact `= 1.15.8`. The pessimistic
+  #       operator on the patch component accepts 1.15.0 through 1.15.x and
+  #       refuses 1.16.0 and 2.x, which is the supported-major/minor policy this
+  #       package is reviewed under. An exact pin would have to be edited for
+  #       every patch release even though a patch release cannot change what this
+  #       file means, and it would break every runner the moment its toolchain
+  #       image moved forward within the series. Moving to a new MINOR is
+  #       deliberately a reviewed edit to this line, in the same commit as the
+  #       plan produced under it.
+  # WHY : Assumptions: this constraint is what makes the committed
+  #       .terraform.lock.hcl beside this file meaningful. The lock records the
+  #       provider versions and checksums selected under a given CLI; a CLI from
+  #       an unvalidated minor could legitimately re-resolve or re-format it, so
+  #       the two controls are one mechanism and neither is sufficient alone.
+  required_version = "~> 1.15.0"
 
   required_providers {
     # WHAT: pins the AWS provider to the 6.56 minor series (6.56.0 verified as
     #       the constraint's floor; 6.57.1 resolves within it).
-    # WHY : Assumption: this constraint is shared with infra/envs/dev and is
+    # WHY : Assumptions: this constraint is shared with infra/envs/dev and is
     #       identical in both roots by design. Its floor is set by a requirement
     #       THIS root never exercises: an Aurora Serverless v2 minimum capacity
     #       of zero needs provider 5.81.0 or later, and `~> 6.56` comfortably
@@ -77,7 +95,7 @@ terraform {
     #       password and the Cognito seed-user passwords at apply time.
     # WHY : Alternatives Considered: omitting this entry and letting each child
     #       module carry its own `random` constraint. Rejected. Only two of the
-    #       sixteen modules generate values with this provider -- `secrets` for
+    #       two modules generate values with this provider -- `secrets` for
     #       the database credential and `cognito` for the seed users -- so no
     #       resource in THIS directory uses it, yet a root-level constraint is
     #       the only thing that holds the whole graph to one version of it,
@@ -85,7 +103,7 @@ terraform {
     #       drift apart. Declaring the requirement with no matching
     #       `provider "random"` block is correct and complete: that provider
     #       takes no configuration, so there is nothing for a block to carry.
-    # WHY : Trade-off: because no resource in this directory references it, a
+    # WHY : Trade-offs: because no resource in this directory references it, a
     #       tflint run that enables `terraform_unused_required_providers` will
     #       flag this entry -- that rule is evaluated per directory and does not
     #       follow child-module usage. The rule sits outside tflint's
@@ -93,6 +111,14 @@ terraform {
     #       finding; `terraform_unused_declarations` is a separate rule and does
     #       not apply, since it targets unused variables, locals, data sources
     #       and provider ALIASES, and this root declares no alias.
+    # WHY : Refactoring Rationale: this root declares the random provider for its
+    #       child modules rather than using it directly, so the recursive lint's
+    #       unused-required-providers rule reports it here. The rule stays enabled
+    #       globally in infra/.tflint.hcl so a genuinely unused declaration in any
+    #       module is still reported; only this reviewed, graph-level declaration is
+    #       excepted. The identical annotation and reasoning sit in
+    #       infra/envs/dev/versions.tf.
+    # tflint-ignore: terraform_unused_required_providers
     random = {
       source  = "hashicorp/random"
       version = "~> 3.9"
@@ -101,7 +127,7 @@ terraform {
 }
 
 # WHAT: the one and only AWS provider configuration for the production root.
-# WHY : Assumption: infra/envs/prod/main.tf must NOT declare a second
+# WHY : Assumptions: infra/envs/prod/main.tf must NOT declare a second
 #       `provider "aws"` block. Terraform treats two unaliased configurations
 #       for the same provider as a duplicate-configuration error at
 #       `terraform init`, so a well-meant second block breaks the root outright
@@ -112,7 +138,7 @@ terraform {
 #       none of them defines its own.
 provider "aws" {
   # WHAT: region for every AWS API call this root makes.
-  # WHY : Assumption: the region is supplied by var.aws_region rather than
+  # WHY : Assumptions: the region is supplied by var.aws_region rather than
   #       written as a literal, so this file stays identical between the two
   #       environment roots and the region remains a terraform.tfvars decision.
   #       A literal here would also be the one place a deployment target could
@@ -120,9 +146,9 @@ provider "aws" {
   region = var.aws_region
 
   # WHAT: applies var.tags to every taggable resource this root creates,
-  #       including resources created inside all sixteen child modules.
-  # WHY : Trade-off: this is the SOLE tagging mechanism for the production
-  #       graph. The alternative -- threading a `tags` variable through sixteen
+  #       including resources created inside every child module.
+  # WHY : Trade-offs: this is the SOLE tagging mechanism for the production
+  #       graph. The alternative -- threading a `tags` variable through every
   #       modules and merging it into a `tags` argument on every resource -- was
   #       rejected because it makes correct tagging depend on every module
   #       author remembering to wire it, and a single omission yields an

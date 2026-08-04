@@ -3,6 +3,24 @@
  * authorities, and so replaces the one-character user type the CardDemo
  * baseline carried between screen turns.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> This package is the shared-kernel home for exactly one
  * decision: given a token the resource server has already validated, which
  * Spring Security authorities does the caller hold? The answer is read from the
@@ -218,7 +236,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds 17 production classes and 9 package charter files,
+ * <p>The shared kernel's target inventory is 17 production classes and 9 package charter files,
  * for 26 compilation units in total. This package contributes 1 of those
  * production classes and 1 of those charters, which is 2 files in this
  * directory and no more. The arithmetic is recorded so that a later reader can
@@ -235,15 +253,15 @@
  * charters.
  *
  * <p>Assumptions: this package's inventory depends on that repository-wide
- * allocation staying at one production class and one charter here. A figure of
- * 18 production classes appears in earlier drafts of the migration plan; it is
- * superseded and must not be propagated. The distinction matters locally rather
- * than academically: an inflated total is exactly what would make a second
- * class in this directory look authorised, and the second class a reader is
- * most likely to reach for is the configuration class the paragraph above
- * explains away. Stating the total beside a breakdown that re-derives it is
- * what allowed the stale figure to be caught at all, which is why both are kept
- * here instead of the total alone.
+ * allocation staying at one production class and one charter here, within an
+ * authoritative kernel total of <strong>17 production classes and 26
+ * compilation units, 9 of them charters</strong>. The precision matters locally
+ * rather than academically: an inflated total is exactly what would make a
+ * second class in this directory look authorised, and the second class a reader
+ * is most likely to reach for is the configuration class the paragraph above
+ * explains away. The total is therefore always stated beside a breakdown that
+ * re-derives it, so that a figure which does not reproduce all three sums above
+ * is rejected on sight rather than adopted.
  *
  * <h2>The documentation contract this file is held to</h2>
  *
@@ -264,23 +282,19 @@
  * nine in the reactor, so a missing or empty charter here stops the whole build
  * on a developer's own machine and not merely in the pipeline.
  *
- * <p>Alternatives Considered: the four justification labels used throughout
- * this file are written in the plural and without parentheses, which is a
- * deliberate divergence from the form predominating elsewhere in this
- * repository. Imitating the repository was the obvious alternative and it was
- * rejected. A reader searching the existing trees meets the singular label form
- * more often than the plural, and inside comments meets the parenthesised
- * singular most often of all, so that same reader could reasonably conclude
- * this file had ignored house style. It has not. The rule's four categories are
- * worded in the plural at its lines 31 to 34, and its line 43 makes that
- * wording the sentence this tree is audited against, so the plural is the form
- * matching the audited text. The singular is the inline abbreviation of those
- * same four categories, used by the build manifests, the infrastructure
- * definitions and the shell entry points, and the polyglot documentation
- * standard records the two forms as semantically equivalent. Forms are never
- * mixed inside one file: this Java tree uses the plural exclusively, so this
- * file agrees with its parent charter and its sibling charters rather than with
- * the repository-wide tally.
+ * <p>Assumptions: the four justification labels used throughout this file are
+ * written in the plural, without parentheses and terminated by a colon. That
+ * spelling is the only accepted one and it is mandatory in every language and
+ * every file of the migration trees, so it holds here, in the sibling charters,
+ * in the build manifests, in the infrastructure definitions and in the shell
+ * entry points alike. The rule's four categories are worded in the plural at its
+ * lines 31 to 34, and its line 43 makes that wording the sentence this tree is
+ * audited against, so the plural is the audited text itself. A singular,
+ * bracketed, heading-style or dash-terminated variant is not an alternative
+ * spelling: it is a label that a fixed-string search for the category will not
+ * find, which makes a documented rationale read as absent to the audit that
+ * looks for it. {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full
+ * statement of the convention and enumerates the rejected shapes.
  *
  * <p>Assumptions: the labels are transcribed from the rule's own lines 31 to 34
  * and from no other source. The house convention at lines 544 to 549 of
@@ -385,12 +399,15 @@
  * maintained by hand.
  *
  * <p>Assumptions: the inline form this tree establishes for rationale on
- * statements is a twin comment placed immediately above the code it explains,
- * the first line labelled with what the code does and the second with why,
- * their two colons aligned in the left margin. The form is taken from lines 267
- * and 270 of {@code tests/README.md}. It does not appear in this file at all,
- * because a charter has one declaration and no statements to annotate; the
- * in-Javadoc equivalent is the labelled sentence used throughout above.
+ * statements is a single comment placed immediately above the code it explains,
+ * opening with one of the four canonical labels and its colon and carrying the
+ * reason alone. Alternatives Considered: pairing that line with a second one
+ * labelled for what the code does was the earlier convention and is rejected,
+ * because such a line restates the statement below it and the explainability
+ * rule forbids exactly that; purpose belongs in the Javadoc, where the language
+ * already puts it. The form does not appear in this file at all, because a
+ * charter has one declaration and no statements to annotate; the in-Javadoc
+ * equivalent is the labelled sentence used throughout above.
  *
  * <p>Trade-offs: prose wraps at 80 columns to match the parent charter and the
  * sibling charters in this tree, even though the repository ruleset enables no

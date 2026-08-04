@@ -1,6 +1,25 @@
 /**
  * Owns the exact twenty-six character timestamp contract carried by the migrated CardDemo services.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * {@code TimestampFormatter.java}, which is the one production class that exists anywhere in this
+ * module. A type or test named below that has no file yet is therefore <b>planned</b>, not missing,
+ * and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>A single canonical rendering serves every origination and processing timestamp that crosses a
  * persistence, batch or API boundary in the migrated system:
  * {@code 'YYYY-MM-DD HH:MM:SS.mmmmmm'}. Read left to right that is ten characters of ISO date, then
@@ -8,11 +27,28 @@
  * separated by COLONS, then a PERIOD, then exactly six fractional-second digits: twenty-six
  * characters in total, never twenty-five and never twenty-seven. The
  * {@code java.time.format.DateTimeFormatter} pattern that realises it is
- * {@code yyyy-MM-dd HH:mm:ss.SSSSSS}, and the contract binds three declarations of one value
- * together, namely {@code PIC X(26)} in the reference COBOL, {@code TIMESTAMP(6)} in the target
- * column and {@code java.time.LocalDateTime} in the target Java type.</p>
+ * {@code uuuu-MM-dd HH:mm:ss.SSSSSS}, resolved strictly, and the contract binds three declarations
+ * of one value together, namely {@code PIC X(26)} in the reference COBOL, {@code TIMESTAMP(6)} in
+ * the target column and {@code java.time.LocalDateTime} in the target Java type. Assumptions: the
+ * proleptic year letter and strict resolution are a coupled pair and are what make reading a value
+ * back reject an impossible date rather than adjust it into a nearby one; the rendered
+ * twenty-six-character form is identical either way, and the reasoning is recorded on the formatter
+ * constant in {@code TimestampFormatter}.</p>
  *
- * <p>The leading ten characters are locked to {@code yyyy-MM-dd}. Because that prefix is of constant
+ * <p>Two properties of that pattern are enforced by the class rather than left to the type it
+ * renders, because {@code java.time.LocalDateTime} is wider than this contract in both directions.
+ * Its year is restricted to the range 1000 through 9999 inclusive: below and above that range the
+ * year field stops being four characters -- year 999 renders {@code 0999} and holds the width, but
+ * year 10000 renders {@code +10000} and produces twenty-eight characters, which a {@code PIC X(26)}
+ * receiving field truncates rather than rejects, so a rejected record would become a silently
+ * corrupted one. And an impossible calendar date is a failure rather than a correction: strict
+ * resolution is what makes the thirtieth of February, the twenty-ninth of a non-leap February, the
+ * thirty-first of April and an hour of twenty-four each raise
+ * {@code java.time.format.DateTimeParseException} instead of being moved to a neighbouring valid
+ * value, while a genuine leap day is accepted unchanged. The default resolver does move all four,
+ * which was measured rather than assumed and is recorded on the class.</p>
+ *
+ * <p>The leading ten characters are locked to {@code uuuu-MM-dd}. Because that prefix is of constant
  * width, zero padded and ordered most significant component first, comparing two prefixes
  * lexicographically returns the same answer as comparing them chronologically. That equivalence is
  * not an incidental property of the encoding to be enjoyed where convenient: the reference baseline
@@ -101,6 +137,22 @@
  * three records disagree about when the work happened, which the baseline structurally cannot
  * do.</p>
  *
+ * <p>Reduce the value to microseconds once, through this package, before either rendering it or
+ * binding it to a database parameter. The two sides of the persistence boundary dispose of a seventh
+ * fractional digit differently, and the difference was measured on JDK 21.0.11 with PostgreSQL JDBC
+ * 42.7.13 against a real {@code TIMESTAMP(6)} column rather than taken on trust: the
+ * {@code .SSSSSS} fraction field of this package TRUNCATES a seventh digit, while the driver ROUNDS
+ * it to the nearest microsecond before binding. A value of {@code 19:27:53.123456500} therefore
+ * rendered as {@code .123456} and was stored as {@code .123457}, and the carry case crossed a second:
+ * {@code 19:27:53.999999500} rendered as {@code 53.999999} and was stored as {@code 54.000000}. At
+ * the end of a day the carry moves the ten-character date prefix too, which was measured as well --
+ * {@code 2023-06-10 23:59:59.999999} rendered, {@code 2023-06-11 00:00:00.000000} stored -- and that
+ * prefix is the part every production consumer of this field reads. Truncating once, deliberately,
+ * leaves the driver nothing to round, and the same cases re-measured after truncation had the
+ * rendered string and the stored column agreeing exactly. A caller that renders one value into a
+ * report and binds another into a column has produced two records of one event, which a
+ * byte-deterministic parity comparison will correctly report as different.</p>
+ *
  * <p>Keep the ambient processing stamp distinct from an injected business date.
  * {@code app/jcl/INTCALC.jcl} line 22 runs {@code //STEP15 EXEC PGM=CBACT04C,PARM='2022071800'},
  * supplying a business date from outside the program into {@code PARM-DATE PIC X(10)} at
@@ -144,7 +196,7 @@
  * {@code app/cbl/CBACT04C.cbl} line 614), padded out to microsecond width. And the absence of any
  * zone component, {@code COB-REST PIC X(05)} never being moved into the result.</p>
  *
- * <p>Trade-offs: two compromises are accepted knowingly. Six fractional digits are emitted although
+ * <p>Trade-offs: three compromises are accepted knowingly. Six fractional digits are emitted although
  * the baseline clock can populate only two of them, so the four trailing zeros are structural rather
  * than incidental; width fidelity against {@code PIC X(26)} and {@code TIMESTAMP(6)} is bought at
  * the cost of a rendering that implies a resolution the source never had. And the ISO space and
@@ -153,17 +205,24 @@
  * space and colon form while the only production consumer of this field's punctuation reads just the
  * ten-character date prefix ({@code app/jcl/TRANREPT.jcl} line 42), which is byte identical under
  * both forms. That compromise is therefore paid in cosmetic divergence and not in consumer
- * behaviour.</p>
+ * behaviour. And the pattern is spelled with the proleptic year letter {@code uuuu} rather than the
+ * year-of-era letter {@code yyyy} the prose contract above uses, so the pattern string is no longer a
+ * character-for-character echo of the prose; the two render identically for every year this contract
+ * admits, and what is bought is the strict resolution that rejects a date the calendar does not have,
+ * since strict resolution paired with {@code yyyy} leaves the era unresolved and fails on every value
+ * including the ones this package itself writes.</p>
  *
  * <h2>Contents of this package</h2>
  *
  * <p>This package holds exactly one production class, {@code TimestampFormatter}, which owns the
  * pattern named above; with this descriptor beside it, the directory contains exactly two
- * {@code .java} files. Across {@code com.carddemo.common} as a whole there are seventeen production
- * classes, distributed as two in {@code money}, five in {@code codec}, three in {@code error}, two
- * in {@code web}, one in {@code security}, one in {@code observability}, one here in {@code time}
- * and two in {@code validation}; adding the nine package descriptors, one for the package root and
- * one for each of its eight subpackages, gives twenty-six {@code .java} files in total.</p>
+ * {@code .java} files. That makes this the one package in the module whose target inventory is
+ * complete at this checkpoint. Across {@code com.carddemo.common} as a whole the target is
+ * seventeen production classes, distributed as two in {@code money}, five in {@code codec}, three
+ * in {@code error}, two in {@code web}, one in {@code security}, one in {@code observability}, one
+ * here in {@code time} and two in {@code validation}; adding the nine package descriptors, one for
+ * the package root and one for each of its eight subpackages, gives twenty-six {@code .java} files
+ * in total.</p>
  *
  * <h2>Why this descriptor exists</h2>
  *

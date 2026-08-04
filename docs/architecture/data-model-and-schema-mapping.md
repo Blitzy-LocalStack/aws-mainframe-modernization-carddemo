@@ -69,25 +69,41 @@
 > package, whose byte offsets must match §[The dataset, copybook and record-length
 > contract](#the-dataset-copybook-and-record-length-contract); the data-transfer
 > objects and mappers in every service; and the sibling documents
-> [`batch-orchestration.md`](batch-orchestration.md),
-> [`messaging-contracts.md`](messaging-contracts.md),
-> [`security-and-identity.md`](security-and-identity.md) and
-> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md). The
+> `docs/architecture/batch-orchestration.md`,
+> `docs/architecture/messaging-contracts.md`,
+> `docs/architecture/security-and-identity.md` and
+> `docs/architecture/cobol-to-service-traceability.md`. The
 > catalog links this file by exactly the path
 > `docs/architecture/data-model-and-schema-mapping.md`, so the spelling is part of
 > the contract.
 >
+> **None of those consumers has landed yet.** This document is authored ahead of
+> them on purpose, so that the migrations, layout module, transfer objects and
+> sibling documents can be written against one derivation instead of each deriving
+> its own. Concretely: of the per-service Flyway migrations only
+> `V1__reference.sql` and `V1__batch.sql` exist; the extract-transform-load layout
+> module does not; no service has a transfer object or mapper yet; and of the four
+> sibling documents named above, none exists. Assumptions:  a path here that names
+> a document not yet authored is written as a plain code span rather than as a link,
+> per the Markdown convention in
+> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — a link
+> resolving to nothing is a defect a reader finds by clicking. A code span becomes a
+> link when the file it names exists.
+>
 > **Caveats.** Four, stated up front rather than buried. First, this describes a
-> **target design**: the infrastructure is authored and statically validated, and
+> **target design**: the infrastructure is authored to a foundation state and checked
+> to the extent that state admits (the measured per-check state is tabulated under
+> [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope)), and
 > applying it to a live account is an operator action outside this scope, so no
 > table below is asserted to exist in a provisioned database and no figure in this
 > document was measured on a running system. Second, a list of technologies is
 > deliberately **out of scope** and is named in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope) —
 > none of it appears anywhere below as delivered. Third, where the repository and
-> narrative prose disagree about a count, **the repository wins**: five figures
-> below were re-measured and corrected, and each correction is flagged where it
-> occurs rather than silently applied. Fourth, the baseline is preserved
+> narrative prose disagree about a count, **the repository wins**: every count in
+> this document is the one measured from the file it cites, and the five figures
+> most easily mistaken carry the measurement that establishes them at the point
+> they are stated. Fourth, the baseline is preserved
 > byte-for-byte — nothing under `app/**` is modified, no baseline defect is
 > corrected in COBOL, and the existing mainframe path keeps working exactly as it
 > does.
@@ -98,6 +114,12 @@ cards, procedures and the seed data — is cited here by path and line and is
 read-only. The same reference status applies to `tests/**`, `scripts/**` and
 `samples/**`.
 
+**Exactly three pre-existing files may be modified by this migration**, and naming
+them is what makes the additive claim above checkable rather than asserted: `README.md`,
+`CONTRIBUTING.md` and `.gitignore`. There is no fourth — every other artifact of the
+migration, every table derived below included, is a new file in a new tree. At this
+checkpoint only `.gitignore` has been modified.
+
 
 ## WHY (non-obvious design decisions)
 
@@ -105,29 +127,29 @@ This section carries the reasoning for the choices made *by this document about
 itself*. Every mapping decision it records is justified at the point where the
 mapping is stated, under the same four category names.
 
-- **Assumptions:** the copybook `PICTURE` clauses **are** the external data-format
-  contract, so this document's dominant category is necessarily *Assumptions*.
+- Assumptions: the copybook `PICTURE` clauses **are** the external data-format
+  contract, so this document's dominant category is necessarily `Assumptions`.
   Every derivation rule below is an assumption about byte-level layout — width,
   scale, sign representation, character set, padding — and each one is stated as
   such rather than as a preference. Where a rule can be checked against a second,
   independent source in the repository, it is, and the check is shown.
-- **Assumptions:** the repository is authoritative and prose is not. Every count,
+- Assumptions: the repository is authoritative and prose is not. Every count,
   offset, length and column total below was measured directly from the files named
-  in the header. Five figures that circulate in narrative form did not survive
-  measurement — the fraud table's column count, the detail segment's field count,
-  the home of the restrict-on-delete clause, the reach of one misspelling, and the
-  presence of a record-length annotation on one copybook — and each is corrected
-  in place with the measurement that produced the correction. Restating an
-  unverified figure in a document whose whole purpose is byte-level fidelity would
-  defeat the document.
-- **Refactoring Rationale:** the baseline already contains a COBOL-to-relational
+  in the header. Five of them are easy to get wrong and are therefore stated with
+  the measurement that establishes them, in a marked callout at the point of use —
+  the fraud table's column count, the detail segment's field count, the file that
+  holds the restrict-on-delete clause, the reach of one misspelling, and whether
+  one copybook carries a record-length annotation. A figure that cannot be
+  re-derived from a cited file has no standing in a document whose whole purpose is
+  byte-level fidelity.
+- Refactoring Rationale:  the baseline already contains a COBOL-to-relational
   mapping of its own, in the Db2 DDL of its two extensions. That mapping is used
   here as **precedent rather than paraphrase** — including the one place where it
   disagrees with the derivation rules adopted for the target. Presenting the
   target's rules without the baseline's own answer would turn a checkable argument
   into an assertion, and would hide the fact that a reasonable alternative exists
   and was measured.
-- **Trade-offs:** this document reproduces **complete field-by-field tables** —
+- Trade-offs: this document reproduces **complete field-by-field tables** —
   every field of every migrated record, with its picture, its byte width, its
   zero-based offset and its target column — rather than a summary of the rules and
   a worked example. The tables are long, and the accepted cost is length. The
@@ -136,7 +158,7 @@ mapping is stated, under the same four category names.
   independently is precisely how two decoders of the same record come to disagree
   by one byte, and a one-byte disagreement in a zoned-decimal money field is
   silent.
-- **Alternatives Considered:** the derivation rules could have lived inside each
+- Alternatives Considered: the derivation rules could have lived inside each
   service's migration file as comments next to the columns they govern. That was
   rejected because eleven record layouts feed eight schemas, several fields cross
   context boundaries — the account identifier appears in four different records —
@@ -149,7 +171,7 @@ mapping is stated, under the same four category names.
   `app/cpy/`"* — reproduced with that file's non-breaking hyphen intact, because a
   quotation this document presents as verbatim has to be verbatim down to the
   codepoint.
-- **Assumptions:** the documentation convention this file follows is the one
+- Assumptions: the documentation convention this file follows is the one
   already established in the repository, rather than one invented for it. The
   in-repository precedent is [`tests/README.md`](../../tests/README.md) §12
   (L544–L549), which requires every test, fixture builder, helper, mock and runner
@@ -220,7 +242,7 @@ is that the two authorization segments are the only **persisted** packed layouts
 and `CVEXPORT` is the only packed **file** layout. `authorization` is therefore the
 one target schema whose columns are derived from packed source bytes.
 
-> **Assumptions — the sign convention is a compiler setting in the baseline, and
+> **Assumptions: the sign convention is a compiler setting in the baseline, and
 > must be an explicit codec in the target.**
 > [`tests/README.md`](../../tests/README.md) §5.2 (L273–L275) records that
 > `-fsign=EBCDIC` is **required** when compiling these programs, because *"the
@@ -238,7 +260,7 @@ Thirteen of the seed datasets are EBCDIC-encoded fixed-width files under
 [`app/data/EBCDIC`](../../app/data/EBCDIC); nine are ASCII text under
 [`app/data/ASCII`](../../app/data/ASCII).
 
-> **Assumptions — decode per fixed-width field, never per record. This is the
+> **Assumptions: decode per fixed-width field, never per record. This is the
 > single most likely implementation mistake in the whole extract-transform-load
 > path.** A record decoded as one string routes sign-overpunch bytes, packed
 > nibbles and embedded low values through a text decoder. Some of those bytes are
@@ -279,7 +301,7 @@ the category Rule 1 assigns to *"what external contracts, data formats, or
 behaviors this code depends on"* — and the reason column states the specific
 consequence that makes the mapping correct, not a preference.
 
-| COBOL `PICTURE` | PostgreSQL | Java | Reason (Assumptions) |
+| COBOL `PICTURE` | PostgreSQL | Java | Assumptions: the byte-level reason the mapping is correct |
 |---|---|---|---|
 | `PIC 9(n)` used as a key or identifier | `BIGINT` | `Long` | Numeric identity with no arithmetic beyond comparison. The two widths in use, `9(11)` and `9(09)`, have maxima of 99,999,999,999 and 999,999,999, both inside `BIGINT`'s ±9.22 × 10¹⁸, so a single type covers every identifier in the model without a per-column width decision |
 | `PIC X(n)` used as a key or a fixed code | `CHAR(n)` | `String` | The fixed width **is** the contract. A 16-character card number and a 2-character type code are always exactly that long in the source; storing them variable-width would let a 15-character value in, and the golden-master comparison reads fixed-width records back out |
@@ -317,13 +339,13 @@ lines 2–27 and `PRIMARY KEY(CARD_NUM,AUTH_TS )` on line 28. Only two columns a
 `NOT NULL`: `CARD_NUM` (L2) and `AUTH_TS` (L3) — which are exactly the two primary
 key columns.
 
-> **Correction — this table has 26 columns, not 27.** The figure is stated here
-> because a 27 circulates in narrative form. Lines 2 through 27 inclusive are 26
+> **Measured — this table has 26 columns.** Lines 2 through 27 inclusive are 26
 > lines, each declaring one column; line 28 is the primary-key clause and the
-> closing parenthesis, not a column. **Assumptions:** the correction matters
-> downstream because the column count is the arithmetic check on the
-> segment-to-table reconciliation below, and a reconciliation that lands on the
-> wrong total hides whichever field is actually unaccounted for.
+> closing parenthesis, not a column. A count of 27 therefore counts the key clause
+> as a column. Assumptions:  the figure matters downstream because the column
+> count is the arithmetic check on the segment-to-table reconciliation below, and a
+> reconciliation that lands on the wrong total hides whichever field is actually
+> unaccounted for.
 
 ```bash
 # WHAT: count the column definitions in the fraud table, and confirm that the
@@ -353,7 +375,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 | L25 | `FRAUD_RPT_DATE DATE` | `PA-FRAUD-RPT-DATE` (L53) | `X(08)` | A character date → `DATE`, from an **eight**-character form |
 | L26–L27 | `ACCT_ID DECIMAL(11)`, `CUST_ID DECIMAL(9)` | `CIPAUSMY` L19, L20 | `S9(11) COMP-3`, `9(09)` | Identifiers as `DECIMAL` — the one place the baseline **disagrees** with the target rules |
 
-> **Refactoring Rationale — the timestamp collapse is precedent, not invention.**
+> Refactoring Rationale: the timestamp collapse is precedent, not invention.
 > `AUTH_TS` at L3 is a single `TIMESTAMP` derived from **four** separate segment
 > fields: the packed pair `PA-AUTH-DATE-9C PIC S9(05) COMP-3` and
 > `PA-AUTH-TIME-9C PIC S9(09) COMP-3` (`CIPAUDTY.cpy` L20–L21, which together form
@@ -365,7 +387,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > the idea: what was wrong with the old shape is that four fields could disagree
 > about one instant, and no constraint prevented it.
 
-> **Refactoring Rationale — the target adds the `CHECK` constraints the baseline
+> **Refactoring Rationale: the target adds the `CHECK` constraints the baseline
 > could not enforce.** `MATCH_STATUS` (L23) and `AUTH_FRAUD` (L24) are bare
 > `CHAR(1)` columns with no domain constraint, yet both fields have fully specified
 > domains in COBOL: `PA-MATCH-STATUS` carries the `88`-level values `'P'`, `'D'`,
@@ -378,7 +400,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > code path that happened to write the row, so a second writer, a migration or a
 > manual correction could violate it undetected.
 
-> **Trade-offs — identifiers as `BIGINT` here, `DECIMAL` in the baseline.** The
+> Trade-offs: identifiers as `BIGINT` here, `DECIMAL` in the baseline. The
 > rules above map `PIC 9(n)` identifiers to `BIGINT`, but the baseline's own DDL
 > chose `DECIMAL(11)` for `ACCT_ID` (L26) and `DECIMAL(9)` for `CUST_ID` (L27).
 > Both are defensible and the divergence is real, so it is recorded rather than
@@ -394,7 +416,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > constrain identifier width at the request boundary rather than relying on the
 > store to reject an over-wide value.
 
-> **Assumptions — two date-string conventions coexist in the baseline, and both
+> **Assumptions: two date-string conventions coexist in the baseline, and both
 > reach `DATE`.** `FRAUD_RPT_DATE` at L25 is a `DATE` derived from
 > `PA-FRAUD-RPT-DATE PIC X(08)`, an eight-character form. Every character date in
 > the base masters is ten characters — `ACCT-OPEN-DATE`, `ACCT-EXPIRAION-DATE`,
@@ -440,12 +462,12 @@ grep -cE '^ +10 ' "$P"                 # ->  2  subfields of the key group
 grep -cE '^ +88 ' "$P"                 # ->  7  condition names (domains, not fields)
 ```
 
-> **Correction — the detail segment has 28 elementary fields, not 24, and the
-> reconciliation is `28 − 1 − 3 + 2`.** A narrative figure of 24 fields with a
-> `−4 −1 +2` adjustment circulates; it does not reconcile to any column count the
-> file actually has. **Assumptions:** the collapse is four fields *into one*, so its
-> net effect on the count is −3 rather than −4, and the group/elementary distinction
-> adds the two `10`-levels that the `05` count alone omits.
+> **Measured — the detail segment has 28 elementary fields, and the reconciliation
+> is `28 − 1 − 3 + 2`.** Assumptions:  two details decide the arithmetic, and
+> both are easy to miss. The collapse is four fields *into one*, so its net effect
+> on the count is −3 and not −4; and the group/elementary distinction adds the two
+> `10`-levels that a count of `05` levels alone omits. A figure of 24 fields with a
+> `−4 −1 +2` adjustment reconciles to no column count the file actually has.
 
 **Four fields are absent from `AUTHFRDS` altogether**, and the reason differs per
 field. `FILLER X(17)` (`CIPAUDTY.cpy` L54) is dropped as padding — **the baseline
@@ -472,7 +494,7 @@ CREATE UNIQUE INDEX CARDDEMO.XAUTHFRD
 
 Two properties of those four lines carry into the target.
 
-> **Assumptions — the descending order is deliberate access-path intent, not
+> **Assumptions: the descending order is deliberate access-path intent, not
 > decoration.** This is a `UNIQUE` index over the **same two columns as the primary
 > key** already declared at `AUTHFRDS.ddl` L28. A unique index that duplicates the
 > primary key adds no new uniqueness, so the only thing it can be adding is the
@@ -484,14 +506,14 @@ Two properties of those four lines carry into the target.
 > matched rows. Preserving `(card_num ASC, auth_ts DESC)` keeps the read a forward
 > index scan, which is the behaviour the baseline index was created to obtain.
 
-> **Trade-offs — `COPY YES` is dropped, and its replacement is named.** `COPY YES`
+> Trade-offs: `COPY YES` is dropped, and its replacement is named. `COPY YES`
 > is a Db2 recoverability attribute: it declares that the index is eligible for
 > image-copy and so can be recovered rather than rebuilt. PostgreSQL has **no index
 > option that corresponds to it**, so the attribute cannot be carried across as
 > written. Its intent — that this data is recoverable to a point in time — is
 > satisfied at the cluster level instead, by encrypted automated backups and
-> point-in-time recovery, which is where the [security and
-> identity](security-and-identity.md) document places it. It is recorded here as a
+> point-in-time recovery, which is where the security and
+> identity (`docs/architecture/security-and-identity.md`) document places it. It is recorded here as a
 > **dropped attribute with a named replacement**, because an attribute that simply
 > disappears from a migration reads as an oversight, and the replacement is not an
 > index option so a reader will not find it by looking at the index.
@@ -517,21 +539,21 @@ The second Db2 extension is small, and every one of its lines is a mapping decis
 | `TRNTYCAT.ddl` L6–L7 | `FOREIGN KEY ... REFERENCES CARDDEMO.TRANSACTION_TYPE (TR_TYPE) ON DELETE RESTRICT` | — | The referential rule the target must preserve |
 
 `TRC_TYPE_CATEGORY` is the decisive row. Its source picture is `9(04)` — all
-digits — and the baseline nevertheless stored it as `CHAR(4)`. **Assumptions:** a
+digits — and the baseline nevertheless stored it as `CHAR(4)`. Assumptions: a
 category code of `0001` is a label whose leading zeros are part of its identity, so
 an integer column would render it as `1` and two different four-character codes
 could collide on one integer. That is the concrete reason the derivation rules
 split `PIC 9(n)` by role rather than by picture, and the baseline reached the same
 split independently.
 
-> **Correction — the restrict-on-delete clause is in `TRNTYCAT.ddl`, not in
-> `XTRNTYCAT.ddl`.** The two files are often referred to interchangeably. The
-> foreign key with `ON DELETE RESTRICT` is at `TRNTYCAT.ddl` L6–L7, inside the table
-> definition; `XTRNTYCAT.ddl` is a separate five-line file that creates the unique
-> index `CARDDEMO.X_TRAN_TYPE_CATG` and contains no referential clause at all.
-> **Assumptions:** the distinction matters because the behaviour being preserved is
-> a *constraint*, which a migration expresses in the `CREATE TABLE`, and looking for
-> it in the index file finds nothing.
+> **Measured — the restrict-on-delete clause lives in `TRNTYCAT.ddl`.** The foreign
+> key with `ON DELETE RESTRICT` is at `TRNTYCAT.ddl` L6–L7, inside the table
+> definition. `XTRNTYCAT.ddl` is a separate five-line file that creates the unique
+> index `CARDDEMO.X_TRAN_TYPE_CATG` and contains no referential clause at all, so
+> the two file names are not interchangeable. Assumptions:  the distinction
+> matters because the behaviour being preserved is a *constraint*, which a migration
+> expresses in the `CREATE TABLE`, and looking for it in the index file finds
+> nothing.
 
 
 ## From IMS hierarchy to relational keys
@@ -566,7 +588,7 @@ sequential files used to load and unload the segments, not additional databases
 with structure of their own. `DLIGSAMP.PSB` L21–L22 declares them as two
 `PCB TYPE=GSAM,PROCOPT=LS` entries.
 
-> **Assumptions — the segment byte counts independently validate the copybook
+> **Assumptions: the segment byte counts independently validate the copybook
 > layouts, and both totals were recomputed here from the pictures.** The two
 > `BYTES=` values are declared in the database description; the two copybooks
 > declare field widths. They are independent statements about the same records, and
@@ -593,7 +615,7 @@ L20. **`KEYLEN=14` is exactly `6 + 8`** — the root's 6-byte packed key
 concatenated with the child's 8-byte key — which is how a hierarchical store
 addresses a child: by the full path from the root, not by a key of its own.
 
-> **Assumptions — `PAUTBPCB` is a program-communication-block mask for
+> **Assumptions: `PAUTBPCB` is a program-communication-block mask for
 > `DBPAUTP0`, not a third database.** The three masks in the extension's copybook
 > set (`PADFLPCB.CPY`, `PASFLPCB.CPY`, `PAUTBPCB.CPY`) are DL/I *linkage*
 > structures — the areas through which a program receives segment-level status —
@@ -641,7 +663,7 @@ full address is the 14-byte concatenation. In Db2 the same data is keyed
 **`(CARD_NUM, AUTH_TS)`**, and the account and customer identifiers are demoted to
 ordinary nullable columns (`AUTHFRDS.ddl` L26–L27 — neither is `NOT NULL`).
 
-> **Refactoring Rationale — the target adopts the baseline's relational key, not
+> **Refactoring Rationale: the target adopts the baseline's relational key, not
 > its hierarchical one.** What was wrong with the hierarchical shape, for the
 > queries this data actually serves, is that a detail row has no identity of its own:
 > it is identified by a path, so every access begins at an account even when the
@@ -654,7 +676,7 @@ ordinary nullable columns (`AUTHFRDS.ddl` L26–L27 — neither is `NOT NULL`).
 > which is how both access paths stay indexed instead of one of them becoming a
 > scan.
 
-> **Assumptions — two-phase commit disappears, and it disappears because of a
+> **Assumptions: two-phase commit disappears, and it disappears because of a
 > storage decision made here.** In the baseline the pending-authorization segments
 > are in IMS and the fraud rows are in Db2, so marking an authorization fraudulent
 > spans two products and requires a coordinated commit. The target places all three
@@ -692,12 +714,12 @@ Ten of the eleven copybooks state their own record length in a comment on line 2
 `CVCUS01Y.cpy` L2 reads *"Data-structure for Customer entity (RECLN 500)"*, and the
 others follow the same form.
 
-> **Correction — `CSUSR01Y.cpy` carries no record-length annotation, and its
-> padding field is named.** Lines 1–16 of that file are the Apache licence header,
+> **Measured — `CSUSR01Y.cpy` carries no record-length annotation, and its padding
+> field is named.** Lines 1–16 of that file are the Apache licence header,
 > so there is no `RECLN` comment: its 80 bytes are **derived** from the field widths
 > (`8 + 20 + 20 + 8 + 1 = 57`, plus 23) rather than declared. Its trailing field is
 > also called `SEC-USR-FILLER` (L23) rather than the anonymous `FILLER` every other
-> record uses. **Assumptions:** both details matter to a reader-generator that
+> record uses. Assumptions: both details matter to a reader-generator that
 > locates padding by looking for the literal name `FILLER`, because on this one
 > record that search finds nothing and the 23 bytes would be mapped to a column.
 
@@ -728,7 +750,7 @@ key at zero-based offset 304, which is precisely the full width and position of
 comma-separated, which is worth noting because a reader transcribing the clause
 into a comma-separated form will not find it by searching.
 
-> **Assumptions — two honest discrepancies in that control card, disclosed rather
+> **Assumptions: two honest discrepancies in that control card, disclosed rather
 > than smoothed over.** First, L41 annotates the card number as `ZD` (zoned
 > decimal) although `CVTRA05Y.cpy` L15 declares it `PIC X(16)`. The *offsets and
 > widths* agree exactly, which is the corroboration being claimed; only the sort-side
@@ -748,7 +770,7 @@ into a comma-separated form will not find it by searching.
 > ordering it already relies on. Note also that `INCLUDE COND` here selects
 > *records*; it is not a step-gating condition code, and conflating the two forms is
 > a real hazard since they share the keyword — the step-gating semantics are covered
-> in [`batch-orchestration.md`](batch-orchestration.md).
+> in `docs/architecture/batch-orchestration.md`.
 
 ### Corroboration B: the category-balance record
 
@@ -772,7 +794,7 @@ sorts on all three key components in order, corroborating that
 than a single surrogate. The job consumes `TCATBALF.BKUP(+1)` (L39) and its
 `REPROC` procedure's internal step is named `PRC001` (L32, L35).
 
-> **Assumptions — `TRAN-CAT-BAL,18,11,ZD` is independent proof that base-master
+> **Assumptions: `TRAN-CAT-BAL,18,11,ZD` is independent proof that base-master
 > money is zoned.** The control card declares the balance field as `ZD`, zoned
 > decimal. This is a second source, written for a different purpose by a different
 > mechanism, agreeing with the copybook's `PIC S9(09)V99` display form — which is
@@ -837,13 +859,13 @@ golden-master comparison, so its composition is fixed from three independent pla
 So the contract is `350 + 4 + 76 = 430`, and the target preserves it as three
 columns rather than one opaque field:
 
-| Target column | Type | Source | Reason (Assumptions) |
+| Target column | Type | Source | Assumptions: the byte-level reason the mapping is correct |
 |---|---|---|---|
 | `raw_record` | `CHAR(350)` | `REJECT-TRAN-DATA` | Fixed width, deliberately **not** `VARCHAR`: the golden-master comparison reads these records back at 350 bytes including trailing blanks, so a type that trimmed them would change the compared bytes even when the content was identical |
 | `reason_code` | `SMALLINT` | `WS-VALIDATION-FAIL-REASON PIC 9(04)` | A four-digit unsigned value has a maximum of 9999, inside `SMALLINT`'s 32,767, so `SMALLINT` is the narrowest exact integer type covering the whole declared domain. The documented reject reasons occupy 100–103 of that range |
 | `reason_desc` | `VARCHAR(76)` | `WS-VALIDATION-FAIL-REASON-DESC PIC X(76)` | Descriptive text, so rule 3 applies; the declared 76-character maximum is kept as the constraint |
 
-> **Alternatives Considered — one 430-character column, versus these three.**
+> Alternatives Considered: one 430-character column, versus these three.
 > Storing the whole reject record as a single `CHAR(430)` was considered, since that
 > is literally what the file holds, and rejected: the reason code is the field every
 > consumer filters on, and extracting it from a substring of a character column on
@@ -859,9 +881,10 @@ columns rather than one opaque field:
 ## The eight schemas and their owners
 
 Ownership is schema-per-service, and the names below are taken verbatim from
-[`service-catalog.md`](service-catalog.md), which is the naming authority. Six
-contexts own a schema outright, one owns a schema plus narrowly-scoped write grants
-outside it, and one owns nothing.
+[`service-catalog.md`](service-catalog.md), which is the naming authority. There are
+**eight schemas for eight contexts**: six contexts own a schema and the tables in it,
+one owns a schema plus narrowly-scoped write grants outside it, and one owns a schema
+that holds no table at all.
 
 | Schema | Owning context | Tables |
 |---|---|---|
@@ -871,8 +894,8 @@ outside it, and one owns nothing.
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` |
 | `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` |
 | `batch` | `batch-service` | `batch_run`, plus the batch framework's own job-repository tables |
-| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud` |
-| *(none)* | `reporting-service` | **none** — read-only cross-schema views under a `SELECT`-only role |
+| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` |
+| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table** — read-only cross-schema views only, created by `data-migration/sql/V1__reporting_views.sql`, reachable by the `carddemo_reporting` login through `SELECT` on those views and through no base-table grant at all |
 
 `batch-service` additionally holds narrowly-scoped cross-schema **write** grants on
 `ledger.*` and `account.*` only. That is the one deliberate departure from
@@ -900,7 +923,7 @@ graph LR
         S4["ledger<br/>4 tables"]
         S5["reference<br/>6 tables"]
         S6["batch<br/>net-new"]
-        S7["authorization<br/>3 tables"]
+        S7["authorization<br/>4 tables"]
         S8["reporting<br/>0 tables · views only"]
     end
 
@@ -913,7 +936,10 @@ graph LR
     S4 -.->|"SELECT-only view"| S8
     S2 -.->|"SELECT-only view"| S8
     S3 -.->|"SELECT-only view"| S8
-%% batch has no baseline source; reporting owns nothing and only reads
+    S5 -.->|"SELECT-only view"| S8
+%% batch has no baseline source; reporting owns a schema but no table, and only reads
+%% All four SELECT-only edges match V0__schemas_and_roles.sql section 5: ledger,
+%% account, card and reference
 ```
 
 In the field tables that follow, the **Offset** column is **zero-based** and is the
@@ -940,7 +966,7 @@ The identifier is `CHAR(8)` rather than `VARCHAR(8)` because it is a key of decl
 fixed width and rule 2 applies; the two name fields are descriptive, so rule 3 gives
 `VARCHAR`.
 
-> **Refactoring Rationale — the plaintext password field is deliberately not
+> **Refactoring Rationale: the plaintext password field is deliberately not
 > carried forward.** `SEC-USR-PWD PIC X(08)` at
 > [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) L21 stores an
 > eight-character password in plain text, and sign-on compares it directly. The
@@ -956,9 +982,9 @@ fixed width and rule 2 applies; the two name fields are descriptive, so rule 3 g
 >
 > **This document makes no claim that the COBOL was changed.** The baseline is
 > untouched and continues to behave exactly as it does; the divergence is registered
-> in [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), and the
+> in `docs/architecture/cobol-to-service-traceability.md`, and the
 > full identity mapping — including how `'A'` and `'U'` become group claims — is in
-> [`security-and-identity.md`](security-and-identity.md).
+> `docs/architecture/security-and-identity.md`.
 
 The `CHECK` constraint on `user_type` encodes the `'A'` / `'U'` domain that the
 baseline expresses as condition names in the shared session structure
@@ -993,7 +1019,7 @@ the database described for the fraud table.
 whose width is meaningful: the group identifier is the lookup key into
 `reference.disclosure_groups`, and a trimmed value would not match the seeded key.
 
-> **Refactoring Rationale — the `version` column expresses concurrency control the
+> **Refactoring Rationale: the `version` column expresses concurrency control the
 > baseline already implements.** `COACTUPC` snapshots the entire pre-edit record
 > into a before-image area and compares it before rewriting, holding each numeric as
 > a display field with a numeric `REDEFINES` alongside. That is optimistic
@@ -1032,7 +1058,7 @@ whose width is meaningful: the group identifier is the lookup key into
 | `FILLER` (L23) | `X(168)` | 168 | 332 | dropped | — | — |
 | — | — | — | — | `version` | `BIGINT NOT NULL` | `long` |
 
-> **Trade-offs — the two national-identifier fields become encrypted `BYTEA`, not
+> **Trade-offs: the two national-identifier fields become encrypted `BYTEA`, not
 > the type their pictures suggest.** `CUST-SSN PIC 9(09)` is all digits and
 > `CUST-GOVT-ISSUED-ID PIC X(20)` is characters, so rules 1 and 3 would give
 > `BIGINT` and `VARCHAR(20)`. Both are overridden because these are the two most
@@ -1074,7 +1100,7 @@ bytes · dataset `CARDDATA` → table **`card.cards`**
 | `FILLER` (L11) | `X(59)` | 59 | 91 | dropped | — | — |
 | — | — | — | — | `version` | `BIGINT NOT NULL` | `long` |
 
-> **Trade-offs — the card verification value is stored as encrypted `BYTEA` and
+> **Trade-offs: the card verification value is stored as encrypted `BYTEA` and
 > returned by no endpoint.** `CARD-CVV-CD PIC 9(03)` is a three-digit number, so
 > rule 7 would give `SMALLINT`. It is overridden for the same reason as the national
 > identifiers, and more strictly: the value is **write-only** from the application's
@@ -1132,7 +1158,7 @@ prefix in place of `TRAN-`. Every offset in the table above therefore applies
 unchanged: `DALYTRAN-CARD-NUM` at 262, `DALYTRAN-PROC-TS` at 304, `FILLER X(20)` at
 330.
 
-> **Alternatives Considered — two tables with one shape, rather than one table with
+> **Alternatives Considered: two tables with one shape, rather than one table with
 > a discriminator column.** Because the two layouts are byte-identical, a single
 > table with a `stage` column distinguishing daily from posted rows was the obvious
 > alternative, and it was rejected for a specific reason: the posting job reads the
@@ -1190,7 +1216,7 @@ including `VARCHAR(50)` for the description.
 | `TRAN-CAT-TYPE-DESC` (L8) | `X(50)` | 50 | 6 | `description` | `VARCHAR(50)` | `String` |
 | `FILLER` (L9) | `X(04)` | 4 | 56 | dropped | — | — |
 
-> **Refactoring Rationale — the restrict-on-delete rule is preserved as a
+> **Refactoring Rationale: the restrict-on-delete rule is preserved as a
 > constraint and surfaced as a status code.** `transaction_categories` carries
 > `FOREIGN KEY (type_cd) REFERENCES transaction_types (type_cd) ON DELETE RESTRICT`,
 > transcribing `TRNTYCAT.ddl` L6–L7 — which is where that clause actually lives, as
@@ -1213,7 +1239,7 @@ including `VARCHAR(50)` for the description.
 | `DIS-INT-RATE` (L9) | `S9(04)V99` | 6 | 16 | `interest_rate` | `NUMERIC(6,2)` | `BigDecimal` |
 | `FILLER` (L10) | `X(28)` | 28 | 22 | dropped | — | — |
 
-> **Trade-offs — the key columns keep the record's own `DIS-TRAN-` prefix here, while
+> **Trade-offs: the key columns keep the record's own `DIS-TRAN-` prefix here, while
 > `transaction_categories` drops it.** The two tables carry the same two code values,
 > so an unqualified `type_cd`/`cat_cd` pair would read identically in both and the
 > shorter form was considered for that reason. It is not used, because the disclosure
@@ -1225,7 +1251,7 @@ including `VARCHAR(50)` for the description.
 > names in this table are the ones the migration creates, in
 > [`services/reference-service/src/main/resources/db/migration/V1__reference.sql`](../../services/reference-service/src/main/resources/db/migration/V1__reference.sql).
 
-> **Assumptions — the `'DEFAULT'` group row is mandatory seed data, and its absence
+> **Assumptions: the `'DEFAULT'` group row is mandatory seed data, and its absence
 > fails silently.** The interest calculation reads this table by
 > `(acct_group_id, tran_type_cd, tran_cat_cd)`; when the account's own group key is not
 > found it retries with the literal group `'DEFAULT'`, at
@@ -1255,7 +1281,7 @@ recording.
 | `batch_run` | `run_id`, `step_name`, `status`, `started_at`, `finished_at`, `return_code` | Net-new |
 | the batch framework's job-repository tables | as the framework defines them | Net-new |
 
-> **Assumptions — this is an addition, not a port, because the baseline has no
+> **Assumptions: this is an addition, not a port, because the baseline has no
 > checkpoint contract to port.** There is no active restart directive anywhere in
 > the JCL tree — the only one present is commented out — and no checkpoint
 > declaration at all. `batch_run` therefore gives each step a durable idempotency
@@ -1263,7 +1289,7 @@ recording.
 > documented here as a **capability the target adds**. Describing it as a migration
 > of an existing mechanism would misrepresent the baseline, which recovers from a
 > failed step by resubmitting from a step the operator selects. The orchestration
-> that uses this table is in [`batch-orchestration.md`](batch-orchestration.md).
+> that uses this table is in `docs/architecture/batch-orchestration.md`.
 
 
 ### `authorization` — `authorization-service`
@@ -1296,7 +1322,7 @@ Note the two `S9(04) COMP` counters at L27–L28: these are **binary**, two byte
 each, not packed, so the reader must not hand them to the packed codec. They are the
 only binary fields in either segment.
 
-> **Trade-offs — the five-slot array becomes five discrete columns, not a
+> **Trade-offs: the five-slot array becomes five discrete columns, not a
 > PostgreSQL array.** `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
 > [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) L22
 > becomes `account_status_1` through `account_status_5`. **A `CHAR(2)[]` array column
@@ -1358,7 +1384,7 @@ eight-character form. The two `CHECK` constraints are the addition described in
 `CHECK (match_status IN ('P','D','E','M'))` from L46–L49 and
 `CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL)` from L51–L52.
 
-> **Assumptions — the composite primary key transcribes the hierarchical path, and
+> **Assumptions: the composite primary key transcribes the hierarchical path, and
 > the two key components stay separate integers.** IMS addresses a detail segment by
 > the concatenation of the root key and the child key, 14 bytes in total
 > (`DLIGSAMP.PSB` L18 `KEYLEN=14`). The target expresses the same identity as
@@ -1377,14 +1403,117 @@ descending order preserved for the reason given above. It is the one target tabl
 whose source is already relational, so its mapping is a transcription rather than a
 derivation.
 
+#### `authorization.auth_reply_outbox` — the fourth table, with no baseline source
 
-### `reporting-service` — no schema
+No copybook, segment or table in the baseline corresponds to this one, because the
+behaviour it exists for is a correction rather than a migration: the baseline publishes
+an authorization reply outside the unit of work that committed the decision, so a
+failure between the commit and the put loses a reply the data says was produced. A row
+written here inside the same transaction as the decision, and drained afterwards, is
+what closes that window. It holds the reply's routing and correlation, the card and
+transaction the reply belongs to, the moment it was written and the moment it was
+published; the queue attributes those fields feed are listed at the end of this
+subsection. It is created and owned by `authorization-service` alone, and the
+extract-transform-load path never loads into it.
 
-`reporting-service` owns **no tables**. It reads `ledger`, `account` and `card`
-through read-only cross-schema views, under a database role holding `SELECT`-only
-grants, so the context cannot write to another context's schema even in error.
+Two indexes, both partial and both on unpublished rows only:
 
-> **Alternatives Considered — a card-ordered projection instead of a second
+| Index | Definition | Why |
+|---|---|---|
+| `idx_auth_reply_outbox_pending` | `(created_at) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. |
+| `idx_auth_reply_outbox_group` | `(card_num, outbox_id) WHERE published_at IS NULL` | Per-card publication order. The reply queue groups by card, so the drain must send a card's pending replies in the order they were written; this index makes that ordering an index scan rather than a sort. |
+
+> **Assumptions — publication state is a nullable timestamp rather than a status
+> column.** A `CHAR(1)` status with a check constraint was the alternative, matching
+> how `match_status` and `auth_fraud` are modelled elsewhere in this schema. It was
+> rejected here for a specific reason: those columns carry a domain the baseline
+> defines, while this one carries a two-valued fact the target invented, and a
+> nullable timestamp states both the fact and the moment in one column. It also
+> makes the partial-index predicate exactly the drain predicate, so the index cannot
+> drift from the query it exists for. The accepted cost is that "published" is read
+> as `published_at IS NOT NULL` rather than as an equality, which is one more
+> keyword in every query that touches it.
+
+> **Assumptions — retention is bounded by the existing purge job, not by a new
+> one.** A published row has no further purpose, and rows accumulate at the rate
+> authorizations are decided. Deleting them at drain time was considered and
+> rejected: keeping a short published history is what lets an operator answer
+> whether a reply was ever sent for a given transaction, which is precisely the
+> question the baseline's lost-reply window made unanswerable. Rows are therefore
+> removed by the migrated `CBPAUP0C` purge job — the one that already expires
+> pending authorizations — so retention is one scheduled job's concern rather than
+> two. Only rows with `published_at IS NOT NULL` are eligible; an unpublished row is
+> never purged, because purging one would lose the reply this table exists to
+> guarantee.
+
+> **Assumptions — this table is owned and created here, not by data-migration.** It
+> holds no migrated data, so the extract-transform-load path has nothing to load into
+> it; it is created by `authorization-service`'s own Flyway migration alongside the
+> three derived tables, and no other context reads or writes it. The queue attributes
+> that `card_num`, `transaction_id`, `correlation_id` and `reply_to_queue_url` feed
+> are specified in `docs/architecture/messaging-contracts.md`.
+
+
+### `reporting` — `reporting-service`, a schema with no tables
+
+`reporting-service` owns **no tables**, and the `reporting` schema nevertheless
+exists: it is the eighth of the eight schemas
+[`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+creates, and it is where this context's read-only cross-schema views live. The
+context reads `ledger`, `account`, `card` and `reference` through those views under a database
+role holding `SELECT` alone, so it cannot write to another context's schema even in
+error.
+
+Three properties of this schema differ from the other seven, and all three are
+deliberate:
+
+| Property | The other seven | `reporting` |
+|---|---|---|
+| Database owner | the login role named after the schema | `carddemo_reporting_owner`, created `NOLOGIN` |
+| Contents | tables, indexes and constraints | views only, no table of any kind |
+| Created by | the owning service's own Flyway migration | `data-migration/sql/V1__reporting_views.sql`, applied after every per-service `V1__*.sql` |
+
+> **Assumptions — the owner is deliberately not the reporting login, and that is
+> the security property.** A schema's owner holds `CREATE` in it unconditionally.
+> Owning `reporting` with `carddemo_reporting` would therefore let the one role a
+> reporting process authenticates as create, replace or drop the very views that are
+> supposed to be its only reach into other contexts' data, which would leave the
+> context read-only by convention in code rather than in the database.
+> `carddemo_reporting_owner` owns it instead, cannot open a connection at all, and is reachable
+> only by a principal already holding membership in it. The schema's NAME is still
+> `reporting`, matching the login role and every configuration string that resolves
+> it, so nothing that looks the schema up by name is affected — only the owner
+> differs.
+
+> **Assumptions — a view executes with its owner's privileges, which is why the
+> grant model has two halves.** `carddemo_reporting_owner` holds `USAGE` and `SELECT` on
+> `ledger`, `account`, `card` and `reference` because it owns the views and they
+> resolve their reads as it; `carddemo_reporting` holds `USAGE` on `reporting` plus
+> `SELECT` on the views there, and **no grant of any kind on a base table**. V0's
+> default privileges attach that `SELECT` to each new view automatically, so
+> `V1__reporting_views.sql` issues no `GRANT` and cannot get one wrong. An earlier
+> revision of V0 did the opposite — it made `carddemo_reporting` the schema owner and
+> granted it direct `SELECT` on every base table in four schemas, while the views it
+> was documented to read through did not exist — so the least-privilege model was
+> described accurately and implemented nowhere. V0 now revokes those grants as well
+> as not issuing them, which is what makes it idempotent in the direction a
+> `GRANT`-only script cannot be.
+
+> **Assumptions — the views are a data-migration artifact rather than a service
+> migration, for an ordering reason and not a stylistic one.** A view cannot be
+> created over a table that does not exist, and V0 runs before any table exists
+> anywhere, so the views cannot be created with the schema. They also span four
+> schemas owned by four different services, so no single service's migration is the
+> right home for them: `reporting-service` deliberately has no `db/migration`
+> directory, and one appearing under that module would be a defect its own POM
+> records as such. `V1__reporting_views.sql` connects as the bootstrap principal and
+> issues `SET ROLE carddemo_reporting_owner` before each `CREATE VIEW`, which is what makes
+> `carddemo_reporting_owner` their owner. A view missing at run time is a defect to report
+> against that artifact. That artifact is authored at a later index of this plan, so
+> at this checkpoint the schema, both roles and the four grants exist in
+> `V0__schemas_and_roles.sql` while the views themselves do not yet.
+
+> Alternatives Considered: **a card-ordered projection instead of a second
 > table.** The statement generator reads transactions grouped by card, which invites
 > a physically card-ordered copy of the ledger. That was rejected because a second
 > copy of the transaction data introduces a second thing that can disagree with the
@@ -1424,7 +1553,7 @@ and every operand of that definition carries into the target index:
 | L39, L42–L44 | `STEP25` `DEFINE PATH NAME(...AIX.PATH) PATHENTRY(...AIX)` | The path object that lets a program open the index as a file. A relational secondary index needs no separate object, so this step has no target equivalent |
 | L49, L52–L54 | `STEP30` `BLDINDEX INDATASET(...KSDS) OUTDATASET(...AIX)` | The bulk index build. Retired for the same reason as `UPGRADE` |
 
-> **Refactoring Rationale — three of these clauses are retired rather than mapped,
+> **Refactoring Rationale: three of these clauses are retired rather than mapped,
 > and the reason is a property of the target store.** `UPGRADE`, `DEFINE PATH` and
 > `BLDINDEX` all exist because a VSAM alternate index is a **separate dataset** that
 > must be declared, related, opened and populated as its own object, and can drift
@@ -1436,7 +1565,7 @@ and every operand of that definition carries into the target index:
 > migration against this job will otherwise find three steps with no counterpart and
 > reasonably suspect an omission.
 
-> **Alternatives Considered — keyset pagination rather than offset pagination, for
+> **Alternatives Considered: keyset pagination rather than offset pagination, for
 > the browses these indexes serve.** The online list screens drive a sequential
 > browse over these paths rather than a keyed read, carrying a first-key, last-key
 > and next-page-exists triple between turns. Offset pagination was the alternative
@@ -1464,7 +1593,7 @@ copybooks or COBOL programs, so the misspelling never leaves the source tree.
 
 **The third is different in kind, and the difference matters.**
 
-> **Trade-offs — correcting `CATAGORY` is a breaking divergence, because it is a
+> **Trade-offs: correcting `CATAGORY` is a breaking divergence, because it is a
 > persisted column name and not only a copybook typo.** The misspelling reaches
 > **six** source-of-truth locations, not one:
 >
@@ -1483,12 +1612,12 @@ copybooks or COBOL programs, so the misspelling never leaves the source tree.
 > spelled. Correcting it therefore changes something outside this repository can
 > depend on, and the accepted cost is exactly that — the corrected column will not
 > match a query written against the Db2 table. It is corrected anyway because the
-> target schema is new and no client of it exists yet, so the choice is between one
+> target schema is new and has no existing clients, so the choice is between one
 > documented rename now and the misspelling being permanent. The rename is registered
-> in [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), and the
+> in `docs/architecture/cobol-to-service-traceability.md`, and the
 > **message payload field order and delimiter are unaffected** — the wire format is
 > positional, so renaming a field changes no byte on the queue. The wire contract is
-> in [`messaging-contracts.md`](messaging-contracts.md).
+> in `docs/architecture/messaging-contracts.md`.
 
 ```bash
 # WHAT: show how far each misspelling reaches, and in what kind of file.
@@ -1510,11 +1639,11 @@ model:
 | Layer | Representation |
 |---|---|
 | PostgreSQL | `NUMERIC(p,2)` |
-| Java | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` |
+| Java | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` at one reduction point — see [Arithmetic order is preserved](#arithmetic-order-is-preserved) for where that point sits |
 | Python (the extract-transform-load path) | `Decimal` |
 | JSON on the wire | a **string** |
 
-> **Assumptions — money is a JSON string because a JSON number is parsed into an
+> **Assumptions: money is a JSON string because a JSON number is parsed into an
 > IEEE-754 double by most clients.** That is the specific reason, and it is a
 > statement about client behaviour rather than about taste. A double has 53 bits of
 > significand, so it cannot represent every two-decimal value exactly; a balance
@@ -1526,7 +1655,7 @@ model:
 > prohibited in the money path, and the prohibition is enforced by an architecture
 > test rather than by review, so a reintroduction fails the build.
 
-> **Assumptions — this preserves the baseline's own wire contract rather than
+> **Assumptions: this preserves the baseline's own wire contract rather than
 > inventing a convention, and that is verifiable in two files.** The baseline already
 > transports money as **edited decimal text** on its message wire:
 > `PA-RQ-TRANSACTION-AMT PIC +9(10).99` at
@@ -1544,7 +1673,7 @@ model:
 
 ### Arithmetic order is preserved
 
-> **Assumptions — where the baseline computes a product before a quotient, the
+> **Assumptions: where the baseline computes a product before a quotient, the
 > target multiplies at full precision and only then divides, with an explicit scale
 > and rounding mode.** The interest calculation is the case that matters:
 > [`app/cbl/CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) L462–L465, in paragraph
@@ -1559,8 +1688,45 @@ model:
 > digits — so **the two orders yield different cents on many inputs**. Because the
 > golden-master comparison is byte-deterministic, the difference would surface as a
 > parity failure rather than as a rounding note. The target therefore multiplies at
-> full precision, divides once, and applies scale 2 with `HALF_UP` at that single
-> point.
+> full precision, divides once, and applies scale 2 at that single point.
+
+> **Assumptions — the mode at that single point is `HALF_UP`, the same mode as every
+> other hop, and the baseline diverges from it in a way that is recorded rather than
+> matched.** The reference program truncates, and two observations establish that.
+> First, the receiving field is declared at
+> [`app/cbl/CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) L168 as
+> `05 WS-MONTHLY-INT PIC S9(09)V99`, so the result is stored at exactly two decimal
+> places and the surplus precision of the quotient has to go somewhere. Second, the
+> `COMPUTE` carries **no `ROUNDED` phrase** — and neither does any other statement in
+> that program, because a search for the phrase across all 652 lines returns no match.
+> A store into a fixed-scale field without `ROUNDED` **discards** the surplus digits
+> rather than rounding them, so the baseline behaviour is truncation toward zero.
+>
+> The target applies `HALF_UP` regardless, because transformation rule T3 states the
+> money contract as one mode at every hop and that plan is the frozen contract this
+> migration is measured against. The resulting one-cent difference is therefore a
+> documented behavioural divergence, not a defect and not an exception to the table
+> above: it is registered as **C-ROUNDING** in
+> `docs/architecture/cobol-to-service-traceability.md`, the register of every
+> intentional divergence, alongside the three baseline defects that are likewise not
+> reproduced.
+>
+> **Trade-offs — the cost is exactly one cent, and only where a quotient lands on an
+> exact half cent.** On the vectors the reference fixtures actually carry the two modes
+> agree, which is why the divergence has to be written down rather than left for a
+> fixture to catch: a balance of `1000.00` at a rate of `15.00` yields `12.5000`
+> exactly and both modes return `12.50`; at a rate of `2.50` against the same balance
+> the quotient is `2.08333…` and both return `2.08`. They part company only at
+> `1000.80` and `2.50`, where the quotient is `2.0850` exactly — truncation returns
+> `2.08` and half-up returns `2.09`. **Alternatives Considered — implementing
+> `RoundingMode.DOWN` here to match the baseline cent for cent** was evaluated and
+> rejected: it would leave the plan, every sibling package descriptor and the
+> documentation standard stating one mode while the shared kernel implemented another,
+> with nothing to indicate which a reader should believe, and it would remove the one
+> money-rounding contract an architecture rule can assert mechanically. The
+> authoritative statement of the contract lives beside the implementation, in
+> [`../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`](../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java),
+> which carries the same two baseline observations and the same vectors.
 
 
 ## Reference seed data
@@ -1582,13 +1748,14 @@ and **five** `88`-level allow-lists, each a set of literal values:
 | `VALID-US-STATE-ZIP-CD2-COMBO` | **240** | L1073–L1318 | `us_state_zip_prefixes` |
 | **grand total** | **1276** | | |
 
-> **Correction — the figure 490 belongs to `VALID-PHONE-AREA-CODE` alone, and the
-> file holds 1276 literals across five lists.** A narrative "490 lookup codes" is
-> sometimes read as the whole-file total. It is not: `410 + 80 = 490` exactly, which
+> **Measured — the figure 490 belongs to `VALID-PHONE-AREA-CODE` alone, and the
+> file holds 1276 literals across five lists.** 490 is therefore not the whole-file
+> total, and reading it as one understates the file by 786 literals. `410 + 80 = 490`
+> exactly, which
 > **proves** that the first list is precisely the union of the two phone sub-lists —
 > general-purpose area codes plus easily-recognisable ones. The three phone lists are
 > therefore one domain expressed three ways, which is why they seed **one** table
-> with subset flags rather than three tables. **Assumptions:** the arithmetic is the
+> with subset flags rather than three tables. Assumptions: the arithmetic is the
 > evidence for that modelling decision, so it is shown rather than asserted; without
 > it, three separate tables would look equally defensible.
 
@@ -1622,10 +1789,10 @@ rows** whose necessity is established in
 Every place where the target data model deliberately differs from the baseline is
 listed here in one table, so the set is bounded and countable. Each is justified at
 the point in this document where it is introduced, and each is registered in
-[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), which is the
+`docs/architecture/cobol-to-service-traceability.md`, which is the
 register for all divergences across the migration.
 
-| # | Divergence | Category | Where justified |
+| # | Divergence | Rule 1 category | Where justified |
 |---|---|---|---|
 | 1 | The plaintext password field is not carried forward | Refactoring Rationale | [`auth`](#auth--auth-service) |
 | 2 | Identifier columns are `BIGINT` where the baseline DDL used `DECIMAL(p)` | Trade-offs | [`AUTHFRDS`, column by column](#authfrds-the-fraud-table-column-by-column) |
@@ -1645,21 +1812,48 @@ declaration, the statement generator's unchecked table bounds, and the interest
 job's final-account flush. All three are properties of program behaviour rather than
 of storage, all three are left exactly as they are in the COBOL, and all three are
 registered — with what the target implementation does instead — in
-[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
+`docs/architecture/cobol-to-service-traceability.md`.
 
 
 ## Caveats, boundaries and out-of-scope
 
 ### The deployment boundary
 
-The infrastructure that would host these schemas is **authored and statically
-validated** — formatted, validated, planned, linted and policy-scanned. Applying it
-to a live account is an **operator action outside this scope**. Consequently **no
-table in this document is asserted to exist in a provisioned database**, no figure
-here was measured on a running system, and nothing below is load-tested or
-benchmarked. Every count, offset and length comes from the repository files named in
-the header; every schema statement describes a target design. The provisioning and
-teardown commands are in the runbooks under `docs/runbooks/`.
+The infrastructure that would host these schemas is **authored to a foundation
+state** and **checked to the extent that state admits**. Applying it to a live
+account is an **operator action outside this scope**. Consequently **no table in this
+document is asserted to exist in a provisioned database**, no figure here was
+measured on a running system, and nothing below is load-tested or benchmarked. Every
+count, offset and length comes from the repository files named in the header; every
+schema statement describes a target design. The provisioning and teardown commands
+belong to the runbooks under `docs/runbooks/`, which are authored at later indexes of
+the same plan.
+
+**Assumptions — the measured state is given rather than the phrase, because
+"statically validated" is a claim a reader can check.** At this checkpoint the
+Terraform tree holds each directory's `versions.tf` and, for fourteen of them, its
+`variables.tf`; no `main.tf`, `outputs.tf` or `README.md` has landed anywhere, and
+neither has `infra/modules/step-functions-batch`. HCL parse and
+`terraform fmt -check -recursive infra/` **pass**; every `variable` carries a `type`
+and a `description`, and the provider constraints agree across every directory.
+`terraform validate` and `terraform plan` are **not runnable** without `terraform
+init` and a resource graph; a recursive `tflint` run **reports findings by design**,
+because `terraform_unused_declarations` fires for every variable no `main.tf` consumes
+yet and `terraform_standard_module_structure` fires for every directory missing its
+`main.tf` and `outputs.tf`; `terraform-docs --output-check` **fails** for want of any
+`README.md` to compare against; and the policy scan is a step in an
+infrastructure CI workflow that does not exist yet. Each of those clears as the
+composition files land. The same table, with the per-check detail, is in
+[`service-catalog.md`](service-catalog.md) under its deployment boundary.
+
+**One consequence for this document specifically.** The schemas described above are
+created by
+[`../../data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
+which exists, and the tables in them by the per-service Flyway migrations, of which
+**two of seven** exist at this checkpoint — `V1__reference.sql` and `V1__batch.sql`.
+Every other table below is a derivation waiting for its migration, authored at a later
+index of the same plan. The derivation is the deliverable here; the migration that
+encodes it is a separate one.
 
 ### Explicitly out of scope
 
@@ -1668,7 +1862,7 @@ listed so that its absence is a recorded decision rather than an apparent omissi
 
 * **Read replicas** — reporting reads go to the writer through `SELECT`-only
   cross-schema views, for the reason given under
-  [`reporting-service`](#reporting-service--no-schema).
+  [`reporting-service`](#reporting-service--an-empty-schema-and-no-tables).
 * **Application-level caching** — no in-memory cache tier of any kind. The baseline
   has none and none is required for parity, so every read in this model goes to the
   database.
@@ -1709,14 +1903,22 @@ oracle, and the existing mainframe deployment path is left exactly as it is.
 
 ## Related documents
 
+**A linked row exists; a code-span row does not exist yet.** Six of the nine documents
+in this folder are authored at later indexes of the same plan, so their paths appear
+below — and everywhere above — as plain code spans rather than as links, per the
+Markdown convention in
+[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each becomes
+a link when the file it names exists, which lets a reader tell a written document from
+a contracted one without clicking.
+
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The naming authority: service responsibilities, ownership and dependency edges |
-| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | The current-state and target-state architecture diagrams |
-| [`batch-orchestration.md`](batch-orchestration.md) | Job-to-state mapping, condition-code semantics and generation-dataset handling |
-| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, the positional wire format, correlation, ordering and deduplication |
-| [`security-and-identity.md`](security-and-identity.md) | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
-| [`observability.md`](observability.md) | Logs, metrics, traces and alarms |
+| `docs/architecture/context-and-container-diagrams.md` | The current-state and target-state architecture diagrams |
+| `docs/architecture/batch-orchestration.md` | Job-to-state mapping, condition-code semantics and generation-dataset handling |
+| `docs/architecture/messaging-contracts.md` | Queue mapping, the positional wire format, correlation, ordering and deduplication |
+| `docs/architecture/security-and-identity.md` | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
+| `docs/architecture/observability.md` | Logs, metrics, traces and alarms |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from mapsets to screen routes and tokens |
-| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix and the authoritative register of every documented divergence |
+| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix and the authoritative register of every documented divergence |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |

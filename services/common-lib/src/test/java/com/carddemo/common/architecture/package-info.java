@@ -1,5 +1,24 @@
 /**
- * Owns the single build-enforced ArchUnit gate that every migrated CardDemo service module inherits.
+ * Owns the single build-enforced ArchUnit gate that every migrated CardDemo service module is held
+ * to.
+ *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
  *
  * <p>Three invariants of the migrated decomposition are asserted here as an executable test rather
  * than described as a convention: a {@code ..domain..} type may not reach for an AWS SDK, web or
@@ -65,8 +84,57 @@
  * whichever is cheaper to silence that gets silenced. Distributing the rules instead, each into the
  * module it constrains, was rejected because the layering invariants apply identically to all eight
  * services: eight copies drift, and a constraint held in eight places can be relaxed in one without
- * the other seven noticing. Keeping one copy in the first module of the reactor, which all eight
- * depend on, makes inheritance the delivery mechanism.</p>
+ * the other seven noticing. One copy in the first module of the reactor is what this package keeps,
+ * and the section below is how that copy reaches the other eight.</p>
+ *
+ * <h2>How this one copy reaches the eight service modules</h2>
+ *
+ * <p>Refactoring Rationale: the build descriptors, and this file, previously described the rules as
+ * <i>inherited</i> by every module because all eight depend on this one. Depending on a module
+ * inherits nothing of its tests. Maven resolution hands a module's <b>main</b> classes to its
+ * consumers and never its test classes, so a rule class living here was compiled once, evaluated
+ * against this module alone, and never saw a single service class; each service POM carried the
+ * ArchUnit engine, which is an assertion API with no rules in it. Every invariant described above was
+ * therefore authored and unenforced outside this module, and a build that checked nothing reported
+ * success. Three coupled declarations replace that inheritance claim with an execution, and all three
+ * are load bearing:</p>
+ *
+ * <ul>
+ *   <li>{@code services/common-lib/pom.xml} binds the jar plugin's test-jar goal, narrowed to this
+ *       package, so this one class is published as an artifact. It is bound before the
+ *       {@code package} phase deliberately, because Surefire's dependency scanner reads only files
+ *       whose name ends in {@code .jar}, and an unpackaged reactor dependency resolves to a
+ *       directory that the scanner passes over in silence.</li>
+ *   <li>each of the eight service POMs declares that test artifact at test scope, its version and
+ *       scope managed centrally so no module can widen the engine onto a production classpath.</li>
+ *   <li>{@code services/pom.xml} declares a Surefire execution, {@code architecture-rules}, whose
+ *       {@code dependenciesToScan} collects test classes from that artifact and runs them on the
+ *       consuming module's own test classpath, with an include that narrows the scan to
+ *       {@code LayeringRulesTest} alone.</li>
+ * </ul>
+ *
+ * <p>Assumptions: the third declaration is what makes the rules meaningful rather than merely
+ * present. A rule about a package can only be evaluated against classes an importer can see, and
+ * running the class inside the consuming module is what puts that module's compiled classes in front
+ * of it. Running it here instead would put only this module's classes there, which is the arrangement
+ * that produced the gap.</p>
+ *
+ * <p>Assumptions: two obligations fall on {@code LayeringRulesTest} as a consequence, and both are
+ * recorded here because neither is visible from the class itself. Its analysed packages must be
+ * expressed so that the classes of whichever module is executing it are imported, rather than a fixed
+ * single package root that would resolve to this module wherever it ran. And it must tolerate a rule
+ * whose input set is empty, because the same class runs in nine modules and a given invariant does
+ * not match a class in all of them: this module has no {@code domain} package at all, and ArchUnit
+ * fails a rule whose {@code should} clause saw no classes unless the rule says otherwise. Without
+ * that tolerance the gate would fail everywhere for a reason that has nothing to do with a violated
+ * boundary, and the likeliest repair a hurried reader reaches for is to stop running the rules.</p>
+ *
+ * <p>Alternatives Considered: a dedicated aggregator module depending on all eight services and
+ * running these rules once over a combined classpath was evaluated as a way to avoid publishing a
+ * test artifact. It was rejected for two reasons. A violation would be reported against that module
+ * rather than against the service that introduced it, so the failure would name the wrong owner; and
+ * the module would need a Maven edge to all eight contexts, making it the only artifact in the
+ * reactor coupled to every one of them, which is the coupling these very rules exist to forbid.</p>
  *
  * <p>Assumptions: this descriptor exists solely because the effective Maven Checkstyle configuration
  * audits test sources, which brings the file-level package documentation checks to bear on this
@@ -100,14 +168,31 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Two {@code .java} files and no others: this descriptor, and {@code LayeringRulesTest}, which
- * holds the invariants described above. The package deliberately carries no helper, no base class,
- * no second rule class, no fixture and no resource, because a rule split between a class and a
- * helper can be weakened by editing the helper, where the change reads as maintenance rather than as
- * the relaxation of an architectural constraint that it is. The class name and this directory are
+ * <p>Target contract: two {@code .java} files and no others -- this descriptor, and
+ * {@code LayeringRulesTest}, which is to hold the invariants described above. That class is authored
+ * at a later index of the same plan, so at this checkpoint the directory holds this descriptor alone
+ * and NO engine enforces layering anywhere in the reactor; until it lands the invariants above are
+ * carried by review. The package deliberately carries no helper, no base class, no second rule
+ * class, no fixture and no resource, because a rule split between a class and a helper can be
+ * weakened by editing the helper, where the change reads as maintenance rather than as the
+ * relaxation of an architectural constraint that it is. The class name and this directory are
  * treated as a fixed external contract rather than an internal detail, since the build descriptors
  * name both and the services pipeline may invoke that class by name as a labelled step of its
  * own.</p>
+ *
+ * <p>Assumptions: authored here is not the same as executed here, and the distinction decides what
+ * the other nine module descriptors say. Maven carries a module's MAIN classes to its consumers and
+ * never its test classes, so single authorship delivers nothing on its own. Delivery is three
+ * coupled declarations and all three are present in this reactor: {@code services/common-lib/pom.xml}
+ * binds {@code maven-jar-plugin}'s {@code test-jar} goal at {@code process-test-classes}, narrowed by
+ * an include to this directory alone; each of the eight service descriptors declares that artifact
+ * with {@code <type>test-jar</type>} at test scope; and the {@code architecture-rules} Surefire
+ * execution in {@code services/pom.xml} names {@code com.carddemo:common-lib} in
+ * {@code dependenciesToScan} so the class is collected from that artifact and run on the consuming
+ * module's own test classpath. That last part is the point: the rules see the classes of the module
+ * they run in. Each service additionally declares the ArchUnit engine at test scope, because the
+ * assertion API has to resolve wherever the class executes. Any one of the three missing leaves the
+ * rules authored and unenforced, which is indistinguishable from not having written them.</p>
  *
  * <h2>Why no reference baseline artifact is cited above</h2>
  *

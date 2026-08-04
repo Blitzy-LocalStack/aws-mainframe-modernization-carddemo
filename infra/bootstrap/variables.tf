@@ -58,7 +58,7 @@
 #   relies on the default -- including the credential-free CI validate above.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: there is deliberately NO `environment` input here, and a
+#   - Assumptions: there is deliberately NO `environment` input here, and a
 #     reader arriving from infra/envs/dev or infra/envs/prod -- both of which
 #     ARE parameterized by environment -- should expect one and not find it.
 #     This root provisions ONE state backend per AWS ACCOUNT, shared by every
@@ -68,11 +68,11 @@
 #     composed bucket name. For the same reason no sizing, retention or
 #     capacity input appears here: those belong to the environment roots, which
 #     are the only directories in this tree carrying a terraform.tfvars.
-#   - Trade-off: every input is defaulted rather than required, so this root
+#   - Trade-offs: every input is defaulted rather than required, so this root
 #     applies with no variable file at all. The cost is that a defaulted region
 #     or prefix is a decision made by silence; outputs.tf reports both back,
 #     which is what keeps such a choice visible rather than buried.
-#   - Assumption: no default holds an AWS account identifier, an ARN, a bucket
+#   - Assumptions: no default holds an AWS account identifier, an ARN, a bucket
 #     name or a table name. Those identify one specific account's
 #     infrastructure, so committing one would publish that account's naming to
 #     every reader of this repository and pin the root to it; they are supplied
@@ -80,7 +80,7 @@
 # =============================================================================
 
 # WHY this input has a default at all, when the region a deployment lands in is
-# normally something an operator must state explicitly (Trade-off): the infra CI
+# normally something an operator must state explicitly -- Trade-offs: the infra CI
 # workflow checks this root with `terraform -chdir=infra/bootstrap init
 # -backend=false` followed by `terraform validate`, supplying no variable file
 # and holding no AWS credentials. An input with no default makes that step
@@ -96,7 +96,7 @@ variable "aws_region" {
   type        = string
   default     = "us-east-1"
 
-  # WHY a shape check on a value the provider would reject anyway (Trade-off): a
+  # WHY a shape check on a value the provider would reject anyway -- Trade-offs: a
   # malformed region fails TWICE over, and neither failure names this input. The
   # provider reports it as an endpoint-resolution failure naming a hostname, and
   # the same string is a component of the composed bucket name in main.tf, where
@@ -119,24 +119,24 @@ variable "aws_region" {
 }
 
 # WHY the bound is 3 to 20 characters rather than an unexplained "keep it short"
-# (Assumption): main.tf composes the default bucket name as
+# Assumptions: main.tf composes the default bucket name as
 # <prefix>-tfstate-<12-digit-account-id>-<region>. The fixed middle segment is
 # nine characters (`-tfstate-`), an AWS account identifier is always twelve
 # digits, one further hyphen separates it from the region, and the longest
 # region identifier in use is fourteen characters (ap-southeast-4). A
-# twenty-character prefix therefore yields 20 + 9 + 12 + 1 + 14 = 56
-# characters, which sits inside S3's 63-character bucket-name limit with seven
-# characters of headroom for a region identifier longer than any that exists
-# today. Twenty-one would spend that headroom, and the resulting failure would
-# present as a rejected bucket name during apply rather than as a prefix that
-# was too long. The lower bound of three is S3's own minimum bucket-name
-# length, which the composed name inherits.
+# twenty-character prefix therefore yields 20 + 9 + 12 + 1 + 14 = 56 characters,
+# which sits inside S3's 63-character bucket-name limit with seven characters of
+# headroom for a region identifier longer than any that exists today. Twenty-one
+# would spend that headroom, and the resulting failure would present as a
+# rejected bucket name during apply rather than as a prefix that was too long.
+# The lower bound of three is S3's own minimum bucket-name length, which the
+# composed name inherits.
 variable "name_prefix" {
   description = "Leading component of the composed names for both halves of the backend. Read by the locals block in main.tf, which appends the fixed -tfstate- segment, the caller's account identifier and aws_region to build the bucket name, and derives the lock table name from the same prefix."
   type        = string
   default     = "carddemo"
 
-  # WHY the charset is narrower than Terraform itself would accept (Assumption):
+  # WHY the charset is narrower than Terraform itself would accept -- Assumptions:
   # this value becomes the leading component of an S3 bucket name, and S3 bucket
   # names must be lowercase and may not contain an underscore -- so `CardDemo`
   # and `card_demo` are both refused by the S3 API rather than by Terraform,
@@ -152,7 +152,7 @@ variable "name_prefix" {
 }
 
 # WHY an override that defaults to null rather than a required name
-# (Alternatives Considered): a required input was rejected on two counts. It
+# Alternatives Considered: a required input was rejected on two counts. It
 # would force every invocation to state a bucket name even when the composed
 # default is exactly what is wanted, and it would break the credential-free CI
 # validate described in the header. `default = null` is not decorative here, it
@@ -162,7 +162,7 @@ variable "name_prefix" {
 # it". For the same reason `nullable = false` is deliberately NOT set on this
 # input -- it would reject the null the default supplies and make the composed
 # fallback unreachable.
-# Assumption: the default holds no real bucket name. A committed bucket name
+# Assumptions: the default holds no real bucket name. A committed bucket name
 # would publish one account's naming standard to every reader of this repository
 # and tie the root to that account.
 variable "state_bucket_name" {
@@ -171,7 +171,7 @@ variable "state_bucket_name" {
   default     = null
 
   # WHY the condition short-circuits on null before reaching the pattern
-  # (Assumption): `regex` applied to null raises a type error rather than
+  # Assumptions: `regex` applied to null raises a type error rather than
   # returning false, so a condition that tested the pattern alone would fail
   # every invocation that relies on the default -- which is every invocation
   # that does not override the name, the CI validate among them. The
@@ -188,14 +188,14 @@ variable "state_bucket_name" {
 }
 
 # WHY the lock table carries its own override instead of reusing the bucket's
-# (Assumption): the two names answer to different service rules. A bucket name
+# Assumptions: the two names answer to different service rules. A bucket name
 # is unique across all of S3 and limited to 63 lowercase characters, while a
 # DynamoDB table name is unique only within one account and region and admits
 # uppercase letters, underscores and up to 255 characters -- so an account
 # naming standard that fits one need not fit the other. A single shared override
 # would impose the stricter rule on the looser resource, and an operator whose
 # standard uses mixed case for tables could not express it at all.
-# Assumption: as with the bucket, no literal table name is committed; null is
+# Assumptions: as with the bucket, no literal table name is committed; null is
 # what tells main.tf to compose one from name_prefix.
 variable "lock_table_name" {
   description = "Explicit name for the DynamoDB state-lock table, overriding the name main.tf composes from name_prefix. Resolved by the matching coalesce in main.tf, so leaving it null selects the composed name. Set it to adopt an existing table or to satisfy an account naming standard."
@@ -203,7 +203,7 @@ variable "lock_table_name" {
   default     = null
 
   # WHY the same null short-circuit as the bucket override, for the same reason
-  # (Assumption): `regex` on null is a type error and not a false result, so the
+  # Assumptions: `regex` on null is a type error and not a false result, so the
   # guard is what keeps every defaulted invocation valid. The pattern is
   # DynamoDB's own table-name rule -- 3 to 255 characters of letters, digits,
   # underscores, hyphens and periods -- and it is deliberately laxer than the S3
@@ -217,7 +217,7 @@ variable "lock_table_name" {
 
 # WHY this key is an optional input rather than a key this root creates, when
 # every datastore elsewhere in this migration is encrypted with a
-# customer-managed key (Alternatives Considered): creating a CMK inside this
+# customer-managed key -- Alternatives Considered: creating a CMK inside this
 # root was considered and rejected because it inverts the very dependency the
 # root exists to establish. Key management belongs to infra/modules/kms, and
 # that module's own state lives in the bucket this root creates -- so a key
@@ -227,7 +227,7 @@ variable "lock_table_name" {
 # apply, so the key becomes an input: an operator who already holds a suitable
 # key supplies its ARN, and an account with none still gets a working, encrypted
 # backend on the first apply.
-# Trade-off: with null the bucket falls back to SSE-S3 (AES256) and the table to
+# Trade-offs: with null the bucket falls back to SSE-S3 (AES256) and the table to
 # AWS-owned encryption. Both encrypt at rest, and both give up exactly what a
 # customer-managed key would add -- there is no per-key CloudTrail trail of
 # decrypt calls and no key policy restricting who may read state, and state
@@ -246,7 +246,7 @@ variable "state_kms_key_arn" {
   default     = null
 
   # WHY the check stops at an ARN shape rather than proving the key is usable
-  # (Trade-off): this value is handed straight to two AWS APIs that reject a
+  # Trade-offs: this value is handed straight to two AWS APIs that reject a
   # malformed key reference with a message naming the bucket or the table rather
   # than this input, so a cheap shape check moves the two common mistakes -- a
   # bare key id, or an alias/<name> reference, pasted where a full ARN was asked
@@ -274,7 +274,7 @@ variable "state_kms_key_arn" {
 # standing advice to leave the bootstrap in place if the account may be
 # redeployed -- two artifacts in one repository describing incompatible
 # behaviour, with the destructive one winning by default.
-# Trade-off: with false, `terraform destroy` against a populated bucket fails
+# Trade-offs: with false, `terraform destroy` against a populated bucket fails
 # with a BucketNotEmpty error. That failure is the point rather than a rough
 # edge: it is a stop, and the input exists so a genuine account decommission can
 # clear it deliberately. Discarding state history should require an affirmative
@@ -286,7 +286,7 @@ variable "state_bucket_force_destroy" {
 }
 
 # WHY the common tags are one map applied through the provider rather than
-# written onto each resource (Trade-off): versions.tf passes this value to the
+# written onto each resource -- Trade-offs: versions.tf passes this value to the
 # provider's `default_tags` block, and the provider merges it into every
 # taggable resource it creates -- the bucket, its versioning, encryption and
 # public-access sub-resources, and the lock table -- so the common set is stated
@@ -299,7 +299,7 @@ variable "state_bucket_force_destroy" {
 # below. Rejected -- the AWS tagging API is itself an arbitrary
 # string-to-string map, so an object type would reject a caller's own
 # cost-allocation or ownership tags while adding nothing this root relies on.
-# Assumption: the default holds only non-secret descriptive values. Tags are
+# Assumptions: the default holds only non-secret descriptive values. Tags are
 # readable by any principal that can describe the resource and are surfaced in
 # billing and cost-allocation exports, so nothing sensitive belongs in one.
 variable "tags" {

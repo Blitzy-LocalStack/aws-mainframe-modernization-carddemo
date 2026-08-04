@@ -1,0 +1,442 @@
+# =============================================================================
+# infra/modules/observability/variables.tf
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The complete input surface of the `observability` module -- the module that
+#   provisions CardDemo's centralized log groups, its operator dashboard, its
+#   metric alarms and the notification topic those alarms publish to. Every
+#   value a calling environment root can configure is declared here, and nothing
+#   else is configurable: anything absent from the list below is a property of
+#   the module fixed in main.tf, not a per-environment choice.
+#
+#   Lineage: this surface is ADDED by the migration rather than ported. Every
+#   CICS file in the baseline is defined RECOVERY(NONE) JOURNAL(NO)
+#   (app/csd/CARDDEMO.CSD lines 7 and 9), and the batch chain's only operational
+#   signals are the job log routed by MSGCLASS, the operator notification from
+#   NOTIFY=&SYSUID on the JOB card (app/jcl/POSTTRAN.jcl lines 1 to 2) and the
+#   SYSPRINT and SYSOUT streams (app/jcl/POSTTRAN.jcl lines 26 to 27). The
+#   inputs below are the cloud equivalents of exactly those three things: where
+#   output goes, how long it is kept, and who is told when a step fails.
+#
+#   Nothing here is read from the ambient environment and nothing is generated
+#   inside the module. Every input arrives from infra/envs/dev/main.tf or
+#   infra/envs/prod/main.tf, which is what keeps the only differences between the
+#   two environments visible in their own terraform.tfvars files.
+#
+# Parameters -- two required, twelve optional:
+#   environment                     string       REQUIRED. Names every resource.
+#   kms_key_arn                     string       REQUIRED. Encrypts the log
+#                                                groups and the topic.
+#   name_prefix                     string       Common resource-name prefix.
+#   tags                            map(string)  Module-specific tags.
+#   log_retention_days              number       Retention for the log groups
+#                                                this module owns.
+#   log_group_names                 list(string) Log groups this module creates,
+#                                                for producers that do not
+#                                                create their own.
+#   dashboard_service_names         list(string) Services the dashboard renders
+#                                                a row of widgets for.
+#   alarm_email_endpoints           list(string) Subscribers on the topic.
+#   alarm_evaluation_periods        number       Consecutive breaching periods
+#                                                needed to raise an alarm.
+#   alarm_period_seconds            number       Length of one such period.
+#   service_error_rate_threshold    number       Server-error count per period
+#                                                that raises a service alarm.
+#   database_cpu_threshold_percent  number       Cluster processor utilisation
+#                                                that raises a database alarm.
+#   dead_letter_depth_threshold     number       Messages in a dead-letter queue
+#                                                that raise a messaging alarm.
+#   batch_failure_threshold         number       Failed executions per period
+#                                                that raise a batch alarm.
+#
+#   Each block below carries the full `type` and `description` that tflint's
+#   terraform_typed_variables and terraform_documented_variables rules require;
+#   the summary above is a map of the surface, not a second copy of it.
+#
+# Return values:
+#   None. A variables.tf declares no output, so the topic ARN, the dashboard
+#   name and the log group names and ARNs this module publishes to its caller
+#   are declared in infra/modules/observability/outputs.tf.
+#
+# Errors / Exceptions:
+#   `environment` and `kms_key_arn` have no default, so omitting either stops the
+#   calling root at `plan` with a missing-required-argument error. For the key
+#   that is the mechanism which makes encryption of the log groups and the topic
+#   unskippable rather than merely intended. Every other input carries a
+#   `validation` block rejecting an out-of-domain value at `plan` time rather
+#   than letting the service reject it partway through an apply.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: this module does NOT own every log group in the stack, and the
+#     `log_group_names` input is deliberately narrow because of it. Each ECS
+#     service creates its own log group through the `ecs-service` module, which
+#     takes its own retention and key inputs, and the batch state machine creates
+#     its own through `step-functions-batch`. A log group created here for a
+#     producer that also creates one would be an empty duplicate that still
+#     bills, and an operator reading the empty one would conclude the producer
+#     was silent.
+#   - Trade-offs: the alarm inputs are FOUR named thresholds rather than one
+#     generic list of alarm definitions. A generic list would let a root add an
+#     alarm without a module change, at the cost of moving the alarm's metric,
+#     namespace, statistic and comparison operator into tfvars, where none of
+#     them can be validated and none carries a rationale. Four named thresholds
+#     keep the alarm definitions in main.tf, where each can be explained, and
+#     expose only the number a root actually has reason to vary.
+#   - Assumptions: no alarm threshold defaults to a value that disables the
+#     alarm. A threshold high enough never to be crossed produces a dashboard
+#     and an alarm set that look complete and report nothing, which is worse than
+#     having no alarm at all because it removes the reason to look.
+#   - Assumptions: no input here accepts a credential or an account identifier,
+#     and no default holds an ARN literal. The one ARN input is required
+#     precisely so that no specimen default is needed: an ARN embeds an AWS
+#     account identifier and the project's no-secrets-in-source constraint admits
+#     no exception. Email endpoints are the one input that carries an address,
+#     and it defaults to empty for the same reason -- a real address in tfvars is
+#     a person's contact detail committed to source control.
+#   - Where a comment below reasons about `terraform apply` or about an alarm
+#     firing, it is describing what an input MEANS at those points, not reporting
+#     on a provisioned stack. This tree is authored and statically validated --
+#     formatted, validated, planned, linted and policy-scanned; applying it to a
+#     live account is an operator action outside this scope.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Naming and environment
+# -----------------------------------------------------------------------------
+
+# WHY this is required with no default. Trade-offs: a defaulted environment name
+# is how one environment's alarms end up publishing to the other environment's
+# topic, and an alarm that pages about the wrong environment is worse than one
+# that does not page at all, because it teaches the recipient to ignore it.
+# Requiring the value costs each root one line.
+#
+# WHY the accepted values are exactly two. Assumptions: two environment roots
+# exist, infra/envs/dev and infra/envs/prod, and this module is called only from
+# those two.
+variable "environment" {
+  description = "Environment name interpolated into the log group paths, the dashboard name, every alarm name and the topic name, so an alarm's own name says which environment raised it; must be `dev` or `prod`, the two environments that have a Terraform root under infra/envs/."
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "prod"], var.environment)
+    error_message = "environment must be exactly \"dev\" or \"prod\", matching the environment root under infra/envs/ that calls this module."
+  }
+}
+
+# WHY the characters are checked rather than trusted. Trade-offs: this prefix is
+# concatenated into a dashboard name, a topic name and a set of log group paths,
+# and those three accept different character sets. Restricting it to lowercase
+# letters, digits and hyphens keeps it legal in all three at once and catches a
+# space or an uppercase letter at plan time rather than during an apply that has
+# already created other resources.
+#
+# WHY the name and the default match the rest of the tree instead of being chosen
+# here (Assumption): every directory under infra/ takes its prefix through a
+# variable of this name with this default, which is what lets a root pass one
+# value to every module it calls.
+variable "name_prefix" {
+  description = "Prefix concatenated into the dashboard name, the topic name, every alarm name and every log group path this module creates, giving the observability surface one greppable identity shared with the rest of the stack; lowercase letters, digits and hyphens only, at most 32 characters."
+  type        = string
+  default     = "carddemo"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.name_prefix)) && length(var.name_prefix) <= 32
+    error_message = "name_prefix must be 1 to 32 characters of lowercase letters, digits and hyphens, beginning and ending with a letter or digit -- for example \"carddemo\"."
+  }
+}
+
+# WHY an empty default reads as complete here rather than as an oversight
+# (Assumption): the baseline tag set is not this module's to supply. Each calling
+# root configures `default_tags` on its own `provider "aws"` block and the
+# provider merges that map into every taggable resource it creates, so the log
+# groups, alarms and topic carry the root's common tags whether or not this
+# variable is passed. What this input adds is the layer above that.
+variable "tags" {
+  description = "Tags merged onto the resources this module creates, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module."
+  type        = map(string)
+  default     = {}
+}
+
+# -----------------------------------------------------------------------------
+# Encryption
+# -----------------------------------------------------------------------------
+
+variable "kms_key_arn" {
+  description = "ARN of the customer-managed key the log groups and the notification topic are encrypted with. Required rather than optional, because the baseline recorded neither recovery nor journalling on any file and encryption at rest is one of the properties this migration adds; making the key mandatory is what keeps that addition from being skippable."
+
+  type = string
+
+  validation {
+    # WHY : Assumptions: both the `kms:` service field and the `:key/`
+    #       resource type are asserted, because an alias ARN is the plausible
+    #       wrong value -- an alias is what a human reads in the console -- and
+    #       it carries resource type `alias/`, which a log group does not accept.
+    #       Catching that here names the input; letting it through produces an
+    #       apply-time failure against the log group instead.
+    condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", var.kms_key_arn))
+    error_message = "kms_key_arn must be a KMS key ARN of the form arn:<partition>:kms:<region>:<account-id>:key/<key-id>, not an alias ARN."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Log groups and retention
+# -----------------------------------------------------------------------------
+
+variable "log_retention_days" {
+  description = "Days the log groups this module creates retain events. This is one of the retention values the dev and prod roots are permitted to set differently without changing the stack's shape, and it is the direct analogue of how long a mainframe job log was kept before it aged off the spool."
+  type        = number
+  default     = 30
+
+  validation {
+    # WHY : Assumptions: the set is closed because the service accepts only
+    #       these values and nothing else -- an arbitrary number is rejected
+    #       during apply, after other resources exist. 0 is excluded deliberately
+    #       even though the service reads it as never expire: unbounded retention
+    #       is a cost that grows without anyone deciding to accept it, and a
+    #       caller who wants it can widen this check rather than pass a value
+    #       that looks like a mistake.
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.log_retention_days)
+    error_message = "log_retention_days must be one of the retention periods CloudWatch Logs accepts: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653."
+  }
+}
+
+variable "log_group_names" {
+  description = "Log group name suffixes this module creates, for producers that do not create a group of their own. Each entry becomes one group under this module's prefixed and environment-suffixed path, encrypted with the key above and held for the retention above."
+
+  type = list(string)
+
+  # Assumptions: the default is EMPTY on purpose, and the emptiness is the
+  # decision rather than an unfinished thought. Every producer in this stack that
+  # writes logs already owns its group: each of the eight container services
+  # creates one through the `ecs-service` module, the nightly chain creates one
+  # through `step-functions-batch`, and the HTTP API creates its access log group
+  # through `api-gateway-http`. Creating a group for any of them here would leave
+  # an empty duplicate that still bills, and an operator who opened the empty one
+  # would reasonably conclude the producer had gone silent.
+  #
+  # WHY the input exists at all if the default is empty. Trade-offs: a producer
+  # with no Terraform resource of its own -- the read-only-flag function, or an
+  # operational script run from a task -- otherwise causes its log group to be
+  # created implicitly on first write, with the service's default of unlimited
+  # retention and no customer-managed key. That is the failure this input exists
+  # to let a root avoid, and it is why the entries are suffixes rather than full
+  # paths: the path must match what the producer writes to, and composing it here
+  # keeps the prefix and environment segments identical to every other group.
+  default = []
+
+  validation {
+    # WHY : Assumptions: the characters permitted are those a log group name
+    #       accepts -- letters, digits, underscore, hyphen, forward slash, period
+    #       and hash. A leading slash is rejected because main.tf prepends the
+    #       prefixed path, and a suffix beginning with a separator would compose
+    #       a doubled one, producing a group whose name differs from the one the
+    #       producer writes to by a single character.
+    condition     = alltrue([for n in var.log_group_names : can(regex("^[A-Za-z0-9][A-Za-z0-9_./#-]*$", n))])
+    error_message = "Each log_group_names entry must be a path suffix of letters, digits, underscores, hyphens, forward slashes, periods and hashes, not beginning with a separator, because main.tf prepends the prefixed and environment-suffixed path."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Dashboard
+# -----------------------------------------------------------------------------
+
+variable "dashboard_service_names" {
+  description = "Service names the dashboard renders a row of widgets for, in the order given. The order is preserved because it is the order an operator reads the dashboard in, and a request travels through these services in roughly that sequence."
+
+  type = list(string)
+
+  # Assumptions: the eight defaults are the eight bounded contexts of this
+  # migration, named exactly as their ECS services are, because a widget's metric
+  # dimension is the service name and a mismatch produces a widget that renders
+  # with no datapoint rather than an error. They are ordered as a reader
+  # encounters them rather than alphabetically: sign-on first, then the account
+  # and card lookups, then the ledger writes, then reference data, then the
+  # nightly chain, then the asynchronous authorization path, then reporting.
+  #
+  # WHY this is an input rather than fixed in main.tf. Trade-offs: the dashboard
+  # is the one resource here whose usefulness is a matter of operator taste, and
+  # a root that wants a narrower board -- during an incident, or in a development
+  # environment where six of the eight are idle -- should not need a module edit
+  # to get one. The accepted cost is that a caller can pass a name matching no
+  # service, which renders an empty widget; that is visible on the dashboard
+  # itself, which is the cheapest place for it to be visible.
+  default = [
+    "auth-service",
+    "account-service",
+    "card-service",
+    "transaction-service",
+    "reference-service",
+    "batch-service",
+    "authorization-service",
+    "reporting-service",
+  ]
+
+  validation {
+    # WHY : Assumptions: each entry is used as a metric dimension value and as
+    #       part of a widget title, so it is restricted to the characters an ECS
+    #       service name accepts. An empty list is permitted deliberately: it is
+    #       how a root asks for a dashboard with no per-service row, leaving the
+    #       shared database and messaging widgets main.tf always renders.
+    condition     = alltrue([for s in var.dashboard_service_names : can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]*$", s))])
+    error_message = "Each dashboard_service_names entry must be a service name of letters, digits, hyphens and underscores, beginning with a letter or digit."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Notification
+# -----------------------------------------------------------------------------
+
+variable "alarm_email_endpoints" {
+  description = "Email addresses subscribed to the notification topic, which is what replaces the baseline's NOTIFY=&SYSUID operator notification. Empty by default, because an address is a person's contact detail and this repository is not the place to record one."
+
+  type = list(string)
+
+  # WHY the default is empty rather than a distribution list. Assumptions: the
+  # project's constraint is that nothing which belongs in a secret store or an
+  # operator's own configuration is committed here. An address is not a
+  # credential, but it is personal data and it changes with staffing rather than
+  # with the architecture, so it belongs in a root's tfvars or in a subscription
+  # created outside Terraform. The topic still exists with no subscriber, which
+  # is deliberate: alarms publish to it and the messages are retained by the
+  # topic's own delivery semantics, so subscribing later loses no future alarm.
+  #
+  # WHY email and not a chat or paging integration. Alternatives Considered: a
+  # richer integration was considered and rejected for this module. Every such
+  # integration needs an endpoint URL carrying a token, which is exactly the
+  # class of value that may not be committed, so it would have to be read from a
+  # secret at apply time and would make this module depend on the secrets module.
+  # A topic with an email subscription needs no credential at all, and a root
+  # that wants a richer integration can subscribe to the same topic without
+  # changing this module.
+  default = []
+
+  validation {
+    # WHY : Trade-offs: the check is deliberately a loose shape check rather
+    #       than an attempt at full address validation. Its purpose is to catch
+    #       the two mistakes that actually happen -- a bare username with no
+    #       domain, and a value that is a URL rather than an address -- both of
+    #       which the service accepts into a subscription that can never be
+    #       confirmed. Rejecting genuinely unusual but legal addresses would be a
+    #       worse failure than accepting them.
+    condition     = alltrue([for e in var.alarm_email_endpoints : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[A-Za-z]{2,}$", e))])
+    error_message = "Each alarm_email_endpoints entry must look like an email address, with a local part, an @ sign, a domain and a top-level domain of at least two letters."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Alarm evaluation window
+#
+# The two inputs below apply to every alarm this module creates. They are shared
+# rather than per-alarm because the window is a property of how quickly the
+# operator wants to hear, not of which metric is being watched, and four
+# independent windows would make two alarms about the same incident fire minutes
+# apart for no reason a reader could reconstruct.
+# -----------------------------------------------------------------------------
+
+variable "alarm_evaluation_periods" {
+  description = "Consecutive breaching periods required before an alarm changes state. Anything above one is what distinguishes a sustained problem from a single unlucky period, at the cost of delaying the notification by that many periods."
+  type        = number
+  default     = 2
+
+  validation {
+    # WHY : Trade-offs: one is permitted, because a batch chain that runs once a
+    #       night has no second period to wait for and a single failed execution
+    #       is the whole signal. The ceiling of 12 is where an alarm stops being
+    #       an alarm: at the default period length that is an hour of sustained
+    #       breach before anyone is told.
+    condition     = var.alarm_evaluation_periods >= 1 && var.alarm_evaluation_periods <= 12 && floor(var.alarm_evaluation_periods) == var.alarm_evaluation_periods
+    error_message = "alarm_evaluation_periods must be a whole number from 1 to 12 inclusive."
+  }
+}
+
+variable "alarm_period_seconds" {
+  description = "Length of one evaluation period, in seconds. The alarm's total detection latency is this value multiplied by the evaluation period count, so the two inputs are read together."
+  type        = number
+  default     = 300
+
+  validation {
+    # WHY : Assumptions: the accepted set is closed to the values CloudWatch
+    #       treats as valid periods -- the three high-resolution values and then
+    #       whole minutes up to a day. An arbitrary number such as 45 is rejected
+    #       by the service during apply, and a value below 60 additionally
+    #       requires the metric itself to be published at high resolution, which
+    #       none of the metrics this module watches is; the smaller values are
+    #       kept in the set anyway so a future high-resolution metric needs no
+    #       change here.
+    condition     = contains([1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600, 21600, 86400], var.alarm_period_seconds)
+    error_message = "alarm_period_seconds must be one of the periods CloudWatch accepts: 1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600, 21600 or 86400."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Alarm thresholds -- one per watched signal
+# -----------------------------------------------------------------------------
+
+variable "service_error_rate_threshold" {
+  description = "Server-error responses within one evaluation period that raise the per-service alarm. This watches the load balancer's own count of 5xx responses, so it fires for a service that is failing requests regardless of whether the service itself is still logging."
+  type        = number
+  default     = 5
+
+  validation {
+    # WHY : Trade-offs: the floor is 1 rather than 0. A threshold of zero is
+    #       breached by any single server error, including the one a rolling
+    #       deployment can produce as a task drains, which trains an operator to
+    #       dismiss the alarm. A small positive threshold keeps the alarm
+    #       meaningful; a root that genuinely wants zero tolerance can pass 1
+    #       with an evaluation period count of 1.
+    condition     = var.service_error_rate_threshold >= 1 && floor(var.service_error_rate_threshold) == var.service_error_rate_threshold
+    error_message = "service_error_rate_threshold must be a whole number of 1 or more; zero would be breached by a single error, including one produced by a rolling deployment."
+  }
+}
+
+variable "database_cpu_threshold_percent" {
+  description = "Cluster processor utilisation, as a percentage, that raises the database alarm. On a serverless cluster this is a scaling signal as much as a saturation one: sustained high utilisation means the workload is pressed against its configured maximum capacity."
+  type        = number
+  default     = 80
+
+  validation {
+    # WHY : Assumptions: the range is 1 to 100 because the metric is a
+    #       percentage; 0 would alarm permanently and a value above 100 could
+    #       never be crossed, and both are accepted silently without this check.
+    condition     = var.database_cpu_threshold_percent >= 1 && var.database_cpu_threshold_percent <= 100
+    error_message = "database_cpu_threshold_percent must be between 1 and 100 inclusive, because the metric it is compared against is a percentage."
+  }
+}
+
+variable "dead_letter_depth_threshold" {
+  description = "Visible messages in any dead-letter queue that raise the messaging alarm. A dead-letter queue is empty in normal operation, so this is the one threshold whose default is the smallest value that can be breached."
+  type        = number
+  default     = 1
+
+  validation {
+    # WHY : Assumptions: the floor of 1 is not a conservative guess, it is the
+    #       semantics of the queue. A message reaches a dead-letter queue only
+    #       after the configured number of failed receives, so its presence is
+    #       already the evidence of a repeated failure and there is no benign
+    #       reason for the depth to be non-zero. Raising this threshold does not
+    #       reduce noise; it hides messages that have exhausted every retry the
+    #       system offers.
+    condition     = var.dead_letter_depth_threshold >= 1 && floor(var.dead_letter_depth_threshold) == var.dead_letter_depth_threshold
+    error_message = "dead_letter_depth_threshold must be a whole number of 1 or more; a dead-letter queue holds only messages that have exhausted every retry, so any depth above zero is a real failure."
+  }
+}
+
+variable "batch_failure_threshold" {
+  description = "Failed nightly-chain executions within one evaluation period that raise the batch alarm. This is the metric that replaces reading a job log for a non-zero condition code, and it counts executions the state machine itself reported as failed."
+  type        = number
+  default     = 1
+
+  validation {
+    # WHY : Assumptions: the floor of 1 follows from the schedule rather than
+    #       from caution: the chain runs once per night, so there is never a
+    #       second failure within a period to corroborate the first, and a
+    #       threshold above 1 would mean a failed night went unreported.
+    #       Trade-offs: this alarm counts only executions the machine reported as
+    #       FAILED. A posting step that returned the graded warn status and let
+    #       the chain continue is a success by design, per the return-code
+    #       semantics recorded in infra/modules/step-functions-batch, so it does
+    #       not appear here; the reject stream is where that outcome is visible.
+    condition     = var.batch_failure_threshold >= 1 && floor(var.batch_failure_threshold) == var.batch_failure_threshold
+    error_message = "batch_failure_threshold must be a whole number of 1 or more; the nightly chain runs once, so a threshold above 1 would leave a failed night unreported."
+  }
+}

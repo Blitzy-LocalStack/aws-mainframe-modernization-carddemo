@@ -75,15 +75,21 @@
                  dependency version and the inherited documentation gate.
    artifactId    `common-lib`, matching this directory name exactly.
    packaging     `jar`, an ordinary classpath jar.
-   dependencies  Four Spring Boot starters marked optional, plus Jackson
-                 databind and Micrometer core as exported API, plus two
-                 test scoped artifacts.
+   dependencies  Four Spring Boot starters marked optional, plus Jackson 3
+                 databind (group `tools.jackson.core`, the generation Boot 4
+                 builds its default mapper from) and Micrometer core as
+                 exported API, plus two test scoped artifacts.
 
  RETURNS
-   `com.carddemo:common-lib:1.0.0-SNAPSHOT`, written as
+   Two artifacts. `com.carddemo:common-lib:1.0.0-SNAPSHOT`, written as
    `target/common-lib-1.0.0-SNAPSHOT.jar`: a plain jar whose classes sit at
    the archive root and are therefore directly usable as a classpath entry
-   by the eight dependent service modules. Test reports stay at their
+   by the eight dependent service modules. And the test artifact of the same
+   coordinate at type `test-jar`, written as
+   `target/common-lib-1.0.0-SNAPSHOT-tests.jar`, carrying the architecture
+   package alone: it is how the eight services receive the one layering rule
+   class, and the `build` element below explains why it is produced before
+   the `package` phase rather than during it. Test reports stay at their
    default `target/surefire-reports/` location, which is where the services
    pipeline collects them.
 
@@ -94,9 +100,12 @@
      this project's Explainability rule.
    * A missing or unresolvable parent fails before any goal runs, since
      every version used here is inherited rather than declared.
-   * `LayeringRulesTest` fails the `test` phase when an architectural
+   * `LayeringRulesTest` is to fail the `test` phase when an architectural
      boundary is crossed, using the ArchUnit engine this descriptor puts on
-     the test classpath.
+     the test classpath. That class is authored at a later index of the same
+     plan and does not exist yet, so this exception is the contract the
+     engine declaration below prepares for rather than a failure mode the
+     build can currently produce.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  Assumptions: every dependency version is owned by `services/pom.xml` and,
@@ -240,20 +249,56 @@
      starters above this dependency is deliberately NOT optional. It has to
      reach consumers.
 
-     Assumptions: the Spring Boot 4.1.0 parent imports TWO Jackson bills of
-     material, one for the 2.x line under the `com.fasterxml.jackson` group
-     and one for the 3.x line under the `tools.jackson` group, so both lines
-     are version managed and neither needs a version stated here. That is
-     worth recording because Boot 4's own web stack resolves the 3.x line,
-     under group `tools.jackson.core`, transitively through the web starter
-     above. A reader who notices a `jackson-databind` already arriving that
-     way may conclude this declaration is redundant. It is not: the two are
-     different group ids on different major lines, and this coordinate
-     selects the 2.x line explicitly for the types `MoneyModule` is written
-     against.
+     Assumptions: the coordinate is the Jackson 3.x line, group
+     `tools.jackson.core`, and the group id is the load bearing part of it.
+     The Spring Boot 4.1.0 parent imports TWO Jackson bills of material, one
+     for the 2.x line under `com.fasterxml.jackson` and one for the 3.x line
+     under `tools.jackson`, so BOTH lines are version managed and both can
+     end up on one classpath at once. Only one of them is the line Boot 4's
+     HTTP stack actually uses: the web starter above resolves the 3.x
+     mapper, and a module registered against it must implement
+     `tools.jackson.databind.JacksonModule`.
+
+     Refactoring Rationale: this coordinate previously named
+     `com.fasterxml.jackson.core:jackson-databind`, the 2.x line. That
+     resolved, compiled and shipped, and it silently did nothing: a Jackson
+     2 `com.fasterxml.jackson.databind.Module` cannot be registered with a
+     Jackson 3 `ObjectMapper`, because the two lines share no type. The
+     effect was that money serialised through Boot's own default handling
+     instead — as a bare JSON NUMBER — which is exactly the outcome
+     `MoneyModule` exists to prevent, and the only symptom was a client
+     losing cents on a value large enough to exceed a double's exact integer
+     range. Nothing in a build or a startup log reports it, so the wrong
+     group id is recorded here rather than left to be rediscovered.
+
+     Trade-offs: the version is inherited from the managed 3.x bill of
+     material rather than stated here. That gives up the ability to hold this
+     one artifact at a version of its own, and it buys the guarantee that the
+     mapper this module contributes to and the module it contributes are the
+     same major line, which is the failure this coordinate has already had
+     once.
+
+     Assumptions: mapper generations are not mixed anywhere in this tree.
+     Boot 4 leaves `spring.jackson.use-jackson2-defaults` off, every service
+     configures the 3.x property shapes under `spring.jackson`, and no module
+     declares a 2.x DATABIND coordinate; a single generation is what lets the
+     module bean this library exports be picked up by the one mapper the
+     framework builds. Declaring the 2.x databind artifact alongside this one
+     would put two mapper implementations on a single classpath and
+     reintroduce the ambiguity about which of them serves a response.
+
+     Assumptions: `com.fasterxml.jackson.core:jackson-annotations` still
+     appears on this module's resolved compile classpath, arriving as a
+     transitive of the coordinate above, and its presence is correct rather
+     than the mixing this comment forbids. Jackson 3 deliberately kept the
+     ANNOTATIONS artifact on the older group id so that a type annotated for
+     2.x is still annotated for 3.x; only databind and core moved. A reader
+     auditing the classpath for a stray 2.x artifact needs that distinction,
+     because the annotations jar is the one 2.x coordinate that is expected
+     to be there.
     -->
     <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
+      <groupId>tools.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
 
@@ -288,14 +333,17 @@
     -->
 
     <!--
-     Assumptions: all seven test classes in this module end in `Test`, so
-     Surefire runs them in the `test` phase and no Failsafe execution or
-     include pattern override is needed. This module has no integration
-     test and needs none: it touches no database, no queue and no container,
-     which is a direct consequence of it owning no schema and no transport.
-     Report output stays at the default location the services pipeline
-     collects from; relocating it would silently empty the pipeline's test
-     report step while every test still passed locally.
+     Assumptions: all seven test classes this module's plan assigns to it are
+     to end in `Test`, so Surefire will run them in the `test` phase and no
+     Failsafe execution or include pattern override is needed. None of the
+     seven exists yet; each is authored at a later index of the same plan,
+     and this declaration is what lets the first one run without a further
+     build change. This module is to have no integration test and needs
+     none: it touches no database, no queue and no container, which is a
+     direct consequence of it owning no schema and no transport. Report
+     output stays at the default location the services pipeline collects
+     from; relocating it would silently empty the pipeline's test report
+     step while every test still passed locally.
     -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -306,13 +354,45 @@
     <!--
      Assumptions: `LayeringRulesTest`, under
      `src/test/java/com/carddemo/common/architecture/`, is the single owner
-     of the architectural invariants for the entire reactor and is inherited
-     by all eight service modules, so the ArchUnit engine has to resolve on
-     THIS module's test classpath. Its version, 1.4.2, is managed by
-     `services/pom.xml` and must not be re-pinned here. The services
-     pipeline may invoke that class by name as a labelled step of its own,
-     so the class name and its path are a fixed external contract, not an
-     implementation detail that can be renamed freely.
+     of the architectural invariants for the entire reactor, so the ArchUnit
+     engine has to resolve on THIS module's test classpath. Its version,
+     1.4.2, is managed by `services/pom.xml` and must not be re-pinned here.
+     The services pipeline may invoke that class by name as a labelled step
+     of its own, so the class name and its path are a fixed external
+     contract, not an implementation detail that can be renamed freely.
+
+     Assumptions: single ownership is NOT single execution, and the two were
+     previously conflated here. Maven publishes this module's main classes to
+     its eight consumers and never its test classes, so declaring the engine
+     and the rule class in one place delivers them nowhere on its own. The
+     `build` element below packages that one class as this module's test
+     artifact, each service declares that artifact at test scope, and the
+     `architecture-rules` Surefire execution in `services/pom.xml` runs it
+     inside each service against that service's own compiled classes. All
+     three are required; any one of them alone leaves the rules authored and
+     unenforced, which is indistinguishable from not having written them.
+
+     Assumptions: "inherited by all eight service modules" is a statement
+     about a MECHANISM, and the mechanism is named here so nobody has to
+     infer it. Maven inheritance moves configuration from a parent to a
+     child; it never moves a dependency's test classes onto a consumer's
+     test classpath, and this module is a dependency of the eight services
+     rather than their parent. The inheritance is therefore carried by three
+     cooperating declarations: the `test-jar` execution in this file's build
+     section publishes these test classes as a `tests`-classified artifact,
+     each service declares that artifact at test scope, and
+     `services/pom.xml` configures Surefire's `dependenciesToScan` so the
+     runner looks inside it for test classes instead of only inside the
+     module being built. Remove any one of the three and the gate silently
+     stops running in all eight services while every build stays green,
+     which is the precise failure this note exists to prevent.
+
+     Assumptions: the ArchUnit engine does NOT reach the eight services
+     through this declaration, because `test` scope is not transitive. Each
+     service declares `archunit-junit5` itself, at test scope, for the same
+     reason: a discovered `LayeringRulesTest` needs the engine on the
+     classpath of the module that runs it, and without it the class fails to
+     load rather than failing an assertion.
 
      Alternatives Considered: expressing the same package boundaries through
      Checkstyle's `ImportControl` module, which is already available given
@@ -331,6 +411,117 @@
     </dependency>
 
   </dependencies>
+
+  <!--
+=============================================================================
+ BUILD
+ Exactly two plugin declarations, and both exist for one purpose: to hand
+ this module's single architecture rule class to the eight service modules,
+ and to keep it from being run twice here.
+=============================================================================
+  -->
+  <build>
+    <plugins>
+
+      <!--
+       WHAT: publishes `src/test/java/com/carddemo/common/architecture/` as
+       this module's test artifact, `common-lib-1.0.0-SNAPSHOT-tests.jar`,
+       alongside the ordinary jar of main classes.
+
+       Refactoring Rationale: the descriptors in this reactor previously
+       stated that the eight service modules INHERITED the layering rules
+       from this module. They did not and could not. Maven resolution passes
+       a module's main classes to its consumers and never its test classes,
+       so the rule class was compiled once, evaluated against this module
+       alone, and never saw a single service class; the ArchUnit engine each
+       service declared supplied an assertion API and no rules. Publishing
+       the class as an artifact is what turns the single owner into a single
+       owner that is actually executed everywhere.
+
+       Assumptions: the goal is bound to `process-test-classes` rather than
+       to its own default phase, `package`, and the binding is load bearing.
+       Surefire's dependency scanner reads only files whose name ends in
+       .jar; when a reactor dependency has not yet been packaged Maven
+       satisfies it from `target/test-classes`, a DIRECTORY, which that
+       scanner ignores in silence. Under the default binding a plain
+       `mvn test` at the reactor root would therefore run no architecture
+       rule at all while reporting success, because this module never reaches
+       `package` in that lifecycle. Bound to `process-test-classes` the
+       artifact is a real file, attached to this project, before any
+       downstream module reaches its own `test` phase, so the gate behaves
+       identically under `mvn test` and under `mvn verify`.
+
+       Trade-offs: `includes` narrows the artifact to the architecture
+       package instead of publishing every test class in this module. The
+       compromise is that a consumer cannot reuse this module's codec
+       fixtures or its money vectors, which is intentional: those suites
+       belong to this module and re-running them once per service would
+       report one defect eight times. What it buys is an artifact whose whole
+       content is the shared contract, so nothing else can start travelling
+       with it by accident. The package holds a documented
+       `package-info.java`, so the archive is never empty.
+
+       Assumptions: no version is stated, because `services/pom.xml`
+       inherits the Spring Boot 4.1.0 parent's management of this plugin, and
+       no `archive` configuration is stated either, so the test artifact is
+       built with the same manifest settings as the main one.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>architecture-rules-test-jar</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>com/carddemo/common/architecture/**</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
+       WHAT: switches off the inherited `architecture-rules` Surefire
+       execution in THIS module, and only in this module.
+
+       Assumptions: that execution exists in `services/pom.xml` to scan the
+       test artifact above into a module that would otherwise never see the
+       rule class. This module is where the class lives, so its own ordinary
+       test execution already runs it; leaving the inherited execution active
+       here would run it a second time in the same phase and overwrite the
+       first result's report file with an identical one. The execution
+       identifier MUST match the inherited one character for character,
+       because Maven merges a module execution into an inherited execution
+       only when the identifiers agree, and any other identifier would add a
+       second execution instead of refining the first.
+
+       Trade-offs: skipping is declared here rather than by making the
+       inherited execution conditional on something. A profile or a property
+       would put the decision at a distance from the module it concerns, and a
+       reader of this file would have no way to tell that the rules still run
+       here. The accepted cost is one plugin block whose only content is a
+       skip, which is why this comment states what still runs.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>architecture-rules</id>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+    </plugins>
+  </build>
 
   <!--
 =============================================================================
@@ -430,11 +621,15 @@
  federated role assumption from the deployment pipeline and never from a
  build descriptor.
 
- NO `properties` element and no `build` element.
- Assumptions: the Java release, the compiler settings and every plugin
- binding come from the aggregator, and this module overrides none of them.
- Both elements are omitted entirely rather than left empty, because an empty
- element carries no information and invites the next reader to fill it in.
+ NO `properties` element.
+ Assumptions: the Java release and the compiler settings come from the
+ aggregator and this module overrides none of them. The element is omitted
+ entirely rather than left empty, because an empty element carries no
+ information and invites the next reader to fill it in. The `build` element
+ above is the one exception to that inheritance, and it is narrow on purpose:
+ it adds one goal of a plugin the parent already manages and switches off one
+ inherited execution, and it configures neither the compiler, nor the
+ documentation gate, nor any report location.
 =============================================================================
   -->
 

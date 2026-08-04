@@ -52,7 +52,7 @@
 #     Requirements table is generated from one predictable file, and so a
 #     constraint change reviews as a one-file diff rather than hiding inside a
 #     resource change.
-#   - Assumption: HCL has no docstring construct, so this header block IS the
+#   - Assumptions: HCL has no docstring construct, so this header block IS the
 #     entry-point docstring for this file. Rationale for each individual
 #     argument is carried adjacent to that argument below rather than duplicated
 #     up here, so a reader editing a constraint sees why it is what it is
@@ -60,15 +60,13 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the minimum Terraform CLI that any root calling this module must run;
-  #       the constraint binds the caller, not just this directory.
   # WHY : Alternatives Considered: an exact `= 1.15.8` pin -- 1.15.8 being the
   #       version this package was validated on -- was rejected because it
   #       rejects every operator and CI runner already on a newer 1.15.x patch
   #       while buying no compatibility guarantee the floor does not already
   #       give. A floor guarantees the language features this module's HCL
   #       relies on and leaves patch upgrades unblocked.
-  #       Trade-off: a floor cannot protect against a breaking change in a new
+  #       Trade-offs: a floor cannot protect against a breaking change in a new
   #       Terraform minor. That risk is accepted here and controlled elsewhere:
   #       the infra CI workflow pins the CLI version it runs, so drift is caught
   #       by a failing pipeline rather than by widening this constraint.
@@ -77,11 +75,11 @@ terraform {
   required_providers {
     # WHAT: resolve the AWS provider from the public registry, constrained to
     #       the 6.56-or-newer 6.x series.
-    # WHY : Assumption: `hashicorp/aws` resolves from the public Terraform
+    # WHY : Assumptions: `hashicorp/aws` resolves from the public Terraform
     #       Registry. This package declares no private registry, network mirror
     #       or credentialed provider source, so the bare `hashicorp/` namespace
     #       is unambiguous.
-    #       Assumption: 6.56 is a capability floor, not a preference. A
+    #       Assumptions: 6.56 is a capability floor, not a preference. A
     #       5.81.0-or-newer provider is required for the zero-minimum Aurora
     #       serverless capacity this package's data tier uses, and 6.56 clears
     #       that comfortably. Holding every module in this package on the
@@ -95,7 +93,7 @@ terraform {
     #       lets only the rightmost stated component float, so with two segments
     #       this resolves to >= 6.56.0 and < 7.0.0: 6.x patch and minor releases
     #       are admitted, the next major is not.
-    #       Trade-off: admitting 6.x minors does mean a minor release can change
+    #       Trade-offs: admitting 6.x minors does mean a minor release can change
     #       resource behaviour without a constraint edit. That is accepted
     #       because the per-root .terraform.lock.hcl is what actually freezes the
     #       resolved provider build, and it moves only under an explicit
@@ -115,7 +113,7 @@ terraform {
 # to read as an oversight.
 #
 # No `provider` block -- not configured, not aliased, not empty:
-#   Assumption: this directory is a module, not a Terraform root. It is
+#   Assumptions: this directory is a module, not a Terraform root. It is
 #   instantiated by infra/envs/dev and infra/envs/prod and inherits their
 #   provider configuration, region and default tagging included.
 #   Alternatives Considered: configuring an aws provider here was rejected
@@ -124,7 +122,7 @@ terraform {
 #   inheritance those roots depend on.
 #
 # No `backend` block:
-#   Assumption: only Terraform roots have backends. State for this module lives
+#   Assumptions: only Terraform roots have backends. State for this module lives
 #   in the calling root's backend: the backend.tf of each environment root
 #   targets the versioned S3 bucket and DynamoDB lock table that
 #   infra/bootstrap provisions, and infra/bootstrap itself carries no backend
@@ -141,7 +139,7 @@ terraform {
 #   owned by the `secrets` and `cognito` modules. This module creates a bucket,
 #   an origin access control and a distribution, and generates no value of its
 #   own, so declaring the provider was rejected.
-#   Trade-off: declaring it anyway would cost nothing at apply time but would
+#   Trade-offs: declaring it anyway would cost nothing at apply time but would
 #   trip tflint's `terraform_unused_declarations` rule, which is a gating check
 #   in the infra CI workflow. The omission is therefore enforced by the
 #   pipeline, not merely tidy.

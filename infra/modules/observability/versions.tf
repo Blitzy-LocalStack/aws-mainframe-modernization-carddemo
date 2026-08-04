@@ -41,7 +41,7 @@
 #   errors this file can raise.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: this directory is a reusable MODULE, not a Terraform root.
+#   - Assumptions: this directory is a reusable MODULE, not a Terraform root.
 #     It is consumed as `module "observability" { source = ... }` by the
 #     infra/envs/dev and infra/envs/prod roots, and every decision below
 #     follows from that single fact. Three of those decisions are deliberate
@@ -58,13 +58,13 @@
 #     the caller passing a provider in explicitly. With no provider block the
 #     module inherits the calling root's configuration, which is what lets one
 #     module body serve both environments.
-#   - Assumption: no `backend` block. State is configured by roots only --
+#   - Assumptions: no `backend` block. State is configured by roots only --
 #     infra/bootstrap keeps local state because it is what CREATES the state
 #     bucket, while infra/envs/dev and infra/envs/prod use the S3 backend that
 #     bootstrap provisioned. A `backend` block is valid only in a root module,
 #     so including one here would not be merely redundant: it would fail
 #     `init` for every root that calls this module.
-#   - Trade-off: no `hashicorp/random` provider. infra/README.md pins
+#   - Trade-offs: no `hashicorp/random` provider. infra/README.md pins
 #     `hashicorp/random ~> 3.9` for the package as a whole, but that provider
 #     exists to generate database and seed-user passwords at apply time, and
 #     this module generates no random value -- its resources are log groups, a
@@ -75,7 +75,7 @@
 #     providers whose resources actually appear in main.tf are declared here,
 #     which is the same omission infra/bootstrap/versions.tf makes for the
 #     same reason.
-#   - Trade-off: CloudFront metrics are surfaced through a dashboard widget,
+#   - Trade-offs: CloudFront metrics are surfaced through a dashboard widget,
 #     NOT through an alarm, so this block declares no `configuration_aliases`.
 #     CloudFront publishes its metrics to a single region only. A CloudWatch
 #     ALARM on a CloudFront metric therefore needs a provider configured for
@@ -98,7 +98,7 @@ terraform {
   # WHY : a FLOOR rather than an exact pin, because `required_version` is
   #       checked against the CLI actually running and three separate roots
   #       (infra/bootstrap, infra/envs/dev, infra/envs/prod) plus the CI
-  #       runner each invoke this module. Trade-off: an exact `= 1.15.8` pin
+  #       runner each invoke this module. Trade-offs: an exact `= 1.15.8` pin
   #       would reject a root on any later patch release for no compatibility
   #       reason, while a floor below 1.15.0 would claim support for a CLI
   #       this package was never exercised against -- 1.15.8 is the version
@@ -108,16 +108,14 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the sole provider this module needs -- its log groups, dashboard,
-    #       alarms and SNS topic are all AWS resources.
     # WHY : `~> 6.56` admits 6.56.x and any later 6.x minor but excludes 7.0,
     #       so a major-version provider bump -- where this provider's breaking
-    #       changes land -- cannot arrive unreviewed. Assumption: the floor is
+    #       changes land -- cannot arrive unreviewed. Assumptions: the floor is
     #       set by a concrete capability rather than a preference: a
     #       zero-minimum Aurora serverless capacity requires provider 5.81.0
-    #       or later, and 6.56 clears that with margin. Trade-off: every
+    #       or later, and 6.56 clears that with margin. Trade-offs: every
     #       module in this package declares this identical constraint, because
-    #       a calling root resolves ONE provider version for all sixteen
+    #       a calling root resolves ONE provider version for all the
     #       modules at once and a divergent constraint in any single module
     #       makes the whole root unresolvable.
     aws = {

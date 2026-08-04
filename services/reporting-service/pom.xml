@@ -387,21 +387,51 @@
     </dependency>
 
     <!--
-    Assumptions: the layering and money prohibitions are enforced as executable
-    tests rather than as conventions, so a violation fails the build instead of
-    depending on a reviewer noticing it. The rules inherited from
+    Assumptions: the layering and money prohibitions are to be enforced as
+    executable tests rather than as conventions, so a violation fails the build
+    instead of depending on a reviewer noticing it. The rules are authored at
     services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
+    and are re-run per module rather than inherited as an artifact, because
+    common-lib binds no test-jar goal and so publishes no test classes to depend
+    on; that class is authored at a later index of the same plan and does not
+    exist yet, which is why this dependency prepares for it rather than consuming
+    it. The rules
     are that the money path admits no float, no double and no JSON number; that
     no service may import another service's domain package; and that a domain
     package may not import AWS SDK or web types. The third rule is load bearing
     in this module specifically, because it holds both an AWS SDK client and web
     controllers, so its view projections are exactly where such an import would
     otherwise creep in. That test file's path is itself part of the contract and
-    must not be relocated, because the rules are discovered by package.
+    must not be relocated, because the build names it in two places: the
+    architecture-rules Surefire execution in services/pom.xml selects it by name,
+    and the shared kernel's jar plugin execution packages its directory.
     -->
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+    Refactoring Rationale: the engine above was declared alone, and the rules were
+    described as inherited from the shared kernel. Maven resolution passes a
+    module's MAIN classes to its consumers and never its test classes, so that
+    rule class was evaluated against the shared kernel alone; nothing analysed
+    com.carddemo.reporting, and the third rule this module was said to depend on
+    most was the one least enforced, because this is the module that holds an AWS
+    SDK client and web controllers side by side. The shared kernel now publishes
+    the class as a test artifact narrowed to the architecture package, and the
+    architecture-rules Surefire execution scans it into this module's test run so
+    the rules see this module's own compiled classes.
+
+    Assumptions: this delivers one class and duplicates none, ownership staying
+    with the file named above. Version and scope are managed by the aggregator, so
+    neither appears here.
+    -->
+    <dependency>
+      <groupId>com.carddemo</groupId>
+      <artifactId>common-lib</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
 

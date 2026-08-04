@@ -3,6 +3,24 @@
  * correlation identity that travels with every request, and the keyset page
  * envelope that carries a browse cursor across a stateless boundary.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p><b>Purpose.</b> Two concerns live here and nothing else does. A
  * correlation identity has to accompany a request from the edge through to the
  * log line, so that one unit of work can be reassembled afterwards out of
@@ -251,7 +269,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>17 production classes</b> and <b>9</b> package
+ * <p>The shared kernel's target inventory is <b>17 production classes</b> and <b>9</b> package
  * charters -- one at the kernel root and one for each subpackage -- for <b>26</b>
  * compilation units in total. This package contributes two of the seventeen and
  * one of the nine. The breakdown is given so that a reader can re-derive the
@@ -272,12 +290,11 @@
  * <p>Those eight sum to 17, the kernel root itself contributing none; adding the
  * nine charters gives 26.
  *
- * <p>Assumptions: an earlier draft of the migration plan puts the
- * production-class total one higher than 17. That figure is superseded and must
- * not be propagated. The canon above is stated as a breakdown and not merely as
- * a total for exactly that reason: a bare total invites a reader to trust it,
- * whereas a per-subpackage list can be re-derived, and a stale figure caught the
- * way the superseded one was caught.
+ * <p>Assumptions: the authoritative totals are <strong>17 production classes and
+ * 26 compilation units, 9 of the latter being charters</strong>. The canon above
+ * is stated as a breakdown and not merely as a total for a reason: a bare total
+ * invites a reader to trust it, whereas a per-subpackage list can be re-derived,
+ * so any figure that does not reproduce these two sums is wrong on its face.
  *
  * <h2>Why these two types live in the shared kernel</h2>
  *
@@ -336,25 +353,20 @@
  * so an empty charter would satisfy the first and fail the second, and both
  * halves are load-bearing.
  *
- * <p>Alternatives Considered: the four rationale labels used throughout this
- * charter, namely Alternatives Considered, Refactoring Rationale, Assumptions
- * and Trade-offs, are written in the plural, without parentheses, and with the
- * ASCII hyphen-minus. That is a deliberate divergence from the form that
- * predominates elsewhere in this repository, and it is recorded here so that a
- * later reader does not quietly normalise it back. A census taken while this
- * migration was being planned found the plural form in a handful of files, the
- * parenthesised singular in roughly two dozen, and the bare singular in some
- * eighty -- a majority of between one and two orders of magnitude against the
- * form chosen here. That tally necessarily moves as this Java tree lands, so the
- * durable fact is the direction and not the digit: the singular and the
- * parenthesised singular dominate the markup, infrastructure and shell
- * artifacts, and the plural is used here regardless. The reason is that the rule
- * states its own four categories in the plural at its lines 31 to 34, and its
- * line 43 makes that wording the sentence this work is audited against, so the
- * plural is the form that matches the audited text. The two forms mean the same
- * thing; choosing one and holding to it is what makes the convention read as one
- * convention instead of two. Forms are never mixed within a file, and this Java
- * tree uses the plural exclusively.
+ * <p>Assumptions: the four rationale labels used throughout this charter --
+ * {@code Alternatives Considered:}, {@code Refactoring Rationale:},
+ * {@code Assumptions:} and {@code Trade-offs:} -- are written in the plural,
+ * without parentheses, colon-terminated, and with the ASCII hyphen-minus. That
+ * spelling is the only accepted one, and it is mandatory in every language and
+ * every file of the migration trees, so it must never be normalised to anything
+ * else. The rule states its own four categories in the plural at its lines 31 to
+ * 34, and its line 43 makes that wording the sentence this work is audited
+ * against, so the plural is the audited text itself. A singular, bracketed,
+ * heading-style or dash-terminated variant is not an alternative spelling: it is
+ * a label that a fixed-string search for the category will not find, which makes
+ * a documented rationale read as absent to the audit that looks for it.
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full statement of the
+ * convention and enumerates the rejected shapes.
  *
  * <p>Assumptions: every quotation in this charter is transliterated to ASCII.
  * {@code tests/README.md} is the only file in the repository that contains the

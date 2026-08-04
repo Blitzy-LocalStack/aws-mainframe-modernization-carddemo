@@ -74,7 +74,7 @@ variable "environment" {
   description = "Environment this schedule belongs to. Supplies the `-<env>` suffix that keeps the dev and prod copies of every resource this module creates distinct. Accepted values: dev, prod."
   type        = string
 
-  # WHY : (Trade-offs) this is the one input in the file with no default, and
+  # WHY : Trade-offs: this is the one input in the file with no default, and
   #       the omission is the point. Defaulting it to "dev" would make the
   #       wrong environment the silent outcome of a forgotten argument: a prod
   #       root that failed to pass it would still plan cleanly and still
@@ -84,7 +84,7 @@ variable "environment" {
   #       environment roots, paid against a failure whose blast radius is a
   #       production trigger pointing at development state.
   validation {
-    # WHY : (Assumptions) the domain is closed at exactly two values because
+    # WHY : Assumptions: the domain is closed at exactly two values because
     #       the tree defines exactly two environment roots, infra/envs/dev and
     #       infra/envs/prod, and every name in the target carries one of the
     #       two as its suffix. A third value would name resources that no root
@@ -112,17 +112,17 @@ variable "state_machine_arn" {
   type        = string
 
   validation {
-    # WHY : (Assumptions) the shape is checked because a wrong-but-well-formed
+    # WHY : Assumptions: the shape is checked because a wrong-but-well-formed
     #       ARN here fails silently rather than loudly. main.tf scopes the
     #       role's states:StartExecution grant to precisely this string, so an
     #       ARN naming some other service or resource type -- an activity, a
     #       function, a task definition -- still yields a syntactically valid
     #       IAM policy and a schedule that applies without complaint, and then
     #       authorises nothing the target needs. The symptom appears at the
-    #       first invocation, in the dead-letter queue, detached from the
-    #       change that caused it. Asserting the `states:` service field and
-    #       the `:stateMachine:` resource type converts that into a plan-time
-    #       error naming the offending input.
+    #       first invocation, in the dead-letter queue, detached from the change
+    #       that caused it. Asserting the `states:` service field and the
+    #       `:stateMachine:` resource type converts that into a plan-time error
+    #       naming the offending input.
     #       Alternatives Considered: anchoring the pattern at the end, which
     #       would be the tighter check and is rejected. A version-qualified or
     #       alias-qualified machine ARN carries a further colon-delimited
@@ -138,7 +138,7 @@ variable "dead_letter_arn" {
   type        = string
 
   validation {
-    # WHY : (Assumptions) EventBridge Scheduler delivers an undeliverable
+    # WHY : Assumptions: EventBridge Scheduler delivers an undeliverable
     #       invocation to an SQS queue and to nothing else, so an ARN of any
     #       other service cannot work -- but it is accepted into the plan and
     #       rejected only by the service at apply. Checking the `sqs:` service
@@ -159,7 +159,7 @@ variable "dead_letter_kms_key_arn" {
   default     = null
   nullable    = true
 
-  # WHY : (Assumptions) null is a meaningful sentinel here rather than an
+  # WHY : Assumptions: null is a meaningful sentinel here rather than an
   #       absent value, and it selects between two different IAM outcomes that
   #       main.tf resolves. Left null, the queue is assumed to use SQS-managed
   #       encryption and no key grant is minted, which keeps the role at least
@@ -191,28 +191,27 @@ variable "schedule_expression" {
   description = "Cron expression in the six-field EventBridge Scheduler form `cron(minutes hours day-of-month month day-of-week year)` fixing when the batch chain is started. Only the cron(...) form is accepted; rate(...) and at(...) are rejected."
   type        = string
 
-  # WHY : (Assumptions) the default is a daily expression because the baseline
+  # WHY : Assumptions: the default is a daily expression because the baseline
   #       daily folder in app/scheduler/CardDemo.controlm carries DAYS="ALL" on
   #       each of its four jobs -- an every-day cadence, which `* *` in the
   #       day-of-month and month fields reproduces exactly. Note that the
   #       day-of-week field must be `?` and not `*`: the service rejects an
   #       expression that constrains both day-of-month and day-of-week, so the
-  #       two cannot both be wildcards.
-  #       The time of day is the one element the baseline does NOT state, so it
-  #       is a decision rather than a transcription and is recorded as such.
-  #       00:00 is chosen because the only related value the baseline does fix
-  #       is TIMETO="23:00", a must-end-by deadline; starting at the first
-  #       minute of the day puts the start and that deadline unambiguously on
-  #       the same calendar date, whereas a late-evening start would place them
-  #       on either side of midnight depending on the day. It is also the time
-  #       component named by the CA-7 scheduling floor at
-  #       app/scheduler/CardDemo.ca7 line 39. This is a placement decision
-  #       about which date the run belongs to; it asserts nothing about how
-  #       long anything takes.
+  #       two cannot both be wildcards. The time of day is the one element the
+  #       baseline does NOT state, so it is a decision rather than a
+  #       transcription and is recorded as such. 00:00 is chosen because the
+  #       only related value the baseline does fix is TIMETO="23:00", a
+  #       must-end-by deadline; starting at the first minute of the day puts the
+  #       start and that deadline unambiguously on the same calendar date,
+  #       whereas a late-evening start would place them on either side of
+  #       midnight depending on the day. It is also the time component named by
+  #       the CA-7 scheduling floor at app/scheduler/CardDemo.ca7 line 39. This
+  #       is a placement decision about which date the run belongs to; it
+  #       asserts nothing about how long anything takes.
   default = "cron(0 0 * * ? *)"
 
   validation {
-    # WHY : (Assumptions) this guard is load-bearing rather than defensive,
+    # WHY : Assumptions: this guard is load-bearing rather than defensive,
     #       because the AWS provider validates this argument not at all. That
     #       was measured against the pinned provider, not assumed: `rate(1
     #       day)`, `at(2026-01-01T00:00:00)` and even the literal string
@@ -239,7 +238,7 @@ variable "schedule_expression_timezone" {
   description = "IANA time zone name, such as UTC or America/New_York, that the cron expression above is interpreted in."
   type        = string
 
-  # WHY : (Assumptions) stated explicitly rather than left to the service
+  # WHY : Assumptions: stated explicitly rather than left to the service
   #       default, because the baseline's TIMETO="23:00" is an operator
   #       wall-clock deadline and a wall clock is exactly what a zone decides.
   #       Naming the zone makes the daylight-saving behaviour a recorded
@@ -259,7 +258,7 @@ variable "schedule_state" {
   default     = "ENABLED"
 
   validation {
-    # WHY : (Assumptions) the two accepted values and their exact casing were
+    # WHY : Assumptions: the two accepted values and their exact casing were
     #       read off the pinned provider, which reports `expected state to be
     #       one of ["ENABLED" "DISABLED"]` and rejects both a third value and
     #       a lowercase spelling of an accepted one. Restating the domain here
@@ -276,7 +275,7 @@ variable "start_date" {
   default     = null
   nullable    = true
 
-  # WHY : (Assumptions) this input is not speculative -- the baseline states
+  # WHY : Assumptions: this input is not speculative -- the baseline states
   #       the same constraint. app/scheduler/CardDemo.ca7 line 39 reads
   #       `. DONT SCHEDULE BEFORE 03237 AT 0000`, a floor on the earliest
   #       instant the job may be picked up at all, distinct from the recurring
@@ -293,7 +292,7 @@ variable "flexible_time_window_mode" {
   description = "Whether EventBridge Scheduler may shift an invocation within a window rather than firing at the exact expression time. OFF fires at the expression time; FLEXIBLE spreads it across the window given by flexible_time_window_minutes. Accepted values: OFF, FLEXIBLE."
   type        = string
 
-  # WHY : (Trade-offs) OFF, because a flexible window spends the one budget the
+  # WHY : Trade-offs: OFF, because a flexible window spends the one budget the
   #       baseline actually states. Every job definition in
   #       app/scheduler/CardDemo.controlm carries TIMETO="23:00" -- fifteen
   #       occurrences, a single value on every real job -- and that is a hard
@@ -304,12 +303,12 @@ variable "flexible_time_window_mode" {
   #       feature exists to provide only pay off across many schedules
   #       contending for one target, and there is exactly one schedule here.
   #       What is given up by choosing OFF is precisely that jitter, and it is
-  #       given up knowingly; FLEXIBLE stays available as an opt-in for a
-  #       caller whose circumstances differ.
+  #       given up knowingly; FLEXIBLE stays available as an opt-in for a caller
+  #       whose circumstances differ.
   default = "OFF"
 
   validation {
-    # WHY : (Assumptions) the two accepted values and their casing were read
+    # WHY : Assumptions: the two accepted values and their casing were read
     #       off the pinned provider, which reports `expected mode to be one of
     #       ["OFF" "FLEXIBLE"]`. As with schedule_state, restating the domain
     #       names the offending input rather than a line in main.tf.
@@ -324,7 +323,7 @@ variable "flexible_time_window_minutes" {
   default     = null
   nullable    = true
 
-  # WHY : (Assumptions) null rather than a number, because the value is
+  # WHY : Assumptions: null rather than a number, because the value is
   #       meaningless unless the mode above is FLEXIBLE, and the mode defaults
   #       to OFF. A numeric default would therefore ship a width that describes
   #       a window the module does not open, and main.tf gates the argument on
@@ -332,7 +331,7 @@ variable "flexible_time_window_minutes" {
   #       object to a width supplied alongside mode OFF -- that combination was
   #       measured and accepted -- so the gating has to be the module's job.
   validation {
-    # WHY : (Assumptions) the 1-1440 bound is the pinned provider's, obtained
+    # WHY : Assumptions: the 1-1440 bound is the pinned provider's, obtained
     #       by driving it until it complained: it reports `expected
     #       maximum_window_in_minutes to be in the range (1 - 1440)` and
     #       rejects both 0 and 1441. The null branch is explicit because a
@@ -362,7 +361,7 @@ variable "maximum_retry_attempts" {
   description = "Retries attempted, with exponential backoff, before the invocation is sent to the dead-letter queue. Accepts 0 to 185, the range the pinned AWS provider enforces."
   type        = number
 
-  # WHY : (Assumptions) five is preserved baseline behaviour, not a round
+  # WHY : Assumptions: five is preserved baseline behaviour, not a round
   #       number. app/scheduler/CardDemo.controlm carries MAXRERUN="5" on
   #       fifteen of its seventeen job definitions -- every real job; the only
   #       two exceptions are the SMART_FOLDER container nodes at lines 32 and
@@ -380,7 +379,7 @@ variable "maximum_retry_attempts" {
   default = 5
 
   validation {
-    # WHY : (Assumptions) the 0-185 bound is the pinned provider's, established
+    # WHY : Assumptions: the 0-185 bound is the pinned provider's, established
     #       by driving it with out-of-range values rather than by reading a
     #       guide: it reports `expected maximum_retry_attempts to be in the
     #       range (0 - 185)` and rejects -1 and 186 while accepting 0 and 185.
@@ -395,7 +394,7 @@ variable "maximum_event_age_in_seconds" {
   description = "Outer bound, in seconds, on how long retry attempts may continue before the invocation is sent to the dead-letter queue. Accepts 60 to 86400, the range the pinned AWS provider enforces."
   type        = number
 
-  # WHY : (Trade-offs) the default is the top of the accepted range so that the
+  # WHY : Trade-offs: the default is the top of the accepted range so that the
   #       attempt count above, and not this bound, is what actually governs.
   #       Because the two are a conjunction, a smaller value here would cut the
   #       retrying short before the five attempts carried over from the
@@ -403,7 +402,7 @@ variable "maximum_event_age_in_seconds" {
   #       baseline does state with one it does not. Holding this at the ceiling
   #       narrows exactly one setting, the retry count, and leaves the other
   #       where the platform puts it, which is also 86400.
-  #       (Trade-offs, and an honest divergence.) The baseline's nearest
+  #       Trade-offs: this is also an honest divergence. The baseline's nearest
   #       analogue is Control-M MAXWAIT="7" -- fifteen occurrences in
   #       app/scheduler/CardDemo.controlm -- seven days of willingness to keep
   #       waiting for a job's conditions to be met. 86400 is the largest value
@@ -417,14 +416,13 @@ variable "maximum_event_age_in_seconds" {
   default = 86400
 
   validation {
-    # WHY : (Assumptions) the 60-86400 bound is the pinned provider's, obtained
+    # WHY : Assumptions: the 60-86400 bound is the pinned provider's, obtained
     #       the same way as the bound above: it reports `expected
     #       maximum_event_age_in_seconds to be in the range (60 - 86400)` and
-    #       rejects 59 and 86401 while accepting both endpoints. The
-    #       EventBridge Scheduler API reference states the same range. Note the
-    #       floor is 60 and not 0, so this field cannot be used to disable
-    #       retrying -- setting maximum_retry_attempts to 0 is how that is
-    #       expressed.
+    #       rejects 59 and 86401 while accepting both endpoints. The EventBridge
+    #       Scheduler API reference states the same range. Note the floor is 60
+    #       and not 0, so this field cannot be used to disable retrying --
+    #       setting maximum_retry_attempts to 0 is how that is expressed.
     condition = (
       var.maximum_event_age_in_seconds >= 60 &&
       var.maximum_event_age_in_seconds <= 86400
@@ -449,7 +447,7 @@ variable "kms_key_arn" {
   default     = null
   nullable    = true
 
-  # WHY : (Trade-offs) null selects the service-owned key, which is what makes
+  # WHY : Trade-offs: null selects the service-owned key, which is what makes
   #       this module usable by a caller that has not provisioned a key for it,
   #       while leaving the encrypted-with-a-customer-managed-key posture
   #       available to one that has. The distinction is real but narrow: the
@@ -470,7 +468,7 @@ variable "target_input" {
   type        = map(string)
   default     = {}
 
-  # WHY : (Assumptions) additive by contract, and empty by default, because one
+  # WHY : Assumptions: additive by contract, and empty by default, because one
   #       key in that payload is not the caller's to remove. main.tf always
   #       injects the scheduler's own scheduled-time context attribute, which
   #       is how the state machine receives the business date it is running
@@ -480,10 +478,10 @@ variable "target_input" {
   #       carries as a --business-date argument -- and it is what makes a rerun
   #       reproduce its original output instead of quietly processing whatever
   #       day the retry happens to land on. A caller able to overwrite the
-  #       payload wholesale could drop that key and get a chain that still
-  #       runs, still succeeds, and dates its work wrongly. Merging on top of
-  #       the module's own keys removes that possibility while still allowing a
-  #       root to pass anything else the state machine accepts.
+  #       payload wholesale could drop that key and get a chain that still runs,
+  #       still succeeds, and dates its work wrongly. Merging on top of the
+  #       module's own keys removes that possibility while still allowing a root
+  #       to pass anything else the state machine accepts.
 }
 
 # -----------------------------------------------------------------------------
@@ -495,7 +493,7 @@ variable "tags" {
   type        = map(string)
   default     = {}
 
-  # WHY : (Assumptions) the gap in coverage is the service's, not this
+  # WHY : Assumptions: the gap in coverage is the service's, not this
   #       module's, and is recorded so a reader does not file it as a bug. The
   #       schedule resource carries no tags argument in the pinned provider's
   #       schema, so the group and the role are the only taggable surfaces this

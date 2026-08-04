@@ -39,13 +39,13 @@
 #     module deliberately configures none -- see the closing comment.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: no `backend` block appears here, because a module holds no
+#   - Assumptions: no `backend` block appears here, because a module holds no
 #     state of its own. This directory is never applied directly; it is reached
 #     only through `terraform -chdir=infra/envs/<env>`, and infra-ci.yml
 #     initialises the three roots -- infra/bootstrap, infra/envs/dev and
 #     infra/envs/prod -- with `init -backend=false`, which is what validates
 #     this module transitively.
-#   - Assumption: because that validation is transitive and never happens in
+#   - Assumptions: because that validation is transitive and never happens in
 #     isolation, a reference to an undeclared input would surface at the
 #     calling root rather than here. Every input main.tf consumes must
 #     therefore be declared in variables.tf; that is a standing constraint on
@@ -55,8 +55,8 @@
 #     .github/workflows/tests.yml -- 79-column rulers, the repository-relative
 #     path alone on the second line, then Purpose and a WHY list. Inventing a
 #     new shape for the first .tf file in the repository would have left the
-#     sixteen modules that follow with no precedent to match.
-#   - Trade-off: one parameterised module is preferred over eight bespoke
+#     modules that follow with no precedent to match.
+#   - Trade-offs: one parameterised module is preferred over eight bespoke
 #     per-service definitions, and app/csd/CARDDEMO.CSD is the evidence that
 #     this matches the baseline's own shape -- all 18 `DEFINE TRANSACTION`
 #     stanzas (L306-L488) are attribute-identical, with ISOLATE(YES),
@@ -70,7 +70,7 @@
 
 terraform {
   # WHAT: the oldest Terraform CLI this module and its callers are written for.
-  # WHY : Assumption: the infrastructure package is validated on 1.15.8, and it
+  # WHY : Assumptions: the infrastructure package is validated on 1.15.8, and it
   #       depends on provider behaviour that no older release can express -- a
   #       zero minimum Aurora capacity requires hashicorp/aws 5.81.0 or later,
   #       which the constraint below clears comfortably. A floor (`>=`) rather
@@ -82,7 +82,7 @@ terraform {
 
   required_providers {
     # WHAT: the only provider this module needs, held inside the 6.x major.
-    # WHY : Trade-off: the pessimistic constraint admits 6.56 and later 6.x
+    # WHY : Trade-offs: the pessimistic constraint admits 6.56 and later 6.x
     #       releases but excludes 7.x, so a provider major bump cannot silently
     #       change resource schemas underneath eight instantiations at once;
     #       the accepted cost is that a genuinely required 7.x feature needs an
@@ -98,7 +98,7 @@ terraform {
 
     # WHAT: hashicorp/random is deliberately absent from this list, even though
     #       the environment roots that call this module do require it.
-    # WHY : Assumption: nothing in this module generates a random value. Every
+    # WHY : Assumptions: nothing in this module generates a random value. Every
     #       generated credential -- database passwords, seed-user passwords --
     #       is produced by infra/modules/secrets at apply time and written
     #       straight into Secrets Manager, which is what makes "no secrets
@@ -110,8 +110,6 @@ terraform {
   }
 }
 
-# WHAT: this module declares no `provider "aws"` block; it inherits the one
-#       configured by whichever root calls it.
 # WHY : Alternatives Considered: declaring a provider here was evaluated and
 #       rejected on two counts. First, it would move `region` and
 #       `default_tags` out of the calling root's control, and the environment

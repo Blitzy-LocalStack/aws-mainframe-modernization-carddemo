@@ -33,12 +33,26 @@
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Six variables carry a `validation` block, so a bad value is rejected
-#     at plan time instead of by the AWS API mid-apply: name_prefix and
+#   - Nine variables carry fourteen `validation` blocks between them, so a
+#     bad value is rejected before the AWS API sees it: name_prefix and
 #     service_name (charset and length, bounding the composed target-group
 #     name), environment (dev or prod only), task_cpu (the Fargate CPU set),
-#     autoscaling_target_cpu_utilization (a usable percentage band) and
-#     log_retention_in_days (the CloudWatch Logs retention set).
+#     autoscaling_target_cpu_utilization (a usable percentage band),
+#     log_retention_in_days (the CloudWatch Logs retention set),
+#     environment_variables (three rules: key shape, an allowlist of the
+#     namespaces the images read, and a refusal of secret-bearing names),
+#     writable_mount_paths (four rules: absolute paths, no "/", no
+#     duplicates, and non-empty whenever the root filesystem is read-only)
+#     and target_protocol (HTTPS only).
+#   - WHEN a rule is checked is not uniform. A `validation` reading only its
+#     own variable is evaluated by `terraform validate`; one reading ANOTHER
+#     variable is deferred to `terraform plan`, because the context that lets
+#     one variable see another does not exist at validate time. Exactly one
+#     rule falls in the second group -- the writable_mount_paths rule that
+#     reads var.readonly_root_filesystem -- so `validate` alone does not
+#     report a read-only root paired with an empty mount list, and `plan`
+#     does. Both precede any resource, so no task definition is created from
+#     the broken pairing either way.
 #   - Three variables select the module's SHAPE rather than one of its
 #     values -- create_service, attach_load_balancer and enable_autoscaling.
 #     Disabling one is not an error and raises no message; it produces fewer
@@ -59,26 +73,49 @@
 #     template eight ways, and any later change to the health-check or
 #     deployment contract would then have to land in eight files to keep the
 #     eight services behaving alike.
-#   - Trade-off: every `description` is written as a heredoc rather than as
+#   - Trade-offs: every `description` is written as a heredoc rather than as
 #     a single-line string. One line cannot carry what a value is for, which
 #     resource consumes it AND where the caller obtains it without running
 #     far past the 79-column width the rest of this module holds to, and a
 #     caller reading the generated README is the party that needs all three.
 #     The accepted cost is a considerably taller file.
-#   - Assumption: comments sit above each `variable` block and never between
+#   - Assumptions: comments sit above each `variable` block and never between
 #     its arguments. `terraform fmt` treats a comment as the end of an
 #     alignment run, so an interleaved comment silently re-aligns the `=`
 #     signs that follow it, and `terraform fmt -check -recursive infra/` is
 #     gating.
+#   - Refactoring Rationale: three of this module's postures are decided by
+#     its DEFAULTS rather than by its callers, because seven of the eight
+#     instantiations pass no value for any of them -- so for those seven the
+#     default is the configuration, and a permissive default is a permissive
+#     fleet. All three were corrected together for that reason.
+#     (a) readonly_root_filesystem now defaults to true, with the writable
+#         ephemeral mount it needs supplied by writable_mount_paths, so a
+#         process that reaches code execution cannot leave anything behind on
+#         the container filesystem for the next task to load.
+#     (b) target_protocol fixes the load-balancer-to-task hop at HTTPS, so
+#         encryption in transit reaches the task rather than stopping at the
+#         load balancer, where bearer tokens and account data would otherwise
+#         have crossed the private application subnets in the clear.
+#     (c) environment_variables is now gated by an allowlist of the key
+#         namespaces the images read plus a refusal of secret-bearing names,
+#         so the documented split with ssm_parameter_arns and secret_arns is
+#         enforced rather than merely described. A literal placed here is
+#         durably readable in the task definition, in plan output and in
+#         state, by a wider audience than the secret store's read policy.
+#     Each is the module-side half of a change whose other half lives
+#     elsewhere: (a) needs no other artifact, (b) requires the server.ssl
+#     block in each service's application.yml, and (c) relies on the secrets
+#     module already generating every credential at apply time.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # TIER 1 -- REQUIRED INPUTS. Every variable in this tier omits `default`.
 #
-# WHY : Alternatives Considered: ordering all forty-six variables strictly
+# WHY : Alternatives Considered: ordering all forty-eight variables strictly
 #       alphabetically, which is the obvious scheme and does help a reader
 #       hunting for one name already known. Rejected because it interleaves
-#       the nine inputs a caller MUST supply with the thirty-seven it may
+#       the nine inputs a caller MUST supply with the thirty-nine it may
 #       ignore, so a new `module` block could only be written correctly by
 #       reading every block in the file to discover which ones lack a
 #       default. Required-first answers the question a caller actually
@@ -91,7 +128,7 @@
 
 # WHAT: the bounded-context short name that distinguishes one instantiation
 #       from the other seven inside the same root.
-# WHY : Assumption: no `default` deliberately. This is the only input that
+# WHY : Assumptions: no `default` deliberately. This is the only input that
 #       tells the eight instantiations apart, so a default would let two
 #       `module` blocks in one root compose the same ECS service name, log
 #       group and target-group name and then collide during apply. The
@@ -128,7 +165,7 @@ variable "service_name" {
 }
 
 # WHAT: which of the two provisioned environments this instance belongs to.
-# WHY : Assumption: the accepted set is closed at exactly two because the
+# WHY : Assumptions: the accepted set is closed at exactly two because the
 #       package provisions exactly two roots, infra/envs/dev and
 #       infra/envs/prod, and those two differ only in sizing and retention
 #       -- task count, CPU and memory, log retention -- never in topology. A
@@ -152,7 +189,7 @@ variable "environment" {
 }
 
 # WHAT: the ECS cluster this service is created in.
-# WHY : Assumption: the ARN form rather than the name, because that is what
+# WHY : Assumptions: the ARN form rather than the name, because that is what
 #       the `cluster` argument of aws_ecs_service takes. It is one of a PAIR
 #       of cluster inputs -- see cluster_name immediately below for why both
 #       forms of one identity are needed.
@@ -163,10 +200,22 @@ variable "cluster_arn" {
     module's output; all eight instantiations in a root share one cluster.
   EOT
   type        = string
+
+  # WHY : Assumptions: this is an ARN and the sibling variable below is a NAME, and
+  #       both are typed string, so passing one where the other belongs
+  #       type-checks and plans cleanly. The two are consumed in different places
+  #       -- the ARN by aws_ecs_service.cluster, the name by the autoscaling
+  #       resource identifier -- so a swap fails at apply against whichever
+  #       resource reads it, in an error naming the AWS argument rather than the
+  #       wiring mistake. Checking the shape here names the input.
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:ecs:[a-z0-9-]+:[0-9]{12}:cluster/", var.cluster_arn))
+    error_message = "cluster_arn must be an ECS cluster ARN of the form arn:<partition>:ecs:<region>:<account>:cluster/<name>, not a cluster name: the name belongs in cluster_name, and both are strings so a swap plans cleanly."
+  }
 }
 
 # WHAT: the same cluster as cluster_arn, in its bare-name form.
-# WHY : Assumption: Application Auto Scaling identifies an ECS service by a
+# WHY : Assumptions: Application Auto Scaling identifies an ECS service by a
 #       composite string, service/<cluster-name>/<service-name>, and that is
 #       a documented AWS API contract rather than a naming preference, so
 #       the NAME is required and the ARN cannot substitute for it.
@@ -192,7 +241,7 @@ variable "cluster_name" {
 }
 
 # WHAT: the VPC the load-balancer target group is registered in.
-# WHY : Assumption: aws_lb_target_group requires vpc_id whenever its target
+# WHY : Assumptions: aws_lb_target_group requires vpc_id whenever its target
 #       type is `ip`, and `ip` is the only target type Fargate's awsvpc
 #       networking supports, so this input is unavoidable even though the
 #       tasks themselves are placed by subnet rather than by VPC.
@@ -207,7 +256,7 @@ variable "vpc_id" {
 }
 
 # WHAT: the subnets the Fargate tasks are placed in.
-# WHY : Assumption: these must be the PRIVATE-APPLICATION tier
+# WHY : Assumptions: these must be the PRIVATE-APPLICATION tier
 #       specifically, which is why the tier is named in the variable instead
 #       of a neutral `subnet_ids`. The network module builds three tiers with
 #       deliberately different reachability -- the public subnets carry only
@@ -227,10 +276,24 @@ variable "private_app_subnet_ids" {
     one.
   EOT
   type        = list(string)
+
+  # WHY : Assumptions: the tasks are placed across three availability zones, so an
+  #       empty or single-element list is refused. One subnet plans and applies
+  #       cleanly and puts every task of a service in one zone, which makes the
+  #       three-zone network design pointless and turns one zone's loss into an
+  #       outage -- the same reasoning desired_count's floor of two rests on, and
+  #       neither guard is worth anything without the other.
+  #       Assumptions: the shape is checked too, because a subnet id and a VPC id
+  #       are both strings beginning "vpc"/"subnet" and a swapped pair is refused
+  #       only when the network interface is created.
+  validation {
+    condition     = length(var.private_app_subnet_ids) >= 2 && alltrue([for id in var.private_app_subnet_ids : can(regex("^subnet-[0-9a-f]{8,17}$", id))])
+    error_message = "private_app_subnet_ids must hold at least two subnet ids of the form subnet-<hex>: a single subnet places every task of a service in one availability zone, which makes the three-zone design and the two-task floor both pointless."
+  }
 }
 
 # WHAT: the security groups attached to each task's network interface.
-# WHY : Trade-off: a list rather than a single id. One group -- the
+# WHY : Trade-offs: a list rather than a single id. One group -- the
 #       application group published by the network module, which admits the
 #       load balancer on the container port and permits egress to the
 #       database on 5432 and to the VPC interface endpoints on 443 -- is the
@@ -250,10 +313,21 @@ variable "security_group_ids" {
     appended by the caller.
   EOT
   type        = list(string)
+
+  # WHY : Assumptions: an empty list is refused because it is not neutral. A task
+  #       launched with no security group of its own falls back to the VPC's
+  #       default group, whose rules this tree neither writes nor reviews, so the
+  #       task's reach becomes whatever that group happens to allow -- the same
+  #       failure the VPC Link guard in infra/modules/api-gateway-http refuses, for
+  #       the same reason.
+  validation {
+    condition     = length(var.security_group_ids) > 0 && alltrue([for id in var.security_group_ids : can(regex("^sg-[0-9a-f]{8,17}$", id))])
+    error_message = "security_group_ids must hold at least one security group id of the form sg-<hex>: a task with no group of its own falls back to the VPC default group, whose rules this configuration does not own."
+  }
 }
 
 # WHAT: the container image this task runs.
-# WHY : Assumption: the value arrives already complete -- registry host,
+# WHY : Assumptions: the value arrives already complete -- registry host,
 #       repository path, and a tag or digest -- and this module composes none
 #       of it. That is deliberate: composing a registry hostname would
 #       require both the account identifier and the region, and no account
@@ -272,9 +346,23 @@ variable "image_uri" {
     result by commit SHA.
   EOT
   type        = string
+
+  # WHY : Assumptions: the image is referenced by an explicit registry URI, and a
+  #       tag or digest is REQUIRED. Omitting it makes the container runtime resolve
+  #       `latest`, so two tasks launched from one task definition can run
+  #       different code, and a rollback has nothing to roll back to. That is the
+  #       same determinism argument the pinned Fargate platform version makes,
+  #       applied to the artifact rather than the platform.
+  #       Trade-offs: a digest reference is admitted alongside a tag and is the
+  #       stronger form, but a tag is not refused: the deploy pipeline pushes an
+  #       immutable tag built from the commit, and requiring digests would mean the
+  #       task definition could only be written after the push resolved.
+  validation {
+    condition     = can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.image_uri))
+    error_message = "image_uri must be a full ECR image reference ending in an explicit :tag or @sha256:<digest> -- for example 111122223333.dkr.ecr.eu-west-1.amazonaws.com/carddemo-dev/auth-service:1.2.3. An untagged reference resolves to latest at task launch, so one task definition can run two different builds."
+  }
 }
 
-# WHAT: the one repository the task execution role is allowed to pull from.
 # WHY : Alternatives Considered: this input exists for exactly one reason --
 #       to scope the execution role's image-pull permission to a single
 #       repository instead of to every repository in the account. The
@@ -287,7 +375,7 @@ variable "image_uri" {
 #       pulled out of the registry hostname and reassembled, which would put
 #       both literals into this module's expressions. Accepting the ARN as
 #       its own input keeps the parsing, and those literals, out entirely.
-#       Assumption: the registry authorization-token action accepts no
+#       Assumptions: the registry authorization-token action accepts no
 #       resource narrower than the wildcard, so it is the one statement this
 #       ARN cannot scope. Every statement that pulls a layer or reads the
 #       image manifest is scoped by it.
@@ -299,13 +387,24 @@ variable "ecr_repository_arn" {
     ecr module's output, which publishes one ARN per repository.
   EOT
   type        = string
+
+  # WHY : Assumptions: this value scopes the execution role's image-pull permission
+  #       to one repository, so a malformed value does not fail loudly -- it
+  #       produces an IAM statement matching no repository, and the task then fails
+  #       to start with an authorization error about pulling the image rather than
+  #       anything pointing at this input. A repository NAME and a repository URI
+  #       are both plausible things to pass here and both type-check.
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/", var.ecr_repository_arn))
+    error_message = "ecr_repository_arn must be an ECR repository ARN of the form arn:<partition>:ecr:<region>:<account>:repository/<name>. A repository name or an image URI produces an IAM statement matching no repository, so the task fails to pull its image."
+  }
 }
 
 # -----------------------------------------------------------------------------
 # TIER 2 -- OPTIONAL INPUTS. Every variable below carries a `default`, so a
 # caller may omit all of them and still get a working service.
 #
-# WHY : Assumption: each default is chosen to be the value seven of the eight
+# WHY : Assumptions: each default is chosen to be the value seven of the eight
 #       instantiations want, so a root's `module` block stays short and the
 #       lines it does write are the ones that genuinely differ. Three axes
 #       are expected to diverge between dev and prod -- task count, CPU and
@@ -315,7 +414,7 @@ variable "ecr_repository_arn" {
 # -----------------------------------------------------------------------------
 
 # WHAT: the common leading token in every resource name this module composes.
-# WHY : Assumption: the binding constraint on this value is an AWS naming
+# WHY : Assumptions: the binding constraint on this value is an AWS naming
 #       ceiling, and it comes from the shortest limit among the names built
 #       out of it -- an ALB target-group name, capped at 32 characters, well
 #       below the ceiling on an ECS service name or an IAM role name. The
@@ -325,7 +424,7 @@ variable "ecr_repository_arn" {
 #       additionally forbids a leading digit, a trailing hyphen and doubled
 #       hyphens, because a target-group name may not begin or end with a
 #       hyphen and concatenation is what would otherwise produce one.
-#       Trade-off: the default matches the same-named variable in the
+#       Trade-offs: the default matches the same-named variable in the
 #       bootstrap root so one prefix identifies every resource in the
 #       package; the cost is that the two must be changed together to stay
 #       consistent.
@@ -361,7 +460,7 @@ variable "name_prefix" {
 
 # WHAT: an explicit override for the name of the container inside the task
 #       definition.
-# WHY : Assumption: this matters far beyond cosmetics, for one instantiation
+# WHY : Assumptions: this matters far beyond cosmetics, for one instantiation
 #       in particular. Step Functions starts each batch step through the
 #       synchronous run-task integration and passes that step's arguments as
 #       container overrides, which address the container being overridden BY
@@ -370,7 +469,7 @@ variable "name_prefix" {
 #       silently inside this module would be a contract neither side
 #       declares. Exposing it lets the root pin one literal and hand the same
 #       one to both modules.
-#       Trade-off: the default is null rather than a computed string, because
+#       Trade-offs: the default is null rather than a computed string, because
 #       a variable default cannot reference another variable. main.tf
 #       coalesces null to a name derived from service_name, so the seven
 #       services that have no cross-module contract never set it.
@@ -390,7 +489,7 @@ variable "container_name" {
 
 # WHAT: the TCP port the container listens on and the target group forwards
 #       to.
-# WHY : Assumption: 8080 is not an arbitrary preference but the one port the
+# WHY : Assumptions: 8080 is not an arbitrary preference but the one port the
 #       network tiering admits -- the application security group permits
 #       load-balancer-to-application traffic on 8080 and nothing else
 #       inbound. Any other value would produce a target group whose health
@@ -408,9 +507,24 @@ variable "container_port" {
   EOT
   type        = number
   default     = 8080
+
+  # WHY : Assumptions: the port is the one the network design admits between the
+  #       load balancer and the application, and the same number appears in each
+  #       image's EXPOSE, in the security-group rule pair and in the target group
+  #       this module creates. A value outside the TCP port range is rejected by
+  #       the task-definition API at apply; a privileged port below 1024 would be
+  #       refused at container start instead, because the containers run as the
+  #       unprivileged user named by container_user, and that failure appears as a
+  #       task that starts and immediately stops with no port bound.
+  #       Trade-offs: the whole ephemeral range stays permitted rather than pinning
+  #       8080, because a module reused for a service listening elsewhere is a
+  #       legitimate case; what is refused is the range that cannot work.
+  validation {
+    condition     = var.container_port >= 1024 && var.container_port <= 65535 && floor(var.container_port) == var.container_port
+    error_message = "container_port must be a whole number between 1024 and 65535. Ports below 1024 are privileged and cannot be bound by the unprivileged container user, which presents as a task that starts and stops with nothing listening."
+  }
 }
 
-# WHAT: the identity the container process runs as.
 # WHY : Refactoring Rationale: running as root is the container default and
 #       is what this replaces. It is also not a policy imported from outside
 #       the application -- app/csd/CARDDEMO.CSD sets TASKDATAKEY(USER) on all
@@ -420,11 +534,11 @@ variable "container_port" {
 #       against the system being migrated rather than a neutral choice, and
 #       the CI policy scan separately treats a container with no non-root
 #       user as a finding.
-#       Assumption: the value must name a user the image actually has. Each
+#       Assumptions: the value must name a user the image actually has. Each
 #       service's Dockerfile creates one as part of its multi-stage build,
 #       and a mismatch fails at task start with an unresolvable-user error
 #       rather than at plan time, so the two are changed together.
-#       Trade-off: typed as a string, not a number, because the ECS container
+#       Trade-offs: typed as a string, not a number, because the ECS container
 #       definition's user field also accepts the uid:gid pair and named-user
 #       forms, neither of which a numeric type could carry.
 variable "container_user" {
@@ -437,16 +551,30 @@ variable "container_user" {
   EOT
   type        = string
   default     = "10001"
+
+  # WHY : Assumptions: the value lands on the container definition's `user` field,
+  #       which accepts a numeric uid, a uid:gid pair or a name that must exist in
+  #       the image's own /etc/passwd. The numeric form is required here so that a
+  #       policy check, and a reader, can confirm the process is not root without
+  #       reading the image; a name would also break if an image were rebuilt on a
+  #       base whose account table differed.
+  #       Assumptions: uid 0 is refused explicitly. It is the one value that
+  #       satisfies every shape check and defeats the purpose of the field, and
+  #       nothing downstream would report it: the task runs, as root.
+  validation {
+    condition     = can(regex("^[1-9][0-9]*(:[1-9][0-9]*)?$", var.container_user))
+    error_message = "container_user must be a numeric uid, or a numeric uid:gid pair, and must not be 0. A name is refused because it depends on the image's /etc/passwd, and uid 0 would run the task as root while satisfying every other check."
+  }
 }
 
 # WHAT: the CPU units reserved for the whole task.
-# WHY : Assumption: Fargate accepts only a fixed set of task CPU sizes, and
+# WHY : Assumptions: Fargate accepts only a fixed set of task CPU sizes, and
 #       only certain memory sizes alongside each one, so an arbitrary integer
 #       is rejected by the API during apply. The validation restates that set
 #       to move the rejection to plan time, where the message names this
 #       variable rather than the task definition. The set is an AWS contract
 #       this module depends on rather than something verified here.
-#       Trade-off: the pairing with task_memory cannot be validated as a pair
+#       Trade-offs: the pairing with task_memory cannot be validated as a pair
 #       without embedding the whole CPU-to-memory matrix in a condition, so
 #       each is bounded independently and the coupling is documented on both.
 #       The default of 1024 units with 2048 MiB is chosen because 2048 is the
@@ -476,11 +604,11 @@ variable "task_cpu" {
 }
 
 # WHAT: the memory reserved for the whole task, in MiB.
-# WHY : Assumption: Fargate constrains this to a set that DEPENDS ON
+# WHY : Assumptions: Fargate constrains this to a set that DEPENDS ON
 #       task_cpu -- the same API contract task_cpu depends on -- so no
 #       standalone condition can bound it correctly and none is written here;
 #       an invalid pair surfaces at apply.
-#       Trade-off: that is the accepted cost of not embedding the whole
+#       Trade-offs: that is the accepted cost of not embedding the whole
 #       CPU-to-memory matrix in a validation that would then have to be
 #       maintained against a set AWS owns. The default is the smallest memory
 #       Fargate permits with the default task_cpu, so the two ship as a pair
@@ -494,30 +622,165 @@ variable "task_memory" {
   EOT
   type        = number
   default     = 2048
+
+  # WHY : Refactoring Rationale: the CPU-to-memory matrix IS validated here now,
+  #       and the note above -- that no standalone condition can bound this
+  #       correctly, so an invalid pair surfaces at apply -- is superseded. It was
+  #       true of a condition reading only this variable; a validation may read
+  #       ANOTHER variable, so the pair can be checked as a pair. What the earlier
+  #       reasoning got right is that the matrix is an AWS contract this module
+  #       depends on rather than something verified here, which is why the table
+  #       below is transcribed rather than derived.
+  #       Assumptions: Fargate permits, for each task CPU size, a fixed set of
+  #       memory values: 256 units takes 512, 1024 or 2048 MiB; 512 takes 1024 to
+  #       4096 in 1024-MiB steps; 1024 takes 2048 to 8192 in 1024-MiB steps; 2048
+  #       takes 4096 to 16384 in 1024-MiB steps; 4096 takes 8192 to 30720 in
+  #       1024-MiB steps; 8192 takes 16384 to 61440 in 4096-MiB steps; and 16384
+  #       takes 32768 to 122880 in 8192-MiB steps. An out-of-set pair is rejected
+  #       by the task-definition API during apply, in an error naming neither this
+  #       variable nor task_cpu, and it is the single likeliest thing to get wrong
+  #       when raising capacity for prod, because each value is individually
+  #       plausible and only the COMBINATION is refused.
+  #       Trade-offs: transcribing the matrix means a size AWS adds later is
+  #       refused here until this list is extended. Accepted: the set has been
+  #       stable across the platform generations this stack targets, and the
+  #       failure it prevents lands partway through creating a task definition.
+  validation {
+    condition = contains(lookup({
+      256   = [512, 1024, 2048]
+      512   = [1024, 2048, 3072, 4096]
+      1024  = [2048, 3072, 4096, 5120, 6144, 7168, 8192]
+      2048  = [4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]
+      4096  = [8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]
+      8192  = [16384, 20480, 24576, 28672, 32768, 36864, 40960, 45056, 49152, 53248, 57344, 61440]
+      16384 = [32768, 40960, 49152, 57344, 65536, 73728, 81920, 90112, 98304, 106496, 114688, 122880]
+    }, var.task_cpu, []), var.task_memory)
+    error_message = "task_memory must be a value AWS Fargate permits alongside the chosen task_cpu. The pairs are: 256 units with 512, 1024 or 2048 MiB; 512 with 1024 to 4096 in 1024-MiB steps; 1024 with 2048 to 8192; 2048 with 4096 to 16384; 4096 with 8192 to 30720; 8192 with 16384 to 61440 in 4096-MiB steps; 16384 with 32768 to 122880 in 8192-MiB steps. Change the two together."
+  }
 }
 
 # WHAT: whether the container's root filesystem is mounted read-only.
-# WHY : Trade-off: declared and defaulted to false as a reviewed decision
-#       rather than left out. A read-only root would be the stronger posture
-#       and the CI policy scan prefers it, but the service images run a JVM
-#       that writes to a temporary directory in normal operation, so enabling
-#       it without also mounting a writable volume would make every task fail
-#       after start rather than harden it -- and no such volume is part of
-#       this module's surface. Defaulting to false therefore keeps the module
-#       working, and declaring the variable is what turns a silent gap into a
-#       choice a root can reverse once its image is built to run without
-#       writing to the root filesystem. Omitting the variable altogether was
-#       the alternative and is strictly worse: the same posture, with nothing
-#       recording that anyone weighed it.
+# WHY : Refactoring Rationale: this defaulted to false, and the reasoning given
+#       for that -- a JVM writes to a temporary directory, and this module
+#       mounts no writable volume -- was accurate about the obstacle and drew
+#       the wrong conclusion from it. The missing volume was a gap in this
+#       module's surface, so the fix was to close the gap rather than to leave
+#       every task writable because of it. writable_mount_paths below is that
+#       volume, and with it the default is true: a container whose root
+#       filesystem cannot be written is one where a process that reaches code
+#       execution cannot leave a modified binary, a cron entry, a shared object
+#       on the loader path, or an altered configuration file behind for the next
+#       task to load. Eight services times every task in every environment ran
+#       without that property for the sake of one temporary directory.
+#       Assumptions: this pairs with the read-only default rather than standing
+#       alone. main.tf emits one Fargate ephemeral volume and one mount point per
+#       entry in writable_mount_paths, so the JVM's temporary directory is
+#       writable while the root filesystem is not, and the validation on that
+#       variable refuses the half-configured combination -- read-only root, no
+#       writable path -- which is the state that would break every task at start.
+#       Alternatives Considered: leaving the default false and documenting that a
+#       root may harden it. Rejected because a security posture reached only by a
+#       caller opting in is the posture nobody has: seven of the eight
+#       instantiations pass this module's defaults, so the default IS the
+#       configuration. Also considered: keeping it false for the batch
+#       instantiation specifically, on the theory that a batch step writes more
+#       than a service does. Rejected as unfounded -- batch output goes to the
+#       database and to object storage, not to the container filesystem -- and
+#       the input remains available if a specific step ever proves otherwise.
 variable "readonly_root_filesystem" {
   description = <<-EOT
-    Sets readonlyRootFilesystem on the container definition. Left false
-    because the service images run a JVM that writes to a temporary directory
-    and this module mounts no writable volume for it. A root whose image is
-    prepared to run without writing to the root filesystem may set it true.
+    Sets readonlyRootFilesystem on the container definition. Defaults to true,
+    which is the intended posture for all eight instantiations: writable paths
+    the JVM needs are supplied as Fargate ephemeral volumes through
+    writable_mount_paths rather than by leaving the whole root filesystem
+    writable. Setting this false is a deliberate weakening and needs a reason.
   EOT
   type        = bool
-  default     = false
+  default     = true
+}
+
+# WHAT: the container paths that stay writable while the root filesystem does
+#       not, each backed by a Fargate ephemeral volume.
+# WHY : Assumptions: /tmp is the whole of the default because it is the whole of
+#       what the images need. A JVM writes to java.io.tmpdir -- heap dumps, JAR
+#       extraction, the hsperfdata performance file, Tomcat's upload staging
+#       directory -- and on Linux java.io.tmpdir IS /tmp unless something
+#       overrides it. Mounting /tmp writable therefore satisfies the JVM with no
+#       JVM flag at all.
+#       Alternatives Considered: adding a jvm_tmp_dir input and passing
+#       -Djava.io.tmpdir through JAVA_TOOL_OPTIONS. Rejected as a second way to
+#       express one fact: the flag and this list would both have to name the same
+#       path, nothing would check that they agreed, and a mismatch presents as a
+#       JVM that cannot write its temporary files -- which looks like the
+#       read-only root filesystem is broken rather than like two settings
+#       disagreeing. Relying on the platform default and mounting that exact path
+#       leaves one authority.
+#       Alternatives Considered: an EFS or bind mount instead of an ephemeral
+#       volume. Rejected because temporary files must NOT survive a task or be
+#       shared between tasks -- a heap dump written by one task and readable by
+#       the next is a data-exposure path, and the baseline had no equivalent of
+#       shared scratch storage. Fargate ephemeral storage is encrypted at rest
+#       and destroyed with the task, which is the lifetime a temporary directory
+#       should have.
+#       Trade-offs: an empty list is permitted, and is the correct value for an
+#       image that provably writes nowhere. It is refused only in combination
+#       with a read-only root, where it would break every task; that pairing is
+#       checked on this variable rather than on the boolean above, because
+#       Terraform evaluates a cross-variable validation at plan time and naming
+#       the list is what tells the caller which value to add.
+variable "writable_mount_paths" {
+  description = <<-EOT
+    Absolute container paths to keep writable when readonly_root_filesystem is
+    true, each backed by its own Fargate ephemeral volume that is encrypted at
+    rest and destroyed with the task. Defaults to the single temporary directory
+    the JVM writes to, which is all the service images require. Must be
+    non-empty whenever readonly_root_filesystem is true.
+  EOT
+  type        = list(string)
+  nullable    = false
+  default     = ["/tmp"]
+
+  # WHY : Assumptions: a relative path is refused rather than resolved. A container
+  #       mount point is interpreted by the container runtime, not by a shell, so
+  #       "tmp" is not made absolute -- it produces a mount at an unintended
+  #       location while /tmp stays read-only, which presents as the JVM failing
+  #       to write and sends a reader looking at the image.
+  validation {
+    condition     = alltrue([for path in var.writable_mount_paths : startswith(path, "/")])
+    error_message = "every writable_mount_paths entry must be an absolute container path beginning with a forward slash."
+  }
+
+  # WHY : Assumptions: "/" is refused explicitly. Mounting a writable volume over
+  #       the root directory satisfies the letter of readonlyRootFilesystem and
+  #       defeats all of it, and it is the shortest value anyone debugging a
+  #       write failure would reach for.
+  validation {
+    condition     = !contains(var.writable_mount_paths, "/")
+    error_message = "writable_mount_paths must not contain \"/\"; mounting a writable volume over the root directory defeats readonly_root_filesystem entirely. Name the specific directories that must be writable."
+  }
+
+  # WHY : Assumptions: duplicates are refused because main.tf derives one volume
+  #       NAME per entry, so two identical paths would produce two volumes
+  #       competing for one mount point -- which the ECS API rejects at apply,
+  #       after the task definition revision has already been composed.
+  validation {
+    condition     = length(distinct(var.writable_mount_paths)) == length(var.writable_mount_paths)
+    error_message = "writable_mount_paths must not repeat a path; each entry becomes its own volume and mount point."
+  }
+
+  # WHY : Assumptions: this is the cross-variable rule that keeps the pair
+  #       coherent, and it is the reason the read-only default is safe to ship.
+  #       A read-only root with no writable path is not a hardened task, it is a
+  #       task that starts and then fails the moment the JVM writes -- which is
+  #       during startup, so it fails every deployment rather than intermittently.
+  #       Terraform defers a validation that reads another variable to plan time
+  #       rather than validate time, so this one is checked by `plan` and by
+  #       `apply`; both precede any resource, so no task definition is ever
+  #       created from the broken pairing.
+  validation {
+    condition     = !var.readonly_root_filesystem || length(var.writable_mount_paths) > 0
+    error_message = "writable_mount_paths must list at least one path when readonly_root_filesystem is true; the service images run a JVM that writes to its temporary directory, so a read-only root with no writable mount fails every task at startup. Pass [\"/tmp\"], which is the default, or set readonly_root_filesystem false with a stated reason."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -527,15 +790,6 @@ variable "readonly_root_filesystem" {
 # here, then create_service and enable_autoscaling below -- are described
 # together once, because none of the three makes sense in isolation.
 #
-# WHAT: seven of the eight instantiations are long-running online services
-#       behind the internal load balancer. The batch instance is not: its
-#       steps are started one at a time by Step Functions through the
-#       synchronous run-task integration, with each step's arguments passed
-#       as container overrides. It needs the task definition, the task role,
-#       the execution role and the log group, and it must NOT get a target
-#       group, a permanently running service or an autoscaling target --
-#       there is nothing for a load balancer to route to and nothing for a
-#       scaling policy to act on.
 # WHY : Alternatives Considered: a second module, `ecs-task`, emitting only
 #       the task definition, the two roles and the log group. Rejected
 #       because those four ARE the bulk of this module, so a second module
@@ -544,7 +798,7 @@ variable "readonly_root_filesystem" {
 #       the details that must not differ between how a service and a batch
 #       step are packaged: the non-root user, the log-group naming, and the
 #       execution role's resource-scoped pull and decrypt permissions.
-#       Trade-off: the cost is three booleans that seven of the eight callers
+#       Trade-offs: the cost is three booleans that seven of the eight callers
 #       never mention, accepted so one module covers both shapes and the four
 #       shared resources are defined exactly once.
 # -----------------------------------------------------------------------------
@@ -552,7 +806,7 @@ variable "readonly_root_filesystem" {
 # WHY : Alternatives Considered: the rejected `ecs-task` module recorded in
 #       the section note above; this flag is part of what lets one module
 #       serve both shapes.
-#       Assumption: the coupling is not inferable from the type and is
+#       Assumptions: the coupling is not inferable from the type and is
 #       load-bearing in main.tf. Setting this false creates no target group,
 #       emits no `load_balancer` block on the service, and forces
 #       health_check_grace_period_seconds to null, because aws_ecs_service
@@ -570,38 +824,122 @@ variable "attach_load_balancer" {
   EOT
   type        = bool
   default     = true
+
+  # WHY : Assumptions: attaching a load balancer without creating a service is
+  #       incoherent and cannot be expressed. main.tf would create a target group
+  #       that no service ever registers with, so the group would exist with zero
+  #       targets, its health check would report nothing, and a listener rule
+  #       pointed at it would answer every request with a 503 -- while the plan and
+  #       the apply both succeeded. The two flags describe one shape between them,
+  #       so the incoherent quarter of the matrix is refused here rather than
+  #       documented.
+  #       Trade-offs: the reverse pairing stays legal. A service with no load
+  #       balancer is exactly the batch shape this module also serves.
+  validation {
+    condition     = !var.attach_load_balancer || var.create_service
+    error_message = "attach_load_balancer requires create_service: a target group with no service registered against it has zero targets, so a listener rule pointed at it answers 503 while the plan reports success. The batch shape sets both to false."
+  }
 }
 
 # WHAT: the HTTP path the target group probes.
-# WHY : Assumption: the services expose Spring Boot Actuator, whose health
+# WHY : Assumptions: the services expose Spring Boot Actuator, whose health
 #       endpoint is the one path guaranteed to answer without touching
 #       business data or requiring a token, and the same endpoint backs both
 #       this target-group probe and the image's own container health check.
 #       Probing a business route instead was the alternative and is rejected
 #       because it would make target-group membership depend on a database
 #       round trip, so one slow query would deregister healthy tasks.
-#       Assumption: this module owns the TARGET GROUP and its health check,
+#       Assumptions: this module owns the TARGET GROUP and its health check,
 #       and nothing else about routing. The listener and the per-service
 #       listener rules that send traffic to the group belong to the alb
 #       module. Keeping that boundary explicit is why no listener or
 #       listener-rule input appears anywhere in this file.
 variable "health_check_path" {
   description = <<-EOT
-    Path the target-group health check requests on container_port. Defaults
-    to the Spring Boot Actuator health endpoint every service exposes.
-    Consumed only by the target group this module creates; the listener rule
-    that routes traffic to that group is the alb module's to define.
+    Path the target-group health check requests on container_port, over HTTPS
+    like the traffic it stands in for. Defaults to the Spring Boot Actuator
+    health endpoint every service exposes. Consumed only by the target group
+    this module creates; the listener rule that routes traffic to that group is
+    the alb module's to define.
   EOT
   type        = string
   default     = "/actuator/health"
+
+  # WHY : Assumptions: the value is used verbatim as an absolute request path, so a
+  #       value such as "actuator/health" is not corrected -- it probes a path that
+  #       does not exist, which presents as every task failing its health check
+  #       rather than as a configuration error, and sends a reader looking at the
+  #       service instead of at this input. The same check guards the republished
+  #       copy in infra/modules/alb, deliberately worded identically so the two
+  #       cannot diverge.
+  validation {
+    condition     = startswith(var.health_check_path, "/")
+    error_message = "health_check_path must begin with \"/\"; a health-check path is absolute, and a relative value probes a path that does not exist, so every target fails its check."
+  }
+}
+
+# WHAT: the protocol the target group and its health check use to reach the task.
+# WHY : Refactoring Rationale: this module said nothing about the protocol, and
+#       silence here is not neutral -- an aws_lb_target_group needs one, so main.tf
+#       would have supplied HTTP and the load-balancer-to-task hop would have been
+#       cleartext. The viewer hop was already TLS (the alb module pins a TLS 1.2
+#       floor on its listener, and API Gateway reaches that listener over a VPC
+#       Link), so the encrypted path stopped exactly at the load balancer and
+#       every request then crossed the private application subnets in the clear:
+#       the bearer token in the Authorization header, the account and card numbers
+#       in the paths, and the response bodies. The design requires encryption in
+#       transit end to end rather than up to the edge, and being inside a VPC
+#       bounds who can observe that traffic without making it unreadable -- the
+#       same distinction recorded on the Aurora cluster's rds.force_ssl parameter.
+#       Assumptions: main.tf uses this one value for BOTH the target group's
+#       protocol and its health check's protocol. They are deliberately not two
+#       inputs: a health check that probes HTTP while traffic goes over HTTPS
+#       reports a task healthy on a listener the traffic never uses, and the two
+#       could then be configured to disagree with nothing detecting it.
+#       Assumptions: the task must actually terminate TLS on container_port for
+#       this to work, which is the other half of the same change --
+#       services/*/src/main/resources/application.yml carries the server.ssl
+#       block that makes each service serve HTTPS on 8080. The two halves must
+#       move together, and each names the other.
+#       Trade-offs: the target group does NOT verify the task's certificate, and
+#       cannot -- an Application Load Balancer trusts any certificate a target
+#       presents, including a self-signed one. So this defends against observation
+#       on the path and not against a substituted target; that residual is
+#       accepted because target registration is controlled by this module and the
+#       security groups admit only the load balancer, and it is recorded so nobody
+#       reads HTTPS here as mutual authentication.
+variable "target_protocol" {
+  description = <<-EOT
+    Protocol the target group and its health check use to reach the task.
+    Fixed at HTTPS: the load-balancer-to-task hop carries bearer tokens and
+    account data across the private application subnets, so it is encrypted like
+    the viewer hop in front of it. Declared as an input only so that an attempt
+    to lower it is refused with a reason rather than silently accepted.
+  EOT
+  type        = string
+  nullable    = false
+  default     = "HTTPS"
+
+  # WHY : Trade-offs: an input whose only accepted value is its default looks
+  #       redundant and is not. Someone debugging a target group whose members
+  #       will not turn healthy reaches for the protocol first; with no input to
+  #       set, the next step is an edit to main.tf, which changes the hop for all
+  #       eight services and appears in no review of the environment root. A
+  #       variable that refuses the change states the reason at the moment it is
+  #       attempted. The same pattern is used for the ETL's TLS mode in
+  #       data-migration/src/carddemo_migration/config.py, for the same reason.
+  validation {
+    condition     = var.target_protocol == "HTTPS"
+    error_message = "target_protocol must be \"HTTPS\". The load-balancer-to-task hop carries the Authorization header and account, card and transaction data across the private application subnets, so it is encrypted end to end rather than only up to the load balancer. If a task genuinely cannot serve TLS, fix the service's server.ssl configuration rather than lowering this."
+  }
 }
 
 # WHAT: the HTTP status codes the probe treats as healthy.
-# WHY : Assumption: the Actuator health endpoint answers 200 when its status
+# WHY : Assumptions: the Actuator health endpoint answers 200 when its status
 #       is UP and a server error when it is not, so a single code is the
 #       whole contract and a range would widen it to include responses that
 #       mean the service is not healthy.
-#       Trade-off: typed as a string, not a number, because the AWS matcher
+#       Trade-offs: typed as a string, not a number, because the AWS matcher
 #       accepts ranges and comma-separated lists as well as a single code,
 #       none of which a numeric type could express.
 variable "health_check_matcher" {
@@ -612,10 +950,23 @@ variable "health_check_matcher" {
   EOT
   type        = string
   default     = "200"
+
+  # WHY : Assumptions: the target group accepts either a single status code or a
+  #       comma-separated list and range, and it validates the string during apply
+  #       rather than normalising it. A value such as "OK" or "2xx" is
+  #       syntactically plausible and is refused there, after the target group is
+  #       already being created; checking the shape here names this input instead.
+  #       Trade-offs: only the SHAPE is checked, not whether the codes are ones the
+  #       actuator can return. A caller widening the matcher to admit a redirect
+  #       is making a deliberate choice this module has no basis to refuse.
+  validation {
+    condition     = can(regex("^[1-5][0-9][0-9](-[1-5][0-9][0-9])?(,[1-5][0-9][0-9](-[1-5][0-9][0-9])?)*$", var.health_check_matcher))
+    error_message = "health_check_matcher must be one HTTP status code, a hyphenated range, or a comma-separated list of either -- for example \"200\", \"200-299\" or \"200,204\". Class shorthands such as \"2xx\" are rejected by the load balancer at apply."
+  }
 }
 
 # WHAT: how often the target group probes each registered task, in seconds.
-# WHY : Trade-off: a deliberately bounded compromise rather than a tuned
+# WHY : Trade-offs: a deliberately bounded compromise rather than a tuned
 #       value. Probing less often lets a wedged task keep receiving requests
 #       for more consecutive probes before unhealthy_threshold is reached;
 #       probing more often multiplies probe traffic against every task of
@@ -633,10 +984,20 @@ variable "health_check_interval" {
   EOT
   type        = number
   default     = 30
+
+  # WHY : Assumptions: 5 to 300 seconds is the range an Application Load Balancer
+  #       target-group health check accepts, and a value outside it is refused at
+  #       apply while the target group is being created. The cross-check against
+  #       health_check_timeout lives on that variable, where a reader changing the
+  #       timeout will meet it.
+  validation {
+    condition     = var.health_check_interval >= 5 && var.health_check_interval <= 300 && floor(var.health_check_interval) == var.health_check_interval
+    error_message = "health_check_interval must be a whole number of seconds between 5 and 300, the range an Application Load Balancer target-group health check accepts."
+  }
 }
 
 # WHAT: how long a single probe may take before it counts as a failure.
-# WHY : Assumption: AWS requires this to be strictly less than
+# WHY : Assumptions: AWS requires this to be strictly less than
 #       health_check_interval, so the two cannot be set independently -- a
 #       timeout at or above the interval is rejected when the target group is
 #       created. Keeping the default well below the interval also means a
@@ -650,10 +1011,24 @@ variable "health_check_timeout" {
   EOT
   type        = number
   default     = 5
+
+  # WHY : Assumptions: 2 to 120 seconds is the accepted range, and the timeout must
+  #       be STRICTLY LESS than health_check_interval. The load balancer refuses
+  #       the equal case as well as the inverted one, and both are easy to reach by
+  #       raising a timeout to chase a slow probe: the plan looks like a tuning
+  #       change and the apply fails on a constraint neither value states on its
+  #       own. Checking the pair here reports which two inputs disagree.
+  #       Trade-offs: a timeout close to the interval leaves a probe barely any
+  #       recovery margin, which this check permits rather than second-guesses --
+  #       what it refuses is the configuration the service rejects outright.
+  validation {
+    condition     = var.health_check_timeout >= 2 && var.health_check_timeout <= 120 && floor(var.health_check_timeout) == var.health_check_timeout && var.health_check_timeout < var.health_check_interval
+    error_message = "health_check_timeout must be a whole number of seconds between 2 and 120 AND strictly less than health_check_interval: a probe cannot be allowed longer to answer than the gap between probes, and the load balancer refuses the equal case too."
+  }
 }
 
 # WHAT: consecutive successful probes before a task starts receiving traffic.
-# WHY : Trade-off: set higher than unhealthy_threshold on purpose, and the
+# WHY : Trade-offs: set higher than unhealthy_threshold on purpose, and the
 #       asymmetry is the whole point. Admitting a task that is not genuinely
 #       ready sends real requests to a process that will fail them, whereas
 #       removing a task that was in fact healthy only costs capacity the
@@ -668,10 +1043,16 @@ variable "healthy_threshold" {
   EOT
   type        = number
   default     = 3
+
+  # WHY : Assumptions: 2 to 10 consecutive successes is the range the target group
+  #       accepts. A value of 1 is the one most likely to be tried, to shorten
+  #       registration, and it is refused by the service rather than honoured.
+  validation {
+    condition     = var.healthy_threshold >= 2 && var.healthy_threshold <= 10 && floor(var.healthy_threshold) == var.healthy_threshold
+    error_message = "healthy_threshold must be a whole number between 2 and 10, the range an Application Load Balancer target group accepts."
+  }
 }
 
-# WHAT: consecutive failed probes before a task is pulled from rotation and
-#       replaced.
 # WHY : Refactoring Rationale: this replaces having no automatic recovery at
 #       all. app/csd/CARDDEMO.CSD sets RESTART(NO) on all 18 transaction
 #       stanzas, so a failed CICS task was not restarted and recovery was an
@@ -679,7 +1060,7 @@ variable "healthy_threshold" {
 #       documented improvement on the migrated system rather than a port of
 #       one of its behaviours, and this threshold is what decides how many
 #       consecutive failures are tolerated first.
-#       Trade-off: set to the smallest value AWS accepts, so a task that has
+#       Trade-offs: set to the smallest value AWS accepts, so a task that has
 #       genuinely stopped answering is removed after the fewest probes the
 #       API allows while still requiring more than one -- a single failure
 #       can be a lost packet rather than a broken task.
@@ -691,11 +1072,18 @@ variable "unhealthy_threshold" {
   EOT
   type        = number
   default     = 2
+
+  # WHY : Assumptions: 2 to 10 consecutive failures is the range the target group
+  #       accepts, and the same bound applies as for the healthy threshold.
+  validation {
+    condition     = var.unhealthy_threshold >= 2 && var.unhealthy_threshold <= 10 && floor(var.unhealthy_threshold) == var.unhealthy_threshold
+    error_message = "unhealthy_threshold must be a whole number between 2 and 10, the range an Application Load Balancer target group accepts."
+  }
 }
 
 # WHAT: how long the load balancer keeps draining a task after it is
 #       deregistered.
-# WHY : Assumption: a short delay is safe here specifically because the
+# WHY : Assumptions: a short delay is safe here specifically because the
 #       services hold no session state. The migrated system carried
 #       continuity between screen turns in one passed structure --
 #       app/cpy/COCOM01Y.cpy L19-L44 declares CARDDEMO-COMMAREA with its
@@ -716,16 +1104,25 @@ variable "deregistration_delay" {
   EOT
   type        = number
   default     = 30
+
+  # WHY : Assumptions: 0 to 3600 seconds is the accepted range. Zero is legal and
+  #       means a draining target is removed at once, which this module permits
+  #       because a caller may deliberately trade in-flight requests for a faster
+  #       deployment; what is refused is a value the service rejects at apply.
+  validation {
+    condition     = var.deregistration_delay >= 0 && var.deregistration_delay <= 3600 && floor(var.deregistration_delay) == var.deregistration_delay
+    error_message = "deregistration_delay must be a whole number of seconds between 0 and 3600, the range an Application Load Balancer target group accepts."
+  }
 }
 
 # WHAT: how long ECS ignores load-balancer health for a freshly started task.
-# WHY : Assumption: without a grace period a JVM service cannot start at all
+# WHY : Assumptions: without a grace period a JVM service cannot start at all
 #       under a load balancer. The container is registered as soon as it is
 #       running, but the Actuator health endpoint does not report UP until the
 #       Spring context has finished refreshing, so the first probes fail and
 #       ECS kills the task before it can ever pass -- a loop that looks like
 #       a crash and is not one.
-#       Assumption: aws_ecs_service REJECTS this argument on a service with
+#       Assumptions: aws_ecs_service REJECTS this argument on a service with
 #       no load balancer rather than ignoring it, so main.tf must resolve it
 #       to null whenever attach_load_balancer is false. The coupling is
 #       recorded on both variables, because setting either one alone is what
@@ -740,6 +1137,21 @@ variable "health_check_grace_period_seconds" {
   EOT
   type        = number
   default     = 60
+
+  # WHY : Assumptions: 0 to 2147483647 is the range aws_ecs_service accepts, and
+  #       the argument is only ever sent when attach_load_balancer is true -- the
+  #       module resolves it to null otherwise, because AWS rejects it outright on
+  #       a service with no load balancer. The bound is checked here regardless of
+  #       that flag, so a value left behind in a root's variables cannot become
+  #       invalid later merely by attaching a load balancer.
+  #       Trade-offs: no upper guidance is imposed beyond the API's. A long grace
+  #       period delays the detection of a task that never becomes healthy, and a
+  #       short one deregisters a task still refreshing its context; that balance
+  #       depends on the image and belongs to the caller.
+  validation {
+    condition     = var.health_check_grace_period_seconds >= 0 && floor(var.health_check_grace_period_seconds) == var.health_check_grace_period_seconds
+    error_message = "health_check_grace_period_seconds must be a whole number of seconds and cannot be negative; it is applied only when attach_load_balancer is true, because AWS rejects the argument on a service with no load balancer."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -751,7 +1163,7 @@ variable "health_check_grace_period_seconds" {
 #       holding only the task definition, the two roles and the log group
 #       would have duplicated the majority of this one. This flag is what
 #       lets the single module emit either shape.
-#       Assumption: the coupling in main.tf is wider than the name suggests.
+#       Assumptions: the coupling in main.tf is wider than the name suggests.
 #       False suppresses the ECS service AND the autoscaling target, because
 #       a scaling policy with no service has nothing to act on, which is why
 #       enable_autoscaling is gated on this flag rather than independent of
@@ -774,13 +1186,13 @@ variable "create_service" {
 }
 
 # WHAT: the task count the service is created with.
-# WHY : Assumption: this is the INITIAL count only. main.tf stops tracking it
+# WHY : Assumptions: this is the INITIAL count only. main.tf stops tracking it
 #       afterwards, because Application Auto Scaling owns the running count
 #       once the target is registered; without that exclusion every plan
 #       after the first scaling event would propose reverting the count, so
 #       Terraform and the scaling policy would fight over one field. A root
 #       wanting a different floor should raise min_capacity, not this.
-#       Trade-off: two rather than one. One task is cheaper and can serve
+#       Trade-offs: two rather than one. One task is cheaper and can serve
 #       traffic, but it puts the whole service in a single availability zone,
 #       which makes the three-zone subnet list it is placed across pointless
 #       and turns one zone's loss into an outage. Two is the smallest count
@@ -796,33 +1208,79 @@ variable "desired_count" {
   EOT
   type        = number
   default     = 2
+
+  # WHY : Assumptions: this is only read when create_service is true, and it must be
+  #       at least one when it is: aws_ecs_service accepts zero, which creates a
+  #       service that registers no task at all, so the target group is empty and
+  #       every request through the load balancer answers 503 with nothing in the
+  #       plan indicating why.
+  #       Assumptions: the count must also sit inside the autoscaling capacity
+  #       range when autoscaling is enabled. Application Auto Scaling adjusts an
+  #       out-of-range count on its first evaluation, so a desired_count of one
+  #       under a min_capacity of two is not rejected anywhere -- it is silently
+  #       corrected minutes later, which makes the value in source wrong without
+  #       anything ever saying so.
+  validation {
+    condition     = !var.create_service || (var.desired_count >= 1 && floor(var.desired_count) == var.desired_count)
+    error_message = "desired_count must be a whole number of at least 1 whenever create_service is true; a service created with zero tasks leaves its target group empty, so every request through the load balancer answers 503."
+  }
+
+  validation {
+    condition     = !(var.create_service && var.enable_autoscaling) || (var.desired_count >= var.min_capacity && var.desired_count <= var.max_capacity)
+    error_message = "desired_count must lie between min_capacity and max_capacity when autoscaling is enabled: Application Auto Scaling silently corrects an out-of-range count on its first evaluation, so the value recorded here would never be the one running."
+  }
 }
 
 # WHAT: the Fargate platform version the tasks run on.
-# WHY : Trade-off: tracking the current platform accepts Fargate platform
-#       updates as AWS ships them, so the tasks are not reproducible to one
-#       exact platform build and a platform change arrives without a
-#       Terraform diff. Pinning an explicit version was the alternative and
-#       is rejected because the pin would then have to be raised by hand in
-#       eight module blocks in each of two roots -- sixteen places -- every
-#       time it went stale, and a stale pin is how a platform reaches end of
-#       support while every plan still reports no changes. The variable
-#       exists so a root that needs one specific platform can pin it
-#       deliberately.
+# WHY : Refactoring Rationale: this defaulted to LATEST, and the reasoning for
+#       that -- a pin would go stale in sixteen places and a stale pin is how a
+#       platform reaches end of support while every plan reports no changes --
+#       had the trade-off backwards. LATEST is resolved by ECS at task launch,
+#       not at apply, so the platform underneath a running service can change
+#       with no Terraform diff, no plan, and no record of when it changed. For a
+#       stack whose parity is judged by comparing output bytes against a golden
+#       master, an undated runtime substitution is the wrong kind of surprise:
+#       when a result moves, the first question is what changed, and LATEST makes
+#       that unanswerable from the repository. A pin makes the platform a
+#       reviewable value like every other version in this migration.
+#       Trade-offs: the pin does have to be raised deliberately, and the cost is
+#       exactly the one the earlier note describes -- one edit, in one module
+#       default, which both roots inherit. That is a single place rather than
+#       sixteen, because the roots are not expected to override this: platform is
+#       topology, and dev and prod are required to differ only in sizing and
+#       retention. Staleness is answered by the version appearing in every plan
+#       and in this module's generated README, so it is visible rather than
+#       implicit.
+#       Assumptions: 1.4.0 is the current Fargate Linux platform version and the
+#       one this configuration is validated against. AWS has published no 1.5.x
+#       Linux platform, and 1.3.0 is retired, so the pin names the only supported
+#       Linux build rather than an arbitrary point in history.
 variable "platform_version" {
   description = <<-EOT
     Value of the platform_version argument of aws_ecs_service, selecting the
-    Fargate platform the tasks run on. Left tracking the current platform so
-    updates are picked up without an edit in sixteen places; set an explicit
-    version when one specific platform build is required. Supplied by the
-    caller as a literal, not from another module's output.
+    Fargate platform the tasks run on. Pinned to 1.4.0, the current Fargate
+    Linux platform version, so a platform change is a reviewed edit rather than
+    a silent substitution at task launch. Raise it deliberately when AWS ships a
+    successor. Supplied by the caller as a literal, not from another module's
+    output.
   EOT
   type        = string
-  default     = "LATEST"
+  default     = "1.4.0"
+
+  # WHY : Assumptions: the value is either an explicit x.y.z platform version or
+  #       the literal LATEST, which the provider accepts and which this module
+  #       does not choose by default. LATEST is not refused outright, because a
+  #       root deliberately tracking the current platform is a legitimate choice
+  #       to make explicitly -- what this module declines to do is make it
+  #       silently. Any other string is a typo the API rejects at apply while
+  #       creating the service, in an error that names the argument rather than
+  #       this input.
+  validation {
+    condition     = var.platform_version == "LATEST" || can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.platform_version))
+    error_message = "platform_version must be an explicit Fargate platform version such as \"1.4.0\", or the literal \"LATEST\" if a root deliberately chooses to track the current platform. Anything else is rejected by ECS at apply."
+  }
 }
 
-# WHAT: the lower bound, as a percentage of desired_count, on how much
-#       capacity stays in service during a deployment.
 # WHY : Alternatives Considered: blue-green deployment and canary
 #       deployment, both of which are out of scope for this migration --
 #       rolling ECS deployment only. This pair of percentages IS the rolling
@@ -843,9 +1301,19 @@ variable "deployment_minimum_healthy_percent" {
   EOT
   type        = number
   default     = 100
+
+  # WHY : Assumptions: 0 to 100 is the range aws_ecs_service accepts for this
+  #       percentage. The rolling strategy this pair expresses depends on the value
+  #       being 100, but lower values are legal and are a deliberate choice for a
+  #       service that can shed capacity during a deployment, so the bound is the
+  #       API's rather than the strategy's.
+  validation {
+    condition     = var.deployment_minimum_healthy_percent >= 0 && var.deployment_minimum_healthy_percent <= 100 && floor(var.deployment_minimum_healthy_percent) == var.deployment_minimum_healthy_percent
+    error_message = "deployment_minimum_healthy_percent must be a whole percentage between 0 and 100, the range aws_ecs_service accepts."
+  }
 }
 
-# WHY : Trade-off: the upper half of the same rolling strategy, and it is
+# WHY : Trade-offs: the upper half of the same rolling strategy, and it is
 #       what makes a minimum of 100 achievable at all -- with no headroom
 #       above the desired count ECS would have to stop a task before it could
 #       start its replacement, contradicting the minimum. Allowing double
@@ -861,11 +1329,27 @@ variable "deployment_maximum_percent" {
   EOT
   type        = number
   default     = 200
+
+  # WHY : Assumptions: 100 to 200 is the range this module admits, and the maximum
+  #       must be STRICTLY GREATER than deployment_minimum_healthy_percent. ECS
+  #       refuses a deployment whose two percentages leave it no room to replace a
+  #       task -- a minimum of 100 with a maximum of 100 permits neither starting a
+  #       replacement first nor stopping the old task first -- and it does so when
+  #       the deployment is attempted, not when the service is created. The
+  #       configuration therefore applies cleanly and then wedges on the next
+  #       image, which is the worst place to find it.
+  #       Trade-offs: the pair is checked here rather than on the minimum, so a
+  #       reader raising either one meets the constraint at the value they are
+  #       raising toward.
+  validation {
+    condition     = var.deployment_maximum_percent >= 100 && var.deployment_maximum_percent <= 200 && var.deployment_maximum_percent > var.deployment_minimum_healthy_percent && floor(var.deployment_maximum_percent) == var.deployment_maximum_percent
+    error_message = "deployment_maximum_percent must be a whole percentage between 100 and 200 AND strictly greater than deployment_minimum_healthy_percent: equal percentages leave ECS no room to replace a task, which wedges the next deployment rather than failing this apply."
+  }
 }
 
 # WHAT: whether a failing deployment is detected and rolled back
 #       automatically.
-# WHY : Assumption: this is a property of the ROLLING deployment controller,
+# WHY : Assumptions: this is a property of the ROLLING deployment controller,
 #       and it needs saying plainly because the word rollback invites a
 #       reader to look for the blue-green setup that is deliberately absent.
 #       It adds no second target group, creates no alternate task set and
@@ -896,7 +1380,7 @@ variable "enable_deployment_circuit_breaker" {
 # WHY : Alternatives Considered: the rejected `ecs-task` module recorded in
 #       the shape note above the load-balancer section; this is the third of
 #       the three flags that let one module emit both shapes.
-#       Assumption: it is gated on create_service in main.tf and is not
+#       Assumptions: it is gated on create_service in main.tf and is not
 #       independent of it. An Application Auto Scaling target names the
 #       service it scales through the resource_id
 #       service/<cluster-name>/<service-name>, so with no service there is no
@@ -913,10 +1397,22 @@ variable "enable_autoscaling" {
   EOT
   type        = bool
   default     = true
+
+  # WHY : Assumptions: autoscaling requires a service to scale. With create_service
+  #       false there is no ECS service for a scalable target to register against,
+  #       so main.tf gates the target on that flag; asking for autoscaling in that
+  #       shape is a request the module silently drops rather than honours, and a
+  #       silently dropped scaling policy is indistinguishable from one that is
+  #       working until load arrives. Refusing the combination here makes the batch
+  #       shape state both flags explicitly.
+  validation {
+    condition     = !var.enable_autoscaling || var.create_service
+    error_message = "enable_autoscaling requires create_service: without a service there is nothing for a scalable target to register against, so the scaling policy would be dropped silently. The batch shape sets both to false."
+  }
 }
 
 # WHAT: the floor Application Auto Scaling may reduce the task count to.
-# WHY : Assumption: matched to the desired_count default rather than set
+# WHY : Assumptions: matched to the desired_count default rather than set
 #       lower, because the two answer the same question at different times --
 #       desired_count is where the service starts and this is where scaling is
 #       allowed to leave it -- and a floor below the starting count would let
@@ -931,10 +1427,20 @@ variable "min_capacity" {
   EOT
   type        = number
   default     = 2
+
+  # WHY : Assumptions: at least one task, for the same reason desired_count needs
+  #       one: a floor of zero lets the scaling policy drain a load-balanced
+  #       service to no tasks at all, and the service then answers 503 while
+  #       reporting itself scaled correctly. The upper bound is checked against
+  #       max_capacity on that variable.
+  validation {
+    condition     = !var.enable_autoscaling || (var.min_capacity >= 1 && floor(var.min_capacity) == var.min_capacity)
+    error_message = "min_capacity must be a whole number of at least 1 when autoscaling is enabled; a floor of zero lets the policy drain the service to no tasks, which answers 503 while reporting a successful scale-in."
+  }
 }
 
 # WHAT: the ceiling Application Auto Scaling may grow the task count to.
-# WHY : Trade-off: a bounded ceiling rather than a generous one. The point of
+# WHY : Trade-offs: a bounded ceiling rather than a generous one. The point of
 #       the bound is that a runaway scale-out -- driven by a fault that raises
 #       CPU rather than by real demand -- is capped at a known number of tasks
 #       instead of consuming whatever the account allows, and the cost is that
@@ -950,10 +1456,19 @@ variable "max_capacity" {
   EOT
   type        = number
   default     = 6
+
+  # WHY : Assumptions: the ceiling must be at least the floor. Application Auto
+  #       Scaling refuses a scalable target whose maximum is below its minimum, and
+  #       it refuses it when the target is registered -- partway through an apply
+  #       that has already created the service. The equal case is permitted, and it
+  #       is a legitimate way to pin a service at a fixed size while keeping the
+  #       target registered.
+  validation {
+    condition     = !var.enable_autoscaling || (var.max_capacity >= var.min_capacity && floor(var.max_capacity) == var.max_capacity)
+    error_message = "max_capacity must be a whole number greater than or equal to min_capacity: Application Auto Scaling refuses a scalable target whose ceiling is below its floor, and it does so after the service has already been created."
+  }
 }
 
-# WHAT: the average CPU utilisation the target-tracking policy holds the
-#       service at.
 # WHY : Alternatives Considered: step scaling, which reacts to alarm
 #       thresholds. Rejected because it needs hand-tuned thresholds and the
 #       migrated system supplies no data to tune them with -- all 18
@@ -964,7 +1479,7 @@ variable "max_capacity" {
 #       per-service thresholds from. Target tracking needs exactly one number
 #       and derives the rest, which is the honest choice when one number is
 #       the only defensible input.
-#       Trade-off: the band the validation enforces is narrower than the full
+#       Trade-offs: the band the validation enforces is narrower than the full
 #       percentage range AWS accepts. Below the lower bound the target is
 #       effectively unreachable, so the policy scales out until it reaches
 #       max_capacity and stays there; above the upper bound there is no
@@ -995,12 +1510,12 @@ variable "autoscaling_target_cpu_utilization" {
 }
 
 # WHAT: how long the policy waits after a scale-in before scaling in again.
-# WHY : Assumption: scale-in is safe at all only because the services are
+# WHY : Assumptions: scale-in is safe at all only because the services are
 #       stateless -- no sticky sessions and no server-side session store,
 #       which is what makes tasks behind a load balancer interchangeable and
 #       therefore removable. Removing a task from a stateful service would
 #       strand whatever that task held.
-#       Trade-off: set longer than the scale-out cooldown on purpose. The two
+#       Trade-offs: set longer than the scale-out cooldown on purpose. The two
 #       mistakes are not symmetric: capacity added and not needed costs task
 #       time, while capacity removed and then needed costs requests arriving
 #       before a replacement is serving. The longer wait is placed on the side
@@ -1014,10 +1529,19 @@ variable "autoscaling_scale_in_cooldown" {
   EOT
   type        = number
   default     = 300
+
+  # WHY : Assumptions: a cooldown is a whole, non-negative number of seconds. Zero
+  #       is legal and means every evaluation may act, which is a deliberate choice
+  #       for a service that scales cheaply; a negative value is refused by the
+  #       API at apply, after the scaling policy is being created.
+  validation {
+    condition     = var.autoscaling_scale_in_cooldown >= 0 && floor(var.autoscaling_scale_in_cooldown) == var.autoscaling_scale_in_cooldown
+    error_message = "autoscaling_scale_in_cooldown must be a whole number of seconds and cannot be negative."
+  }
 }
 
 # WHAT: how long the policy waits after a scale-out before scaling out again.
-# WHY : Trade-off: the shorter of the two cooldowns, for the reason recorded
+# WHY : Trade-offs: the shorter of the two cooldowns, for the reason recorded
 #       on autoscaling_scale_in_cooldown -- adding capacity that turns out to
 #       be unnecessary is the cheaper mistake, so the policy is allowed to
 #       make it sooner. It is not zero, because a new task is not serving the
@@ -1033,6 +1557,15 @@ variable "autoscaling_scale_out_cooldown" {
   EOT
   type        = number
   default     = 60
+
+  # WHY : Assumptions: the same bound as the scale-in cooldown, checked separately
+  #       so the message names the value that is wrong. The two are deliberately
+  #       allowed to differ: scaling out fast and in slowly is the asymmetry a
+  #       target-tracking policy is usually tuned for.
+  validation {
+    condition     = var.autoscaling_scale_out_cooldown >= 0 && floor(var.autoscaling_scale_out_cooldown) == var.autoscaling_scale_out_cooldown
+    error_message = "autoscaling_scale_out_cooldown must be a whole number of seconds and cannot be negative."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -1040,7 +1573,7 @@ variable "autoscaling_scale_out_cooldown" {
 # -----------------------------------------------------------------------------
 
 # WHAT: how long the service's CloudWatch log group keeps its events.
-# WHY : Assumption: CloudWatch Logs accepts only a fixed set of retention
+# WHY : Assumptions: CloudWatch Logs accepts only a fixed set of retention
 #       values and rejects any other integer, so the validation restates that
 #       set in order to move the rejection from apply to plan. The set is an
 #       AWS contract this module depends on rather than something verified
@@ -1048,7 +1581,7 @@ variable "autoscaling_scale_out_cooldown" {
 #       expire; it is deliberately not the default, because indefinite
 #       retention accrues storage charges without bound and nothing in this
 #       migration requires logs to be kept forever.
-#       Trade-off: this is one of the three axes on which the dev and prod
+#       Trade-offs: this is one of the three axes on which the dev and prod
 #       roots are expected to differ, alongside task count and CPU or memory,
 #       and it is why retention is an input at all rather than a fixed value
 #       -- keeping development logs as long as production logs pays for
@@ -1078,13 +1611,13 @@ variable "log_retention_in_days" {
 }
 
 # WHAT: an optional customer-managed key to encrypt the log group with.
-# WHY : Assumption: null is the expected value, not a gap. Log events are
+# WHY : Assumptions: null is the expected value, not a gap. Log events are
 #       encrypted at rest by CloudWatch Logs regardless; supplying a key here
 #       changes who controls that encryption, not whether it happens. The
 #       package provisions four customer-managed keys -- for the database,
 #       object storage, the secret store and the queues -- and a log key is
 #       deliberately not among them, so there is normally no ARN to pass.
-#       Trade-off: the variable exists anyway so a root deciding its logs need
+#       Trade-offs: the variable exists anyway so a root deciding its logs need
 #       a key it controls can supply one without editing this module. The
 #       alternative -- omitting the input and relying only on the service
 #       default -- would turn one environment's policy decision into a module
@@ -1099,6 +1632,18 @@ variable "log_group_kms_key_arn" {
   EOT
   type        = string
   default     = null
+
+  # WHY : Assumptions: null means the log group uses the CloudWatch Logs service key,
+  #       and that path must stay expressible, so the check is written as an
+  #       explicit null test. When a value IS supplied it has to be a KMS key ARN:
+  #       a key id or an alias name type-checks as a string, plans cleanly, and is
+  #       rejected by CloudWatch Logs at apply -- after the log group exists, which
+  #       leaves a group encrypted with the service key while the configuration
+  #       claims a customer-managed one.
+  validation {
+    condition     = var.log_group_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:", var.log_group_kms_key_arn))
+    error_message = "log_group_kms_key_arn must be null, or a KMS key ARN beginning arn:<partition>:kms:. A bare key id or an alias name is accepted by Terraform here and then rejected by CloudWatch Logs at apply."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -1107,7 +1652,7 @@ variable "log_group_kms_key_arn" {
 
 # WHAT: plain, non-secret values injected into the container as environment
 #       variables.
-# WHY : Assumption: everything passed here is readable by anyone who can
+# WHY : Assumptions: everything passed here is readable by anyone who can
 #       describe the task definition, because a container definition's
 #       environment entries are stored and returned in clear text. That is
 #       exactly why the split with ssm_parameter_arns and secret_arns exists:
@@ -1116,23 +1661,119 @@ variable "log_group_kms_key_arn" {
 #       plan file. A credential placed here instead would be written to state
 #       and printed in plan output, which is what the no-secrets constraint
 #       forbids.
-#       Trade-off: the empty default keeps the common case -- a service
+#       Trade-offs: the empty default keeps the common case -- a service
 #       needing only its active profile and a handful of references -- free of
 #       ceremony.
+#       Refactoring Rationale: the split with ssm_parameter_arns and secret_arns
+#       was described here and enforced nowhere, and a described split is not a
+#       control. Anything a caller put in this map was accepted, so the one
+#       mistake the paragraph above warns against -- a credential passed as a
+#       literal -- was the mistake this module made easiest to make and hardest
+#       to notice. It does not fail: the task starts, the service connects, and
+#       the credential is durably readable in the task definition, in every
+#       `describe-task-definition` response, in plan output, and in Terraform
+#       state, to every principal who can read any of those. That is a wider
+#       audience than the secret store's read policy, and nothing reports the
+#       difference. The three validations below turn the paragraph into a
+#       plan-time gate: the first fixes the shape, the second admits only the
+#       key namespaces the eight services actually read, and the third refuses a
+#       name that says it carries a secret.
 variable "environment_variables" {
   description = <<-EOT
     Non-secret environment variables for the container, as a map of name to
-    literal value: the active Spring profile and similar plain settings.
-    Values appear in clear text in the task definition and in plan output, so
-    anything sensitive belongs in ssm_parameter_arns or secret_arns instead.
+    literal value: the active Spring profile and similar plain settings. Values
+    appear in clear text in the task definition, in plan output and in state, so
+    anything sensitive belongs in ssm_parameter_arns or secret_arns instead --
+    and a name that reads as a secret is refused here rather than trusted.
+    Accepted keys are upper-case, begin with one of the namespaces the CardDemo
+    services read, and do not end in a secret-bearing word.
   EOT
   type        = map(string)
   default     = {}
+
+  # WHY : Assumptions: the shape is checked first and separately, because the
+  #       later two checks reason about upper-case underscore-delimited
+  #       segments and a lower-case or hyphenated key would slip past both. A
+  #       container definition will accept almost any string as a name, but a
+  #       Spring Boot process reads relaxed-binding environment variables in
+  #       exactly this form, so a lower-case key is silently ignored by the
+  #       application rather than rejected by ECS -- the value is present in the
+  #       task definition, absent from the running configuration, and the
+  #       service starts on its defaults.
+  validation {
+    condition = alltrue([
+      for name in keys(var.environment_variables) : can(regex("^[A-Z][A-Z0-9_]*$", name))
+    ])
+    error_message = "every environment_variables key must be an upper-case name of letters, digits and underscores starting with a letter, which is the form Spring Boot relaxed binding reads; a lower-case or hyphenated key is ignored by the application rather than rejected by ECS."
+  }
+
+  # WHY : Alternatives Considered: refusing secret-bearing names only, with no
+  #       allowlist. Rejected because a denylist can only refuse what it
+  #       anticipated: a key named CARDDEMO_COGNITO_APP_CLIENT_MATERIAL carries
+  #       a secret and matches no word anyone would have thought to list. An
+  #       allowlist inverts the default, so an unanticipated key is refused
+  #       until someone names it, and the two together mean a key has to be both
+  #       recognised and non-secret-shaped to reach a task definition.
+  #       Assumptions: these prefixes are not a policy choice but an inventory of
+  #       what the images read -- Spring Boot's own relaxed-binding namespaces
+  #       (SPRING_, SERVER_, MANAGEMENT_, LOGGING_, SPRINGDOC_), the
+  #       application's single custom namespace (CARDDEMO_, the prefix every
+  #       service's own properties sit under), the JVM's two option variables,
+  #       the region the AWS SDK default chain reads, and the timezone. A key
+  #       outside them is not a setting any CardDemo container consumes.
+  #       Trade-offs: the list lives in this condition rather than in a variable
+  #       of its own. A variable would let a root widen the allowlist from a
+  #       tfvars file, which is the one place a widening is least likely to be
+  #       reviewed; keeping it here means adding a namespace is a module edit
+  #       that appears in a diff. The accepted cost is that a genuinely new
+  #       namespace needs a change to this file.
+  validation {
+    condition = alltrue([
+      for name in keys(var.environment_variables) : anytrue([
+        for allowed in [
+          "SPRING_", "SERVER_", "MANAGEMENT_", "LOGGING_", "SPRINGDOC_",
+          "CARDDEMO_", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS",
+          "AWS_REGION", "AWS_DEFAULT_REGION", "TZ",
+        ] : startswith(name, allowed)
+      ])
+    ])
+    error_message = "every environment_variables key must begin with a namespace the CardDemo images read: SPRING_, SERVER_, MANAGEMENT_, LOGGING_, SPRINGDOC_, CARDDEMO_, JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS, AWS_REGION, AWS_DEFAULT_REGION or TZ. Anything else is not a setting a container consumes, and a runtime endpoint or identifier belongs in ssm_parameter_arns."
+  }
+
+  # WHY : Assumptions: the match is on the FINAL underscore-delimited segment, not
+  #       on the name as a substring, and that precision is load-bearing rather
+  #       than tidiness. CARDDEMO_SECURITY_JWT_EXPECTED_TOKEN_USE is a real key
+  #       this platform sets to the literal "access" -- it contains TOKEN and
+  #       carries nothing sensitive -- so a substring test would refuse a
+  #       legitimate setting and the obvious workaround would be to delete the
+  #       validation. Ending in a secret-bearing word, by contrast, is how a
+  #       secret is actually named: SPRING_DATASOURCE_PASSWORD,
+  #       CARDDEMO_AUTH_COGNITO_CLIENT_SECRET, AWS_SESSION_TOKEN.
+  #       Trade-offs: KEY is on the list, so a non-secret key would have to be
+  #       named ..._KEY_ARN or ..._KEY_ID rather than ..._KEY. That rename is a
+  #       clarification worth requiring: an ARN or an identifier is not key
+  #       material, and a name that does not distinguish them is exactly how the
+  #       two get confused. The three static AWS credential names are refused by
+  #       exact match as well, because AWS_ACCESS_KEY_ID ends in ID and would
+  #       otherwise pass -- and on Fargate the task role supplies credentials, so
+  #       a static one is a defect however it is spelled.
+  validation {
+    condition = alltrue([
+      for name in keys(var.environment_variables) : !contains([
+        "PASSWORD", "PASSWD", "PWD", "SECRET", "TOKEN", "CREDENTIAL",
+        "CREDENTIALS", "PASSPHRASE", "KEY", "APIKEY", "PRIVATEKEY",
+        "SIGNATURE", "SALT",
+        ], element(split("_", name), length(split("_", name)) - 1)) && !contains([
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+      ], name)
+    ])
+    error_message = "an environment_variables key must not end in PASSWORD, PASSWD, PWD, SECRET, TOKEN, CREDENTIAL, CREDENTIALS, PASSPHRASE, KEY, APIKEY, PRIVATEKEY, SIGNATURE or SALT, and must not be a static AWS credential name. Values here are stored in clear text in the task definition, in plan output and in state; pass the reference through secret_arns or ssm_parameter_arns so ECS resolves it at task start instead."
+  }
 }
 
 # WHAT: environment variables whose values ECS reads from Parameter Store when
 #       the task starts.
-# WHY : Assumption: this is how a service learns any runtime endpoint or
+# WHY : Assumptions: this is how a service learns any runtime endpoint or
 #       identifier at all. Terraform module outputs are the only source of
 #       those values -- the database writer endpoint, the queue URLs, the token
 #       issuer, the dataset bucket -- and they are written to Parameter Store
@@ -1141,7 +1782,7 @@ variable "environment_variables" {
 #       the alternative and is rejected because it would make the image
 #       environment-specific, so the same artifact could not be promoted from
 #       dev to prod.
-#       Assumption: these ARNs are also what scopes the execution role. Its
+#       Assumptions: these ARNs are also what scopes the execution role. Its
 #       parameter-read permission names exactly these parameters, so passing
 #       them is what keeps that statement free of a wildcard resource.
 variable "ssm_parameter_arns" {
@@ -1155,18 +1796,36 @@ variable "ssm_parameter_arns" {
   EOT
   type        = map(string)
   default     = {}
+
+  # WHY : Assumptions: every value is an SSM Parameter Store ARN, and the shape is
+  #       checked because this map feeds two things at once -- the container's
+  #       secrets list and the execution role's resource-scoped read permission. A
+  #       bare parameter NAME, which is what an operator reads off the console,
+  #       type-checks as a string and produces a task definition ECS cannot
+  #       resolve plus an IAM statement scoped to nothing, and the task then fails
+  #       to start with an error about the parameter rather than about this input.
+  #       Assumptions: the key shape is the same environment-variable identifier
+  #       rule as environment_variables, because each key becomes the variable name
+  #       the resolved parameter is injected under.
+  validation {
+    condition = alltrue([
+      for key, arn in var.ssm_parameter_arns :
+      can(regex("^[A-Z][A-Z0-9_]*$", key)) && can(regex("^arn:[a-z0-9-]+:ssm:[a-z0-9-]+:[0-9]{12}:parameter/", arn))
+    ])
+    error_message = "Each ssm_parameter_arns entry must map an upper-case environment-variable name to a full SSM parameter ARN of the form arn:<partition>:ssm:<region>:<account>:parameter/<path>. A bare parameter name leaves the execution role scoped to nothing and the task unable to start."
+  }
 }
 
 # WHAT: environment variables whose values ECS reads from Secrets Manager when
 #       the task starts.
-# WHY : Assumption: ECS resolves Parameter Store and Secrets Manager through
+# WHY : Assumptions: ECS resolves Parameter Store and Secrets Manager through
 #       the SAME container secrets mechanism, distinguished only by the kind of
 #       ARN in each entry, which is why two maps are accepted here and merged
 #       into one list in main.tf. They are kept apart at the module boundary
 #       because the execution role needs a different action for each store, and
 #       merging them earlier would discard the information needed to write
 #       those two statements separately.
-#       Assumption: as with ssm_parameter_arns, these ARNs are what the
+#       Assumptions: as with ssm_parameter_arns, these ARNs are what the
 #       execution role's read permission is scoped to, so a caller passing them
 #       is the mechanism that keeps the policy wildcard-free.
 variable "secret_arns" {
@@ -1180,14 +1839,31 @@ variable "secret_arns" {
   EOT
   type        = map(string)
   default     = {}
+
+  # WHY : Assumptions: every value is a Secrets Manager secret ARN, checked for the
+  #       same reason as the parameter ARNs above and with one addition: a secret
+  #       ARN carries a six-character random suffix, so the value cannot be
+  #       composed by hand from a name and must come from the module that created
+  #       the secret. A hand-written value without the suffix resolves to nothing,
+  #       and the task fails at start with a message about the secret.
+  #       Assumptions: this is the ONLY path by which a credential reaches a
+  #       container. Values here are resolved by the ECS agent at task start and
+  #       never appear in the task definition, which is what distinguishes this map
+  #       from environment_variables and why a password in that map is a finding
+  #       rather than a style choice.
+  validation {
+    condition = alltrue([
+      for key, arn in var.secret_arns :
+      can(regex("^[A-Z][A-Z0-9_]*$", key)) && can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:", arn))
+    ])
+    error_message = "Each secret_arns entry must map an upper-case environment-variable name to a full Secrets Manager ARN of the form arn:<partition>:secretsmanager:<region>:<account>:secret:<name>-<suffix>. The six-character suffix means the ARN has to come from the secrets module's output rather than being composed from a name."
+  }
 }
 
 # -----------------------------------------------------------------------------
 # IAM.
 # -----------------------------------------------------------------------------
 
-# WHAT: the entire permission set the running application is given, supplied
-#       by the caller as a policy document.
 # WHY : Alternatives Considered: composing the policy inside this module as the
 #       union of what the eight services need -- queue access for the
 #       authorization consumer, state-machine execution for reporting, object
@@ -1203,7 +1879,7 @@ variable "secret_arns" {
 #       pretended to have one. Its role is filled by these per-service task
 #       roles together with the managed user directory, and the substitution
 #       is documented as a mapping rather than presented as a port.
-#       Assumption: null means the role is created with a trust policy and
+#       Assumptions: null means the role is created with a trust policy and
 #       nothing else. That is a valid and useful state -- a service that only
 #       serves HTTP and reaches the database through an injected credential
 #       needs no AWS API permission at all -- so null is not a missing value.
@@ -1218,11 +1894,36 @@ variable "task_role_policy_json" {
   EOT
   type        = string
   default     = null
+
+  # WHY : Assumptions: null means this service needs no service-specific permission
+  #       beyond the baseline the module attaches, and that path stays expressible,
+  #       so the check is an explicit null test first.
+  #       Assumptions: when a document IS supplied it is parsed here. A malformed
+  #       policy is a string like any other to Terraform, so without this the
+  #       failure arrives from IAM during apply -- often after the role itself
+  #       exists -- with a message about the document rather than about which
+  #       caller supplied it. can(jsondecode(...)) is the cheapest complete syntax
+  #       check available at plan time.
+  #       Trade-offs: the check is syntactic, and deliberately not semantic. It
+  #       confirms the document parses and carries the two required top-level
+  #       members; it does not judge whether the statements are least-privilege,
+  #       which is what the policy scan in the infrastructure pipeline is for.
+  #       Duplicating that judgement here would give one concern two enforcement
+  #       points that drift apart.
+  validation {
+    condition     = var.task_role_policy_json == null || can(jsondecode(var.task_role_policy_json))
+    error_message = "task_role_policy_json must be null or a parseable JSON document; an unparseable string reaches IAM at apply, where the error names the document rather than the caller that supplied it. Build it with jsonencode or data.aws_iam_policy_document."
+  }
+
+  validation {
+    condition     = var.task_role_policy_json == null || try(can(jsondecode(var.task_role_policy_json).Version) && can(jsondecode(var.task_role_policy_json).Statement), false)
+    error_message = "task_role_policy_json must carry both a Version and a Statement member: a document that parses but omits either is accepted by Terraform and rejected by IAM at apply."
+  }
 }
 
 # WHAT: existing managed policies to attach to the task role alongside the
 #       inline document.
-# WHY : Trade-off: accepted as a second, separate way of granting the same role
+# WHY : Trade-offs: accepted as a second, separate way of granting the same role
 #       permissions, which is redundant in the simple case. It earns its place
 #       where a permission set is genuinely shared -- a policy a root already
 #       owns and attaches to several services -- because inlining that set into
@@ -1239,10 +1940,27 @@ variable "task_role_managed_policy_arns" {
   EOT
   type        = list(string)
   default     = []
+
+  # WHY : Assumptions: each entry is an IAM policy ARN, either AWS-managed
+  #       (arn:aws:iam::aws:policy/...) or customer-managed in this account. A
+  #       policy NAME type-checks and is rejected at attach time, after the role
+  #       exists, so the task starts without the permission the caller intended
+  #       and the failure surfaces as an access denial inside the application.
+  #       Trade-offs: broad AWS-managed policies are not refused here. Naming
+  #       specific policies to ban would put a policy judgement in a module input,
+  #       and that judgement belongs to the pipeline's policy scan, which fails on
+  #       over-broad grants wherever they are declared.
+  validation {
+    condition = alltrue([
+      for arn in var.task_role_managed_policy_arns :
+      can(regex("^arn:[a-z0-9-]+:iam::([0-9]{12}|aws):policy/", arn))
+    ])
+    error_message = "Each task_role_managed_policy_arns entry must be an IAM policy ARN of the form arn:<partition>:iam::aws:policy/<name> for an AWS-managed policy, or arn:<partition>:iam::<account>:policy/<name> for a customer-managed one. A bare policy name is rejected only when the attachment is attempted."
+  }
 }
 
 # WHAT: the specific keys the roles may use to decrypt what they read.
-# WHY : Assumption: a resource-scoped parameter-read or secret-read permission
+# WHY : Assumptions: a resource-scoped parameter-read or secret-read permission
 #       is not sufficient on its own. When a parameter is a SecureString or a
 #       secret is encrypted with a customer-managed key, reading it also
 #       requires permission to decrypt with that key, so a role granted only
@@ -1265,6 +1983,22 @@ variable "kms_key_arns" {
   EOT
   type        = list(string)
   default     = []
+
+  # WHY : Assumptions: each entry is a KMS key ARN, for the same reason the log
+  #       group's key is: a key id or an alias satisfies the type and produces an
+  #       IAM statement whose resource matches no key, so the decrypt permission
+  #       the caller believes it granted is absent. That failure appears when a
+  #       secret or a queue message is first decrypted, not when this applies.
+  #       Trade-offs: an empty list is permitted, because a service that touches
+  #       none of the customer-managed keys needs no decrypt grant, and the batch
+  #       and reporting shapes differ from the online ones in exactly that way.
+  validation {
+    condition = alltrue([
+      for arn in var.kms_key_arns :
+      can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", arn))
+    ])
+    error_message = "Each kms_key_arns entry must be a KMS key ARN of the form arn:<partition>:kms:<region>:<account>:key/<key-id>. A bare key id or an alias produces an IAM statement matching no key, so the decrypt permission is silently absent."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -1272,14 +2006,14 @@ variable "kms_key_arns" {
 # -----------------------------------------------------------------------------
 
 # WHAT: additional tags merged onto every resource this module creates.
-# WHY : Assumption: this MERGES with, rather than replaces, whatever the
+# WHY : Assumptions: this MERGES with, rather than replaces, whatever the
 #       calling root already applies through the provider's default_tags. A
 #       module cannot set default_tags -- that belongs to a provider
 #       configuration, and this module deliberately declares no provider so
 #       the root keeps control of the region and of the package-wide tag set
 #       -- so this input is the only way a caller can add a tag to one
 #       service's resources without adding it to all sixteen instances.
-#       Trade-off: because the two sets combine, a key present in both
+#       Trade-offs: because the two sets combine, a key present in both
 #       resolves to the value given here. That is what makes a per-service
 #       override possible, and it also means a carelessly chosen key can
 #       shadow a package-wide one; naming the precedence in the description
@@ -1294,4 +2028,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-

@@ -2,6 +2,24 @@
  * Verifies the shared kernel timestamp formatter against its exact twenty-six character contract
  * and its deterministic conversion behaviour.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
+ * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
+ * beside this one today. The migration lands its artifacts in plan order and this charter is
+ * authored first, so at the checkpoint that authored it this directory holds this charter and
+ * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
+ * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ *
+ * <p>Alternatives Considered: withholding this charter until every class it governs
+ * exists. Rejected, because the charter is what the authors of those classes work
+ * from -- which type belongs here, which may not, what the closed set is -- so
+ * writing it last would leave the package with no stated contract during exactly
+ * the interval in which one is needed. The cost of authoring it first is that its
+ * inventory reads as present tense unless the distinction is declared, which is
+ * what this section is for; the sentence above is the single place a reader has to
+ * look to tell a target from a measurement.</p>
+ *
  * <p>The one rendering asserted here is {@code YYYY-MM-DD HH:MM:SS.mmmmmm}. Read left to right that
  * is ten characters of date, then a single SPACE where ISO 8601 would place a {@code T}, then a
  * time whose hour, minute and second are separated by COLONS, then one PERIOD, then exactly six
@@ -13,9 +31,51 @@
  * the sole period fail independently of one another, and a single string comparison reports only
  * that something differed without saying which of the five it was.</p>
  *
+ * <h2>What the formatter must REFUSE, which is where the contract is easiest to lose</h2>
+ *
+ * <p>Refactoring Rationale: an earlier charter for this package described the width, the separators
+ * and the populated, blank and absent inputs, and nothing else. Those expectations are all satisfied
+ * by a parser that accepts a well-punctuated value of the right width whose date or time is
+ * IMPOSSIBLE and quietly adjusts it into a nearby one, which is precisely what the platform's default
+ * resolution does: it clamps a day the month does not have and rolls the date forward for an
+ * end-of-day hour. A suite that asserts only width and punctuation therefore reports a passing
+ * contract while the class under test returns an instant that differs from the text it was given.
+ * The rejection cases below are what close that gap, and each is listed because it fails
+ * independently of the others.</p>
+ *
+ * <ul>
+ *   <li>{@code '2023-02-29 00:00:00.000000'} -- the twenty-ninth of February in a year that is not a
+ *       leap year. Under the default resolution this becomes the twenty-eighth; the contract requires
+ *       it to be refused.</li>
+ *   <li>{@code '2022-04-31 12:00:00.000000'} -- a thirty-first day in a thirty-day month. Under the
+ *       default resolution this becomes the thirtieth.</li>
+ *   <li>{@code '2022-06-10 24:00:00.000000'} -- an hour of twenty-four. Under the default resolution
+ *       this becomes midnight on the ELEVENTH, so both the time and the ten-character date prefix
+ *       change, and the prefix is the part every reference consumer reads.</li>
+ *   <li>a value carrying the wrong punctuation, whether the ISO {@code T} in place of the space
+ *       separator, hyphens and dots in the time portion as the reference baseline's native Db2 form
+ *       has, or a comma before the fractional second. Each is twenty-six characters, so the width
+ *       check passes and only the pattern can reject them.</li>
+ *   <li>a value of the wrong width, one character short and one character long, which must fail as a
+ *       structural error distinct from a content error, because at this width the usual cause is a
+ *       field read at the wrong offset inside a 350-byte record.</li>
+ *   <li>an absent value, which is a defect in a Java caller rather than a datum, and is distinct
+ *       again from the twenty-six blank characters a fixed-width record uses to mean unstamped.</li>
+ *   <li>a month beyond twelve, which the default resolution already refuses, asserted so that the
+ *       suite records the boundary rather than leaving a reader to assume it.</li>
+ * </ul>
+ *
+ * <p>Assumptions: the acceptance cases are asserted in the same breath, because a rejection suite
+ * that admits nothing is indistinguishable from a formatter that refuses everything. The valid leap
+ * day {@code '2024-02-29 23:59:59.999999'} must parse; the live fixture vector must parse and render
+ * back to the exact same twenty-six characters, which is the round trip that proves resolution
+ * changed no component on the way through; and the width must stay at twenty-six for a single-digit
+ * month, day, hour, minute and second alike, at midnight, at the last instant of a year and on a leap
+ * day, which is what pins the zero padding.</p>
+ *
  * <h2>The ten-character date prefix is part of the contract</h2>
  *
- * <p>The leading ten characters are {@code yyyy-MM-dd}. That prefix is constant width, zero padded
+ * <p>The leading ten characters are {@code uuuu-MM-dd}. That prefix is constant width, zero padded
  * and ordered most significant component first, so comparing two prefixes lexicographically answers
  * the same question as comparing them chronologically. Two consumers in the reference baseline
  * slice the prefix out of a twenty-six character value instead of parsing the value, which is why
@@ -81,6 +141,40 @@
  * the source the contract derives from rather than as a value the code under test is expected to
  * return.</p>
  *
+ * <h2>Three classes of rejection that must each be asserted</h2>
+ *
+ * <p>Assumptions: a contract this narrow is only verified by the values it must REFUSE, so three
+ * groups of negative cases are named here rather than left to the judgement of whoever authors the
+ * test. Each group exists because the type under test is wider than the contract, and each was
+ * measured against JDK 21.0.11 before being written down.</p>
+ *
+ * <p>Impossible calendar dates. A twenty-six character value whose date does not exist must raise
+ * {@code java.time.format.DateTimeParseException} and must never be moved to a neighbouring valid
+ * date. The cases are the thirtieth of February, the twenty-ninth of February in a non-leap year, the
+ * twenty-ninth of February in a non-leap CENTURY year such as 1900, the thirty-first of a
+ * thirty-day month, a month of 13 or 00, a day of 00, an hour of 24, a minute of 60 and a second of
+ * 60. Four of those, the two February cases, the thirty-first of a thirty-day month and the hour of
+ * 24, were verified to be silently normalised under the default resolver, the hour of 24 becoming
+ * midnight of the FOLLOWING day and so moving the date prefix that a production filter reads. The
+ * positive counterparts must be asserted beside them: a genuine leap day in 2024 and in the leap
+ * century 2000 must parse and must keep the twenty-ninth as the twenty-ninth.</p>
+ *
+ * <p>Years the width cannot carry. Rendering must be refused for a year outside 1000 through 9999
+ * inclusive, and reading must be refused for a twenty-six character value carrying such a year --
+ * {@code 0999-06-10 19:27:53.000000} is exactly twenty-six characters and would otherwise pass every
+ * width check, which is why the year case cannot be folded into the width case. Both boundaries must
+ * be asserted as accepted, {@code 1000-01-01 00:00:00.000000} and
+ * {@code 9999-12-31 23:59:59.999999}, and the rendered length of an accepted value must be asserted
+ * as exactly twenty-six rather than inferred from the pattern.</p>
+ *
+ * <p>Fractional digits below the contract resolution. A value carrying a seventh fractional digit
+ * must be reduced by truncation and never by rounding, and the assertions must include the two carry
+ * boundaries, because rounding is what the database driver does and truncation is what this contract
+ * requires: {@code 19:27:53.999999500} must keep the second at 53, and
+ * {@code 23:59:59.999999500} must keep the day, since rounding either one advances a component the
+ * ten-character date prefix depends on. Reducing an already-reduced value must be asserted to change
+ * nothing, so that a caller may apply it at more than one layer without consequence.</p>
+ *
  * <h2>Decision record</h2>
  *
  * <p>Assumptions: this descriptor exists because the Java documentation gate audits test sources on
@@ -134,10 +228,13 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Two {@code .java} files and no others: this descriptor, and {@code TimestampFormatterTest},
- * which exercises the single production class held in the {@code com.carddemo.common.time} package
- * of the main source tree. Fixture bytes are quoted in the expectations rather than copied into a
- * test resource directory, so this package owns no resources.</p>
+ * <p>Target contract: two {@code .java} files and no others -- this descriptor, and
+ * {@code TimestampFormatterTest}, which is to exercise the single production class the
+ * {@code com.carddemo.common.time} package of the main source tree holds. That production class,
+ * {@code TimestampFormatter}, has landed; its test is authored at a later index of the same plan, so
+ * at this checkpoint the directory holds this descriptor alone. Fixture bytes are to be quoted in
+ * the expectations rather than copied into a test resource directory, so this package owns no
+ * resources.</p>
  *
  * <h2>Relationship to the reference test suite</h2>
  *
