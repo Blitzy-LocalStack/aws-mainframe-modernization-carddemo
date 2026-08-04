@@ -297,6 +297,31 @@
       why it is called out. It is not a duplicate and it must not be removed as
       one.
     -->
+    <!--
+      WHAT: the Spring Boot module that ACTIVATES Flyway, which is a separate
+      concern from the two engine artifacts immediately below it.
+
+      Spring Boot 4 broke the single spring-boot-autoconfigure artifact into one
+      autoconfiguration module per technology, so FlywayAutoConfiguration no
+      longer travels with the framework core. It ships in
+      org.springframework.boot:spring-boot-flyway, and this starter is what puts
+      that module and spring-boot-jdbc on the classpath.
+
+      Assumptions: the two org.flywaydb coordinates below supply the migration
+      engine and the PostgreSQL dialect and activate nothing on their own. With
+      this starter absent, every spring.flyway.* key in
+      src/main/resources/application.yml is inert, V1__card.sql never runs, and
+      the service starts and reports healthy against a database with no cards
+      table at all. That is the same build-green, runtime-broken asymmetry the
+      note below describes for the missing dialect, and for the same reason worth
+      declaring explicitly rather than inferring.
+
+      Trade-offs: it is declared here rather than relied upon as a transitive of
+      spring-boot-starter-data-jpa, which contributes spring-boot-jdbc but not
+      spring-boot-flyway. The cost is one more coordinate; what it buys is that
+      the activation cannot disappear when an unrelated starter reorganises its
+      own dependencies. No version: the Spring Boot parent manages it.
+    -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-flyway</artifactId>

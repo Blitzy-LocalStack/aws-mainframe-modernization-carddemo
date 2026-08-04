@@ -1,0 +1,343 @@
+# =============================================================================
+# services/transaction-service/src/main/resources/application-dev.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The `dev` profile OVERLAY on application.yml for transaction-service, the
+#   LEDGER bounded context. It introduces nothing of its own: every key below
+#   also appears in the base document, and each one differs from it only in
+#   value. A profile that added a key would no longer be an overlay, so the
+#   absence of a concern here is as deliberate as the presence of one.
+#
+#   Activation is external. SPRING_PROFILES_ACTIVE=dev is set by the ECS task
+#   definition and is deliberately NOT baked into the image, so one image runs
+#   in either environment and the profile stays a deployment-time choice rather
+#   than a build-time one.
+#
+#   THE GOVERNING CONSTRAINT: `dev` and `prod` differ ONLY in sizing, pool
+#   limits, log level, retention and diagnostic verbosity -- NEVER in topology.
+#   That is deliberately narrow, and the reason is diagnostic rather than tidy:
+#   a bug reproduced in `dev` is evidence about `prod` only if the two run the
+#   same shape. Consequently this file adds no datasource and no embedded
+#   database, no queue, no cache, no second schema and no read replica; and it
+#   changes no Flyway location, no `ddl-auto` value and nothing in the security
+#   filter chain. Each of those omissions is a decision, and the ones a reader
+#   would most plausibly expect to find here are justified below rather than
+#   left as silence.
+#
+#   NO SECRET, CREDENTIAL OR ENDPOINT VALUE APPEARS ANYWHERE IN THIS FILE, and
+#   no ${...} placeholder is restated from the base either. `dev` is a real
+#   deployed AWS environment provisioned by infra/envs/dev, not a developer
+#   laptop, so there is no host, port, URL or credential that would be correct
+#   to write down here even as a convenience. A local-development shortcut, had
+#   one been wanted, belongs in documentation and not in a committed profile.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md.
+# -----------------------------------------------------------------------------
+# WHY (non-obvious design decisions):
+#
+#   Assumptions: the connection pool is made SMALLER here, not larger, and is
+#     allowed to empty entirely. The `dev` Aurora Serverless v2 cluster is
+#     provisioned with a minimum capacity of zero, which obliges the auto-pause
+#     setting to be configured, and auto-pause requires the cluster to be
+#     without connections; an idle floor would hold it awake for as long as the
+#     task ran and remove the whole saving that scaling to zero exists to
+#     deliver. Detail at spring.datasource.hikari.minimum-idle.
+#   Trade-offs: the first connection opened after a pause pays roughly fifteen
+#     seconds of resume latency, and that cost is accepted rather than
+#     engineered around. It is precisely why `prod` holds its minimum capacity
+#     above zero instead of copying these values. Detail at
+#     spring.datasource.hikari.connection-timeout.
+#   Assumptions: the acquisition timeout is RAISED, which is a loosening, and
+#     one mechanism alone justifies it -- it must exceed the resume window, or
+#     the first request after an idle period fails every time. Detail at
+#     spring.datasource.hikari.connection-timeout.
+#   Assumptions: max-lifetime is deliberately not touched, because it is sized
+#     against Aurora failover rather than against traffic, and a failover is
+#     not an environment-specific event. Detail at
+#     spring.datasource.hikari.idle-timeout.
+#   Assumptions: com.carddemo drops to DEBUG to make the transcribed keyset
+#     paging and field edit chains readable against the COBOL paragraphs they
+#     were taken from. Detail at logging.level.
+#   Trade-offs: SQL STATEMENT logging is enabled and BIND-PARAMETER logging is
+#     not. A bound parameter can carry the primary account number that every
+#     response masks; a statement text carries the predicate and no values.
+#     Detail at logging.level and at spring.jpa.show-sql.
+#   Trade-offs: the health body is widened to carry its contributor detail,
+#     which names the datasource and the migration state on an endpoint whose
+#     two pollers are both unauthenticated. Detail at
+#     management.endpoint.health.show-details.
+#   Assumptions: two diagnostic endpoints are added and four are still
+#     withheld -- heapdump and loggers for reasons that survive being in `dev`.
+#     Detail at management.endpoints.web.exposure.include.
+#   Assumptions: no springdoc key appears here, and none is needed. springdoc
+#     enables the interactive view by default, and the base already pins both
+#     its path and the hand-authored contract it is to display:
+#     openapi/transaction-api.yaml, the document ui/src/api/transactions.ts is
+#     to be written against, and the thing the view exists to exercise the four
+#     screen flows of this context against. NEITHER of those two files exists
+#     at this checkpoint -- both are authored at later indexes of the same plan
+#     and the pinned url resolves to a 404 until the contract lands -- so this
+#     bullet records why no key is added rather than describing a document
+#     served today. Adding an `enabled` key would introduce a key the base does
+#     not carry, which is the one thing an overlay may not do. The asymmetry
+#     therefore sits on the other side -- `prod` is where the view is switched
+#     off -- so the two overlays read as a matched pair rather than as an
+#     omission here.
+#   Alternatives Considered: an embedded database for `dev`, H2 or HSQLDB,
+#     which is the conventional shortcut and is rejected outright. The physical
+#     contract this module is written against is PostgreSQL: NUMERIC(p,2) for
+#     money, CHAR(n) for fixed-width keys and TIMESTAMP(6) for the
+#     26-character timestamps. An embedded engine's type semantics differ from
+#     all three, so the failure mode is not a broken `dev` but a PASSING one --
+#     a build green against H2 and broken against Aurora, discovered in `prod`.
+#     The repository integration tests run against a Testcontainers PostgreSQL
+#     instance for the same reason, so no tier of this module is ever exercised
+#     against an engine other than the one it deploys onto.
+#   Assumptions: spring.jpa.hibernate.ddl-auto is deliberately absent rather
+#     than overlooked. Flyway owns this schema in EVERY environment. Letting
+#     Hibernate generate it here would mean `dev` and `prod` no longer share a
+#     physical contract, and that contract is not this module's alone: the base
+#     records at application.yml L409 to L420 that `ledger` is written by TWO
+#     roles, because batch-service writes these tables under a narrowly scoped
+#     cross-schema grant that keeps the three-row posting commit atomic. A
+#     column generated from this side would break that commit in the other
+#     module, which is the worst place for the failure to surface.
+#   Assumptions: nothing in the security chain is relaxed. The OAuth2 resource
+#     server stays enabled, the listener stays on TLS, and the three token
+#     checks the base installs stay in force. Identity comes from signed JWT
+#     claims mapped by JwtRoleConverter, which is what replaced a
+#     client-echoed CDEMO-USER-TYPE field a caller could assert for itself; a
+#     permit-all shortcut here would leave the real authorization path untested
+#     in the only environment available to test it, and the endpoints behind it
+#     move money.
+#   Assumptions: no spring.cloud.aws.* key and no spring.batch.* key appears,
+#     for the same reason the base carries none -- the sibling POM declares no
+#     io.awspring.cloud artifact, no software.amazon.awssdk artifact and no
+#     batch starter, so such a key would bind nothing and would read as a
+#     missing dependency. Configuration arrives as plain environment variables
+#     injected by the ECS task definition. Peer account-service looks different
+#     here because it owns the COACCT01 inquiry listener and genuinely consumes
+#     a queue; its profile is not a template for this one.
+# =============================================================================
+
+spring:
+
+  datasource:
+
+    hikari:
+      # WHAT: a narrower pool than the ten the base sizes, and one that is
+      #       permitted to empty completely.
+      # WHY : (1) Assumptions: the base leaves this decision open on purpose.
+      #       Its note at application.yml L293 to L299 sizes ten against a
+      #       connection budget Aurora enforces for the whole cluster, shared
+      #       with seven peer services and the batch role, and leaves widening
+      #       to "a profile that knows its environment's instance size". This
+      #       profile knows something more specific than a size: the `dev`
+      #       cluster runs Aurora Serverless v2 with a minimum capacity of
+      #       zero. Taking ten of a shared budget in the environment that runs
+      #       at the capacity floor and serves no production traffic starves
+      #       peers without making this service faster.
+      #       (2) Assumptions: minimum-idle is ZERO rather than merely small,
+      #       and that is the load-bearing half of this pair. A zero minimum
+      #       capacity obliges auto-pause to be configured, and auto-pause
+      #       requires the cluster to be entirely without connections. A floor
+      #       of two would hold two sockets open for as long as the task ran,
+      #       so the pause condition would never once be met: the cluster would
+      #       stay awake, still be billed, and deliver none of the saving that
+      #       choosing a zero floor exists to deliver. A pool that cannot empty
+      #       defeats the single feature this environment is configured around.
+      #       (3) Trade-offs: four connections cannot absorb a burst that ten
+      #       could, so a load test aimed here would queue on the pool rather
+      #       than on the database and would measure this file instead of the
+      #       service. That is accepted, because `dev` exists to answer whether
+      #       behaviour is correct and not how much of it fits at once.
+      #       Capacity questions belong to `prod`, which is where the base's
+      #       widening note is exercised in the other direction.
+      maximum-pool-size: 4
+      minimum-idle: 0
+
+      # WHAT: longer to acquire a connection, shorter to keep an unused one.
+      # WHY : (1) Assumptions: the base's ten seconds is shorter than the
+      #       window this environment needs, so raising it is not a loosening
+      #       of convenience. The first connection opened after the cluster has
+      #       auto-paused waits for it to resume, and that resume takes on the
+      #       order of fifteen seconds. Ten seconds is therefore GUARANTEED to
+      #       expire before a paused cluster can answer, so the first request
+      #       after an idle period would fail on pool acquisition every time --
+      #       and it would fail looking like a broken service rather than a
+      #       cold one. Thirty seconds covers the resume with margin.
+      #       (2) Assumptions: idle-timeout is CUT to a minute, and that is the
+      #       mechanism which actually lets a pause occur. HikariCP retires
+      #       idle connections only while minimum-idle is below
+      #       maximum-pool-size, so the zero floor above is what makes this key
+      #       effective at all and the two are one decision. The base's five
+      #       minutes also sits exactly at the 300-second floor an auto-pause
+      #       threshold may be set to, so the pool would still be releasing its
+      #       last connection as the shortest legal threshold elapsed and the
+      #       pause would keep being deferred. Emptying inside a minute leaves
+      #       the idle window unambiguous.
+      #       (3) Assumptions: max-lifetime is deliberately NOT overridden. The
+      #       base sets fifteen minutes to bound how long a pooled socket can
+      #       outlive an Aurora failover, reasoned at application.yml L307 to
+      #       L312, and a failover is not an environment-specific event: both
+      #       environments run the same cluster shape, so a value chosen
+      #       against failover behaviour would be wrong to move for sizing.
+      #       (4) Assumptions: all three keys bind as millisecond integers and
+      #       not as durations, as the base records at application.yml L303 to
+      #       L306, so the values below are thirty seconds and one minute. The
+      #       `20s` duration form used for the shutdown phase would silently
+      #       fail to bind here.
+      connection-timeout: 30000
+      idle-timeout: 60000
+
+  jpa:
+    # WHAT: held at the base value. Statement logging IS enabled in this
+    #       profile, but through the logging framework further down, never
+    #       through this key.
+    # WHY : (1) Assumptions: this is the first key a reader looking for SQL in
+    #       a development profile reaches for, which is why it is restated with
+    #       its value unchanged instead of left to inheritance. Silence here
+    #       would read as an oversight rather than as a decision.
+    #       (2) Alternatives Considered: switching it on, which is the obvious
+    #       route and the wrong one. The base records the mechanism at
+    #       application.yml L461 to L467 -- this key echoes statements through
+    #       the provider straight to standard output, so no logger level can
+    #       filter it. Two consequences decide it. Output that bypasses the
+    #       logging framework also bypasses the diagnostic context
+    #       CorrelationIdFilter populates, so a statement printed this way
+    #       cannot be tied back to the request that issued it, which is most of
+    #       what makes a statement useful when several screens are in flight.
+    #       And a stream no level can filter cannot be narrowed without another
+    #       deployment. The framework-routed logger below yields the same
+    #       statements, correlated and filterable.
+    show-sql: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # WHAT: two diagnostic endpoints added to the base pair, which stays.
+        # WHY : (1) Assumptions: this key REPLACES the base list rather than
+        #       extending it, so a name omitted here is an endpoint withdrawn.
+        #       `health` is listed first and is not optional in any
+        #       environment: the load balancer target group and the container
+        #       HEALTHCHECK both poll it, so dropping it would deregister the
+        #       task rather than merely hide a route. `prometheus` stays for an
+        #       equally structural reason -- the module ships a Prometheus
+        #       registry whose only purpose is to publish that endpoint.
+        #       (2) Assumptions: `flyway` earns its place on a specific failure
+        #       mode. The base records at application.yml L367 to L378 that
+        #       Flyway does not fail on a migration location resolving to
+        #       nothing: it starts, reports zero migrations applied, and
+        #       reports healthy. A service that applied its migration and one
+        #       that silently applied none are therefore indistinguishable from
+        #       outside, on a schema that is the system of record for posted
+        #       money. This endpoint is what separates them. It is verified
+        #       present rather than assumed: the spring-boot-starter-flyway
+        #       this module declares carries FlywayEndpoint, id `flyway`, which
+        #       Spring Boot 4 relocated into the per-technology module.
+        #       (3) Trade-offs: `threaddump` is added to separate two failures
+        #       a client cannot tell apart. A first request that hangs for
+        #       fifteen seconds may be the paused cluster resuming, which is
+        #       what the raised connection-timeout above assumes, or the
+        #       application blocked on something of its own; a stack dump
+        #       distinguishes them, and without it that assumption cannot be
+        #       checked in the one environment where a pause happens. The base
+        #       withholds this along with four others at application.yml L613
+        #       to L618, and the harms it names there are specific: env and
+        #       configprops print the resolved datasource and issuer values,
+        #       and heapdump surrenders the heap that held the credentials.
+        #       None of those attaches to a thread dump, which carries stack
+        #       frames and no configuration and no row data.
+        #       (4) Assumptions: `heapdump` stays out, in `dev` as everywhere.
+        #       The heap of THIS context holds ledger rows exactly as they were
+        #       read, and TRAN-CARD-NUM is PIC X(16) at app/cpy/CVTRA05Y.cpy
+        #       L15, unmasked in memory -- so a heap dump would surrender as a
+        #       downloadable file precisely what the bind-parameter decision
+        #       below refuses to write even one line of. `env` and `configprops`
+        #       stay out for the harm the base names. `loggers` stays out for a
+        #       sharper reason: it is a WRITE endpoint, so a caller reaching it
+        #       could raise the bind-parameter logger at run time and undo the
+        #       decision this very file makes, leaving no edit to review.
+        include: health,prometheus,flyway,threaddump
+  endpoint:
+    health:
+      # WHAT: the health body now carries its contributor detail instead of a
+      #       bare status.
+      # WHY : (1) Trade-offs: the detail this reveals is the datasource and
+      #       Flyway contributors -- whether the pool can reach the cluster,
+      #       and what migration state the schema is in -- and both pollers of
+      #       this endpoint are unauthenticated, so it is readable by anything
+      #       that can reach the task inside the private application subnets.
+      #       In `dev` that names a database and a migration version in an
+      #       environment holding no customer data, whose credentials are
+      #       distinct from every other environment's, and it answers the two
+      #       questions a failed deployment here actually raises -- did the
+      #       pool connect, and did the migration run -- without a shell on the
+      #       task. In `prod` the identical body would name the system of
+      #       record for posted money to any caller inside the network while
+      #       telling an operator nothing CloudWatch does not already carry, so
+      #       `prod` keeps the base value and the two overlays differ here on
+      #       purpose.
+      #       (2) Assumptions: the base pins this at `never` and says at
+      #       application.yml L626 to L637 that pinning it means a profile
+      #       cannot widen it without deleting a documented decision. This is
+      #       that widening, so the decision is replaced in the open here
+      #       rather than quietly overwritten. The endpoint itself is neither
+      #       renamed nor removed, because it backs the container HEALTHCHECK
+      #       and the load balancer target group in every environment.
+      show-details: always
+
+logging:
+  level:
+    # WHAT: this project's own package drops to DEBUG and the framework-routed
+    #       SQL statement logger is raised with it, while bind-parameter
+    #       logging is held down. root, org.springframework and org.hibernate
+    #       are left at the base WARN and do not appear here at all.
+    # WHY : (1) Assumptions: com.carddemo at DEBUG is what makes the
+    #       transcribed logic auditable against the COBOL it came from. Two
+    #       chains need it. The keyset pagination replacing the CICS browse of
+    #       app/cbl/COTRN00C.cbl -- STARTBR at L281, READNEXT at L286, ENDBR at
+    #       L322 and READPREV at L340 -- whose page boundaries and next-page
+    #       availability are the behaviour most easily got subtly wrong; and
+    #       the field edit chain of app/cbl/COTRN02C.cbl, including the two
+    #       CALL 'CSUTLDTC' date edits at L393 and L413. Verifying either at
+    #       INFO means inferring which branch ran from its outcome instead of
+    #       reading it.
+    #       (2) Trade-offs: statement logging is switched on and
+    #       BIND-PARAMETER logging is not, and that split is the decision
+    #       rather than an inconsistency. The base states the risk at
+    #       application.yml L646 to L655: a bound parameter can be a primary
+    #       account number, and every response in this context masks that
+    #       number to its last four digits, so a single bind line hands over
+    #       the value the API withholds. A statement TEXT carries no parameter
+    #       values -- it shows the predicate and the ordering, which is exactly
+    #       what verifying a keyset query needs -- so raising the statement
+    #       logger answers the question without disclosing the data. The base
+    #       anticipated this edit, noting that switching these on takes a
+    #       deliberate edit rather than one blanket override; this is that
+    #       edit, and it moves only one of the two on purpose.
+    #       (3) Alternatives Considered: raising the bind logger as well, on
+    #       the grounds that this environment loads only synthetic records --
+    #       app/data/ASCII/dailytran.txt is 300 fabricated rows. Rejected,
+    #       because it makes log safety a property of which data happens to
+    #       have been loaded rather than of the configuration, and `dev` is a
+    #       real deployed environment anyone may point at a fuller dataset
+    #       without touching this file. A control that holds only while an
+    #       assumption about content holds is not a control.
+    #       (4) Trade-offs: org.hibernate.orm.jdbc.bind is restated at WARN
+    #       although the base already sets it there, and it is not redundant.
+    #       Its sibling logger moves in this same block, and an explicit floor
+    #       beside a raised neighbour is what stops the next reader raising the
+    #       shared org.hibernate parent and taking bind logging up with it: the
+    #       more specific level wins, so the floor survives that edit.
+    #       (5) Trade-offs: root, org.springframework and org.hibernate are
+    #       absent from this file deliberately. Raising any of them would bury
+    #       the com.carddemo lines this profile exists to surface under
+    #       framework startup narration, and log volume is billed. What is
+    #       given up is framework-internal detail; when a specific framework
+    #       question arises, the narrow logger for it is the thing to add, not
+    #       its parent.
+    com.carddemo: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: WARN

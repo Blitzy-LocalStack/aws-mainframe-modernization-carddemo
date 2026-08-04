@@ -15,21 +15,19 @@
 //   project alongside ui/tsconfig.json so both config files are linted WITH
 //   type information rather than falling out of the lint gate entirely.
 //
-//   STATE AT THIS CHECKPOINT. This file is authored ahead of the rest of the ui
-//   tree, and the migration lands its artifacts in plan order, so every file
-//   named in this document except ui/package.json is absent today and is
-//   authored at a later index of the same plan: its own two members
-//   vite.config.ts and vitest.config.ts, the sibling project ui/tsconfig.json,
-//   the lint configuration ui/eslint.config.js, and the workflow
-//   .github/workflows/ui-ci.yml. Two consequences, neither of them a defect.
-//   Running `tsc --noEmit -p tsconfig.node.json` today reports that the include
-//   list matched no input file and exits non-zero, because the list is a closed
-//   two-entry list by deliberate design (see the note on `include` at the foot
-//   of this file) rather than a glob that quietly matches nothing. And
-//   ui/eslint.config.js cannot yet name this project, so the lint gate this
-//   document describes is a contract that configuration must satisfy when it
-//   lands rather than a gate running now. Nothing here asserts that any of those
-//   files is present. The project is authored first on purpose: whether Node
+//   STATE AT THIS CHECKPOINT. The ui tree is landed in plan order, so this
+//   document names some files that exist and some that do not, and the
+//   difference is stated here rather than left for a reader to test. Present:
+//   ui/package.json, the sibling project ui/tsconfig.json, and the first of this
+//   project's two members, vite.config.ts. Still to come: its second member
+//   vitest.config.ts, the lint configuration ui/eslint.config.js, and the
+//   workflow .github/workflows/ui-ci.yml. Two consequences, neither of them a
+//   defect. Running `tsc --noEmit -p tsconfig.node.json` now succeeds, type
+//   checking vite.config.ts alone, because the include list below is a closed
+//   literal list and a named entry that has no file yet is skipped rather than
+//   treated as an error. And ui/eslint.config.js cannot yet name this project,
+//   so the lint gate this document describes is a contract that configuration
+//   must satisfy when it lands rather than a gate running now. The project is authored first on purpose: whether Node
 //   globals reach browser code is settled by which of two sibling projects owns
 //   a file, and that split has to exist before the first config file is written,
 //   because retrofitting it means auditing every `process` reference already in
@@ -180,12 +178,13 @@
   // chosen. Widening it should require editing this line. No `exclude`
   // accompanies it -- a two-entry list is already closed, and a second bound
   // would only raise the question of which one wins.
-  // WHY : Trade-offs: neither file exists yet: both are authored at a later index
-  // of the same plan, so `tsc -p` run against this project today reports that
-  // no input was found rather than checking nothing and exiting 0. That noisy
-  // failure is the accepted cost of a literal list, and it is the cost the
-  // rejected references-only layout above would have avoided by being silently
-  // inert -- which is precisely the failure mode this project is shaped to
-  // prevent.
+  // WHY : Trade-offs: vitest.config.ts is authored at a later index of the same
+  // plan, so this list currently resolves to vite.config.ts alone and `tsc -p`
+  // against this project checks that one file and exits 0. Naming both members
+  // up front is the accepted cost of a literal list: the membership decision is
+  // recorded before the file arrives, rather than a glob deciding it later. It
+  // is also the cost the rejected references-only layout above would have
+  // avoided only by being silently inert -- which is precisely the failure mode
+  // this project is shaped to prevent.
   "include": ["vite.config.ts", "vitest.config.ts"]
 }

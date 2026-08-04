@@ -1,0 +1,230 @@
+# =============================================================================
+# services/auth-service/src/main/resources/application-prod.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The prod profile overlay for the CardDemo auth bounded context. It overrides
+#   VALUES ONLY on shapes the application.yml beside it already owns, and it
+#   introduces exactly one key that file deliberately omits,
+#   spring.flyway.clean-disabled. Nothing here restates a value it does not
+#   change, because a profile that repeats the base makes the two files read as
+#   though they disagreed and hides the handful of lines that actually differ.
+#
+#   Four axes of variation are permitted between this profile and its dev
+#   sibling. This file moves all four and nothing else: log levels, Hikari pool
+#   sizing, actuator exposure breadth, and the Flyway clean flag. Six axes are
+#   forbidden -- service topology, route structure, schema ownership,
+#   identity mechanism, queue usage, datastore type -- and none appears below.
+#
+# WHY (non-obvious design decisions):
+#   1. Refactoring Rationale: the destructive Flyway operation is refused at the
+#      configuration level rather than left to operator discipline, because the
+#      data domain this context inherits had no undo of any kind. See
+#      spring.flyway.
+#   2. Assumptions: the pool number that has to fit the cluster is the aggregate
+#      across tasks rather than the per-task figure written here, and the
+#      multiplier is the scaling policy's maximum rather than the initial task
+#      count. See spring.datasource.hikari.
+#   3. Trade-offs: framework detail is suppressed while this context's own
+#      events are kept, so a correlation-id-scoped search still has something to
+#      find. See logging.level.
+#   4. Assumptions: two endpoints cannot be withdrawn from the actuator surface
+#      without breaking a consumer that is unable to authenticate. See
+#      management.endpoints.web.exposure.
+#   5. Trade-offs: no credential, endpoint or identifier appears in this file,
+#      and no fallback is introduced for one. See the second note below.
+# =============================================================================
+
+# Assumptions: this profile overrides VALUES ONLY, and the shapes it leaves
+# alone are as much a part of the contract as the four it moves. It changes the
+# Flyway clean flag, two log levels, two pool numbers and the actuator exposure
+# list. It does NOT change service topology, route structure, schema ownership
+# -- auth remains the single schema this context owns, standing in for the
+# single 80-byte record at app/cpy/CSUSR01Y.cpy L17-L23 -- nor the
+# identity mechanism, which stays a Cognito JWT resource server, nor queue
+# usage, of which this context has none, nor the datastore type, which stays
+# PostgreSQL. The consequence is what makes the restriction worth stating
+# rather than merely observing: because the shapes are identical in both
+# environments, a defect reproduced in dev is reproducible in prod, and a
+# failure seen only in prod is attributable to data or to capacity rather than
+# to drift between these two files.
+
+# Trade-offs: this file supplies no value for anything the platform provides,
+# and in particular no fallback for one. Every credential and every endpoint
+# this service needs -- the datasource URL, its two connection credentials, the
+# resource server's issuer URI, and the user pool, app client and confidential
+# client credential -- is declared in application.yml as an unresolved
+# placeholder and stays unresolved here. Startup therefore fails fast when
+# configuration is absent, which is accepted over a working default: a default
+# that resolved would let this process come up bound to another environment's
+# user pool, or reading another environment's rows, and that fault presents as a
+# service that works.
+#
+# Assumptions: the platform resolves all of it before the process starts. The
+# ECS task definition injects the active profile and every endpoint from
+# Parameter Store, and every credential from Secrets Manager where
+# hashicorp/random generated it at Terraform apply time, so no such value passes
+# through this repository at any point. The image is deliberately built without
+# a baked-in -Dspring.profiles.active, which is what makes THIS file the prod
+# overlay by deployment-time selection rather than by image identity: one image
+# runs in both environments and the injected profile decides which of these two
+# overlays applies.
+
+spring:
+  datasource:
+    hikari:
+      # Refactoring Rationale: there is no baseline number to carry across here,
+      # which is why this is sized from the target's own constraints rather than
+      # transcribed from the arrangement it replaces. app/csd/CARDDEMO.CSD L91
+      # defines FILE(USRSEC) with STRINGS(1), so the baseline serialised EVERY
+      # user-security access -- every sign-on, every user list, every update --
+      # through exactly one VSAM string: a hard concurrency ceiling of one.
+      # Concurrent access is therefore a degree of freedom the migration
+      # introduces, not a tunable it inherits, and a reader looking for the
+      # legacy value these numbers descend from will not find one.
+      #
+      # Assumptions: the figure that has to fit the cluster's connection budget
+      # is the AGGREGATE, and its multiplier is not the one a reader expects.
+      # infra/modules/ecs-service stops tracking desired_count after creation so
+      # that Application Auto Scaling owns the running count, between that
+      # module's min_capacity (2, holding the multi-zone redundancy the service
+      # starts with) and its max_capacity (6). What this context contributes at
+      # full scale-out is therefore 20 x 6 = 120 connections rather than 20 x
+      # the initial task count, against a steady-state contribution of 5 x 2 =
+      # 10 warm ones. Raising max_capacity in an environment root without
+      # revisiting the number here is exactly how a scale-out driven by a fault
+      # turns into refused connections for every context sharing the cluster.
+      #
+      # Assumptions: prod holds the Aurora capacity floor above zero, where a
+      # min_capacity of 0 in the aurora-postgresql module makes auto-pause
+      # mandatory and is a dev posture. Warm connections therefore stay useful
+      # between requests instead of being severed by a pause, which is what
+      # makes minimum-idle worth raising at all -- and it matters more here than
+      # the ceiling does, because the base file pins sslmode: verify-full with
+      # an explicit trust anchor, so every NEW connection pays a full
+      # chain-and-hostname-verifying handshake before it can serve anything.
+      #
+      # Trade-offs: doubling the base ceiling and more than doubling the warm
+      # floor buys burst absorption -- a sign-on burst is served without
+      # borrowers queueing against the 30-second wait the base pins -- and costs
+      # both a higher idle footprint, since minimum-idle connections are held
+      # whether or not traffic arrives, and the 120-connection scale-out ceiling
+      # above. A smaller pool would conserve cluster connections and queue under
+      # burst instead: the right trade for dev, and the wrong one for the
+      # sign-on path, because queueing here delays the one request that gates
+      # every other screen. connection-timeout is deliberately NOT restated, so
+      # the wait stays at the base value: that file states it explicitly so a
+      # pool raise in a profile cannot be read as also relaxing the wait, and
+      # repeating it here would blunt the point of stating it there.
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+  flyway:
+    # Refactoring Rationale: the arrangement this replaces offered no way back.
+    # app/csd/CARDDEMO.CSD L94-L97 defines FILE(USRSEC) -- the indexed file the
+    # auth schema stands in for -- with JOURNAL(NO), JNLREAD(NONE),
+    # JNLSYNCREAD(NO), JNLUPDATE(NO), JNLADD(NONE), RECOVERY(NONE),
+    # FWDRECOVLOG(NO) and BACKUPTYPE(STATIC): no journalling, no recovery
+    # logging and no forward recovery log, which together mean the baseline had
+    # no point-in-time recovery path for the user-security file at all. A
+    # destructive operation there was survivable only in the sense that nobody
+    # ran one. Inheriting a data domain that historically had no undo, the
+    # target forbids the destructive operation outright at the configuration
+    # level rather than relying on operator discipline: with this set, an
+    # accidental or scripted flyway:clean against the production datasource
+    # fails instead of dropping auth.users and every sign-on identity mapped
+    # through it.
+    #
+    # Assumptions: this is a guardrail against operator error and not the only
+    # line of defence. The Terraform aurora-postgresql module provisions
+    # automated backups and encryption at rest, so a recovery capability now
+    # exists where the baseline had none. That is precisely why refusing the
+    # operation is a cheap precaution rather than the single thing standing
+    # between a mistyped goal and permanent loss.
+    #
+    # Trade-offs: the pinned framework release already defaults this to true, so
+    # the line changes no behaviour today and is kept regardless. What it buys
+    # is that the guarantee is readable in the profile carrying the production
+    # risk, instead of being inferable only by knowing a framework default and
+    # trusting that no later upgrade revisits it. The accepted cost is one line
+    # that a reader could mistake for a behavioural change, which this note
+    # settles.
+    clean-disabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Assumptions: the metrics surface cannot be closed in pursuit of a
+        # narrower one. micrometer-registry-prometheus is a runtime dependency
+        # of this module, and common-lib's MetricsConfig contributes the common
+        # tags service, environment and version that every dashboard and alarm
+        # the Terraform observability module provisions groups by. Dropping
+        # metrics or prometheus from this list would raise no error anywhere:
+        # the process would start, serve traffic, and simply stop being scraped,
+        # so dashboards would render empty panels and alarms would sit in
+        # insufficient-data instead of firing. A monitoring gap that presents as
+        # a quiet graph is the outcome this list exists to prevent.
+        #
+        # Assumptions: health stays at exactly /actuator/health and stays
+        # reachable without a token. Both the load balancer target group and
+        # this service's container HEALTHCHECK request that path, NEITHER is
+        # able to present a JWT, and it reports aggregate status carrying no
+        # business data. Withdrawing it, moving it, or putting a credential in
+        # front of it would break target-group registration and container
+        # liveness in the same change, removing the two independent signals that
+        # a deployment is progressing, so the narrowing here deliberately stops
+        # short of it. Which principals may reach the endpoints that remain is
+        # decided in this service's SecurityConfig; this list only decides which
+        # endpoints exist.
+        #
+        # Trade-offs: info is withdrawn, and relative to a dev overlay the whole
+        # diagnostic tier -- env, configprops, loggers, flyway, threaddump and
+        # heapdump -- is never published here at all. The cost falls squarely on
+        # diagnosis: an operator cannot read a running task's effective
+        # configuration, cannot confirm from the endpoint which migration
+        # version applied, and cannot raise a log level at runtime, so a
+        # production investigation runs first on the metrics series and a
+        # correlation-id-scoped log search, and escalates to a reviewed
+        # configuration change and a redeploy second. That is accepted because
+        # env and configprops enumerate resolved property values -- the
+        # datasource URL, the pool identifiers, and the name of everything
+        # injected out of Secrets Manager -- on a surface whose health sibling is
+        # deliberately reachable with no credential, and because heapdump
+        # returns process memory containing whatever a bearer token last
+        # occupied.
+        include: health,metrics,prometheus
+
+logging:
+  level:
+    # Trade-offs: root drops to WARN while this context's own packages stay at
+    # INFO, which is a deliberate split rather than one level applied twice. At
+    # production request rates the framework's INFO output is dominated by
+    # per-request and lifecycle detail that says nothing specific about a
+    # sign-on, and it is paid for twice over, once on CloudWatch ingestion and
+    # again on log group retention; suppressing it keeps both bounded. The cost
+    # is that a defect stops being reproducible from the log alone, because the
+    # surrounding framework context is gone. An investigation therefore starts
+    # from com.carddemo's own events, pivots on the correlation id that
+    # common-lib's CorrelationIdFilter puts into the logging context on the way
+    # in and echoes on the response, and escalates to a reviewed level change
+    # and a redeploy when that is not enough -- /actuator/loggers is not
+    # published here, as the actuator note above records.
+    #
+    # Assumptions: com.carddemo is restated rather than left to inherit. Profile
+    # sources merge with the base, so this line is not needed to hold the level
+    # it already has. It is here because root moves in the same block, and a
+    # reader lowering root for an investigation has to be able to see that this
+    # context's own floor is pinned independently of it.
+    #
+    # Assumptions: the credential-adjacent loggers are absent from this block on
+    # purpose. org.springframework.security and org.hibernate.orm.jdbc.bind are
+    # pinned at WARN by the base file, which forbids a profile lowering either,
+    # because at DEBUG and below they emit token claims and the values bound
+    # into each statement -- here the eight-character user id, the given and
+    # family names, and the pool subject reference of the row being read or
+    # written. Restating them at the value they already hold would add two lines
+    # that read as prod-specific decisions and would invite a later edit to
+    # treat them as this file's to move; omitting them keeps that authority in
+    # one place.
+    root: WARN
+    com.carddemo: INFO

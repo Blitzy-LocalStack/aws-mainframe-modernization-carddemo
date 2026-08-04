@@ -73,8 +73,6 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: resolve the AWS provider from the public registry, constrained to
-    #       the 6.56-or-newer 6.x series.
     # WHY : Assumptions: `hashicorp/aws` resolves from the public Terraform
     #       Registry. This package declares no private registry, network mirror
     #       or credentialed provider source, so the bare `hashicorp/` namespace

@@ -60,6 +60,32 @@
 #   gate retrofitted after the modules exist is a gate whose first run is a
 #   backlog rather than a check.
 #
+# State at this checkpoint:
+#   This file is authored ahead of most of the package it configures, and the
+#   migration lands its artifacts in plan order, so several paths named
+#   throughout this document DO NOT EXIST YET and are authored at later indexes
+#   of the same plan. `src/carddemo_migration/` currently holds exactly two
+#   modules, `__init__.py` and `config.py`; the `copybook/`, `readers/`,
+#   `loaders/` and `verify/` subpackages, the `cli.py` module named by
+#   `[project.scripts]` below, the `tests/` tree named by `testpaths`, and this
+#   package's own README are all still to come. Measured consequences, so that a
+#   reader meets no surprise:
+#     - `ruff check data-migration` PASSES today over the two modules present.
+#       The docstring gate is live and is already being enforced.
+#     - `python -m pytest data-migration/tests` cannot run, because that
+#       directory does not exist; run from this directory, pytest exits 5 (no
+#       tests collected) and warns that `testpaths` matched nothing.
+#     - The distribution BUILDS and INSTALLS cleanly, and the wheel it produces
+#       contains those two modules. `import carddemo_migration` therefore works,
+#       while the console script `[project.scripts]` declares is installed as a
+#       wrapper that fails on first invocation; the `[project.scripts]` block
+#       below records exactly how.
+#   Every setting is nevertheless declared now, deliberately: the lint rules,
+#   the docstring convention, the import ban and the src layout are the
+#   constraints each of those later modules has to be written to satisfy, and a
+#   gate retrofitted after the modules exist is a gate whose first run is a
+#   backlog rather than a check.
+#
 # WHY (non-obvious design decisions):
 #   - Assumptions: TOML has no docstring construct, so Rule 1 is honoured here
 #     through the analogue the migration plan defines for configuration

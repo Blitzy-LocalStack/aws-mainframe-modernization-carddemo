@@ -184,6 +184,30 @@
       <scope>runtime</scope>
     </dependency>
 
+    <!-- WHAT: the Spring Boot module that ACTIVATES Flyway, which is not the same
+         thing as the two engine artifacts that follow it.
+         Assumptions: Spring Boot 4 split the one spring-boot-autoconfigure
+         artifact into one autoconfiguration module per technology, so
+         FlywayAutoConfiguration ships in
+         org.springframework.boot:spring-boot-flyway and not with the framework
+         core. This starter contributes that module along with spring-boot-jdbc;
+         the two org.flywaydb coordinates below are the engine and the PostgreSQL
+         dialect and activate nothing themselves. Without this starter every
+         spring.flyway.* property is inert, neither V1__reference.sql nor
+         V2__seed_reference.sql runs, and the service starts healthy against a
+         reference schema with no disclosure_groups table and therefore no
+         DEFAULT row, which is precisely the state the note below says hard abends
+         the nightly interest run.
+         Trade-offs: declared explicitly rather than expected as a transitive of
+         spring-boot-starter-data-jpa, which brings spring-boot-jdbc but not
+         spring-boot-flyway. One extra coordinate buys an activation that cannot
+         vanish when an unrelated starter reorganises its own dependencies. The
+         version comes from the parent, like every other coordinate here. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+
     <!-- Assumptions: this module owns the reference schema, so it carries its own
          migrations rather than sharing a global set. One of them seeds the
          mandatory DEFAULT disclosure-group row. app/cbl/CBACT04C.cbl line 436 to
@@ -205,11 +229,6 @@
          starter brings it transitively at the version the parent's flyway.version
          property pins, so a direct declaration would add a second editable
          version site while contributing nothing to the classpath. -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-flyway</artifactId>
-    </dependency>
-
     <!-- Assumptions: Flyway 10 and later moved PostgreSQL support out of
          flyway-core into this companion artifact, and the starter above pulls no
          database module of its own. Without this coordinate the build resolves and

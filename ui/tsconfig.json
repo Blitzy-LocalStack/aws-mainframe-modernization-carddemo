@@ -1,0 +1,330 @@
+// =============================================================================
+// ui/tsconfig.json
+// -----------------------------------------------------------------------------
+// Purpose:
+//   TypeScript project for the BROWSER half of the ui tree: every source file
+//   under ui/src, which is the React 19 single-page application that replaces
+//   the 21 CardDemo 3270/BMS online screens. It type-checks that tree and never
+//   emits from it. Its sibling ui/tsconfig.node.json covers the two
+//   Node-executed config files, and the two projects are disjoint by design --
+//   see the third bullet below.
+//
+//   Four consumers depend on this project, and three of them run it by the same
+//   literal command, `tsc --noEmit -p tsconfig.json`: the `typecheck` script in
+//   ui/package.json, the first half of that manifest's `build` script (which
+//   only reaches `vite build` if this check passes), and the type-check gate in
+//   .github/workflows/ui-ci.yml. The fourth consumer, ui/eslint.config.js, does
+//   not run tsc at all; it names this project as the source of type information
+//   for typescript-eslint, which is what allows the eslint-plugin-jsdoc rules
+//   that enforce Rule 1 across this package to evaluate rather than silently
+//   skip. Both of those gates therefore rest on the `include` at the foot of
+//   this file, which is why its rationale is the longest one here.
+//
+//   STATE AT THIS CHECKPOINT. The migration lands its artifacts in plan order
+//   and this project is authored ahead of most of the tree it governs. Of the
+//   files named above, ui/package.json exists today; ui/eslint.config.js,
+//   .github/workflows/ui-ci.yml, ui/vite.config.ts, ui/vitest.config.ts and
+//   ui/src/test/setup.ts are each authored at a later index of the same plan.
+//   Under ui/src only src/messages/messages.ts is present so far. Two
+//   consequences, neither of them a defect. Unlike its sibling project, this one
+//   already matches real input, so `tsc --noEmit -p tsconfig.json` genuinely
+//   checks source today rather than reporting an empty include list -- which is
+//   exactly the property the `include` rationale below exists to protect.
+//   And `npm run build` gets through this check and then stops at `vite build`,
+//   because Vite's own config and the src/main.tsx entry point that index.html
+//   loads are later artifacts; nothing here asserts otherwise.
+//
+// WHY (non-obvious design decisions):
+//   - Alternatives Considered: the stock Vite react-ts layout, whose root
+//     tsconfig.json declares an empty `files` array beside a `references` list
+//     naming a tsconfig.app.json and this tree's tsconfig.node.json, was
+//     evaluated and rejected. `tsc -p` does not traverse project references --
+//     only `tsc -b` does, and no consumer in this repository invokes `-b`. A
+//     references-only root owning no files of its own would therefore make all
+//     three `-p tsconfig.json` invocations check ZERO files and still exit 0,
+//     and would leave typescript-eslint with no typed source either. Two gates
+//     would report success having verified nothing. This file is consequently
+//     the app project itself: it includes ui/src directly, and no
+//     tsconfig.app.json is created.
+//   - Trade-offs: the `types` list below withholds the Node type definitions
+//     that ui/tsconfig.node.json grants, even though @types/node is installed in
+//     this same package. A single project spanning both halves would have to
+//     either hand `process`, `__dirname`, `Buffer` and `require` to all 21 React
+//     screens -- where `process.env.API_URL` in a component type-checks cleanly
+//     and then throws in a browser that has no `process` -- or leave the two
+//     config files uncheckable. The compromise accepted is two projects and two
+//     invocations instead of one.
+//   - Assumptions: the compiler is typescript 6.0.3 as pinned in
+//     ui/package.json, and it stays there. typescript-eslint 8.65.0
+//     peer-declares `typescript >=4.8.4 <6.1.0`; raising the compiler past that
+//     ceiling stops the type-aware lint pass -- and with it the JSDoc
+//     documentation gate -- while the build stays green, so the loss is
+//     invisible to whoever raised it. Every option set below is available at
+//     6.0.3; none is a 7.x-only spelling.
+// =============================================================================
+{
+  "compilerOptions": {
+    // Assumptions: ES2022 is the language level this tree is validated against
+    // at both ends. The UI build stage runs node:22.23.1-alpine and
+    // ui/package.json requires node `^22.22.0 || >=24.0.0`, so the toolchain
+    // parses it natively; the bundle is served to modern browsers through
+    // CloudFront, and no legacy-browser floor is stated anywhere in the
+    // migration plan. Choosing a lower target would make tsc down-level
+    // generators, async iteration and class fields that every supported
+    // runtime already implements, enlarging the shipped bundle to serve a
+    // browser this deployment does not target.
+    "target": "ES2022",
+
+    // Assumptions: this half of the tree runs in a browser, so DOM lies in
+    // scope here exactly as it is withheld from the sibling project.
+    // "DOM.Iterable" is listed separately because it is not implied by "DOM":
+    // without it, `for...of` over a `NodeList` and `FormData.entries()` are
+    // type errors rather than the ordinary iteration they are at run time, and
+    // the form screens do iterate both -- the account-update screen alone
+    // carries 128 fields, which is not a form anyone enumerates by hand.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // Assumptions: these two options are set as a pair because they answer one
+    // question -- who resolves and loads a module in this tree -- and the answer
+    // is Vite, not Node. ui/package.json declares `type: module`, so every file
+    // here is already ESM; `module` therefore names the newest ESM setting
+    // rather than a dated one, which keeps `import.meta` (the mechanism browser
+    // configuration actually arrives through) and top-level `await` available
+    // instead of having tsc reject syntax esbuild accepts. Resolution is
+    // `bundler` because Vite reads package `exports` maps the way a bundler
+    // does. The alternatives were `node16` and `nodenext`; each applies Node's
+    // own ESM rules and would demand an explicit file extension on every
+    // relative import, which is not how ui/src is written -- the plan's import
+    // discipline specifies extensionless relative specifiers such as
+    // `../../theme/tokens` and `../../messages/messages`. Under those modes tsc
+    // would report import failures for specifiers that resolve perfectly well
+    // through Vite.
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // Assumptions: the React 17+ automatic JSX runtime, which is why no .tsx
+    // file in this tree imports React merely to use JSX. The alternative,
+    // "react", is the classic runtime and compiles JSX to `React.createElement`
+    // -- it would require a `React` import in all 21 screen files purely to
+    // satisfy the compiler, an import that carries no meaning for a reader and
+    // that noUnusedLocals could not distinguish from a genuine one.
+    "jsx": "react-jsx",
+
+    // Trade-offs: the `node` entry is deliberately ABSENT from this list, so
+    // browser code cannot see `process`, `__dirname`, `Buffer` or `require` even
+    // though @types/node 26.1.1 is installed in this package for the sibling
+    // project's benefit. A type system that accepts `process.env.API_URL` inside
+    // a React component is worse than no type system on that line, because it
+    // certifies a reference that has no value in a browser. The consequence is
+    // explicit and load-bearing: browser code reads configuration through Vite's
+    // `import.meta.env`, never `process.env`. That entry is named here in
+    // backticks rather than in its JSON spelling on purpose, so that a literal
+    // search of this file for the quoted form finds nothing and the absence is
+    // verifiable by the same grep that would catch a regression.
+    // Assumptions: the two entries that ARE listed are forward contracts on two
+    // sibling files, and they move together with them. `vitest/globals` is
+    // correct only because ui/vitest.config.ts enables Vitest's globals, which
+    // is what lets a test call `describe`, `it` and `expect` without importing
+    // them; `@testing-library/jest-dom` is correct only because
+    // ui/src/test/setup.ts imports that package's matchers, which is what makes
+    // `toBeInTheDocument` and `toHaveAttribute` type-check. If either sibling
+    // stops doing its half, its entry here becomes a declaration of something
+    // untrue and must be removed with it.
+    // Assumptions: the `import.meta.env` typing that browser configuration
+    // depends on does NOT come from this list. It arrives through a triple-slash
+    // `/// <reference types="vite/client" />` in a declaration file under
+    // ui/src, which resolves even here -- a populated `types` array suppresses
+    // only the AUTOMATIC inclusion of installed @types packages, never an
+    // explicit reference. Verified against this project: the reference form
+    // type-checks `import.meta.env.VITE_API_BASE_URL`, whereas the same
+    // expression without it does not.
+    // Alternatives Considered: naming vite/client in this list instead, which is
+    // the reflex fix when that expression fails to compile. It is rejected
+    // because this list applies to every file in the project simultaneously, and
+    // vite/client carries 65 ambient `declare module` statements for CSS-module
+    // and asset specifiers alongside the env typing -- so every screen and every
+    // test would silently gain the ability to import specifiers this tree does
+    // not use, and the narrow list above would stop meaning anything. A single
+    // declaration file keeps the widening local and reviewable.
+    "types": ["vitest/globals", "@testing-library/jest-dom"],
+
+    // Assumptions: Vite and esbuild own emission for this tree, so no consumer
+    // anywhere reads a tsc output -- the two scripts that invoke this project
+    // both pass --noEmit, and `vite build` writes the only bundle anyone
+    // deploys. Letting tsc emit as well would produce a second JavaScript tree
+    // beside the sources that nothing imports and that the root .gitignore does
+    // not name, so it would also become untracked clutter. The compiler's whole
+    // role here is to check.
+    "noEmit": true,
+
+    // Trade-offs: full strictness is accepted for this tree, and the cost is
+    // real -- narrowing, explicit null handling and exhaustive returns make the
+    // 21 screens more verbose than their loosely-typed equivalents would be.
+    // It is taken because the screens are transcriptions of COBOL whose
+    // observable behaviour has to match a golden-master baseline, and the class
+    // of defect strictness catches here is precisely the class that presents as
+    // a blank field or a crashed render rather than as an obvious error. The
+    // two flags below this one are the concrete cases; each is justified from a
+    // measured property of the baseline rather than from a general preference.
+    "strict": true,
+
+    // Assumptions: a page of browse results is a fixed-arity array that the
+    // final page only partly fills, so indexing it can genuinely yield nothing
+    // and the code has to say so. The baseline is explicit about this and the
+    // arity differs per screen: the card list renders 7 rows
+    // (`WS-SCREEN-ROWS OCCURS 7 TIMES`, app/cbl/COCRDLIC.cbl:255, over the
+    // 196-byte array its own comment describes as "28 CHARS X 7 ROWS") while
+    // the user list renders 10 (`USER-REC OCCURS 10 TIMES`,
+    // app/cbl/COUSR00C.cbl:57). Both programs then guard every slot
+    // individually -- COCRDLIC tests `WS-EACH-CARD(n) EQUAL LOW-VALUES` for
+    // each of its 7 rows before painting it (L680-L735), and COUSR00C's read
+    // loop stops at end-of-file rather than at 10 (L300), leaving the trailing
+    // slots empty. Without this flag TypeScript would type `rows[6]` as present
+    // on a page holding four, and the migrated screen would read a property of
+    // undefined at render time instead of handling the short page the way the
+    // COBOL already does.
+    "noUncheckedIndexedAccess": true,
+
+    // Assumptions: the keyset page envelope distinguishes "there is no further
+    // page" from "no key was supplied", and that distinction is data, not an
+    // accident of representation. The baseline carries it in a dedicated
+    // indicator -- `WS-CA-NEXT-PAGE-IND PIC X(1)` with
+    // `88 CA-NEXT-PAGE-NOT-EXISTS VALUE LOW-VALUES` against
+    // `88 CA-NEXT-PAGE-EXISTS VALUE 'Y'` (app/cbl/COCRDLIC.cbl:242-244) --
+    // alongside the first-key and last-key pairs the envelope is built from
+    // (`WS-CA-FIRST-CARDKEY` and `WS-CA-LAST-CARDKEY`, L230-L235). Without this
+    // flag `firstKey?: string` also admits an explicit `undefined`, so assigning
+    // one would be indistinguishable from omitting the property, and the two
+    // states the indicator separates would collapse into one -- taking the
+    // enabled or disabled state of the backward and forward paging controls
+    // with them.
+    "exactOptionalPropertyTypes": true,
+
+    // Trade-offs: the four checks below are not implied by `strict`, and each
+    // rejects something legal. They are enabled because in this tree every one
+    // of them is a half-finished edit rather than an intentional construct: an
+    // unused local or parameter in a screen is usually a field that was renamed
+    // on one side only, a switch case that falls through is usually a missing
+    // `break` in a PF-key dispatch, and a code path that returns nothing from a
+    // function declared to return a value is usually an unhandled branch of a
+    // validation chain transcribed from COBOL. Each would otherwise surface as
+    // a screen that quietly does the wrong thing.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+
+    // Assumptions: a member that means to replace an inherited one says so. The
+    // tree is overwhelmingly function components, so this is cheap here, and it
+    // costs nothing where no class exists; where one does, an `override` that
+    // has silently stopped overriding anything after a base signature changed
+    // is the failure this rejects.
+    "noImplicitOverride": true,
+
+    // Assumptions: esbuild -- which is what actually transforms this tree under
+    // both Vite and Vitest -- compiles one file at a time and cannot look
+    // across a module boundary to decide whether an imported name is a type or
+    // a value. These two flags make tsc reject exactly the constructs esbuild
+    // would therefore mishandle, so a type-only import has to be written
+    // `import type` rather than being erased by luck. Without them a type-only
+    // import can survive into the bundle as a runtime import of a module that
+    // exports no value at that name, which fails when the browser evaluates it
+    // and not when anything checks it.
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    // Trade-offs: declaration files shipped by dependencies are not re-checked.
+    // The alternative spends the check re-validating third-party .d.ts files
+    // this project cannot edit, across a dependency surface that includes antd,
+    // the React 19 typings and the Vitest chain -- where a conflict inside a
+    // transitive dependency would block a check whose real subject is ui/src.
+    "skipLibCheck": true,
+
+    // Assumptions: parts of the dependency surface are still published as
+    // CommonJS, so a default import of one has to be interoperable here for the
+    // code to consume it the way Vite's bundling will.
+    "esModuleInterop": true,
+
+    // Assumptions: CI and the container build stage use a case-sensitive
+    // filesystem, so a specifier whose casing differs from the file on disk has
+    // to fail here. On a case-insensitive developer machine it would otherwise
+    // resolve locally and break only once the image is built, at which point
+    // the failure is a long way from the edit that caused it.
+    "forceConsistentCasingInFileNames": true,
+
+    // Assumptions: importing declarative data typed from its real shape is
+    // preferable to hand-declaring the same data twice, because the second copy
+    // is what drifts.
+    "resolveJsonModule": true,
+
+    // Assumptions: this is only legal alongside `noEmit`, and it is set for the
+    // narrow case of a specifier that names a .ts or .tsx file explicitly.
+    // Vite resolves such a specifier, so the checker accepting it keeps tsc
+    // from rejecting an import that works -- and since nothing is emitted, the
+    // extension cannot leak into an output file that a runtime would then fail
+    // to resolve.
+    "allowImportingTsExtensions": true,
+
+    // Assumptions: class fields are defined rather than assigned, matching the
+    // ECMAScript semantics that `target: "ES2022"` already implies and that
+    // esbuild applies. Stating it explicitly keeps the two halves of the tree
+    // from disagreeing about field initialisation order if either target is
+    // ever moved.
+    "useDefineForClassFields": true,
+
+    // Assumptions: every file in ui/src is a module and is treated as one
+    // unconditionally, rather than being classified by whether it happens to
+    // carry a top-level import or export. Left to that inference, a screen or
+    // helper that exported nothing -- a test file asserting only side effects,
+    // for instance -- would be read as a global script and its declarations
+    // would land in the global scope, where they could collide with another
+    // file's.
+    "moduleDetection": "force"
+
+    // Alternatives Considered: `baseUrl` with a `paths` alias -- the
+    // conventional `@/theme/tokens` form -- was evaluated and rejected. The
+    // migration plan's import discipline specifies named imports with relative
+    // specifiers, and every module in this tree is authored that way. Adding an
+    // alias would create a second, equally valid spelling of the same import
+    // with nothing to arbitrate between them, and Vite resolves the alias only
+    // if its own config repeats the mapping, so the two would drift into
+    // disagreement about which specifiers resolve.
+    //
+    // Also deliberately unset: `incremental` and `tsBuildInfoFile`, because no
+    // consumer runs build mode and a stray .tsbuildinfo is untracked output the
+    // root .gitignore does not name; `composite`, which exists to be referenced
+    // and nothing references this project; and `declaration`, `outDir`,
+    // `rootDir`, `allowJs` and `checkJs`, which all describe emission or
+    // JavaScript sources that this project has neither of.
+  },
+
+  // Alternatives Considered: ui/src is included DIRECTLY, and this project
+  // declares no `references` and no empty `files` array. This is the single
+  // load-bearing line in the file. The stock Vite react-ts root pairs an empty
+  // `files` array with a `references` list, delegating all membership to the
+  // referenced projects -- and `tsc -p` does not traverse project references.
+  // Only `tsc -b` does, and nothing in this repository invokes `-b`: all three
+  // callers run the literal `tsc --noEmit -p tsconfig.json` (the `typecheck`
+  // and `build` scripts in ui/package.json, both declared today, and the
+  // type-check gate in .github/workflows/ui-ci.yml). Under the stock shape each
+  // of those commands would resolve an empty file list, check nothing, and exit
+  // 0 -- a gate that cannot fail, reporting success over a tree of type errors.
+  // ui/eslint.config.js would inherit the same emptiness from the other
+  // direction, leaving typescript-eslint with no typed source and silently
+  // disabling the JSDoc documentation gate with it. Two gates, one root cause.
+  // Naming the directory rather than a glob is what makes this stay true: `src`
+  // matches every .ts and .tsx beneath it, including ui/src/test, so a new
+  // screen or test joins the checked set by existing rather than by being
+  // remembered here.
+  "include": ["src"],
+
+  // Assumptions: both entries are generated, not authored -- node_modules is
+  // installed by `npm ci` and dist/ is the bundle `vite build` writes -- and
+  // the root .gitignore names both (L98 and L103). Checking generated output
+  // reports errors in code nobody wrote and nobody can fix in place, and a
+  // bundle re-checked as source is also the one place the strictness above
+  // produces noise instead of signal. `src` above already excludes them by
+  // construction; they are named anyway so that the boundary survives any later
+  // widening of the include list.
+  "exclude": ["node_modules", "dist"]
+}

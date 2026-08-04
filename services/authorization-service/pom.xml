@@ -307,6 +307,34 @@
     </dependency>
 
     <!--
+      WHAT: the Spring Boot module that ACTIVATES Flyway, as distinct from the
+      two engine artifacts declared after it.
+
+      Assumptions: Spring Boot 4 split the single spring-boot-autoconfigure
+      artifact into one autoconfiguration module per technology, so
+      FlywayAutoConfiguration now ships in
+      org.springframework.boot:spring-boot-flyway rather than with the framework
+      core, and this starter is what contributes it, together with
+      spring-boot-jdbc. The engine and the dialect below activate nothing on
+      their own. With this starter absent, every spring.flyway.* property is
+      inert, V1__authorization.sql never runs, and the service starts and
+      reports healthy against a database holding no pending_auth_summary,
+      pending_auth_detail or auth_fraud table, so the first consumed
+      authorization message fails on a missing relation after the queue has
+      already delivered it.
+
+      Trade-offs: declared explicitly rather than left to arrive as a transitive
+      of spring-boot-starter-data-jpa, which contributes spring-boot-jdbc but
+      not spring-boot-flyway. The cost is one more coordinate in this list; what
+      it buys is an activation that cannot disappear when an unrelated starter
+      reorganises its own dependencies. Version managed by the parent.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+
+    <!--
       Assumptions: the authorization schema is created and evolved by a
       versioned migration that ships inside this same jar, so the schema and
       the code that reads it are released as one artifact and cannot disagree
@@ -329,11 +357,6 @@
       flyway.version property pins, so a direct declaration would add a second
       editable version site while adding nothing to the classpath.
     -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-flyway</artifactId>
-    </dependency>
-
     <!--
       Assumptions: this companion artifact is MANDATORY and is not
       interchangeable with the starter above. Flyway 10 moved

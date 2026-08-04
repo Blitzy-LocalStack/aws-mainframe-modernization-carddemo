@@ -1,0 +1,253 @@
+-- =============================================================================
+-- services/auth-service/src/main/resources/db/migration/V1__auth.sql
+-- -----------------------------------------------------------------------------
+-- Purpose: creates auth.users, the only object the AUTH bounded context owns:
+--       the local user-identity row carrying the eight-character user
+--       identifier, the two descriptive name fields and the one-character
+--       administrator/user type transcribed from the baseline 80-byte
+--       SEC-USER-DATA record declared at app/cpy/CSUSR01Y.cpy L17-L23, together
+--       with cognito_sub, the linkage to the managed identity provider that
+--       authenticates every user in the target. The baseline credential field
+--       SEC-USR-PWD is deliberately not persisted by this table: authentication
+--       is owned by Cognito, so no column here stores, hashes or shadows a
+--       password, and the migrated row holds only the subject reference needed
+--       to resolve an authenticated principal to its local authorities.
+--
+-- WHY (non-obvious design decisions):
+--       (1) No credential column of any kind, recorded as divergence D-4,
+--       because Cognito owns authentication in the target and cognito_sub is
+--       the only identity linkage the local row keeps.
+--       (2) user_id is CHAR(8) and never VARCHAR(8), because its declared width
+--       is part of a fixed-length record contract that the ETL, the screen and
+--       DTO length validation, and the stored value itself all depend on.
+--       (3) first_name and last_name are VARCHAR(20), because their trailing
+--       blanks are record padding rather than name data.
+--       (4) The A/U domain of user_type is enforced as a CHECK, with its
+--       authority taken from app/cpy/COCOM01Y.cpy L26-L28 rather than from the
+--       width-only declaration in the record layout.
+--       (5) cognito_sub is UUID NOT NULL UNIQUE, so one authenticated subject
+--       can never resolve to two local rows.
+--       (6) SEC-USR-FILLER is omitted, and the omission is stated rather than
+--       left to inference, because it is record padding with no named
+--       counterpart in any symbolic map this context renders.
+--       (7) No version or optimistic-lock column, because both baseline user
+--       mutations take and release their lock inside one task instead of
+--       comparing a before-image across user think-time.
+--       (8) No isolation level is set, because PostgreSQL's READ COMMITTED
+--       default is already stricter than the baseline's READINTEG(UNCOMMITTED).
+--       (9) The baseline's STRINGS(1) access ceiling is not reproduced, so
+--       concurrent user-administration transactions can interleave.
+--       (10) No schema, role, user or grant statement appears here; that
+--       bootstrap belongs to data-migration/sql/V0__schemas_and_roles.sql.
+--       (11) The closing block states every object and column this migration
+--       deliberately does not create, so no absence reads as unfinished work.
+-- =============================================================================
+
+-- WHAT: the AUTH bounded context's single table, five columns wide. Four of the
+--       five are transcribed from the 80-byte SEC-USER-DATA record declared at
+--       app/cpy/CSUSR01Y.cpy L17-L23: L18 SEC-USR-ID PIC X(08) at zero-based
+--       offset 0 becomes user_id, L19 SEC-USR-FNAME PIC X(20) at offset 8
+--       becomes first_name, L20 SEC-USR-LNAME PIC X(20) at offset 28 becomes
+--       last_name, and L22 SEC-USR-TYPE PIC X(01) at offset 56 becomes
+--       user_type. The fifth column, cognito_sub, has no baseline counterpart.
+--       Two declared fields are deliberately not carried across: L21
+--       SEC-USR-PWD PIC X(08) at offset 48 and L23 SEC-USR-FILLER PIC X(23) at
+--       offset 57. Because 8 + 20 + 20 + 8 + 1 + 23 = 80, every declared byte
+--       of the record is accounted for and no field is left unexamined.
+-- WHY : (1) Refactoring Rationale: divergence D-4, the highest-priority
+--       divergence recorded for this context. The baseline keeps the credential
+--       in the record itself -- app/cpy/CSUSR01Y.cpy L21 declares SEC-USR-PWD
+--       PIC X(08) -- and app/cbl/COSGN00C.cbl L223 authenticates by comparing
+--       that stored field directly against the entered value, as
+--       IF SEC-USR-PWD = WS-USER-PWD. The administrative surface handles the
+--       same field in the clear throughout: app/cbl/COUSR01C.cbl L136-L159
+--       validates a typed password and copies it into the record before
+--       L240-L248 writes that record, while app/cbl/COUSR02C.cbl L166-L170
+--       sends the stored value back out to the update screen and L227-L229
+--       accepts and copies a replacement, through the eight-byte input and
+--       output fields declared at app/cpy-bms/COUSR02.CPY L78 and L152. In the
+--       target, authentication is owned by Cognito rather than by this table,
+--       so there is nothing a local credential column could be compared
+--       against, and the row keeps only cognito_sub as its identity linkage.
+--       The concrete consequence is that no query, backup, replica or log of
+--       this table can disclose a password, because the value is never in it;
+--       the equally concrete cost is that user administration can no longer
+--       read a password back out the way COUSR02C.cbl L166-L170 does, so a
+--       forgotten password becomes a reset through the identity provider
+--       instead of a screen field. This is a documented target-side parity
+--       divergence, written down here rather than a silent drop of a baseline
+--       field: the whole app tree is reference-only, and every artifact cited
+--       above still declares and uses SEC-USR-PWD exactly as it always did.
+--       (2) Assumptions: app/cpy/CSUSR01Y.cpy L23 declares SEC-USR-FILLER PIC
+--       X(23) at zero-based offset 57, which is what pads the record from the
+--       57 bytes its named fields occupy out to the 80 bytes the dataset
+--       stores. No program addresses it, and it has no named counterpart in any
+--       symbolic map this context renders: none of app/cpy-bms/COSGN00.CPY,
+--       COUSR00.CPY, COUSR01.CPY, COUSR02.CPY or COUSR03.CPY declares a
+--       PIC X(23) field. It therefore carries no logical content to preserve
+--       and is omitted. The omission is stated because a reader diffing this
+--       table against the record layout will find exactly one unmapped field
+--       and needs to know it was assessed as padding rather than overlooked;
+--       carrying it as a column instead would put 23 blanks in every row that
+--       no migrated code path ever reads.
+--       (3) Refactoring Rationale: this table carries no version or
+--       optimistic-lock column, and that absence is evidenced rather than
+--       accidental. Both baseline user mutations acquire the lock and release
+--       it inside a single CICS task. app/cbl/COUSR02C.cbl L215-L217 re-reads
+--       the record at the moment the update is applied, through the READ at
+--       L322 that RIDFLD at L326 keys and that the UPDATE option at L328 makes
+--       lock-acquiring; the paired REWRITE at L360 then rewrites the record the
+--       task already holds, which is why that REWRITE carries no RIDFLD of its
+--       own. app/cbl/COUSR03C.cbl L188-L192 does the same before deleting: its
+--       READ at L269 is keyed by RIDFLD at L273 and takes the lock through
+--       UPDATE at L275, and the paired DELETE at L307 likewise needs no RIDFLD.
+--       Neither program contains a single SYNCPOINT, so the lock lives and dies
+--       with the task. app/csd/CARDDEMO.CSD confirms the discipline from the
+--       resource side: L89 sets RLSACCESS(NO) and L93 sets
+--       UPDATEMODEL(LOCKING), so the update model really is lock-based and not
+--       a versioned compare. No before-image check crosses user think-time
+--       anywhere in this context, so there is no baseline concurrency behaviour
+--       for a version column to reproduce.
+--       Assumptions: the contrast with the account, customer and card contexts
+--       is what makes this a decision rather than an oversight. Those flows do
+--       compare a before-image across the pseudo-conversational gap:
+--       app/cbl/COACTUPC.cbl declares WS-DATACHANGED-FLAG at L168, carries the
+--       user-visible outcome as DATA-WAS-CHANGED-BEFORE-UPDATE at L521-L522,
+--       snapshots the whole pre-edit record into ACUP-OLD-DETAILS from L669
+--       onward, and compares current against old field by field. That is an
+--       optimistic-concurrency check expressed in COBOL, which is why those
+--       contexts receive a JPA version column and surface a conflict as HTTP
+--       409. Searching COUSR02C.cbl and COUSR03C.cbl for the same constructs
+--       returns nothing at all. Adding a version column here anyway would
+--       manufacture a conflict state the baseline cannot produce: two
+--       administrators editing one user would get a 409 where the baseline
+--       serialises them and lets the second write land, a behavioural change
+--       golden-master parity would flag.
+--       (4) Assumptions: no isolation level is set, so this table is read under
+--       PostgreSQL's READ COMMITTED default. That default is deliberately
+--       stricter than the baseline, which defines USRSEC with
+--       READINTEG(UNCOMMITTED) at app/csd/CARDDEMO.CSD L90 and can therefore
+--       return a row a concurrent task has written but not committed. No
+--       verified business behaviour depends on observing an uncommitted row:
+--       the sign-on comparison and every user-administration screen read a
+--       committed record and act on it. The concrete consequence of the
+--       stricter default is that a sign-on can no longer observe a
+--       half-completed administrative write, which removes a dirty read
+--       without removing behaviour any test asserts. Stating an isolation
+--       level in this file would in any case not bind the sessions that
+--       connect later, because isolation is a property of the connection
+--       rather than of the table.
+--       (5) Trade-offs: the baseline's concurrency ceiling is not reproduced.
+--       app/csd/CARDDEMO.CSD L91 defines USRSEC with STRINGS(1), a single VSAM
+--       string, so every read and every update of the user file queued behind
+--       one access path no matter which user row it touched. That ceiling is an
+--       artifact of the access method and carries no meaning in the user
+--       domain, since nothing about administering one user requires excluding
+--       another, so this table imposes no equivalent. The accepted cost is
+--       real: concurrent user-administration transactions can now interleave
+--       where the baseline serialised them, so that serialisation can no longer
+--       be leaned on as an implicit guarantee. What makes dropping it safe is
+--       the same-task lock analysis in reason (3) of this block: each mutation
+--       already takes its own row lock at the moment it writes, so mutation
+--       correctness never rested on the single string, and row-level locking is
+--       what carries it now.
+--       (6) Assumptions: the schema auth, the role that owns it and every grant
+--       on it already exist when this file runs.
+--       data-migration/sql/V0__schemas_and_roles.sql is the exclusive authority
+--       for schemas, roles and grants across the whole stack, and its
+--       completion is a deployment precondition of this service rather than
+--       something this migration can arrange for itself. This file therefore
+--       owns objects inside auth and nothing else: it issues no CREATE SCHEMA,
+--       no CREATE ROLE, no CREATE USER, no ALTER ROLE, and no GRANT or REVOKE.
+--       Whatever Flyway schema-creation setting
+--       services/auth-service/src/main/resources/application.yml carries, that
+--       setting cannot stand in for the bootstrap, because a schema Flyway
+--       creates is owned by whichever role connected and carries none of the
+--       privileges V0 grants. The concrete consequence of holding the boundary
+--       is that a missing bootstrap fails here, naming the absent schema,
+--       rather than succeeding into a differently-owned schema that merely
+--       looks provisioned and then fails later on a permission error.
+CREATE TABLE auth.users (
+-- Assumptions: app/cpy/CSUSR01Y.cpy L18 declares SEC-USR-ID PIC X(08) at
+--       zero-based offset 0, and that width is part of a fixed-length record
+--       contract three consumers already depend on: the ETL reads the
+--       identifier as bytes 0 through 7 of an 80-byte record, the symbolic maps
+--       and the DTOs derived from them validate an entered identifier against a
+--       declared length of eight, and the stored value is blank-padded to eight
+--       characters. CHAR(8) keeps all three in agreement. VARCHAR(8) was
+--       rejected rather than merely not chosen: it would store 'ADMIN' as five
+--       characters, so the migrated identifier would stop comparing equal to
+--       the blank-padded 'ADMIN   ' that the baseline record holds and the ETL
+--       loads, and every lookup keyed on a padded identifier would miss.
+    user_id CHAR(8) PRIMARY KEY,
+-- Assumptions: app/cpy/CSUSR01Y.cpy L19 and L20 declare SEC-USR-FNAME and
+--       SEC-USR-LNAME as PIC X(20) at zero-based offsets 8 and 28. Both are
+--       blank-padded to 20 bytes in the record, but those trailing blanks are
+--       how the record reaches its declared length; they are not part of
+--       anyone's name. VARCHAR(20) keeps the 20-character ceiling the layout
+--       imposes while letting the stored value be the name itself, so a
+--       comparison, a sort or a rendered screen field never has to strip
+--       padding first. This is exactly why these two columns are
+--       variable-width while user_id above and user_type below stay
+--       fixed-width: the key and the code are compared as whole
+--       declared-width values, whereas the names are only ever read as text.
+--       NOT NULL on both, because the record cannot express an absent name --
+--       an unset name is 20 blanks, not a null -- so a nullable column would
+--       invent a state no migrated row can hold.
+    first_name VARCHAR(20) NOT NULL,
+    last_name VARCHAR(20) NOT NULL,
+-- Assumptions: the authority for this domain is app/cpy/COCOM01Y.cpy L26-L28,
+--       where CDEMO-USER-TYPE PIC X(01) is qualified by
+--       88 CDEMO-USRTYP-ADMIN VALUE 'A' and 88 CDEMO-USRTYP-USER VALUE 'U'.
+--       That is the only place the baseline states which values the
+--       one-character type may take. app/cpy/CSUSR01Y.cpy L22 declares
+--       SEC-USR-TYPE PIC X(01) and so gives the width and nothing more, which
+--       is why the domain is not read from the record layout. Enforcing the
+--       pair as a CHECK rather than leaving it to application validation
+--       matters because this column decides authorisation: it maps to the
+--       Cognito group that guards every administrative route, so a third value
+--       arriving by any path -- an ETL load, an ad-hoc statement, a future
+--       service -- would produce a row that is neither administrator nor user
+--       and whose privileges no branch defines. CHAR(1) keeps the column the
+--       same declared width as the single byte it comes from at offset 56.
+    user_type CHAR(1) NOT NULL CHECK (user_type IN ('A','U')),
+-- Assumptions: one Cognito subject must resolve to at most one row of this
+--       table, because this column is how an authenticated principal is turned
+--       into local authorities. UNIQUE is what enforces that: without it two
+--       rows could carry the same subject, so a token presented by that
+--       subject would resolve to two different user identifiers, possibly with
+--       different user_type values, leaving the authority the token carries
+--       ambiguous and dependent on which row a query happened to return first.
+--       NOT NULL because a row with no subject could never be authenticated
+--       against, making it unreachable by every path that reads this table.
+--       UUID rather than a text type because the subject is issued as a UUID,
+--       and text would admit two spellings of one subject -- differing in case
+--       or hyphenation -- that UNIQUE would then treat as two distinct
+--       principals.
+    cognito_sub UUID NOT NULL UNIQUE
+);
+
+-- Assumptions: the object above is deliberately minimal, and its absences are
+--       load-bearing rather than unfinished work. Parity here is measured
+--       against a single 80-byte record and a lock-based access path, and this
+--       context's ownership stops at the auth schema, so anything added beyond
+--       that record would be structure nothing in the baseline produces and
+--       nothing in the migrated code path reads. Stated explicitly so that a
+--       later reader does not restore any of it believing it was forgotten,
+--       this migration contains: no seed data and no INSERT, because the
+--       baseline's user rows arrive through the ETL load of the 80-byte
+--       dataset and the reference context is the only one that owns a seed
+--       migration; no created or updated timestamp, no audit column and no
+--       soft-delete flag, because the record declares none and
+--       app/cbl/COUSR03C.cbl L307 removes a user outright rather than marking
+--       it; no password, credential, hash, salt, secret or otherwise
+--       credential-shaped column, per the divergence in reason (1) of the
+--       block above; no version, xmin, optimistic-lock or system-row-version
+--       column, per reason (3) of that block; no explicit index beyond those
+--       PRIMARY KEY and UNIQUE already imply on user_id and cognito_sub, since
+--       the only access paths this context needs are a keyed lookup by
+--       identifier and a lookup by subject; no second table, because auth.users
+--       is the whole of what the auth schema owns; and no view, trigger,
+--       function, sequence or extension. The concrete consequence is that this
+--       file's entire effect on the database is one table, so a reviewer can
+--       confirm what it does from the single statement above.

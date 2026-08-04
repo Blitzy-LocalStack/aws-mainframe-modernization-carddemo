@@ -387,15 +387,10 @@
     </dependency>
 
     <!--
-    Assumptions: the layering and money prohibitions are to be enforced as
-    executable tests rather than as conventions, so a violation fails the build
-    instead of depending on a reviewer noticing it. The rules are authored at
+    Assumptions: the layering and money prohibitions are enforced as executable
+    tests rather than as conventions, so a violation fails the build instead of
+    depending on a reviewer noticing it. The rules held in
     services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
-    and are re-run per module rather than inherited as an artifact, because
-    common-lib binds no test-jar goal and so publishes no test classes to depend
-    on; that class is authored at a later index of the same plan and does not
-    exist yet, which is why this dependency prepares for it rather than consuming
-    it. The rules
     are that the money path admits no float, no double and no JSON number; that
     no service may import another service's domain package; and that a domain
     package may not import AWS SDK or web types. The third rule is load bearing

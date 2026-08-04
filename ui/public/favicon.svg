@@ -1,0 +1,110 @@
+<!--
+  =============================================================================
+  ui/public/favicon.svg : tab, bookmark and pinned icon for the CardDemo single
+  page application, and the counterparty to the icon link ui/index.html already
+  declares. Each note justifies a choice; none narrates the markup.
+  =============================================================================
+  1) SVG, not .ico or .png. Alternatives Considered: a favicon is requested at 16
+     in a tab, 32 in a bookmark bar and larger when pinned; the raster answer is
+     one file per size inside a multi image .ico, where one vector serves every
+     size. Trade-offs: the deciding reason is review, not byte count. This is the
+     first image asset in the tree (the baseline ships no .svg, .ico, .css, .js or
+     .html at all; the PNGs under diagrams/ are README illustrations, not served
+     assets), and as text it changes in a readable diff where a binary .ico
+     changes as an opaque blob no reviewer can check. Accepted in exchange: the
+     browser rasterises on request, so the geometry stays coarse enough for 16
+     pixels rather than drawn for fidelity at 32.
+
+  2) Served at /favicon.svg; this directory is no part of that path. Assumptions:
+     Vite copies the CONTENTS of ui/public to the build output root, so a file
+     authored here is served at /favicon.svg, which is what ui/index.html links.
+     Naming this directory in that href resolves nowhere, no such path surviving
+     the build.
+
+  3) Static and self contained. Assumptions, stated as contracts still to be met
+     rather than as descriptions of what exists, because ui/nginx.conf is authored
+     later in this same plan: nothing under ui/public is content hashed, yet that
+     configuration is to match its immutable long lived cache rule by file
+     extension, so a browser or CloudFront edge may hold these exact bytes
+     indefinitely with no hashed name to invalidate. Hence no external reference,
+     remote font, script or embedded image: each would be a second thing to
+     invalidate and none can be. It is also to return index.html as the history
+     fallback, so were this file absent the request would answer HTML with HTTP 200
+     against an image/svg+xml expectation, a broken icon reported as success and
+     far harder to diagnose than a 404.
+
+  4) The mark is derived, not invented. Assumptions: app/bms/COSGN00.bms places
+     nine consecutive 42 character DFHMDF fields at POS=(7,21) through (15,21)
+     drawing a payment instrument in ASCII art, closed above and below by rows of
+     '+' and '=', bounded by '|', banded horizontally, all nine COLOR=BLUE. Across
+     the 17 base mapsets and their 902 fields that is the baseline's only
+     pictorial element, so a bordered rectangle with a horizontal band is the one
+     shape the source offers. Alternatives Considered: the instrument there is a
+     banknote, redrawn as a bank card because this application manages credit
+     cards; border and banding carry over, while the ASCII art is not
+     transliterated, app/** being reference only.
+
+  5) Existing at all, and the corner radius, are purely additive. Assumptions: a
+     3270 terminal has no icon vocabulary, and no radius, elevation or motion
+     vocabulary either (AAP gap G5), so neither this file nor its rounded corners
+     ports anything from the baseline or is terminal fidelity.
+
+  6) viewBox carries the sizing; no width or height is pinned on the root.
+     Alternatives Considered: pinning them makes one size intrinsic and leaves
+     every other surface scaling away from it. Trade-offs: a consumer supplying no
+     box of its own then has no intrinsic size to fall back on, which costs
+     nothing because every surface requesting a favicon states its size.
+
+  7) Assumptions, so this is not helpfully 'corrected' later: XML forbids two
+     consecutive hyphens inside a comment body, and a parser meeting that sequence
+     closes the comment early and spills the rest into the document. The rules
+     above use '=' where this repository's header style uses a row of hyphens, and
+     its double hyphen dash idiom is spelled as ordinary punctuation.
+  =============================================================================
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!--
+    WHY a literal, not a token. Assumptions: #1677ff is the resolved colorPrimary
+    seed, read from the pinned antd 6.5.2 package (es/theme/themes/seed.js), not
+    picked by eye. The rule that every UI value resolve to a token cannot hold
+    literally here, structurally rather than by oversight: ui/public is served
+    verbatim before any script runs, outside the Vite module graph, the React tree
+    and antd's ConfigProvider, so no runtime exists in which a token could
+    resolve. Keep it in step with ui/src/theme/tokens.ts if the seed changes,
+    since nothing checks the two against each other. colorPrimary is the right
+    token because the measured BMS census makes COLOR=BLUE dominant by more than
+    two to one (289 of 662 COLOR attributes, against 127 for the runner up), and
+    every row of the sole baseline graphic is BLUE. Alternatives Considered:
+    currentColor, to avoid a literal entirely, fails on a mechanism rather than
+    taste; browser chrome renders a favicon in isolation with nothing to inherit
+    from, so it would resolve to the user agent default, typically black, and
+    discard that derivation.
+  -->
+  <rect x="2" y="7" width="28" height="18" rx="3" fill="#1677ff" />
+
+  <!--
+    WHY colorWhite and not colorBgBase. Both read #fff under antd's default
+    algorithm, so the distinction looks academic until the definitions are read:
+    colorBgBase is an empty seed each algorithm fills, and the dark algorithm
+    fills it with #000 (es/theme/themes/dark/colors.js), whereas colorWhite is a
+    map token fixed at #fff (es/theme/themes/shared/genColorMapToken.js). Browser
+    chrome renders a favicon with no algorithm in scope, so only the unconditional
+    token describes the byte that ships.
+    Alternatives Considered for the band's inset, all three rendered at 16 and
+    inspected pixel by pixel rather than judged by eye. Spanning the full card
+    width was rejected: against a light tab bar a white band running edge to edge
+    merges with the background and splits the mark into two blue bars instead of
+    one closed card. Insetting by a single user unit was rejected too, on a
+    mechanism rather than taste: one unit is half a device pixel at 16 and
+    resolves as an anti aliased smear rather than an edge. Two units is therefore
+    the smallest inset that survives, landing on exactly one whole device pixel of
+    blue each side, which keeps the band enclosed the way the ASCII original's '|'
+    borders enclose its banded rows. Trade-offs: this band's own offset and height
+    are likewise even, because only even values on a 32 unit canvas land on whole
+    device pixels at 16, and an odd height measurably blurred its lower edge when
+    rendered. The card's y geometry is deliberately left odd: its edges border
+    transparency, where anti aliasing is correct, and evening it would pull the
+    proportion away from a real card's.
+  -->
+  <rect x="4" y="12" width="24" height="4" fill="#fff" />
+</svg>

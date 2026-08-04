@@ -66,9 +66,6 @@
 # enforced against them jointly rather than against either one alone.
 # -----------------------------------------------------------------------------
 
-# WHAT: the environment token suffixed onto every queue name, which is what
-#       makes carddemo-inquiry-request-dev and carddemo-inquiry-request-prod
-#       two separate queues instead of one contested name.
 # WHY : Assumptions: a queue name has to be unique only within one account and
 #       region, and nothing prevents both environment roots from targeting the
 #       same account. This token is then the only thing keeping the two queue
@@ -94,7 +91,6 @@ variable "environment" {
   }
 }
 
-# WHAT: the leading token of every composed queue name.
 # WHY : Trade-offs: an input rather than a literal in main.tf, even though both
 #       environments are expected to pass the same value. The cost is one more
 #       parameter to document; what it buys is the ability to stand a second,
@@ -188,7 +184,6 @@ variable "kms_key_arn" {
   }
 }
 
-# WHAT: how long SQS may reuse a single KMS data key before calling KMS again.
 # WHY : Trade-offs: a direct exchange between KMS request volume and the
 #       lifetime of a cached data key, stated in both directions because
 #       neither end is obviously correct. Raising it means fewer GenerateDataKey
@@ -218,8 +213,6 @@ variable "kms_data_key_reuse_period_seconds" {
 # and which the scheduler backed with a rerun budget.
 # -----------------------------------------------------------------------------
 
-# WHAT: how many receives a message may accumulate on a source queue before SQS
-#       moves it to that queue's dead-letter queue.
 # WHY : Assumptions: 5 is constrained at both ends rather than chosen. The
 #       messaging design fixes a dead-letter queue at a receive count of five
 #       for each of the five source queues, and the baseline corroborates that
@@ -248,8 +241,6 @@ variable "max_receive_count" {
   }
 }
 
-# WHAT: how long a received message stays hidden from other consumers before it
-#       becomes visible again.
 # WHY : Assumptions: this is the target's stand-in for a unit of work the
 #       baseline expressed with syncpoint. Both inquiry programs receive under
 #       syncpoint -- MQGMO-SYNCPOINT at app/app-vsam-mq/cbl/CODATE01.cbl:296
@@ -286,9 +277,6 @@ variable "visibility_timeout_seconds" {
   }
 }
 
-# WHAT: how long a receive call waits for a message to arrive before returning
-#       empty, which is what makes the receive a long poll rather than a short
-#       one.
 # WHY : Assumptions: 5 is a measured baseline constant, and recognising it
 #       requires a unit conversion. The authorization consumer sets
 #       MOVE 5000 TO WS-WAIT-INTERVAL at
@@ -332,8 +320,6 @@ variable "receive_wait_time_seconds" {
 # dead-letter queues for longer than either.
 # -----------------------------------------------------------------------------
 
-# WHAT: how long the two request queues and the error queue keep a message that
-#       nothing has deleted.
 # WHY : Trade-offs: four days, and pointedly not the same value the reply queues
 #       get below -- the asymmetry is the whole design. A request IS the unit of
 #       work, so discarding one discards an authorization or an inquiry that was
@@ -363,8 +349,6 @@ variable "request_message_retention_seconds" {
   }
 }
 
-# WHAT: how long the two reply queues keep a message that nothing has deleted.
-#       Deliberately the shortest retention in the module.
 # WHY : Assumptions: the baseline put a hard expiry on its reply and SQS has no
 #       equivalent, so this input is one third of a three-part substitute.
 #       COPAUA0C sets MOVE 50 TO MQMD-EXPIRY at
@@ -414,10 +398,6 @@ variable "reply_message_retention_seconds" {
   }
 }
 
-# WHAT: how long all five dead-letter queues keep a message. The default is
-#       deliberately LONGER than either source retention above, and the second
-#       validation below refuses any value that is shorter than the request
-#       retention.
 # WHY : Trade-offs: the inequality looks backwards and is not. A message only
 #       arrives on a dead-letter queue after being received max_receive_count
 #       times on its source queue, so by definition it is already old when it
@@ -476,7 +456,6 @@ variable "dlq_message_retention_seconds" {
 # Tagging.
 # -----------------------------------------------------------------------------
 
-# WHAT: tags applied to every queue and dead-letter queue this module creates.
 # WHY : Assumptions: this input exists because versions.tf declares no `provider`
 #       block, and it must not declare one -- a module carrying its own provider
 #       configuration cannot be called with count, for_each or depends_on, and

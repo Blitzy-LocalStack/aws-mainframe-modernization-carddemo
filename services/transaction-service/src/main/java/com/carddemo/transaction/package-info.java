@@ -193,13 +193,20 @@
  * AWS and web types out of {@code domain} and binary floating-point types out of
  * the money path. Cross-context data is reached over HTTP, never by import.
  *
- * <p>Assumptions: authored once is not inherited, and the difference is why this
- * module declares the ArchUnit engine at test scope in its own POM. common-lib
- * binds no {@code test-jar} goal, so it publishes no test classes for another
- * module to depend on. That rule class is authored at a later index of the same
- * plan and does not exist yet, so at this checkpoint the prohibition is carried
- * by review and the declaration in this module's POM is what makes it executable
- * when the class lands.
+ * <p>Assumptions: authored once is not executed everywhere, and the difference is why this module
+ * carries two declarations of its own rather than relying on inheritance. Maven hands a dependency's
+ * MAIN classes to its consumers and never its test classes, so delivery of that rule class takes
+ * three cooperating declarations, and all three are present in this reactor:
+ * {@code services/common-lib/pom.xml} binds {@code maven-jar-plugin}'s {@code test-jar} goal at
+ * {@code process-test-classes}, narrowed by an include to the architecture directory alone; this
+ * module's POM declares that artifact with {@code <type>test-jar</type>} at test scope; and the
+ * {@code architecture-rules} Surefire execution in {@code services/pom.xml} names
+ * {@code com.carddemo:common-lib} in {@code dependenciesToScan}, so the class is collected from that
+ * artifact and run against THIS module's own compiled classes. This module additionally declares the
+ * ArchUnit engine at test scope in its own POM, because test scope is not transitive and the
+ * assertion API has to resolve wherever the class executes. That rule class is authored at a later
+ * index of the same plan and does not exist yet, so at this checkpoint the prohibition is carried by
+ * review; the three declarations above are what make it executable the moment the class lands.
  *
  * <p>Assumptions: the baseline reaches other contexts' records directly,
  * because one CICS region shares one file set, and two of the four programs

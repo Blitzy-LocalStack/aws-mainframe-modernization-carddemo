@@ -227,6 +227,35 @@
     </dependency>
 
     <!--
+      WHAT: the module that ACTIVATES Flyway inside this Spring Boot
+            application, as distinct from the two engine artifacts below.
+      WHY : Assumptions: Spring Boot 4 broke the single spring-boot-autoconfigure
+            artifact up into one autoconfiguration module per technology, so
+            FlywayAutoConfiguration no longer ships with the framework core. It
+            ships in org.springframework.boot:spring-boot-flyway, which this
+            starter contributes together with spring-boot-jdbc. The two
+            org.flywaydb coordinates below supply the migration ENGINE and the
+            PostgreSQL dialect; neither one registers it with the application
+            context. Without this starter no FlywayAutoConfiguration is
+            registered, every spring.flyway.* key in
+            src/main/resources/application.yml is inert, and this service starts
+            and reports healthy against a database on which V1__auth.sql has
+            never run, so sign-on fails on a missing relation at the first
+            request rather than at startup.
+      WHY : Trade-offs: declared explicitly rather than relied upon as a
+            transitive of spring-boot-starter-data-jpa, which brings
+            spring-boot-jdbc but not spring-boot-flyway. The cost is one more
+            coordinate in this list; what it buys is that the activation cannot
+            disappear because an unrelated starter reorganised its own
+            dependencies. No version is stated: the Spring Boot parent manages
+            this artifact.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+
+    <!--
       WHAT: schema migration for the auth schema, as a matched pair.
       WHY : Assumptions: the STARTER is what activates migration, and naming it
             rather than flyway-core is the load bearing half of this pair. Spring
@@ -255,10 +284,6 @@
             service cannot migrate rather than as anything a build would have
             caught.
     -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-flyway</artifactId>
-    </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-database-postgresql</artifactId>
