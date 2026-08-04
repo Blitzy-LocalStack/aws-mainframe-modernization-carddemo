@@ -1,0 +1,383 @@
+# =============================================================================
+# services/batch-service/src/main/resources/application-dev.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The `dev` profile overlay for batch-service, the BATCH bounded context of
+#   the CardDemo mainframe-to-microservices migration. It narrows five things
+#   for a development deployment and nothing else: which Parameter Store tier
+#   the module reads, how long a connection attempt may wait, how tightly a
+#   database session is bounded, how many rows a round trip carries, and how
+#   loudly the module logs.
+#
+#   The framework activates this document when SPRING_PROFILES_ACTIVE=dev is
+#   present in the task environment, which infra/modules/ecs-service places
+#   there. Neither this file nor application.yml sets that variable, because a
+#   document that selected its own profile would make both overlays
+#   unreachable.
+#
+#   It is an OVERLAY, never a replacement. application.yml settles topology and
+#   this file settles size, and the split is deliberate: a setting that changes
+#   what the module DOES belongs in the base, and only a setting that changes
+#   how MUCH belongs here. What is deliberately not overridden is listed under
+#   Outputs below, because in a profile document an absence carries as much
+#   meaning as a value.
+#
+# Inputs (the "parameters" this document consumes):
+#   Activation:
+#     SPRING_PROFILES_ACTIVE=dev  -- placed by the task definition, never here.
+#   Keys it overrides, every one of them already declared in application.yml,
+#   with the line the base declares each on:
+#     spring.config.import                                      L270
+#     spring.datasource.hikari.minimum-idle                     L469
+#     spring.datasource.hikari.data-source-properties.options    L523
+#     spring.jpa.show-sql                                       L666
+#     spring.jpa.properties.hibernate.jdbc.fetch_size           L685
+#     spring.jpa.properties.hibernate.jdbc.batch_size           L707
+#     logging.level.com.carddemo                                L776
+#     logging.level.org.springframework.batch                   L785
+#     logging.level.org.flywaydb                                L786
+#     logging.level.org.hibernate.SQL                           L803
+#     logging.level.org.hibernate.orm.jdbc.bind                 L804
+#   The ONE key it adds that application.yml does not declare:
+#     spring.datasource.hikari.connection-timeout. It is the only addition in
+#     this file. Why adding it is correct here, and why it is not simply moved
+#     into the base, are both recorded under WHY below and again at the key.
+#   Environment variables it reads:
+#     CARDDEMO_ENV -- an environment LABEL, never a location, a credential or an
+#     endpoint. It is the one placeholder here carrying a default, for the
+#     reason application.yml:262-268 records: an unresolved placeholder inside
+#     spring.config.import aborts the earliest configuration-loading phase,
+#     before the `optional:` prefix can take effect.
+#   Values it does NOT supply and must never supply:
+#     the writer endpoint, the database credentials, the dataset bucket, the
+#     error-queue URL and every key identifier. Each is an output of a Terraform
+#     module, published to Parameter Store or Secrets Manager and read at
+#     startup through the import this file re-points.
+#
+# Outputs (what this document establishes for a `dev` task):
+#   A connection budget that spans an Aurora resume, a pool allowed to empty, a
+#   session bounded more tightly than the base bounds it, a smaller reader and
+#   writer round trip, and this module's own categories raised one step while
+#   the two categories that would emit cardholder data stay off.
+#
+#   Topology it deliberately leaves UNCHANGED, inherited verbatim from
+#   application.yml, and which a reader should NOT expect to find restated here:
+#     - the ordered FIVE-schema connection search path -- batch, ledger,
+#       account, card, reference (application.yml:428). Five, not four: `card`
+#       is present because app/cbl/CBTRN01C.cbl:46 opens CARDFILE to validate
+#       the daily feed, and `reference` because app/cbl/CBACT04C.cbl:47 opens
+#       DISCGRP for the disclosure-group rate. Trimming either entry would fail
+#       a state of the nightly chain at the database rather than in this file.
+#     - Flyway scoped to classpath:db/migration and to the `batch` schema for
+#       both the migration and its history table, creating no schema, cleaning
+#       nothing, validating on migrate and never baselining. Nothing here
+#       creates, alters or seeds any schema, and `batch` is the only schema this
+#       module owns.
+#     - the persistence provider held to validate-only.
+#     - the framework's startup job launcher left disabled, so the container
+#       command stays the only thing that selects a job.
+#     - script initialisation held off.
+#     - the maximum pool size, the leak-detection threshold, auto-commit, the
+#       pool name, the connection initialisation statement, the shutdown budget,
+#       and the AWS region and queue-listener policy.
+#     - no server.* and no management.* -- see WHY.
+#     - the seven job names, and no default for either the job or the business
+#       date. The seven are PreflightDailyTransactionsJob, PostTransactionsJob,
+#       CalculateInterestJob, BackupTransactionsJob, CombineTransactionsJob,
+#       ExportJob and ImportJob.
+#
+# Fails when (the "exceptions" a reader must know about):
+#   - The connection budget is set below the resume window. A `dev` cluster
+#     provisioned at a minimum capacity of zero is paused while idle, so the
+#     FIRST connection of an otherwise healthy run pays that resume. A budget
+#     shorter than the window fails the task at startup, and the failure
+#     presents as an unreachable database rather than as a cold one.
+#   - A topology key is overridden here. Nothing errors. `dev` simply stops
+#     matching `prod` in behaviour, and the divergence first surfaces as a
+#     parity failure in a run that this file gives no reason to suspect.
+#   - A key is written here that application.yml does not declare and that no
+#     framework property matches. Spring accepts an unknown key in SILENCE, so
+#     the symptom is a missing behaviour with no diagnostic at all. Every key
+#     below was checked against the base, and the one addition against the
+#     HikariConfig setter it binds to.
+#   - Either cardholder-data category at the foot of this file is raised.
+#     Nothing fails; the container's log stream simply begins carrying unmasked
+#     primary account numbers for every record in the feed.
+#
+# Deliberate omissions, so that each absence reads as a decision:
+#   - No management.* and no server.*, even though all three authored peer
+#     overlays set management.endpoints.web.exposure.include. Those services
+#     declare the actuator starter; this module declares neither it nor the web
+#     starter (services/batch-service/pom.xml:193-237), so both namespaces would
+#     bind to nothing here and be accepted without complaint.
+#   - No logback-spring.xml companion and no retention key. Log retention is a
+#     property of the CloudWatch log group infra/modules/observability
+#     provisions, not of this artifact: the container writes to standard output
+#     and standard error and the task definition's log driver collects them.
+#   - No spring.profiles.active, no spring.batch.job.name, no default job, and
+#     no default or canonical format for the business date.
+#   - No rounding key, no scale key and no spring.jackson.* key.
+#   - No springdoc.* and no spring.security.*. This module publishes no contract
+#     and serves no request, so there is nothing to advertise or authorise.
+#   - No statement_timeout.
+# -----------------------------------------------------------------------------
+# WHY (non-obvious design decisions):
+#
+#   - Trade-offs: the connection budget is widened rather than left at the
+#     framework default, and this is the single decision that makes this file
+#     more than a smaller copy of `prod`. The `dev` cluster is provisioned at a
+#     minimum capacity of zero, which obliges auto-pause to be configured, and a
+#     paused cluster must resume before it will accept a connection. The
+#     accepted cost is stated plainly: a `dev` database that is genuinely
+#     unreachable is now reported more slowly, because a wait long enough to
+#     cover a resume is also long enough to sit through a real outage. That is
+#     the trade `dev` makes for the cost saving of a capacity floor of zero, and
+#     it is why `prod` holds its floor above zero and needs no such widening.
+#   - Alternatives Considered: a second key to tolerate the resume at pool
+#     initialisation. Rejected. HikariCP's initialisation-failure behaviour
+#     already exhausts the whole connection budget before giving up, so once the
+#     budget covers the resume window the first connection succeeds without a
+#     second key, and adding one would have doubled this file's departure from
+#     the base for no change in outcome.
+#   - Alternatives Considered: declaring the connection budget in
+#     application.yml instead, which would have held this overlay to keys the
+#     base already declares -- the discipline all three authored peer overlays
+#     follow without a single exception. Rejected because the budget is a
+#     `dev`-tier bound rather than an every-environment one: `prod` runs against
+#     a cluster that never pauses, so the same widened wait there would only
+#     delay the detection of a real outage. The addition is confined to one key,
+#     inside a block the base already populates, and verified against the
+#     HikariConfig setter it binds to so that it cannot become the accepted-in-
+#     silence failure the base warns about.
+#   - Assumptions: the business-date token is an OPAQUE passthrough and this
+#     file must not give it a format. app/cbl/CBACT04C.cbl:476-480 concatenates
+#     whatever PARM-DATE holds straight into the transaction identifier with
+#     STRING ... DELIMITED BY SIZE and no editing, and BOTH shapes are committed
+#     as goldens: tests/golden/interest/e2e_interest_cycle_transactions.expected
+#     opens 2022071800000001, matching the compact PARM='2022071800' at
+#     app/jcl/INTCALC.jcl:22, while
+#     tests/golden/interest/happy_path/transact.expected opens 2024-01-15000001.
+#     A canonical format here would satisfy one golden and break the other.
+#   - Alternatives Considered: a saga, a distributed coordinator or a
+#     compensating reversal, so that the smaller write grouping below could
+#     commit in pieces. Rejected, in agreement with application.yml:357-370.
+#     Detail at spring.jpa.properties.hibernate.jdbc.batch_size.
+#   - Assumptions: raising this module's own log categories is safe only while
+#     the two categories that echo bound parameters stay off, and holding them
+#     off is a deliberate divergence from all three peer overlays. Detail at
+#     logging.level.org.hibernate.SQL.
+#   - Trade-offs: session bounds are tightened while the statement bound stays
+#     absent. Detail at spring.datasource.hikari.data-source-properties.
+#   - Assumptions: no secret, credential, hostname, endpoint, bucket, queue URL,
+#     key identifier or account identifier appears anywhere in this file, and
+#     the environment label is the only placeholder that carries a default.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
+#   docstring construct, so this header block is the module-entry-point
+#   equivalent, and every key below carries an adjacent rationale naming at
+#   least one of Alternatives Considered, Refactoring Rationale, Assumptions or
+#   Trade-offs, as the project's single user-specified rule, Rule 1
+#   "Explainability", requires. Per that standard's L816-830 no key below
+#   carries a statement-level WHAT: comment, because a line restating what a key
+#   already says is the first pattern the rule forbids.
+# =============================================================================
+
+spring:
+
+  # WHY : (1) Assumptions: the same MECHANISM as the base addressed at a
+  #       different tier -- an `optional:aws-parameterstore:` import, exactly as
+  #       application.yml:270 declares it, with only the default environment
+  #       label changed from `local` to `dev`. The path is a logical Parameter
+  #       Store prefix, not an endpoint, and it names no value.
+  #       (2) Refactoring Rationale: the base's default exists to keep an
+  #       off-platform JVM startable and is correct there, but inheriting it
+  #       unchanged under this profile would let a task started with the `dev`
+  #       profile and no CARDDEMO_ENV injected take its SIZING from this file
+  #       and its parameter VALUES from the `local` tier. Both paths resolve, so
+  #       no error reports the mismatch; pinning the default to `dev` makes the
+  #       profile and the tier it reads agree by construction.
+  #       (3) Trade-offs: a profile document contributes its import IN ADDITION
+  #       to the base's rather than replacing it, so both prefixes are visited
+  #       and this one wins on precedence. That is accepted because both carry
+  #       the `optional:` prefix, so whichever path does not exist in a given
+  #       environment is skipped instead of failing the context -- the same
+  #       property application.yml:252-261 relies on to keep the test tree
+  #       runnable with no AWS credentials at all.
+  config:
+    import: "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENV:dev}/batch/"
+
+  datasource:
+    hikari:
+      # WHY : Trade-offs: this is the one key in this file that application.yml
+      #       does not declare, and the widened budget is what lets a `dev` task
+      #       survive an Aurora resume. A cluster provisioned with a minimum
+      #       capacity of zero pauses while idle and must resume before it will
+      #       accept a connection, so the first connection of a run -- taken by
+      #       Flyway at startup, before any job step executes -- pays that
+      #       resume. The framework default leaves little margin over the resume
+      #       window once a verify-full handshake is added on top of it, so a
+      #       healthy cold start could fail exactly as though the endpoint were
+      #       unreachable. What is given up is detection speed: a `dev` database
+      #       that really is unreachable is now reported after this wait rather
+      #       than sooner. That is accepted because `dev` trades detection speed
+      #       for the cost saving of a capacity floor of zero, while `prod`
+      #       holds its floor above zero, never pauses, and therefore neither
+      #       needs this value nor inherits it.
+      connection-timeout: 45000
+
+      # WHY : Trade-offs: the pool is allowed to empty completely, where the
+      #       base keeps one connection warm (application.yml:461-469). A
+      #       run-and-exit task holding an idle connection open against a
+      #       cluster sitting at its capacity floor occupies a connection slot
+      #       that the floor itself makes scarce, and it also keeps an idle
+      #       cluster from settling into the paused state the floor of zero
+      #       exists to reach. What is given up is that the first checkout of a
+      #       job pays its own establishment cost instead of finding a warm
+      #       connection; for a task that runs one job and exits, that cost is
+      #       paid once, which is why the base's reason for keeping one warm
+      #       does not carry into `dev`. The MAXIMUM is deliberately not lowered
+      #       alongside it: application.yml:446-459 fixes the floor at strictly
+      #       above one because the job repository writes step and job execution
+      #       state in a transaction SEPARATE from the chunk transaction, and a
+      #       streaming reader holds a third connection for the whole of a step,
+      #       so a smaller ceiling would deadlock this module rather than
+      #       economise on it.
+      minimum-idle: 0
+
+      # WHY : (1) Trade-offs: two of the three bounds the base sets at
+      #       application.yml:523 are tightened and the third stays absent. Lock
+      #       waiting and idle-in-transaction are shortened because a `dev` run
+      #       competes with no online traffic, so a wait that does not clear
+      #       promptly is a real contention defect rather than ordinary
+      #       contention, and surfacing it sooner is the purpose of a
+      #       development environment. statement_timeout stays unset for the
+      #       reason the base gives at application.yml:500-507: a single long
+      #       set-based statement is legitimate batch work -- the combine step
+      #       replaces the sort and merge of app/jcl/COMBTRAN.jcl with one
+      #       ordered query -- and the outer bound on a step is the per-state
+      #       timeout the invoking state machine already enforces, so a second,
+      #       shorter bound here would cancel correct work and report it as a
+      #       failure.
+      #       (2) Assumptions: lowering the idle-in-transaction ceiling
+      #       PRESERVES the base's ordering invariant at
+      #       application.yml:471-485, which requires the client-side leak
+      #       detector to sit ABOVE the server-side ceiling so that the server
+      #       terminates a connection stuck inside a transaction while the
+      #       detector reports only the checked-out-but-not-in-transaction case
+      #       that a stream left unclosed produces. Lowering the ceiling widens
+      #       that gap rather than closing it, so the inherited detector keeps
+      #       reporting exactly the shape it was set for.
+      #       (3) Assumptions: only this map ENTRY is replaced. sslmode and
+      #       sslrootcert are separate entries of the same map and are inherited
+      #       unchanged, so verify-full and its trust anchor still apply here.
+      data-source-properties:
+        options: "-c lock_timeout=10000 -c idle_in_transaction_session_timeout=120000"
+
+  jpa:
+    # WHY : Trade-offs: held at the base's value rather than raised, and
+    #       restated rather than merely inherited because it is the single most
+    #       tempting key to flip in a development profile.
+    #       application.yml:655-666 records that this key echoes statements
+    #       through the persistence provider straight to standard output,
+    #       bypassing the logging framework, so no logger level below can filter
+    #       it and none of the masking reaches it. In this module the values
+    #       bound into those statements include the primary account number of
+    #       every transaction in the daily feed. What is given up is the
+    #       convenience of reading executed SQL from a `dev` task's log; the
+    #       accepted substitute is reproducing the step against a local database
+    #       container, where the rows are fixture rows.
+    show-sql: false
+
+    properties:
+      hibernate:
+        jdbc:
+          # WHY : Trade-offs: a narrower reader window than the base's, which
+          #       bounds a failing read to fewer rows and makes the record that
+          #       caused it easier to identify. It stays well above one
+          #       deliberately: a window of a single row per round trip would
+          #       reproduce the baseline's record-at-a-time I/O PATTERN rather
+          #       than its semantics, and application.yml:671-685 establishes
+          #       that it is the semantics parity requires --
+          #       app/cbl/CBTRN02C.cbl:202-219 loops one record at a time
+          #       because a VSAM read returns one record, not because the row
+          #       count per I/O is part of the contract. What is given up is
+          #       round trips against a fixture-sized feed. The value stays
+          #       positive because application.yml:430-444 makes a positive
+          #       window and auto-commit off jointly the condition under which
+          #       the driver opens a server-side cursor at all; a zero here
+          #       would buffer the whole result in the client.
+          fetch_size: 25
+
+          # WHY : Alternatives Considered: a saga, a distributed coordinator or
+          #       a compensating reversal, so that a smaller write grouping
+          #       could also commit in pieces. Rejected, in agreement with
+          #       application.yml:357-370. app/cbl/CBTRN02C.cbl commits three
+          #       writes as ONE unit of work inside 2000-POST-TRANSACTION --
+          #       :440 2700-UPDATE-TCATBAL, then :441 2800-UPDATE-ACCOUNT-REC,
+          #       then :442 2900-WRITE-TRANSACTION-FILE -- so committing them
+          #       separately would make a state such as a posted transaction
+          #       whose category balance has not moved observable. No such state
+          #       exists in the baseline, so the golden masters would correctly
+          #       report it as a parity failure. This key is therefore
+          #       behaviour-neutral ONLY because it changes how many statements
+          #       share a round trip and nothing about the transaction boundary:
+          #       the three writes stay inside one commit at every value it can
+          #       take. The smaller grouping is chosen so that a constraint
+          #       violation in a `dev` run is attributable to fewer statements.
+          batch_size: 10
+
+logging:
+  level:
+    # WHY : (1) Trade-offs: this module's own categories are raised one step,
+    #       which is the reason a `dev` profile exists for logging at all.
+    #       application.yml:770-776 holds them level with the root in every
+    #       environment because a job's progress is recorded durably in
+    #       batch.batch_run and its outcome in the process exit status, so
+    #       per-record output earns nothing in a nightly run and costs
+    #       feed-volume log lines. In `dev` that calculation inverts: the feed
+    #       is fixture-sized and the reason to run a job is to watch it. The
+    #       root level is deliberately NOT lowered alongside this one, so
+    #       third-party categories stay quiet and this module's own lines are
+    #       what the raised level actually surfaces; application.yml:764-767
+    #       states that an overlay may raise a category but must not lower
+    #       either floor.
+    #       (2) Assumptions: raising a category never authorises logging a whole
+    #       record, a primary account number or a card verification value. The
+    #       masking that suppresses those lives in the mapper layer, and a debug
+    #       statement that formats an entity directly is the easiest way to
+    #       defeat that masking without touching it.
+    com.carddemo: DEBUG
+
+    # WHY : (1) Trade-offs: this comment governs BOTH keys immediately below.
+    #       They are raised because they answer the first two questions a
+    #       failing `dev` run raises -- which step stopped, and did the schema
+    #       change -- and at this level they add step and chunk transitions and
+    #       the resolved migration set to the answer the base's level already
+    #       gives. The extra volume is accepted only because a `dev` feed is
+    #       fixture-sized; the same level against a production feed would emit
+    #       per-chunk lines for an entire run, which is why neither is raised in
+    #       the base.
+    #       (2) Assumptions: neither category emits a bound parameter, so
+    #       raising them does not reach the cardholder data the two keys below
+    #       hold off.
+    org.springframework.batch: DEBUG
+    org.flywaydb: DEBUG
+
+    # WHY : Assumptions: this comment governs BOTH keys immediately below, which
+    #       are held at the base's value, and holding them is a deliberate
+    #       divergence from all three authored peer overlays -- transaction-,
+    #       auth- and card-service each raise statement or bind logging in
+    #       `dev`. That choice is sound for a request-scoped service and does
+    #       not transfer here. application.yml:788-804 floors both because a
+    #       bound parameter in this module carries the primary account number of
+    #       every transaction in the feed, these categories sit UNDERNEATH the
+    #       mapper layer that does the masking and so bypass it entirely, and
+    #       the volume is the whole feed rather than one request. They are
+    #       restated rather than inherited silently so that a reader comparing
+    #       this file with a peer's finds the reason here instead of reading the
+    #       difference as an oversight. Off rather than a higher threshold
+    #       because these categories emit at DEBUG and TRACE, so any level above
+    #       them merely happens to exclude them and would let one lowered number
+    #       re-enable both.
+    org.hibernate.SQL: "OFF"
+    org.hibernate.orm.jdbc.bind: "OFF"

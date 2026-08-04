@@ -1,0 +1,869 @@
+# =============================================================================
+# services/reporting-service/src/main/resources/application.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Base, profile-independent Spring Boot configuration for reporting-service,
+#   the REPORTING AND STATEMENT bounded context of the CardDemo
+#   mainframe-to-microservices migration. It settles the values every
+#   environment shares: the HTTP listener and its drain budget, the Aurora
+#   PostgreSQL datasource and its connection pool, the read-only persistence
+#   posture, resource-server identity, the Actuator probe surface, log levels
+#   and log pattern, and the module-local report-execution and object-storage
+#   keys this context owns.
+#
+#   application-dev.yml and application-prod.yml are OVERLAYS on this document.
+#   They may differ from it only in sizing, retention and verbosity, never in
+#   topology, so a setting that changes behaviour rather than capacity belongs
+#   here and not in a profile.
+#
+#   Four COBOL programs are the behavioural oracle for this context. They are
+#   read and never modified, and the uppercase .CBL and .JCL spellings are the
+#   on-disk spellings, so a lowercase citation is a dead reference:
+#     app/cbl/CORPT00C.cbl  online report request. Its ad hoc submission path
+#                           is replaced rather than reimplemented, and that is
+#                           argued in full at
+#                           carddemo.reporting.step-functions.state-machine-arn.
+#     app/cbl/CBTRN03C.cbl  transaction detail report writer.
+#     app/cbl/CBSTM03A.CBL  statement generator, emitting TWO formats.
+#     app/cbl/CBSTM03B.CBL  statement subprogram, called by CBSTM03A.
+#
+#   THREE artifact widths are FD-declared, so they are contracts inherited from
+#   the baseline rather than choices made here, and any output configuration
+#   respects them:
+#     133  transaction detail report -- app/cpy/CVTRA07Y.cpy L48
+#          (01 TRANSACTION-HEADER-2 PIC X(133)), app/cbl/CBTRN03C.cbl L85
+#          (FD-REPTFILE-REC PIC X(133)) and L133 (WS-BLANK-LINE PIC X(133)),
+#          and app/jcl/TRANREPT.jcl L78 (DCB LRECL=133).
+#      80  plain-text statement -- app/cbl/CBSTM03A.CBL L45
+#          (FD-STMTFILE-REC PIC X(80)) and app/jcl/CREASTMT.JCL L89.
+#     100  HTML statement -- app/cbl/CBSTM03A.CBL L47
+#          (FD-HTMLFILE-REC PIC X(100)) and app/jcl/CREASTMT.JCL L94.
+#   Both CREASTMT.JCL citations above sit inside the STEP040 stanzas that
+#   allocate the outputs, L87 to L91 and L92 to L96. The identical LRECL=80 that
+#   also appears at L69 and at L73 is INERT: those two stanzas belong to STEP030,
+#   which runs IEFBR14 with DISP=(MOD,DELETE,DELETE) and writes no data at all,
+#   so neither is a width source, and the L69 occurrence in particular is not
+#   the HTML width.
+#
+#   A FOURTH width exists and stands OUTSIDE the 133-column contract. It is
+#   recorded here so that nobody forces it into the CVTRA07Y mould.
+#   app/jcl/PRTCATBL.jcl is formatted entirely by DFSORT with no COBOL program
+#   participating (L43, STEP10R EXEC PGM=SORT). Its physical record is 40 bytes
+#   per DCB=(LRECL=40,RECFM=FB,BLKSIZE=0) at L61, while the OUTREC FIELDS
+#   arithmetic at L53 to L56 sums to 41 (11 + 1 + 2 + 1 + 4 + 1 + 12 + 9). For
+#   RECFM=FB the DCB governs, so the one trailing blank is never written. That
+#   is an artifact observation about the baseline and not a defect claim: the
+#   baseline behaves as it behaves, the target records the difference, and this
+#   migration adds a path rather than removing one. The doctrine followed here
+#   is the house one at tests/README.md L50 to L51 -- document honestly so that
+#   no claim hides a blocked feature, as a financial-enterprise auditability
+#   requirement.
+#
+#   This module owns NOTHING in the database: no schema, no table, no index and
+#   no relational object of any kind. It reads read-only cross-schema views
+#   through a role holding SELECT-only privileges, and both those views and
+#   those privileges are bootstrapped by
+#   data-migration/sql/V0__schemas_and_roles.sql rather than from here.
+#
+#   NO CREDENTIAL, ENDPOINT, BUCKET NAME, RESOURCE IDENTIFIER, ACCOUNT
+#   IDENTIFIER OR USER-POOL IDENTIFIER APPEARS ANYWHERE IN THIS FILE. Two
+#   placeholder classes are used and the difference between them is deliberate:
+#     - a value the DEPLOYMENT injects -- the datasource triple, the token
+#       issuer, the state-machine identifier, the output bucket -- is a ${...}
+#       placeholder carrying NO fallback, so an absent one stops start-up loudly
+#       rather than starting a reporting service that cannot reach its data or
+#       write its artifacts;
+#     - a value a PROFILE would otherwise tune -- pool sizing, log levels,
+#       health detail, fetch size, object-key prefixes, timeouts -- is a
+#       concrete literal here, so that this document stands alone.
+#   Every value in the first class arrives at run time from Terraform outputs by
+#   way of Parameter Store and Secrets Manager.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md.
+# -----------------------------------------------------------------------------
+# WHY (non-obvious design decisions):
+#
+#   - Assumptions: this document is authored BEFORE the Java that binds it, so the
+#     property keys below are the contract that config/DataSourceConfig.java,
+#     config/SecurityConfig.java, config/StepFunctionsConfig.java and
+#     service/ReportExecutionService.java are written against. Two consequences
+#     follow and both shaped what is here: a key nothing binds is dead weight,
+#     and a key something needs but that is missing is a start-up failure. Every
+#     name that had to agree with an already-authored class was therefore read
+#     out of that class rather than guessed -- see the MetricsConfig and
+#     CorrelationIdFilter bullets below.
+#   - Assumptions: this document must start the application with NO profile
+#     supplied. The ECS task definition sets SPRING_PROFILES_ACTIVE, and if the
+#     base were incomplete a task launched without that variable would fail to
+#     start rather than start degraded. Detail at spring.config.import.
+#   - Alternatives Considered: naming the four source schemas in the connection
+#     search path, which is the obvious reading of "cross-schema views" and is
+#     wrong against the authored privilege model. Rejected. Detail at
+#     spring.datasource.hikari.connection-init-sql.
+#   - Alternatives Considered: an Aurora reader endpoint, a second datasource or a
+#     routing datasource, so that reporting reads never reach the writer.
+#     Rejected. Detail at spring.datasource.
+#   - Alternatives Considered: modelling the report request as a queued message,
+#     the way the authorization context models its request and reply exchange.
+#     Rejected. Detail at carddemo.reporting.step-functions.state-machine-arn.
+#   - Alternatives Considered: a global JSON inclusion policy, and a bespoke
+#     logging back-end configuration file. Both rejected, and each absence is
+#     argued where it would otherwise have been declared -- the first at
+#     `spring`, the second at `logging`.
+#   - Assumptions: no schema-migration key appears anywhere in this document, not
+#     even one disabling migration. services/reporting-service/pom.xml declares
+#     neither the migration-tool core artifact nor its PostgreSQL companion --
+#     that POM names both of them in its DELIBERATELY ABSENT block, which is
+#     where they stay named so that this document does not become a second place
+#     to maintain the pair. Such a key here would bind nothing AND would falsely
+#     imply the tool was available, inviting the next reader to add the library
+#     rather than remove the key. This module owns no schema, so it owns no
+#     migration directory either; a db/migration directory here would be an
+#     affirmative defect, which is the same conclusion that POM reaches
+#     independently.
+#   - Assumptions: no queue key and no batch-job-repository key appears either,
+#     for the same classpath reason. This context consumes none of the migrated
+#     queues, and batch-service owns the step ledger that supplies restart
+#     semantics; a second ledger here would be a second, competing account of
+#     whether a step completed.
+#   - Assumptions: MetricsConfig in com.carddemo.common.observability publishes
+#     three Micrometer common tags from three named properties, and those names
+#     were taken from that class rather than invented:
+#     spring.application.name, carddemo.environment and carddemo.version, each
+#     defaulting in that class to the literal `unspecified`. All three are
+#     declared below so the tags carry meaning. Detail at
+#     spring.application.name and at `carddemo`.
+#   - Assumptions: CorrelationIdFilter in com.carddemo.common.web publishes the
+#     request correlation identity to the SLF4J mapped diagnostic context under
+#     the key `correlationId`, and that class's own documentation states the key
+#     is a contract with a logging configuration rather than an internal detail.
+#     Detail at logging.pattern.console.
+#   - Trade-offs: the connection pool is sized deliberately small against a
+#     cluster-wide connection budget shared with seven peer services, because a
+#     borrow here can be held for the whole of a cursor walk rather than for a
+#     keyed read. Detail at spring.datasource.hikari.maximum-pool-size.
+#   - Trade-offs: the shutdown drain budget is pinned BELOW the container
+#     platform's own default stop timeout, because a budget above it is a budget
+#     the platform never honours. Detail at
+#     spring.lifecycle.timeout-per-shutdown-phase.
+#   - Assumptions: the fetch size below is a TRANSPORT BATCH SIZE and is not a cap
+#     of any kind. The baseline's two unchecked statement tables and their three
+#     distinct numbers are recorded there so that the value can never be read as
+#     standing in for one of them. Detail at
+#     spring.jpa.properties.hibernate.jdbc.fetch_size.
+#   - Assumptions: the Actuator health path is a deployment contract with two
+#     consumers defined outside this repository's Java, and they fail in
+#     different places. Detail at `management`.
+#   - Trade-offs: this file carries no mechanical documentation gate and is held
+#     to Rule 1 by the written standard and by review instead.
+#     config/checkstyle/checkstyle.xml sets fileExtensions to java at Checker
+#     scope, so no linter in this project inspects a .yml file for
+#     documentation, and docs/CODE_DOCUMENTATION_STANDARD.md records the same
+#     limit for YAML. The absence of a linter is not an absence of obligation,
+#     and no comment in this file claims a gate enforces something it does not.
+# =============================================================================
+
+server:
+
+  # WHAT: the single TCP port this service listens on.
+  # WHY : Assumptions: three artifacts outside this file are built against 8080
+  #       and they do not negotiate it -- this module's Dockerfile EXPOSEs it and
+  #       aims its HEALTHCHECK at 127.0.0.1:8080, the load balancer target group
+  #       registers the task on it, and the task security group admits it.
+  #       Moving it here would leave every one of those three addressing a port
+  #       nothing is listening on, and the resulting symptom is a task that never
+  #       turns healthy rather than an error naming a port, which is why the
+  #       coupling is recorded rather than left to be rediscovered.
+  port: 8080
+
+  # WHAT: let in-flight requests finish instead of cutting them at SIGTERM.
+  # WHY : (1) Assumptions: deployment is a rolling task replacement, because
+  #       blue-green and canary deployment are out of scope, so the platform
+  #       stops a task that may be midway through serving a request. The baseline
+  #       has no counterpart to this setting, so nothing is being replaced here.
+  #       (2) Assumptions: a statement or report run walks an open server-side
+  #       cursor and streams bytes to object storage, so an abrupt stop severs it
+  #       mid-write and leaves a TRUNCATED artifact behind rather than a clean
+  #       failure. A truncated fixed-width artifact is the worst of the three
+  #       possible outcomes, because it is indistinguishable from a complete one
+  #       until a reader reaches the short record.
+  #       (3) Trade-offs: task replacement takes longer in exchange for artifacts
+  #       that are either complete or absent, never partial. The wait is bounded
+  #       at spring.lifecycle.timeout-per-shutdown-phase below.
+  shutdown: graceful
+
+  # WHAT: honour the forwarded protocol, host and port headers set upstream.
+  # WHY : (1) Assumptions: this service is reached through two hops it cannot
+  #       see -- an API Gateway HTTP API in front, and an INTERNAL load balancer
+  #       behind it over a private link -- so the scheme, host and port on the
+  #       request as received are the internal ones, not the ones the caller
+  #       used.
+  #       (2) Alternatives Considered: leaving this unset, which is the framework
+  #       default. Rejected because of a concrete, checkable consequence rather
+  #       than a stylistic one: the springdoc-served contract advertises a server
+  #       URL derived from the request, and a report submission answers with a
+  #       Location header naming the execution it created. Left unset, both would
+  #       name the internal load balancer host, which no browser can resolve and
+  #       no client outside the private network can reach -- so the contract
+  #       would document an unreachable address and the Location header would
+  #       point at one.
+  #       (3) Alternatives Considered: the `native` strategy, which delegates to
+  #       the servlet container. Rejected because it is the container that then
+  #       decides which proxies to trust, and that decision would live in neither
+  #       this file nor the Terraform that provisions the two hops. `framework`
+  #       keeps the handling in one place that this document can describe.
+  forward-headers-strategy: framework
+
+# WHY : Alternatives Considered: a spring.jackson block, and in particular a
+#       global non-null inclusion policy. Rejected, and the reasoning is the
+#       reason no such key appears anywhere below. The argument FOR one is real:
+#       the report submission response has to omit its execution identifier
+#       entirely, not send it as null, for the two confirm outcomes that submit
+#       nothing. The argument against is decisive, because the same global
+#       setting reaches every serialised type -- it would also suppress the
+#       deliberately nullable first-key and last-key cursor tokens of the shared
+#       keyset page envelope, turning a four-component envelope into a
+#       three-component one on a first page and breaking the contract the browser
+#       client is written against. Presence and absence are therefore a
+#       per-property concern belonging to the DTO and to the shared kernel types,
+#       not a document-wide default. There is a second, independent reason to
+#       leave Jackson alone from configuration: config/OpenApiConfig.java
+#       deliberately declares no object-mapper bean, because declaring one backs
+#       off the framework's Jackson autoconfiguration and would leave the shared
+#       money module unbound, at which point every money field silently
+#       serialises as a JSON number in violation of the migration's fixed-point
+#       money rule. A document-wide Jackson default set here is the same hazard
+#       approached from the other side.
+spring:
+
+  # WHAT: the logical service name.
+  # WHY : Assumptions: this value has two consumers that must agree, and it was
+  #       matched to the first of them by reading that class rather than by
+  #       convention. MetricsConfig in com.carddemo.common.observability exposes
+  #       the constant SERVICE_PROPERTY with the value `spring.application.name`
+  #       and turns whatever it resolves to into the Micrometer `service` common
+  #       tag attached to every meter, falling back to the literal `unspecified`
+  #       when unset. The same name is what identifies this service's log group
+  #       and stream. Leaving it unset would therefore publish meters tagged
+  #       `service=unspecified` that no dashboard could attribute, and the failure
+  #       is silent -- the metrics arrive, they simply cannot be attributed.
+  application:
+    name: reporting-service
+
+  # WHAT: pull the deployment's non-secret parameters and its credentials from
+  #       Parameter Store and Secrets Manager at start-up, under one namespace.
+  # WHY : (1) Assumptions: both locations carry the `optional:` prefix, and that
+  #       prefix is what makes profile-free and offline start-up real rather than
+  #       aspirational. Without it an unreachable control plane -- a developer
+  #       machine with no credentials, a task whose endpoint policy is still
+  #       settling -- is a hard start-up failure instead of a start that falls
+  #       through to the injected environment variables this document already
+  #       reads. The two starters that resolve these locations are on the
+  #       classpath for exactly this: services/reporting-service/pom.xml declares
+  #       the parameter-store and the secrets-manager starter and nothing else
+  #       from that family.
+  #       (2) Alternatives Considered: writing two different literal namespace
+  #       paths, one in each profile overlay. Rejected because a parameter path
+  #       is TOPOLOGY, and the two overlays are permitted to differ only in
+  #       sizing, retention and verbosity; a path that differed between them would
+  #       smuggle a topology difference into a file whose stated contract forbids
+  #       one, and the two overlays would then have to be diffed to answer where a
+  #       value came from. Carrying the environment-varying segment in one
+  #       variable keeps both overlays identical in this respect and keeps the
+  #       answer in one place.
+  #       (3) Assumptions: the fallback is a bare namespace path and holds no
+  #       account identifier and no environment credential. A namespace is not a
+  #       secret; an account-qualified path would be, which is why the fallback
+  #       stops at the service segment.
+  config:
+    import:
+      - "optional:aws-parameterstore:${CARDDEMO_CONFIG_PREFIX:/carddemo/reporting}/"
+      - "optional:aws-secretsmanager:${CARDDEMO_CONFIG_PREFIX:/carddemo/reporting}/"
+
+  # WHY : Alternatives Considered: leaving the start-up banner at its default of
+  #       `console`. Rejected on a measurable cost rather than a matter of taste.
+  #       Log storage is billed per ingested gigabyte; the banner is several lines
+  #       emitted on every process start, a rolling replacement starts one process
+  #       per task slot per deployment, and no line of it is actionable. What it
+  #       would have shown is already published twice over and in queryable form:
+  #       the build version travels as the Micrometer `version` common tag that
+  #       MetricsConfig applies, and the framework version is available on the
+  #       Actuator info endpoint exposed below. Suppressing it removes billed
+  #       bytes and removes no diagnostic.
+  main:
+    banner-mode: "off"
+
+  # WHY : (1) Trade-offs: twenty seconds is chosen against the window the
+  #       container platform itself allows, not against how long a report might
+  #       take. A Linux task on this platform is given thirty seconds by default
+  #       between SIGTERM and SIGKILL, and the JVM is killed at the end of it
+  #       whatever the framework is still draining. A budget at or above that
+  #       figure is therefore one the platform will not honour: it would read as
+  #       configured while producing exactly the truncated artifact that
+  #       server.shutdown above exists to prevent. Twenty seconds leaves headroom
+  #       inside the window that is actually granted for the drain to finish and
+  #       for the connection pool to close.
+  #       (2) Alternatives Considered: a longer budget -- forty-five or sixty
+  #       seconds -- on the assumption that the task definition raises the stop
+  #       timeout to match. Rejected because this document cannot see the task
+  #       definition and cannot verify that assumption, and the failure mode of
+  #       assuming wrongly is silent. If a run legitimately needs longer than the
+  #       drain window, the answer is to run it as a batch execution rather than
+  #       to widen a budget whose ceiling is set elsewhere.
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  # WHY : Alternatives Considered: a second datasource aimed at an Aurora reader
+  #       endpoint, or a routing datasource that sent reads there and left the
+  #       writer for everyone else. Rejected, and the absence is documented
+  #       because a reader would reasonably expect it in a reporting service. A
+  #       replica adds cost and it adds replica-lag semantics for no parity
+  #       benefit: the baseline's report and statement programs read the very same
+  #       key-sequenced datasets the online programs read, so a replica would
+  #       introduce a staleness window the baseline never had, and the golden
+  #       masters -- which compare bytes -- have no way to express "correct, but
+  #       for a slightly earlier instant". Reads here go to the writer through the
+  #       read-only views instead, which costs nothing and keeps the comparison
+  #       meaningful. There is exactly ONE datasource in this document.
+  datasource:
+
+    # WHY : Assumptions: all three arrive as environment variables that the task
+    #       definition resolves from Parameter Store and Secrets Manager, and none
+    #       carries a fallback. An absent one stops start-up loudly, which is the
+    #       intended behaviour: the alternative -- a default pointing at a local
+    #       database -- would let a task start, pass its health check and serve
+    #       reports built from whatever happened to be reachable, which is a
+    #       worse outcome than not starting. The name resolved into is the
+    #       SELECT-only role, not an owning role.
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+    hikari:
+
+      # WHAT: a pool name that identifies this service in pool metrics and in
+      #       any connection-level diagnostic on the shared cluster.
+      # WHY : Assumptions: eight services connect to one cluster, so pool
+      #       telemetry and server-side session listings are only readable if each
+      #       pool is named for its owner. The default name is shared by every
+      #       Hikari pool in existence, which is what makes it useless here.
+      pool-name: reporting-pool
+
+      # WHAT: mark every pooled connection read-only at the JDBC level.
+      # WHY : Alternatives Considered: relying on the database role's SELECT-only
+      #       privileges alone, which do already make a write impossible.
+      #       Rejected because of WHERE each check lives and how each one reports.
+      #       The privilege model is administered in
+      #       data-migration/sql/V0__schemas_and_roles.sql and is invisible from
+      #       this module, so a reader here cannot tell that writes are barred and
+      #       a change there is not visible in this repository's Java at all. A
+      #       read-only connection fails at the point a write is attempted, in
+      #       this process, naming this pool. The two together mean the read-only
+      #       posture is asserted twice and independently -- once by the database
+      #       and once by the client -- and a single mistake in either place no
+      #       longer opens a write path.
+      read-only: true
+
+      # WHAT: hand out connections with auto-commit already switched off.
+      # WHY : (1) Assumptions: a PostgreSQL server-side cursor materialises rows
+      #       lazily only when BOTH preconditions hold -- a positive JDBC fetch
+      #       size, set at
+      #       spring.jpa.properties.hibernate.jdbc.fetch_size below, AND a
+      #       connection that is not in auto-commit. Hikari's default for this
+      #       key is on, and while the transaction manager switches it off when a
+      #       transaction begins, pinning it off at the pool means the
+      #       precondition holds for every borrow instead of only for a borrow
+      #       that happens to be inside one.
+      #       (2) Alternatives Considered: leaving the default on and relying on
+      #       the transaction manager. Rejected because the failure mode is
+      #       silent rather than loud: a streaming read that ran outside a
+      #       transactional boundary would return exactly the right rows, having
+      #       buffered the entire result set into the driver first, so the only
+      #       symptom is heap that grows with the size of the result. That is
+      #       precisely the whole-result materialisation the fetch size exists to
+      #       avoid, and nothing would report it.
+      #       (3) Trade-offs: every borrow now opens a transaction implicitly, so
+      #       a connection returned without a commit or a rollback would sit idle
+      #       inside one. The window is bounded by the framework closing and
+      #       returning the connection at the end of each request, and a leaked
+      #       one is retired by max-lifetime below; because the connection is
+      #       read-only, such a session can hold no uncommitted data.
+      auto-commit: false
+
+      # WHAT: pin the schema search order for every pooled connection to the one
+      #       schema that holds this context's read-only views.
+      # WHY : (1) Assumptions: this context reads exclusively through read-only
+      #       cross-schema views, under a role holding SELECT-only privileges, so
+      #       no write path exists at any layer. Those views live in the
+      #       `reporting` schema and are owned by a separate, non-login role;
+      #       data-migration/sql/V0__schemas_and_roles.sql establishes that schema
+      #       at L539 to L540 and gives this service's login role USAGE on it at
+      #       L892 while withholding everything else. That same file deliberately
+      #       sets no search path for any role -- its stated reason is that one
+      #       setting with two owners drifts -- so this key is the single owner of
+      #       schema resolution for this service, and the resolution has to be
+      #       correct here or nowhere.
+      #       (2) Assumptions: the views span three source schemas, and the
+      #       evidence is two DIFFERENT four-way joins that must never be
+      #       conflated. They overlap only in the transaction projection and the
+      #       card cross-reference. The statement generator's four data inputs are
+      #       the DD statements at app/jcl/CREASTMT.JCL L83 to L86 -- TRNXFILE,
+      #       XREFFILE, ACCTFILE and CUSTFILE -- which map to the card-ordered
+      #       transaction projection plus account.card_xref, account.accounts and
+      #       account.customers.
+      #       (3) Assumptions: the transaction report's four data inputs are a
+      #       different set, the DD statements at app/jcl/TRANREPT.jcl L65
+      #       (TRANFILE), L67 (CARDXREF), L69 (TRANTYPE) and L71 (TRANCATG),
+      #       which map to the transaction projection plus account.card_xref,
+      #       reference.transaction_types and reference.transaction_categories.
+      #       The fifth DD statement in that step, DATEPARM at L73 to L74, is a
+      #       PARAMETER file and not a joined data source -- which is exactly why
+      #       the reporting date range is a job parameter and why both generators
+      #       are free of any read of the wall clock. Union of the two: ledger,
+      #       account and reference.
+      #       (4) Alternatives Considered: naming those three source schemas here,
+      #       or naming all four of ledger, account, reference and card, which is
+      #       the obvious reading of "cross-schema views". Rejected on two
+      #       independent grounds, either sufficient. First it would resolve
+      #       nothing: V0 withdraws this login role's USAGE on all four at L890,
+      #       and PostgreSQL silently ignores a search-path entry whose schema the
+      #       role cannot use, so every unqualified name would fail to resolve and
+      #       the entries would be decoration. Second, and worse, they would not
+      #       stay decoration -- the day somebody restores that apparently
+      #       missing USAGE, unqualified names would begin resolving to the BASE
+      #       TABLES instead of to the views, and the masking those views carry
+      #       (an account number rendered to its last four digits, a card
+      #       verification value never returned, encrypted identifiers returned
+      #       masked) would be bypassed in silence by queries that had not
+      #       changed. Naming one schema makes that failure unreachable.
+      #       (5) Assumptions: `card` is neither silently dropped from this
+      #       decision nor silently promoted into it. It is read by NEITHER
+      #       program: the DD evidence above never reaches it, and every card
+      #       number surfaced by this context originates in account.card_xref and
+      #       in the card-ordered statement projection of app/cpy/COSTM01.CPY
+      #       rather than in card.cards. Should a card attribute later surface on
+      #       an endpoint, it reaches this service the same way every other column
+      #       does -- through a view in the `reporting` schema -- so this value
+      #       still would not change.
+      #       (6) Assumptions: the views themselves and the SELECT-only privileges
+      #       are bootstrapped by data-migration/sql/V0__schemas_and_roles.sql,
+      #       never from here. A view or a privilege missing at run time surfaces
+      #       as a permission or undefined-relation error naming the view, and
+      #       that is a data-migration defect to be reported rather than anything
+      #       for this module to remedy for itself.
+      connection-init-sql: "SET search_path TO reporting"
+
+      # WHAT: the two pool bounds, four concurrent connections and one kept warm.
+      # WHY : (1) Trade-offs: four is small for an HTTP service and is chosen
+      #       against the shape of the work rather than against request volume. A
+      #       borrow in this context is held for the whole of a cursor walk over a
+      #       card-ordered projection, not for a keyed read that returns and
+      #       releases, so a pool of four here means four LONG holds rather than
+      #       four short ones. The figure that has to fit is cluster-wide: one
+      #       Aurora cluster is shared with seven peer services -- auth, account,
+      #       card, transaction, reference, batch and authorization -- and the
+      #       total is the sum over all eight of tasks multiplied by this bound.
+      #       What four buys is that a burst of report traffic cannot starve the
+      #       other seven of the short keyed reads that sign-on and posting need.
+      #       What it costs is that a fifth concurrent run on one task waits, and
+      #       then fails with a pool timeout after connection-timeout below rather
+      #       than queueing without limit.
+      #       (2) Alternatives Considered: ten, which is what the online peers
+      #       auth-service, card-service and transaction-service each use.
+      #       Rejected because those pools serve keyed reads measured in
+      #       milliseconds while this one serves cursor walks; adopting their
+      #       figure would multiply this module's long holds by two and a half
+      #       against the same shared total, and the symptom would appear in the
+      #       OTHER seven services as refused connections during a reporting
+      #       burst, which is the hardest kind of fault to attribute.
+      #       (3) Trade-offs: minimum-idle is one rather than equal to the
+      #       maximum. One warm connection means the first report after a quiet
+      #       period does not pay a fresh handshake, while a fixed pool would hold
+      #       four connections open against the shared total continuously -- and
+      #       in the development environment, where Aurora capacity is allowed to
+      #       fall to zero, a fixed pool would keep prodding a cluster that is
+      #       trying to pause and would defeat the saving outright.
+      maximum-pool-size: 4
+      minimum-idle: 1
+
+      # WHAT: how long a borrow waits for a connection before failing.
+      # WHY : Alternatives Considered: ten seconds, which is what card-service and
+      #       transaction-service both use. Rejected for a concrete reason: when
+      #       Aurora capacity has fallen to zero and auto-pause has taken effect,
+      #       the cluster takes on the order of fifteen seconds to resume, and the
+      #       request that triggers the resume is the one waiting on this timeout.
+      #       At ten seconds the first report after a quiet period in the
+      #       development environment would abort before the cluster had finished
+      #       resuming, and it would abort with a pool timeout that names nothing
+      #       about capacity -- so it reads as a broken service rather than as a
+      #       cold start. Thirty seconds clears the resume with headroom, and it
+      #       matches what auth-service already uses, so the two services that can
+      #       be first to touch a paused cluster behave the same way.
+      connection-timeout: 30000
+
+      # WHAT: when an idle connection is released, and the hard ceiling on the
+      #       age of any connection.
+      # WHY : (1) Assumptions: both figures match transaction-service exactly, so
+      #       that every pool aimed at this one cluster recycles on a single
+      #       cadence instead of eight services each retiring connections on their
+      #       own rhythm against one server-side session limit.
+      #       (2) Alternatives Considered: leaving max-lifetime at the pool's own
+      #       default, which is longer. Rejected because the requirement is that
+      #       the POOL retire a connection before anything on the far side does --
+      #       a server-side or proxy-side idle reaper, or an Aurora capacity change
+      #       that drops sessions. When the far end wins that race the symptom is
+      #       an intermittent query failure on a connection the pool still
+      #       believed was good, which presents as a flaky database rather than as
+      #       a pool event. Fifteen minutes keeps the pool ahead of it.
+      idle-timeout: 300000
+      max-lifetime: 900000
+
+  jpa:
+
+    # WHY : (1) Trade-offs: closing the persistence context before the response
+    #       is rendered means a repository or service must fetch everything it
+    #       needs while still inside its transaction, and a lazy association
+    #       touched during serialisation raises an error instead of quietly
+    #       working. That is accepted deliberately here, more than in a
+    #       CRUD-shaped peer: with the view left open, the entity manager and its
+    #       pooled connection stay bound for the whole request INCLUDING response
+    #       serialisation, so a streaming statement read would hold one of only
+    #       four connections while bytes were written to a client whose speed this
+    #       service does not control. A slow reader would then consume a
+    #       connection from a total shared with seven other services.
+    #       (2) Assumptions: the error a lazy touch raises is the intended
+    #       outcome, because it is loud and it appears in development, whereas the
+    #       cost of leaving the view open is invisible until connections run short
+    #       under load.
+    open-in-view: false
+
+    hibernate:
+
+      # WHY : (1) Assumptions: this module must be unable to emit DDL even by
+      #       accident. It owns no relational object, and the objects it reads are
+      #       views owned by another role and provisioned by
+      #       data-migration/sql/V0__schemas_and_roles.sql.
+      #       (2) Alternatives Considered: `validate`, which is attractive here
+      #       because it would act as a start-up canary for a view that had not
+      #       been provisioned. Rejected for two reasons. Entity-to-VIEW metadata
+      #       validation is not dependable across dialect versions, so a spurious
+      #       failure would block start-up for a service that provably cannot emit
+      #       DDL -- trading a clear run-time error for an opaque start-up one.
+      #       And a genuinely absent view already reports itself at query time, as
+      #       a permission or undefined-relation error naming the view, which is a
+      #       data-migration defect to be reported rather than remedied from here.
+      ddl-auto: none
+
+    properties:
+      hibernate:
+        jdbc:
+
+          # WHAT: how many rows the driver materialises per round trip on an open
+          #       server-side cursor. A TRANSPORT BATCH SIZE, nothing more.
+          # WHY : (1) Assumptions: a positive value is one of the two
+          #       preconditions for a PostgreSQL server-side cursor to
+          #       materialise lazily; the other is a connection outside
+          #       auto-commit, pinned above at
+          #       spring.datasource.hikari.auto-commit. Miss either and the JDBC
+          #       driver buffers the ENTIRE result set client-side before the
+          #       first row is handed over.
+          #       (2) Assumptions: the repository methods that stream run inside a
+          #       read-only transactional boundary, which is what keeps the second
+          #       precondition true for the duration of the walk.
+          #       (3) Trade-offs: two hundred trades round trips against the heap
+          #       held per open cursor. A much larger figure would cut round trips
+          #       but raise the per-cursor high-water mark on a task with a fixed
+          #       memory reservation, so two concurrent statement runs would
+          #       contend for heap rather than for connections -- and heap
+          #       exhaustion kills the task, where connection contention merely
+          #       makes a request wait.
+          #       (4) Assumptions: THIS VALUE IS NOT A CAP AND MUST NEVER BE READ
+          #       AS ONE. It bounds rows in flight per round trip; it does not
+          #       bound how many transactions a statement may contain, nor how
+          #       many cards a run may cover. service/StatementService.java
+          #       carries no fixed arity at all and streams instead of assembling
+          #       an in-memory card-grouped table, which is divergence D-2 in
+          #       docs/architecture/cobol-to-service-traceability.md.
+          #       (5) Assumptions: divergence D-2 involves THREE distinct numbers
+          #       in the baseline and they are recorded separately here, because
+          #       conflating them is the documented failure. The baseline
+          #       app/cbl/CBSTM03A.CBL declares two independent unchecked tables.
+          #       512 is the MEASURED inner, same-card bound: one card renders up
+          #       to 512 transactions and the 513th overruns the inner table and
+          #       faults, marker F-STMT-INNER-OVERFLOW. 51 is the DECLARED and
+          #       measured outer, distinct-card bound, from L226
+          #       (05 WS-CARD-TBL OCCURS 51 TIMES) with its separate counter table
+          #       at L232 (05 WS-TRN-TBL-CTR OCCURS 51 TIMES): 51 distinct cards
+          #       render and the 52nd overruns, marker F-STMT-OUTER-OVERFLOW. 10
+          #       is MERELY DECLARED, the inner arity at L228
+          #       (10 WS-TRAN-TBL OCCURS 10 TIMES), and is not a measured bound at
+          #       all. Together those declarations reserve 51 x (16 + 10 x
+          #       (16 + 318)) = 171,156 bytes of working storage. tests/README.md
+          #       L70 to L82 states the point directly: there is no single
+          #       transaction-count limit, because that figure conflates the two
+          #       tables, hides the far larger same-card bound and mislabels the
+          #       fault as a transaction-count issue when it is two separate table
+          #       overruns. The baseline behaves that way and is reference-only;
+          #       the target carries no fixed arity; the divergence is documented
+          #       in the register named above.
+          #       (6) Trade-offs: two hundred was chosen partly so that it is
+          #       none of 10, 51 or 512. Any of those three would invite a reader
+          #       to take this transport setting for one of the baseline's table
+          #       arities, and a value that can be misread as a cap is worse than
+          #       one that cannot, whatever it costs in round trips.
+          fetch_size: 200
+
+  # WHY : Alternatives Considered: relying on the fact that this module ships no
+  #       schema.sql and no data.sql, and leaving this key unset. Rejected
+  #       because that absence is enforced by nothing at all -- the framework runs
+  #       either file automatically the moment it appears on the classpath, and
+  #       this module owns no relational object, so such a file arriving here by
+  #       copy from a peer that does own a schema would be executed against a
+  #       role holding SELECT-only privileges. Pinning `never` makes that
+  #       structurally impossible instead of merely unlikely, and it costs
+  #       nothing, because there is no initialisation this module wants.
+  sql:
+    init:
+      mode: never
+
+  # WHY : (1) Assumptions: config/SecurityConfig.java deliberately declares no
+  #       decoder bean, no injected value and no issuer literal, so the
+  #       framework's auto-configured decoder reads THIS key. That is the whole
+  #       reason a user-pool issuer never appears in this module's Java, and it
+  #       is why the key is declared here even though nothing in this file reads
+  #       it: the binding site is autoconfiguration, not a class in this
+  #       repository.
+  #       (2) Assumptions: identity comes from validated token claims and from
+  #       nowhere else. JwtRoleConverter in com.carddemo.common.security maps the
+  #       group claim to authorities. The structure this replaces is the CICS
+  #       communication area, which was storage the terminal echoed back, so a
+  #       client could in principle assert its own user type; a signed claim
+  #       cannot be asserted by the client at all, which makes this a security
+  #       correction rather than a like-for-like port.
+  #       (3) Assumptions: nothing about the servlet filter chain is declared
+  #       here. config/SecurityConfig.java is the settled owner of registering
+  #       the shared correlation filter, because filter ORDER is a property of
+  #       the chain that defines it, and a registration property here would be a
+  #       second place that order could be decided from. This service is
+  #       stateless besides -- there is no server-side conversation to keep -- so
+  #       no session store, no session timeout and no cookie policy is declared
+  #       either.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+
+# WHAT: expose the Actuator surface on the APPLICATION port, at the default
+#       /actuator base path, and expose only what something actually polls.
+# WHY : (1) Assumptions: /actuator/health on port 8080 is a deployment contract
+#       with two consumers that live outside this repository's Java and that fail
+#       in different places. This module's Dockerfile declares
+#       HEALTHCHECK ... CMD curl -f http://127.0.0.1:8080/actuator/health, which
+#       decides whether the container is serving, and the load balancer target
+#       group polls the identical path, which decides whether traffic is routed
+#       to the task at all. There is deliberately NO separate management port and
+#       NO relocated base path anywhere in this folder: either one would let those
+#       two consumers disagree about liveness, with one reporting the task healthy
+#       while the other killed it, and that disagreement presents as a task
+#       flapping for no visible reason.
+#       (2) Assumptions: the Prometheus scrape endpoint is exposed because
+#       micrometer-registry-prometheus is on the classpath at runtime scope for
+#       exactly this purpose, and because the three common tags MetricsConfig
+#       applies -- service, environment and version -- are only worth applying if
+#       something can collect them. The observability module provisions the
+#       collector. The endpoint identifier is `prometheus`, which was read off the
+#       endpoint annotation in the pinned framework release rather than assumed;
+#       that same release publishes no per-endpoint enable or access property for
+#       it, so this exposure list is the correct and the only lever, and writing
+#       such a property would have bound nothing.
+#       (3) Alternatives Considered: enabling the liveness and readiness probe
+#       groups additively. Rejected because nothing in this deployment polls
+#       them: the two consumers above both poll the aggregate path, and the
+#       platform is a container service behind a target group rather than an
+#       orchestrator that splits the two signals. Enabling them would publish two
+#       further paths with no collector, and an endpoint with no consumer is
+#       surface without a purpose. /actuator/health stays available and
+#       unrelocated regardless, because the Dockerfile hard-codes it.
+#       (4) Assumptions: the exposure list is closed rather than open. Every other
+#       endpoint -- environment, configuration properties, loggers, thread dump,
+#       heap dump -- stays unexposed, and the reason is specific to this service:
+#       its configuration names the datasource, the search path and the token
+#       issuer, so an exposed environment endpoint would publish the data-tier
+#       topology to anything that could reach the port.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+
+      # WHY : Trade-offs: the probe body is reduced to a bare status, giving up
+      #       the detail that would help diagnose a failing health check in
+      #       exchange for not disclosing the data tier to anything that can
+      #       reach the path. With detail on, the payload enumerates the
+      #       datasource contributor -- which names the database -- to two
+      #       pollers that are both unauthenticated and neither of which reads
+      #       anything beyond the status. The development overlay may widen this;
+      #       the production overlay does not.
+      show-details: never
+
+# WHY : (1) Assumptions: the pattern names %X{correlationId} explicitly, and that
+#       key is not a choice made here. CorrelationIdFilter in
+#       com.carddemo.common.web echoes an inbound X-Correlation-Id header
+#       verbatim or mints a fresh identity, publishes it to the mapped diagnostic
+#       context under the constant CORRELATION_ID_MDC_KEY whose value is
+#       `correlationId`, and clears it in a finally block; that class's own
+#       documentation states the key is a contract with a logging configuration
+#       rather than an internal detail. The framework's default console pattern
+#       contains no reference to the diagnostic context at all, so leaving the
+#       pattern alone would mean the filter published an identity that never
+#       reached a single log line, and cross-service tracing would be lost while
+#       appearing to be configured. The identity is at most twenty-four
+#       characters, the declared width of 05 WS-SAVE-CORRELID PIC X(24) at
+#       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L45, and it never
+#       carries a credential.
+#       (2) Alternatives Considered: a logging back-end configuration file in this
+#       folder instead of these properties. Rejected, and such a file must not be
+#       added: the framework's own logging plus the shared MetricsConfig already
+#       cover what this service needs, and a bespoke appender here would diverge
+#       from the log-group shape the seven peer services produce, which is what
+#       makes one query able to span them. The whole configuration is therefore
+#       expressed as properties.
+#       (3) Trade-offs: the root logger sits at WARN and only this project's own
+#       package is raised to INFO, so framework start-up narration stays out of a
+#       stream billed by ingested volume. What is given up is that narration; what
+#       is kept is every line this project's own code emits, which is where a
+#       report submission or a failed view read is reported.
+logging:
+  level:
+    root: WARN
+    com.carddemo: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%X{correlationId:-}] %logger{36} : %msg%n"
+
+carddemo:
+
+  # WHAT: the two remaining inputs to the Micrometer common tags, named exactly
+  #       as MetricsConfig names them.
+  # WHY : (1) Assumptions: these two key names were read out of
+  #       com.carddemo.common.observability.MetricsConfig rather than chosen --
+  #       it exposes ENVIRONMENT_PROPERTY as `carddemo.environment` and
+  #       VERSION_PROPERTY as `carddemo.version`, and turns each into the
+  #       `environment` and `version` common tag. A different spelling here would
+  #       bind nothing and fail silently, publishing meters that no dashboard
+  #       could attribute while the service looked healthy.
+  #       (2) Assumptions: each fallback is the literal `unspecified`, which is
+  #       the same sentinel MetricsConfig itself falls back to, so the sentinel
+  #       has ONE definition rather than two that could drift. The deployment
+  #       supplies the real values, and neither is a topology setting the two
+  #       profile overlays should differ on structurally.
+  #       (3) Alternatives Considered: omitting both keys and relying on the
+  #       framework's relaxed binding to map the injected environment variables
+  #       onto the property names by itself, which it does. Rejected because the
+  #       binding would then be invisible from this document: nothing here would
+  #       record that two specific variables feed the metric tags, and the next
+  #       reader adding a tag would have no example to follow. Declaring them
+  #       changes no resolved value -- an injected variable outranks this file
+  #       either way -- and makes the contract legible.
+  environment: ${CARDDEMO_ENVIRONMENT:unspecified}
+  version: ${CARDDEMO_VERSION:unspecified}
+
+  reporting:
+
+    step-functions:
+
+      # WHAT: the state machine this service starts an execution of when a report
+      #       is requested on demand.
+      # WHY : (1) Refactoring Rationale: this replaces the baseline's ad hoc
+      #       submission path, and the accurate account of what was wrong with it
+      #       is subtler than the obvious one, so both halves are stated rather
+      #       than collapsed into one. app/csd/CARDDEMO.CSD defines the submission
+      #       queue at L499 to L505 -- DEFINE TDQUEUE(JOBS) at L499, described
+      #       "SUBMIT JOBS FROM CICS" at L500 -- and L501 carries
+      #       TYPE(EXTRA) DATABUFFERS(1) DDNAME(INREADER) ERROROPTION(IGNORE),
+      #       with RECORDSIZE(80) at L502 and DISPOSITION(MOD) at L503. The first
+      #       half: ERROROPTION(IGNORE) is what makes CICS ITSELF swallow an
+      #       extrapartition I/O error, so a request could be accepted at the
+      #       screen and never reach the job entry subsystem with nothing
+      #       recording the loss. The second half, and it is a DIFFERENT
+      #       statement: the program app/cbl/CORPT00C.cbl DOES check the response
+      #       code and DOES carry its own failure message,
+      #       'Unable to Write TDQ (JOBS)...' at L531 -- the program is not
+      #       negligent. It is the queue definition that makes the region ignore
+      #       the condition the program stands ready to report. The replacement
+      #       answers that directly: starting a state machine execution accepts
+      #       typed input rather than eighty-byte card images, returns an execution
+      #       identifier that makes the run observable and addressable afterwards,
+      #       and raises an error instead of discarding one -- so a failed
+      #       submission can no longer be lost silently. The baseline path is
+      #       neither disparaged nor retired by any of this: the migration adds a
+      #       path, it does not remove one.
+      #       (2) Assumptions: the value arrives as an environment variable the
+      #       task definition resolves from Parameter Store, and no resource
+      #       identifier literal appears in this file. It carries no fallback, for
+      #       the same reason the datasource triple carries none: a reporting
+      #       service that starts without knowing what to submit to would accept
+      #       requests it could never fulfil.
+      state-machine-arn: ${CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN}
+
+      # WHAT: the ceiling on one control-plane call that starts an execution.
+      # WHY : Alternatives Considered: leaving the software development kit's own
+      #       default in place, which leaves the overall per-call ceiling unset
+      #       and bounds only the socket and connect phases. Rejected because the
+      #       call is made on a request thread with a browser waiting on the other
+      #       end, so an unbounded call is a request that neither completes nor
+      #       reports -- which would reproduce in the target exactly the silence
+      #       that ERROROPTION(IGNORE) produced in the baseline, and the whole
+      #       point of the transport change above is that a submission fails
+      #       loudly. A bounded ceiling is the mechanism available: a circuit
+      #       breaker is out of scope and no resilience library is on this
+      #       classpath, so explicit timeouts are what stands in for one. Ten
+      #       seconds is generous for a single control-plane call and still short
+      #       enough that the caller learns of the failure rather than waiting on
+      #       a connection that has already stopped progressing.
+      api-call-timeout: 10s
+
+    s3:
+
+      # WHAT: the bucket the three fixed-width artifacts are written to.
+      # WHY : Assumptions: this arrives as an environment variable resolved from
+      #       Parameter Store, and no bucket name and no storage hostname appears
+      #       in this file. It carries no fallback deliberately: a default would
+      #       let a task start and then fail only at the moment a report was
+      #       finally produced, which moves the error from start-up, where it is
+      #       obvious, to the end of a long run, where the work is already done
+      #       and lost.
+      output-bucket: ${CARDDEMO_REPORTING_S3_OUTPUT_BUCKET}
+
+      # WHAT: the two object-key prefixes under which report and statement
+      #       artifacts are written. Each run composes a DETERMINISTIC key from
+      #       its prefix, the report identity and the resolved date range.
+      # WHY : (1) Assumptions: a rerun REPLACES its prior output and never appends
+      #       to it, and that is inherited from the baseline rather than invented.
+      #       app/jcl/CREASTMT.JCL is explicitly idempotent about its own outputs:
+      #       STEP030 at L66 runs IEFBR14 over both of them with
+      #       DISP=(MOD,DELETE,DELETE) -- HTMLFILE at L67 to L71 and STMTFILE at
+      #       L72 to L75 -- and only then does STEP040 at L79 allocate both fresh
+      #       with DISP=(NEW,CATLG,DELETE). Delete-then-allocate is replace
+      #       semantics, and on object storage a write to an existing key
+      #       reproduces it exactly, so a deterministic key is what carries the
+      #       behaviour across.
+      #       (2) Alternatives Considered: a timestamped or generation-suffixed
+      #       key, which is the usual instinct for object storage and is wrong
+      #       here. Rejected because it silently converts a rerun into an append:
+      #       two runs of the same report over the same date range would both
+      #       persist under one logical report, nothing in the key would say which
+      #       one a reader should trust, and the divergent artifacts would
+      #       accumulate indefinitely. Generation retention belongs to the
+      #       nightly dataset families, which are a different concern owned
+      #       elsewhere, and borrowing their shape here would contradict the
+      #       delete-then-allocate contract above.
+      #       (3) Assumptions: the prefixes are literals rather than placeholders
+      #       because a key layout inside a bucket is neither a credential nor a
+      #       topology setting, so it belongs in the base document where both
+      #       profile overlays inherit one layout and artifacts stay at the same
+      #       place in every environment.
+      report-prefix: reports/transaction-detail/
+      statement-prefix: statements/
