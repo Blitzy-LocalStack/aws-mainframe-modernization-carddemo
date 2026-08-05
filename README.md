@@ -8,6 +8,7 @@ CardDemo is a comprehensive mainframe application that simulates a credit card m
 
 ## Table of Contents
 - [Description](#description)
+- [Linux and AWS Migration](#linux-and-aws-migration)
 - [Technologies](#technologies)
 - [Optional Features](#optional-features)
 - [Installation](#installation)
@@ -36,6 +37,25 @@ CardDemo is a mainframe application designed to test and showcase AWS and partne
 - Test creation and automation
 
 The application intentionally incorporates various coding styles and patterns to exercise analysis, transformation, and migration tooling across different mainframe programming paradigms.
+
+## Linux and AWS Migration
+
+An additive migration is being developed beside the unchanged mainframe
+baseline. The new trees contain Java service modules, a React SPA, Python
+data-migration support, Terraform infrastructure, CI/CD workflows, architecture
+records, and operator runbooks.
+
+- Start with [MIGRATION_README.md](MIGRATION_README.md) for build, deploy, run,
+  data-migration, validation, and rollback commands.
+- Review [the architecture documentation](docs/architecture/) and
+  [the nine ADRs](docs/adr/README.md) for service boundaries and frozen
+  technology decisions.
+- Follow [the code documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md)
+  for every migration-owned source or configuration change.
+
+Assumptions: `app/**`, `tests/**`, `scripts/**`, `samples/**`, and the existing
+COBOL test workflow remain reference-only. The target implementation encodes
+their contracts without editing them.
 
 ## Technologies
 
@@ -395,4 +415,3 @@ The CardDemo application has been enhanced with optional features that extend it
 These optional features make CardDemo an even more useful resource for customers looking to modernize their mainframe applications. With modules for DB2, MQ, IMS DB, JCL utilities, and more data formats now available, customers can leverage CardDemo to test a wider array of mainframe migration, refactoring, replatforming, and augmentation scenarios.
 
 Last updated: April 2025
-

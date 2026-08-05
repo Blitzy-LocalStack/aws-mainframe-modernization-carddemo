@@ -1,0 +1,81 @@
+# =============================================================================
+# authorization-service -- development profile.
+#
+#
+# WHY : (1) Assumptions: this profile differs from prod in SIZING, RETENTION and
+#       DIAGNOSTIC VERBOSITY only, never in topology, protocol or security
+#       posture. A profile that turned off TLS or opened an actuator endpoint
+#       "just for dev" would make dev stop being a rehearsal for prod, which is
+#       the only reason to have a dev environment at all.
+#       (2) Assumptions: the environment label read below is CARDDEMO_ENVIRONMENT
+#       and there is no second spelling of it anywhere in this repository. Two
+#       names for one value means a task definition can set one, a metric tag can
+#       read the other, and the mismatch shows up as an empty dashboard rather
+#       than as an error.
+# =============================================================================
+
+spring:
+  config:
+    # WHY : (1) Assumptions: the prefix is /carddemo/<environment>/authorization/
+    #       -- the same three-part shape every context uses, so one Terraform
+    #       module writes them all and one IAM policy can grant read on exactly
+    #       one context's subtree.
+    #       (2) Assumptions: the import is `optional:`, so a developer running
+    #       against a local database with no AWS credentials at all still starts.
+    #       Making it mandatory would couple a local run to a cloud account for no
+    #       benefit; the values that genuinely must be present are the
+    #       no-default placeholders in application.yml, which fail loudly on their
+    #       own.
+    #       (3) Trade-offs: this list REPLACES the base document's import rather
+    #       than adding to it, so the shared defaults document is named again here.
+    #       Omitting it would silently drop the shared log pattern in this profile
+    #       and the correlation identifier would vanish from dev logs only.
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:dev}/authorization/"
+
+  datasource:
+    hikari:
+      # WHY : Trade-offs: four connections rather than the base document's ten.
+      #       A dev cluster is sized to scale to zero, so its connection budget is
+      #       small and shared with whatever else a developer has running; four is
+      #       enough for the consumer, the outbox drain and a browser session at
+      #       once. The cost is that a load test against dev will queue on the
+      #       pool, which is the correct place for it to queue.
+      maximum-pool-size: 4
+      minimum-idle: 1
+
+      # WHY : Assumptions: a dev cluster with auto-pause enabled takes roughly
+      #       fifteen seconds to resume, and the base document's ten-second
+      #       connection timeout would fail every first request after a pause.
+      #       Thirty seconds absorbs one resume without turning a genuine outage
+      #       into a long hang.
+      connection-timeout: 30000
+
+  jpa:
+    # WHY : Trade-offs: statements are echoed in dev and not in prod. This is the
+    #       one diagnostic that genuinely helps when a keyset predicate returns the
+    #       wrong page, and it is safe here only because the BIND-PARAMETER logger
+    #       stays at WARN below -- the statement text names columns, the parameters
+    #       would name cardholders.
+    show-sql: true
+
+logging:
+  level:
+    # WHY : Assumptions: this context's own packages at DEBUG so a dropped stale
+    #       message, a replayed request and a failed publication are all visible
+    #       while the messaging path is being exercised.
+    com.carddemo.authorization: DEBUG
+
+    # WHY : Assumptions: the consumer's own container is raised too, because the
+    #       questions that actually arise in dev are about polling and visibility
+    #       rather than about the decision, and the decision is already logged.
+    io.awspring.cloud.sqs: DEBUG
+
+    # WHY : Trade-offs: the bind-parameter logger stays at WARN even here, and
+    #       especially here. At TRACE it writes every bound value, and the values
+    #       are primary account numbers; a dev database seeded from the baseline
+    #       extract holds the same kind of data as prod, so the argument that "it
+    #       is only dev" does not hold. show-sql above gives the statement text,
+    #       which answers the question without the values.
+    org.hibernate.orm.jdbc.bind: WARN

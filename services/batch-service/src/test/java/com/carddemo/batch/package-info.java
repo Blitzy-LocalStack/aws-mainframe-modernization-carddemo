@@ -2,22 +2,6 @@
  * Test root of the batch bounded context, and the one test tree in this reactor whose results are
  * checked against committed reference output rather than against transcribed prose alone.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, name pattern and count below describes this tree's <b>target
- * contract</b> as the migration plan assigns it, not the set of files present beside this one. The
- * plan lands its artifacts in order and this charter is authored ahead of the tests it governs, so
- * at the checkpoint that authored it this directory holds this charter and nothing else. A test
- * described by pattern below that has no file yet is therefore <b>planned</b>, not missing, and a
- * count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until the tests it governs exist. Rejected,
- * because the charter is what the authors of those tests read to learn which subpackage a new test
- * belongs in, which runner will collect it, and what this tree may not contain -- so writing it
- * afterwards would leave the tree with no stated contract across exactly the interval in which
- * those questions are being answered. The accepted cost is that the inventory reads as present
- * tense unless the distinction is declared, which is what the sentence above is for.</p>
- *
  * <h2>What the three subpackages hold</h2>
  *
  * <p>Three subpackages, and no fourth:</p>
@@ -48,9 +32,10 @@
  * belong in", and an open list answers it by inventing a fourth home, at which point the same
  * behaviour can be asserted in two places and the two can drift apart.</p>
  *
- * <p>Target contract: four charter files exist in this subtree -- this one, and one in each of
- * those three subpackages -- and no fifth. This directory itself holds no test class, no shared
- * base class, no helper, no fixture and no resource.</p>
+ * <p>This subtree carries one charter per package and no more: this one, and one in each of those
+ * three subpackages, so four in all. This directory itself holds no test class, no shared base
+ * class, no helper, no fixture and no resource -- everything that executes lives one level down, in
+ * the subpackage whose environment it needs.</p>
  *
  * <p>Alternatives Considered: a shared base class or assertion helper at this level, which is where
  * one would naturally go if all three subpackages came to need it. Rejected, because such a helper
@@ -184,100 +169,24 @@
  * mention exceptions -- citing the gate for an exception clause would attribute to it a
  * requirement it does not carry.</p>
  *
- * <h2>Why a file holding no code exists at all</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>Assumptions: nothing in the migration requirements would produce this file. The
- * user-specified Explainability rule attaches its docstring duty to every module entry point, a
- * Java package declaration is that entry point, and {@code package-info.java} is the only
- * compilation unit able to carry package-level Javadoc -- so the rule alone is what puts this file
- * in the tree. The Javadoc block is not decoration on a declaration that would otherwise stand
- * alone; it is the entire reason the file exists, and a bare package statement here would be a
- * failure rather than a minimum.</p>
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <p>Assumptions: that duty is enforced rather than requested, and the enforcement reaches this
- * directory only because the effective build configuration audits test sources. Running
- * {@code mvn -f services/batch-service/pom.xml help:effective-pom} resolves
- * {@code includeTestSourceDirectory} to {@code true} on the documentation gate that
- * {@code services/pom.xml} binds to the Maven {@code validate} phase, and resolves the audited
- * test source root to {@code src/test/java}, so the file-level package-documentation checks bear on
- * this directory exactly as they bear on the main source tree. That the gate runs at
- * {@code validate} rather than at a verification phase means it runs before compilation on every
- * local build and not only in continuous integration.</p>
- *
- * <p>Assumptions: two checks in {@code config/checkstyle/checkstyle.xml} bear on this file and
- * they are a deliberate pair rather than a redundancy. One asserts that a
- * {@code package-info.java} <b>exists</b> in a directory holding audited compilation units; the
- * other asserts that the file <b>carries</b> Javadoc on its package declaration. An empty
- * descriptor, or one holding nothing but an ordinary block comment, satisfies the first and fails
- * the second, so clearing the first check with an empty file is not available. Removing either
- * check would leave the rule's entry-point clause half-enforced, which is why both are configured
- * and neither may be narrowed to let this file through.</p>
- *
- * <p>Assumptions: there is no in-code way out of a finding from that gate. No comment-based or
- * annotation-based suppression filter is configured in the shared ruleset, so the familiar
- * off-switch comment and annotation-driven suppression have no effect whatever here. The companion
- * {@code config/checkstyle/suppressions.xml} is loaded fail-closed and its entries are scoped to
- * generated sources and to test fixture resources, so nothing under {@code src/test/java} is
- * suppressed. The only response to a finding is to write the documentation the finding names.</p>
- *
- * <p>Assumptions: the rule's validation gate is conjunctive. It requires the docstring and,
- * separately, a rationale for every non-obvious decision, and it closes by stating that code
- * missing either fails review -- so the two obligations are independently fatal and neither
- * compensates for the other. A fully documented charter that leaves one non-obvious choice
- * unjustified fails on the second half, and a well-justified charter with no Javadoc fails on the
- * first. That is why each decision above carries a labelled rationale instead of being left to
- * read as self-evident.</p>
- *
- * <h2>Authoring notes for the three subpackages</h2>
- *
- * <p>Assumptions: {@code docs/CODE_DOCUMENTATION_STANDARD.md} is the governing written convention
- * for every file authored in this tree, and it is authoritative over the mechanical ruleset
- * wherever the two could be read differently. It fixes the four rationale labels used above --
- * {@code Alternatives Considered:}, {@code Refactoring Rationale:}, {@code Assumptions:} and
- * {@code Trade-offs:} -- in one written form: plural, unparenthesised, each followed immediately by
- * its colon, and carrying no emphasis markup. The label is read by a literal string search before
- * it is read by a person, because no linter parses prose, so one spelling makes that search
- * complete while a second spelling of the same category makes it silently partial. The forms are
- * never mixed inside one file.</p>
- *
- * <p>Assumptions: {@code Refactoring Rationale:} is deliberately unused in this charter. That
- * label is defined for the case where existing code is being replaced, and nothing in this tree
- * replaces anything: the reference baseline stays byte-identical and keeps running, and these tests
- * are net-new beside it. Labelling an ordinary baseline-versus-migrated difference that way would
- * assert a replacement that did not happen.</p>
- *
- * <p>Assumptions: the twin what-and-why comment idiom of the written convention belongs to fenced
- * command blocks in prose documents and is forbidden on a statement in a Java file, where purpose
- * belongs in the Javadoc and an inline comment carries a labelled rationale and nothing else.
- * Inside a Javadoc block the same information is carried by a labelled sentence, which is the form
- * every rationale above uses. This file has one Javadoc block and one declaration, so it offers no
- * legitimate site for a statement-level comment of any kind.</p>
- *
- * <p>Trade-offs: this file is restricted to ASCII. Where a cited source carries a non-breaking
- * hyphen or an em dash, this charter uses an ASCII hyphen-minus or a pair of ASCII hyphens, and no
- * wording is otherwise altered. The reason is specific rather than stylistic:
- * {@code tests/README.md} uses the non-breaking hyphen inside the very words a charter has to
- * reproduce, including the rationale labels in its own explainability paragraph, so text copied
- * from there yields a label that looks correct, does not match a search for the canonical spelling,
- * and therefore goes uncounted by exactly the audit it was written to satisfy. The cost of the
- * restriction is plainer punctuation; the gain is that every label in this file is
- * byte-predictable.</p>
- *
- * <p>Trade-offs: auditing test sources on the same terms as main sources means every file in this
- * subtree carries the full documentation obligation, this charter and each fixture builder
- * included, and that cost is accepted rather than reduced. The alternative of exempting tests rests
- * on their being throwaway, which inverts their role here: the assertions in these three
- * subpackages are where the parity contract with the reference baseline is actually written down,
- * which makes them the classes a reader coming to this module cold most needs explained. The
- * narrowing that does exist is confined to generated sources and fixture resources, where a
- * docstring would document nothing.</p>
- *
- * <p>Trade-offs: this charter states no figure for the number of checks in the shared ruleset,
- * although a count would be the most compact way to describe the gate. Sibling documents in this
- * repository disagree on that number, because the configuration file mixes container elements and a
- * filter in with the checks themselves and a raw count of declarations does not equal a count of
- * enforced rules. Describing the effective behaviour costs more words and cannot go stale against
- * the configuration the way a number can, so a reader auditing this file against the ruleset
- * compares statements about behaviour rather than arithmetic.</p>
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  */
 package com.carddemo.batch;

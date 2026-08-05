@@ -3,11 +3,10 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the `sqs` module -- every value a calling
-#   root may supply, and nothing beyond that. The module provisions ten queues,
-#   five primary plus one dead-letter queue for each, which together replace
-#   the CardDemo baseline's five IBM MQ queues: a FIFO pair carrying the
-#   pending-authorization request and reply, a standard pair carrying the
-#   account-inquiry request and reply, and a standard terminal error sink.
+#   root may supply, and nothing beyond that. The module provisions twelve
+#   queues: six primary queues plus one dead-letter queue for each. The two
+#   inquiry request flows are split by owning service, while one shared reply
+#   queue follows the request's replyToQueueUrl contract.
 #
 #   Every variable below is explicitly typed, carries a `description`, and is
 #   consumed by main.tf or outputs.tf. Nothing is declared speculatively.
@@ -49,12 +48,12 @@
 #     documented scalars are more to read and less to get wrong.
 #   - Trade-offs: three separate retention inputs rather than one. This is the
 #     most surprising shape in the file and it is deliberate -- requests, of
-#     which the error sink is one, are retained for days; replies for the
-#     service floor; dead-letter queues for longer than either. The reasoning
-#     for each sits on the variable itself, because the three values are only
-#     defensible in relation to one another.
+#     which the error sink is one, are retained for days; replies outlast their
+#     complete retry budget; dead-letter queues retain failed evidence longer
+#     than either source. The reasoning for each sits on the variable itself,
+#     because the three values are only defensible in relation to one another.
 #   - Alternatives Considered: no per-queue name override and no `create_*`
-#     feature flag is offered. The queue set is fixed at five plus five
+#     feature flag is offered. The queue set is fixed at six plus six
 #     dead-letter queues by the messaging design, so a toggle would advertise
 #     an optionality that does not exist, and a `count`-gated queue would turn
 #     every output in outputs.tf into a possibly-empty list that each caller
@@ -107,21 +106,18 @@ variable "name_prefix" {
   #       Terraform. An SQS queue name may be at most 80 characters, and on a
   #       FIFO queue the mandatory `.fifo` suffix counts toward that 80. The
   #       arithmetic, which a reader can check against the naming locals in
-  #       main.tf: the longest name this module composes is the dead-letter
-  #       queue for the FIFO authorization request, whose fixed part is
-  #       "-pauth-request-" (15 characters) + <environment> (4 at most, being
-  #       "prod") + "-dlq.fifo" (9) = 28. 80 - 28 = 52, so a 52-character
-  #       prefix composes a name of exactly 80 and anything longer cannot fit.
-  #       The default spends 8 of those 52. Every other name this module builds
-  #       is shorter: the FIFO reply dead-letter queue costs 26, the standard
-  #       inquiry-request dead-letter queue 25, and the error dead-letter queue
-  #       only 15, so 28 really is the binding case.
+  #       main.tf: the longest name this module composes is the account-inquiry
+  #       dead-letter queue, whose fixed part is
+  #       "-account-inquiry-request-" (25 characters) + <environment> (4 at
+  #       most, being "prod") + "-dlq" (4) = 33. 80 - 33 = 47, so a
+  #       47-character prefix composes a name of exactly 80 and anything longer
+  #       cannot fit. The default spends 8 of those 47.
   #       Left unchecked, an over-long prefix passes `plan` untouched and fails
   #       during `apply` against whichever queue the provider reached first,
   #       reported as an invalid parameter on a name the caller never typed.
   validation {
-    condition     = length(var.name_prefix) >= 1 && length(var.name_prefix) <= 52
-    error_message = "name_prefix must be 1 to 52 characters. The module appends up to 28 more characters (\"-pauth-request-\" + environment + \"-dlq.fifo\") and the SQS queue-name limit of 80 counts the .fifo suffix."
+    condition     = length(var.name_prefix) >= 1 && length(var.name_prefix) <= 47
+    error_message = "name_prefix must be 1 to 47 characters. The module appends up to 33 more characters (\"-account-inquiry-request-\" + environment + \"-dlq\") and SQS limits queue names to 80 characters."
   }
 
   # WHY : Assumptions: SQS accepts only letters, digits, hyphens and
@@ -160,7 +156,7 @@ variable "name_prefix" {
 #       queue here is required to be encrypted with a customer-managed key, and
 #       the policy scan in .github/workflows/infra-ci.yml checks exactly that.
 #       A default would make the requirement skippable by omission: a caller
-#       who simply forgot the argument would still get ten working queues, just
+#       who simply forgot the argument would still get twelve working queues, just
 #       unencrypted ones, and the omission would surface only in the scan. With
 #       no default the same mistake is a `plan` error, so the requirement is
 #       carried by the shape of the contract instead of by a downstream check.
@@ -188,7 +184,7 @@ variable "kms_key_arn" {
 #       lifetime of a cached data key, stated in both directions because
 #       neither end is obviously correct. Raising it means fewer GenerateDataKey
 #       and Decrypt calls -- KMS bills per request and enforces a per-account
-#       request-rate quota that ten queues sharing one key can contend for --
+#       request-rate quota that twelve queues sharing one key can contend for --
 #       but a data key then stays resident in the service for longer, so
 #       revoking access takes effect only once the period lapses. Lowering it
 #       inverts both halves: tighter key turnover, more requests, more contention
@@ -215,7 +211,7 @@ variable "kms_data_key_reuse_period_seconds" {
 
 # WHY : Assumptions: 5 is constrained at both ends rather than chosen. The
 #       messaging design fixes a dead-letter queue at a receive count of five
-#       for each of the five source queues, and the baseline corroborates that
+#       for each of the six source queues, and the baseline corroborates that
 #       figure independently: app/scheduler/CardDemo.controlm sets
 #       MAXRERUN="5" on every job it defines -- lines 4, 8, 14, 20 and 27, and
 #       on all fifteen job elements in the file -- so a budget of five attempts
@@ -231,7 +227,7 @@ variable "kms_data_key_reuse_period_seconds" {
 #       drift is at least visible, since it can only be introduced through
 #       infra/envs/dev/terraform.tfvars or infra/envs/prod/terraform.tfvars.
 variable "max_receive_count" {
-  description = "Receives a message may accumulate on a source queue before SQS moves it to that queue's dead-letter queue. Applied as maxReceiveCount in the redrive_policy of all five source queues."
+  description = "Receives a message may accumulate on a source queue before SQS moves it to that queue's dead-letter queue. Applied as maxReceiveCount in the redrive_policy of all six source queues."
   type        = number
   default     = 5
 
@@ -316,8 +312,8 @@ variable "receive_wait_time_seconds" {
 
 # -----------------------------------------------------------------------------
 # Retention. Three values, deliberately unequal, and only defensible against
-# one another: requests are kept for days, replies for the service floor, and
-# dead-letter queues for longer than either.
+# one another: requests are kept for days, replies long enough to complete the
+# configured retry budget, and dead-letter queues for longer than either.
 # -----------------------------------------------------------------------------
 
 # WHY : Trade-offs: four days, and pointedly not the same value the reply queues
@@ -350,51 +346,46 @@ variable "request_message_retention_seconds" {
 }
 
 # WHY : Assumptions: the baseline put a hard expiry on its reply and SQS has no
-#       equivalent, so this input is one third of a three-part substitute.
+#       equivalent, so queue retention cannot implement business staleness.
 #       COPAUA0C sets MOVE 50 TO MQMD-EXPIRY at
 #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl:750, and MQ expresses
 #       expiry in TENTHS OF A SECOND, so 50 is five seconds -- read as seconds
 #       the literal is wrong by an order of magnitude. A reply older than five
 #       seconds was discarded by the queue manager and never delivered at all.
-#       SQS offers no per-message time to live, so the semantic is reassembled
-#       from three pieces: (1) the producer stamps an `expiresAt` message
-#       attribute; (2) the consumer in authorization-service honours it by
-#       dropping and logging a stale message; and (3) this retention keeps the
-#       reply queues short so an unread reply does not linger. ONLY part (3) is
-#       implemented here -- parts (1) and (2) are consumer-side and cannot be
-#       configured from this module, so setting this value alone does not
-#       deliver the expiry. docs/adr/ADR-004-messaging.md is the decision record
-#       for the gap and owns the transport reasoning, which is not restated.
-# WHY : Assumptions: 60 is the floor SQS permits, and that is what makes it the
-#       right value rather than merely the smallest available. Because the
-#       consumer's acceptance window is the five seconds derived above, and 60
-#       is twelve times that, this retention can never discard a reply the
-#       consumer would still have honoured: everything it drops was already
-#       stale by the consumer's own test. Choosing the floor therefore costs
-#       nothing in correctness while keeping the queue as near the baseline's
-#       observable behaviour as the service allows.
-# WHY : Assumptions: the baseline supports the short value a second time, and
-#       independently of the expiry. The reply is published non-persistent --
-#       MOVE MQPER-NOT-PERSISTENT TO MQMD-PERSISTENCE at COPAUA0C.cbl:749 -- so
-#       it was never meant to survive a restart of the queue manager, let alone
-#       days of retention. A short-lived reply is what the system already chose;
-#       a long retention here would impose durability the baseline declined.
-# WHY : Trade-offs: this is not parity and must not be read as parity. The
-#       baseline's five seconds were enforced by the queue manager, which
-#       withheld an expired message from every consumer. The target's five
-#       seconds are enforced by the consumer, so a stale reply stays in the
-#       queue -- visible, and counted in queue depth -- until something receives
-#       it and throws it away. The observable difference is therefore in queue
-#       depth and metrics during a consumer outage, not in delivered data: no
-#       expired reply is acted upon under either mechanism.
+#       The producer therefore stamps an `expiresAt` message attribute and the
+#       consumer rejects and logs a stale message; that is the only layer that
+#       decides whether a reply is still actionable. This queue-level value has
+#       a different responsibility: retaining a failed reply through every
+#       configured receive and visibility interval so SQS can move it to the
+#       dead-letter queue instead of deleting it first.
+# WHY : Refactoring Rationale: the former sixty-second default was shorter than
+#       five complete sixty-second visibility cycles, so a repeatedly failing
+#       reply could expire on the source queue before reaching its dead-letter
+#       queue. The validation below reserves max_receive_count plus one complete
+#       visibility interval and one receive-wait interval. The extra visibility
+#       interval covers the transition after the final permitted receive rather
+#       than assuming the move occurs at the start of that receive.
+# WHY : Trade-offs: fifteen minutes is intentionally longer than the baseline's
+#       non-persistent five-second reply lifetime. That added transport
+#       durability is accepted because `expiresAt` still prevents stale business
+#       use, while losing an unprocessable reply before it reaches quarantine
+#       would remove the only evidence needed to diagnose the failure.
 variable "reply_message_retention_seconds" {
-  description = "Seconds a message is retained on the two reply queues, applied as message_retention_seconds to those queues. Deliberately short, standing in for the per-message expiry the baseline set and SQS does not offer."
+  description = "Seconds a message is retained on the two reply queues, applied as message_retention_seconds to those queues. Must exceed the complete visibility and receive-wait retry budget; consumer-side expiresAt remains the business-staleness authority."
   type        = number
-  default     = 60
+  default     = 900
 
   validation {
     condition     = var.reply_message_retention_seconds >= 60 && var.reply_message_retention_seconds <= 1209600
-    error_message = "reply_message_retention_seconds must be between 60 (one minute) and 1209600 (fourteen days) inclusive. 60 is the SQS floor and the closest the service can come to the baseline's five-second reply expiry."
+    error_message = "reply_message_retention_seconds must be between 60 (one minute) and 1209600 (fourteen days) inclusive."
+  }
+
+  validation {
+    condition = var.reply_message_retention_seconds > (
+      var.visibility_timeout_seconds * (var.max_receive_count + 1)
+      + var.receive_wait_time_seconds
+    )
+    error_message = "reply_message_retention_seconds must be greater than visibility_timeout_seconds * (max_receive_count + 1) + receive_wait_time_seconds so a failed reply survives every receive cycle and the final move to its dead-letter queue. Business staleness belongs to the expiresAt message attribute, not queue retention."
   }
 }
 
@@ -412,13 +403,13 @@ variable "reply_message_retention_seconds" {
 #       is bounded by the failure rate rather than by throughput. That is the
 #       compromise -- paying to store failed messages in exchange for the
 #       failure still being diagnosable when somebody looks.
-# WHY : Assumptions: one value covers all five dead-letter queues, including the
-#       two whose source queues retain for only sixty seconds. Widening those
-#       two so sharply is intentional: a reply that failed repeatedly is exactly
-#       the case where the deliberately short reply retention would otherwise
-#       destroy the only surviving record of the failure.
+# WHY : Assumptions: one value covers all six dead-letter queues, including the
+#       two whose source queues use the bounded retry-retention window above.
+#       Widening those two to the service maximum is intentional: a reply that
+#       failed repeatedly is exactly the case where the source retention would
+#       otherwise destroy the only surviving record before investigation.
 variable "dlq_message_retention_seconds" {
-  description = "Seconds a message is retained on each of the five dead-letter queues, applied as message_retention_seconds to those queues. Defaults longer than either source retention, and is validated never to be shorter than the request retention, because a message only arrives here already aged."
+  description = "Seconds a message is retained on each of the six dead-letter queues, applied as message_retention_seconds to those queues. Defaults longer than either source retention, and is validated never to be shorter than the request retention, because a message only arrives here already aged."
   type        = number
   default     = 1209600
 
@@ -434,10 +425,9 @@ variable "dlq_message_retention_seconds" {
   #       is not merely unusual, it defeats the purpose of the queue -- and a
   #       relationship that matters that much should fail the `plan` rather than
   #       depend on the next person reading the comment. Terraform evaluates a
-  #       validation condition that references another variable and reports both
-  #       values in the diagnostic, so the check names the conflict precisely.
-  #       Only the request retention is compared: the reply retention sits at
-  #       the service floor, so it can never be the greater of the two.
+  #       validation condition that references the two source retentions and
+  #       reports the conflict before apply, so the check cannot silently become
+  #       false when either source window changes.
   # WHY : Trade-offs: the comparison is `>=` and not `>`, so an equal value is
   #       allowed even though the default is strictly longer. A strict
   #       inequality would make the service maximum of fourteen days
@@ -447,8 +437,11 @@ variable "dlq_message_retention_seconds" {
   #       "shorter" catches the error this is guarding against; demanding
   #       "strictly longer" would also catch a correct configuration.
   validation {
-    condition     = var.dlq_message_retention_seconds >= var.request_message_retention_seconds
-    error_message = "dlq_message_retention_seconds must be greater than or equal to request_message_retention_seconds. A message reaches a dead-letter queue only after ageing on its source queue, so a shorter retention here can expire the evidence of a failure before it is examined."
+    condition = var.dlq_message_retention_seconds >= max(
+      var.request_message_retention_seconds,
+      var.reply_message_retention_seconds,
+    )
+    error_message = "dlq_message_retention_seconds must be greater than or equal to both request_message_retention_seconds and reply_message_retention_seconds. A message reaches a dead-letter queue only after ageing on its source queue, so a shorter retention here can expire the evidence of a failure before it is examined."
   }
 }
 
@@ -464,7 +457,7 @@ variable "dlq_message_retention_seconds" {
 #       to inherit, so tagging cannot happen implicitly the way it does in
 #       infra/bootstrap, which IS a root and therefore does use `default_tags`.
 #       Tags instead arrive as an input and main.tf attaches them to each of the
-#       ten queues individually. The asymmetry between this module and bootstrap
+#       twelve queues individually. The asymmetry between this module and bootstrap
 #       is deliberate, and it is recorded here so that it is not later
 #       "simplified" into a provider block that would break every call site
 #       using for_each.

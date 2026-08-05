@@ -1,0 +1,30 @@
+#
+# CardDemo migration | services/common-lib/src/main/resources/META-INF/spring/
+#                      org.springframework.boot.autoconfigure.AutoConfiguration.imports
+#
+# Purpose: the one auto-configuration class the shared kernel contributes, named so that every service
+#       putting this module on its path receives the correlation filter, the common-tag meter filter,
+#       the money codec module and the single error advice without declaring any of them.
+#
+# WHY : Refactoring Rationale: this file is the reason the shared kernel now owns a resources
+#       directory, and it is the whole of that directory's contents. Before it existed, four
+#       cross-cutting components lived in package roots that no service scans -- a service scans its
+#       own bounded context's root -- so each was compiled and tested and then instantiated by
+#       nothing. The symptom was silent: log lines with no correlation identity, meters with no
+#       service dimension, and failed requests rendered by the framework's own default shape.
+#
+# WHY : Alternatives Considered: an explicit import in each service's configuration package. Rejected
+#       because a registration a service has to remember is one a service can omit, and omitting it
+#       produces a service that starts and serves requests while emitting none of the above. That is
+#       the same argument the error package's charter makes for reaching its advice by propagation
+#       rather than by an invocation written at each of fourteen call sites.
+#
+# WHY : Trade-offs: this file makes the module's jar carry a resource, which the module charters
+#       describe as something a library-not-a-deployable does not have. The departure is accepted
+#       because there is no other mechanism by which a library contributes a bean to a consumer that
+#       has not been told to look for it. It does NOT make the module configurable: this file names one
+#       class and holds nothing else, no property is read from a resource, and no message text is
+#       externalised -- the sibling carddemo-common-defaults.yml carries only values a service imports
+#       deliberately and can override.
+#
+com.carddemo.common.CardDemoCommonAutoConfiguration

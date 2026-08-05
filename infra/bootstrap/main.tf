@@ -14,7 +14,7 @@
 #   in order to create.
 #
 # Parameters:
-#   This file declares no variable. It reads six of the seven that
+#   This file declares no variable. It reads eight of the nine that
 #   infra/bootstrap/variables.tf declares, each exactly once:
 #     var.aws_region                 string. Region component of the composed
 #                                    bucket name, in the `locals` block below.
@@ -24,11 +24,13 @@
 #                                    the composed bucket name.
 #     var.lock_table_name            string, nullable. Operator override for
 #                                    the composed table name.
-#     var.state_kms_key_arn          string, nullable. Customer-managed key
-#                                    encrypting both halves of the backend.
+#     var.state_version_retention_days,
+#     var.state_noncurrent_versions_to_retain
+#                                    bounded state-history policy.
+#     var.audit_log_retention_days   state access-audit retention.
 #     var.state_bucket_force_destroy bool. Whether `destroy` may delete the
 #                                    bucket while it still holds objects.
-#   The seventh, var.tags (map(string)), is deliberately not read here:
+#   The ninth, var.tags (map(string)), is deliberately not read here:
 #   versions.tf hands it to the provider's `default_tags` block, which merges it
 #   into every taggable resource below, so each resource carries only its own
 #   `Name` tag.
@@ -82,11 +84,11 @@
 #     separate `aws_s3_bucket_*` resources below are the only form available.
 #     Every one of them is named `state` so the set reads as one logical
 #     object rather than seven unrelated resources.
-#   - Assumption: exactly two data sources are declared and both are read.
+#   - Assumptions: exactly two data sources are declared and both are read.
 #     infra/.tflint.hcl enables terraform_unused_declarations with
 #     `force = false`, so an unreferenced third would fail the build rather
 #     than merely read as untidy.
-#   - Trade-off: this root calls no module. A module's own state would live in
+#   - Trade-offs: this root calls no module. A module's own state would live in
 #     the bucket being created here, so depending on one would make this root
 #     require the backend it exists to produce. The accepted cost is that the
 #     bucket hardening below is written out in full rather than shared with
@@ -97,7 +99,7 @@
 # The caller's own account identifier, used solely to make the composed bucket
 # name unique in a namespace that is not scoped to this account.
 #
-# WHY this is safe in a credential-free CI check -- Assumption: `terraform
+# WHY this is safe in a credential-free CI check -- Assumptions: `terraform
 # validate` neither contacts a provider nor evaluates a data source, and the
 # gating check over this root is `terraform init -backend=false` followed by
 # `terraform validate`. It never plans this root, because planning it would
@@ -107,13 +109,14 @@
 # an account identifier to "make CI work" -- would commit one account's identity
 # to this repository, which the no-secrets constraint in AAP 0.9.1 forbids.
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
 locals {
   # Both names are composed here, once, and referenced as `local.*` everywhere
   # below, so neither can drift between the resource that creates it and the
   # resource that refers to it.
   #
-  # WHY `coalesce` rather than a required input or a conditional -- Assumption:
+  # WHY `coalesce` rather than a required input or a conditional -- Assumptions:
   # var.state_bucket_name defaults to null in variables.tf, and `coalesce`
   # returns its first non-null argument, so null is precisely the signal that
   # means "compose it". An operator override therefore wins when supplied and
@@ -121,7 +124,7 @@ locals {
   # with no variable file at all.
   #
   # WHY the account identifier is IN this name but NOT in the table name below
-  # Assumption: the two services scope names differently, and the asymmetry
+  # Assumptions: the two services scope names differently, and the asymmetry
   # follows from that rather than being an oversight in either. An S3 bucket
   # name is unique across ALL AWS accounts globally, so `<prefix>-tfstate`
   # alone would collide with any other account that chose the same prefix, and
@@ -137,7 +140,7 @@ locals {
   # and the re-apply would try to create a second bucket. It would also require
   # the hashicorp/random provider, which versions.tf omits deliberately.
   #
-  # WHY var.aws_region and not `data.aws_region` -- Assumption: versions.tf
+  # WHY var.aws_region and not `data.aws_region` -- Assumptions: versions.tf
   # configures the provider from this same variable and outputs.tf echoes it,
   # so resolving all three from one input makes it impossible for the region
   # embedded in this name, the region the bucket is created in, and the region
@@ -151,12 +154,73 @@ locals {
 
   # Composed from the prefix alone, for the namespace reason recorded above.
   lock_table_name = coalesce(var.lock_table_name, "${var.name_prefix}-tfstate-lock")
+
+  state_audit_bucket_name = "${var.name_prefix}-tf-audit-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+  state_audit_trail_name  = "${var.name_prefix}-tfstate-object-access"
+  state_audit_trail_arn   = "arn:${data.aws_partition.current.partition}:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${local.state_audit_trail_name}"
+}
+
+data "aws_iam_policy_document" "state_key" {
+  statement {
+    sid       = "EnableAccountKeyAdministration"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid    = "AllowCloudTrailEncryption"
+    effect = "Allow"
+    actions = [
+      "kms:DescribeKey",
+      "kms:GenerateDataKey*",
+    ]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.state_audit_trail_arn]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:aws:cloudtrail:arn"
+      values   = [local.state_audit_trail_arn]
+    }
+  }
+}
+
+resource "aws_kms_key" "state" {
+  description             = "Terraform state, lock-table and immutable object-access audit encryption."
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy                  = data.aws_iam_policy_document.state_key.json
+
+  tags = {
+    Name = "${var.name_prefix}-terraform-state"
+  }
+}
+
+resource "aws_kms_alias" "state" {
+  name          = "alias/${var.name_prefix}-terraform-state"
+  target_key_id = aws_kms_key.state.key_id
 }
 
 resource "aws_s3_bucket" "state" {
   bucket = local.state_bucket_name
 
-  # WHY this is operator-controlled and defaults to false -- Trade-off: with
+  # WHY this is operator-controlled and defaults to false -- Trade-offs: with
   # false a `terraform destroy` here fails with BucketNotEmpty while any state
   # remains, and that failure is the feature rather than a rough edge. Emptying
   # a versioned bucket means deleting every object version and delete marker,
@@ -168,7 +232,7 @@ resource "aws_s3_bucket" "state" {
   force_destroy = var.state_bucket_force_destroy
 
   # WHY only `Name`, when this bucket carries the project's common tags too
-  # Trade-off: versions.tf passes var.tags to the provider's `default_tags`
+  # Trade-offs: versions.tf passes var.tags to the provider's `default_tags`
   # block and the provider merges that map into every taggable resource it
   # creates, so repeating it here would be exactly the duplication default_tags
   # exists to remove, and the two copies could drift apart. The accepted cost is
@@ -189,7 +253,8 @@ resource "aws_s3_bucket" "state" {
 # overwrite leaves Terraform's record of the account disagreeing with the
 # account itself, and a retained prior version is what turns reconciling that by
 # hand into rolling back one object.
-# Trade-off, stated because it has a real cost: a versioned bucket cannot be
+# Trade-offs: this one has a real cost, which is why it is stated. A versioned
+# bucket cannot be
 # deleted until every version and delete marker in it is removed, which is
 # precisely the BucketNotEmpty obstacle named in the header and the reason
 # docs/runbooks/teardown.md carries a bucket-emptying step at all.
@@ -201,55 +266,30 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
-# WHY a customer-managed key is OPTIONAL here, when every datastore at the
-# environment level receives one -- Assumption: inside this root the dependency
-# runs the wrong way around. Key management belongs to infra/modules/kms, and
-# that module's own state lives in the bucket being created here, so a key
-# created in this root could never be managed by the module that owns key
-# management, and a key from that module cannot encrypt a bucket that has to
-# exist before the module can run at all. The circularity has no resolution
-# within one apply, so the key becomes an input: an operator who already holds a
-# suitable key supplies its ARN, and an account with none still gets an
-# encrypted backend on the first apply.
-# Trade-off: what SSE-S3 gives up is specific rather than notional -- there is
-# no per-key CloudTrail record of decrypt calls against the state objects and no
-# key policy restricting which principals may read them, so the bucket policy
-# and IAM carry the whole access decision. That gap is confined to this backend;
-# environment-level data at rest is encrypted with customer-managed keys through
-# infra/modules/kms.
+# WHY : Refactoring Rationale: the customer-managed key is required. State is
+#       an infrastructure inventory and can retain provider-returned sensitive
+#       attributes; falling back to SSE-S3 would remove the project-owned key
+#       policy and decrypt audit while still making a scanner report "encrypted".
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
 
   rule {
     apply_server_side_encryption_by_default {
-      # WHY the algorithm is derived from whether the key is present rather than
-      # fixed -- Assumption: the two arguments are not independent. S3 rejects
-      # `kms_master_key_id` alongside AES256, and `aws:kms` with no key silently
-      # falls back to the AWS-managed aws/s3 key, which is a third posture that
-      # neither branch here intends. Deriving the algorithm from the same
-      # variable that supplies the key keeps the pair consistent by
-      # construction rather than by an operator remembering to set both.
-      sse_algorithm = var.state_kms_key_arn == null ? "AES256" : "aws:kms"
-
-      # Assumption: passing null omits the argument entirely rather than
-      # sending an empty value, which is exactly what the AES256 branch above
-      # requires -- so one unconditional assignment covers both branches and no
-      # `dynamic` block or second `rule` is needed to express the choice.
-      kms_master_key_id = var.state_kms_key_arn
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.state.arn
     }
 
     # WHY this follows the key rather than being set unconditionally
-    # Trade-off: an S3 Bucket Key makes S3 derive one data key per bucket
+    # Trade-offs: an S3 Bucket Key makes S3 derive one data key per bucket
     # instead of calling KMS once per object, so it reduces KMS request volume
     # and therefore KMS request charges on a bucket that is written on every
-    # plan and every apply. Under SSE-S3 no KMS request is made at all, so the
-    # setting has nothing to reduce there.
-    bucket_key_enabled = var.state_kms_key_arn != null
+    # plan and every apply.
+    bucket_key_enabled = true
   }
 }
 
 # WHY all four flags are set, with the exposure they close named concretely
-# Assumption: a Terraform state file is an inventory. It enumerates every
+# Assumptions: a Terraform state file is an inventory. It enumerates every
 # resource this account contains together with its identifiers, and it stores
 # attribute values verbatim, including values marked sensitive in the
 # configuration that produced them. A publicly readable object in this bucket is
@@ -284,18 +324,12 @@ resource "aws_s3_bucket_ownership_controls" "state" {
   }
 }
 
-# WHY this configuration holds exactly one rule, and what must never be added to
-# it -- Alternatives Considered: a noncurrent-version expiration rule belongs in
-# infra/modules/s3-datasets, where retaining five noncurrent versions reproduces
-# the LIMIT(5) SCRATCH generation limit the baseline's generation-data-group
-# bases carry (app/jcl/DEFGDGB.jcl L26, L32, L38, L44, L50 and L56). Copying
-# that rule into this bucket would look like consistency and would be its
-# opposite: dataset generations are a rolling window by design, whereas the
-# state history here is the only record of what was provisioned and when, so
-# expiring it would delete the audit trail the versioning above exists to keep.
-# No rule in this resource may expire, transition or otherwise remove a
-# noncurrent object version.
-# WHY the one rule that IS present -- Trade-off: an incomplete multipart upload
+# WHY : Trade-offs: state history is finite but deliberately wider than dataset
+#       generation history. The newest configured count is always retained and
+#       older versions remain for at least the configured age, which bounds
+#       storage and credential remnants without turning one mistaken apply into
+#       an unrecoverable state overwrite.
+# WHY the one rule that IS present -- Trade-offs: an incomplete multipart upload
 # leaves parts that are billed as storage but do not appear in an object
 # listing, so they accumulate unnoticed and are found only by asking for them.
 # Terraform's S3 backend writes state in a single request, so a stranded upload
@@ -309,7 +343,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
     id     = "abort-incomplete-multipart-upload"
     status = "Enabled"
 
-    # Assumption: this resource requires a filter or a prefix on every rule, and
+    # Assumptions: this resource requires a filter or a prefix on every rule, and
     # an empty filter is the form that scopes one to every object. Omitting the
     # block is not the same thing -- it leaves the rule unscoped and rejected --
     # and no narrower scope is meaningful in a bucket holding nothing but state.
@@ -317,6 +351,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
+    }
+
+    noncurrent_version_expiration {
+      newer_noncurrent_versions = var.state_noncurrent_versions_to_retain
+      noncurrent_days           = var.state_version_retention_days
     }
   }
 }
@@ -331,7 +370,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
 # cannot construct, and keeps the statement legible as HCL.
 data "aws_iam_policy_document" "state_bucket" {
   # WHY TLS is enforced by the bucket rather than trusted from the client
-  # Assumption: state crosses the network on every plan and every apply, from
+  # Assumptions: state crosses the network on every plan and every apply, from
   # developer workstations and from CI runners alike, and the bucket cannot know
   # how any of those clients was configured -- an endpoint override, an outdated
   # SDK or an intercepting proxy could each produce a plaintext request. A Deny
@@ -343,7 +382,7 @@ data "aws_iam_policy_document" "state_bucket" {
     effect  = "Deny"
     actions = ["s3:*"]
 
-    # WHY both ARNs and not the bucket alone -- Assumption: the bucket ARN
+    # WHY both ARNs and not the bucket alone -- Assumptions: the bucket ARN
     # matches bucket-level actions only. An object-level action such as
     # GetObject or PutObject is authorised against the object's own ARN, so a
     # Deny listing the bucket by itself would leave every state read and write
@@ -354,7 +393,7 @@ data "aws_iam_policy_document" "state_bucket" {
     ]
 
     # WHY a wildcard principal here is not a public policy, which it resembles
-    # Assumption: `block_public_policy = true` above rejects a policy that
+    # Assumptions: `block_public_policy = true` above rejects a policy that
     # GRANTS access to everyone, and this statement grants nothing -- it is an
     # explicit Deny. That is also what makes the wildcard the correct scope: the
     # condition below is the thing being matched, and it has to be matched for
@@ -387,7 +426,7 @@ resource "aws_s3_bucket_policy" "state" {
   bucket = aws_s3_bucket.state.id
   policy = data.aws_iam_policy_document.state_bucket.json
 
-  # WHY the ordering is declared rather than left to be inferred -- Assumption:
+  # WHY the ordering is declared rather than left to be inferred -- Assumptions:
   # Terraform derives order from references, and this resource references the
   # bucket but not the public-access block, so on a first apply the two are free
   # to run concurrently. `block_public_policy` is evaluated at the moment a
@@ -398,6 +437,185 @@ resource "aws_s3_bucket_policy" "state" {
   depends_on = [aws_s3_bucket_public_access_block.state]
 }
 
+resource "aws_s3_bucket" "state_audit" {
+  bucket        = local.state_audit_bucket_name
+  force_destroy = false
+
+  tags = {
+    Name = local.state_audit_bucket_name
+  }
+}
+
+resource "aws_s3_bucket_versioning" "state_audit" {
+  bucket = aws_s3_bucket.state_audit.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "state_audit" {
+  bucket = aws_s3_bucket.state_audit.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.state.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "state_audit" {
+  bucket                  = aws_s3_bucket.state_audit.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "state_audit" {
+  bucket = aws_s3_bucket.state_audit.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "state_audit" {
+  bucket = aws_s3_bucket.state_audit.id
+
+  rule {
+    id     = "expire-after-compliance-retention"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = var.audit_log_retention_days + 1
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.audit_log_retention_days + 1
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  depends_on = [
+    aws_s3_bucket_versioning.state_audit,
+  ]
+}
+
+data "aws_iam_policy_document" "state_audit_bucket" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.state_audit.arn,
+      "${aws_s3_bucket.state_audit.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudTrailAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.state_audit.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.state_audit_trail_arn]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudTrailWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.state_audit.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.state_audit_trail_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "state_audit" {
+  bucket = aws_s3_bucket.state_audit.id
+  policy = data.aws_iam_policy_document.state_audit_bucket.json
+
+  depends_on = [aws_s3_bucket_public_access_block.state_audit]
+}
+
+resource "aws_cloudtrail" "state_object_access" {
+  name                          = local.state_audit_trail_name
+  s3_bucket_name                = aws_s3_bucket.state_audit.id
+  include_global_service_events = false
+  is_multi_region_trail         = false
+  enable_log_file_validation    = true
+  enable_logging                = true
+  kms_key_id                    = aws_kms_key.state.arn
+
+  advanced_event_selector {
+    name = "Terraform state object reads and writes"
+
+    field_selector {
+      field  = "eventCategory"
+      equals = ["Data"]
+    }
+
+    field_selector {
+      field  = "resources.type"
+      equals = ["AWS::S3::Object"]
+    }
+
+    field_selector {
+      field       = "resources.ARN"
+      starts_with = ["${aws_s3_bucket.state.arn}/"]
+    }
+  }
+
+  depends_on = [aws_s3_bucket_policy.state_audit]
+
+  tags = {
+    Name = local.state_audit_trail_name
+  }
+}
+
 # WHY a DynamoDB lock table at all, when the S3 backend can now lock without one
 # Alternatives Considered: Terraform's S3 backend supports two locking
 # mechanisms. The S3-native one is the `use_lockfile` backend argument, which
@@ -406,14 +624,14 @@ resource "aws_s3_bucket_policy" "state" {
 # release, naming use_lockfile as its replacement. This table is provisioned
 # because a DynamoDB lock table is a mandated deliverable of this root -- AAP
 # 0.2.1.1, 0.4.1.6 and 0.5.1.12 each name it -- and that mandate decides it.
-# Assumption: the choice forecloses nothing, because the two mechanisms may be
+# Assumptions: the choice forecloses nothing, because the two mechanisms may be
 # configured simultaneously, which is the documented migration path, so a
 # backend configuration that additionally sets use_lockfile requires no change
 # to this root.
 resource "aws_dynamodb_table" "state_lock" {
   name = local.lock_table_name
 
-  # WHY on-demand rather than provisioned capacity -- Trade-off: this table
+  # WHY on-demand rather than provisioned capacity -- Trade-offs: this table
   # holds at most one small item per concurrent Terraform operation, for as long
   # as that operation runs, so its traffic is a handful of tiny reads and writes
   # per apply arriving in bursts with no predictable shape. Provisioned capacity
@@ -423,7 +641,7 @@ resource "aws_dynamodb_table" "state_lock" {
   billing_mode = "PAY_PER_REQUEST"
 
   # WHY the key is named LockID, which looks like a naming choice and is not
-  # Assumption: this is an external contract. Terraform's S3 backend requires
+  # Assumptions: this is an external contract. Terraform's S3 backend requires
   # the lock table to have a partition key named exactly `LockID` of type
   # String, and it writes and reads the lock item under that key. Renaming it to
   # satisfy a naming standard would leave a table that provisions cleanly and
@@ -436,7 +654,7 @@ resource "aws_dynamodb_table" "state_lock" {
     type = "S"
   }
 
-  # WHY this is on, without overclaiming what it buys -- Trade-off: continuous
+  # WHY this is on, without overclaiming what it buys -- Trade-offs: continuous
   # backups on a table holding one short-lived item cost very little, and they
   # give a restore path if the table is deleted or emptied by accident. They do
   # not protect the state itself, which lives in the bucket above, and a lock
@@ -447,25 +665,36 @@ resource "aws_dynamodb_table" "state_lock" {
     enabled = true
   }
 
-  # WHY the block is emitted only when a key is supplied, rather than always
-  # with `enabled = false` -- Assumption: a DynamoDB table is ALWAYS encrypted
-  # at rest. This block does not decide whether encryption happens, it decides
-  # whose key performs it: omitted, the table uses an AWS-owned key; present
-  # with a key ARN, it uses that customer-managed key. Writing `enabled = false`
-  # explicitly would read to a human reviewer, and to a policy scanner, as
-  # encryption being switched off -- a state this resource does not have.
-  dynamic "server_side_encryption" {
-    for_each = var.state_kms_key_arn == null ? [] : [1]
-
-    content {
-      enabled     = true
-      kms_key_arn = var.state_kms_key_arn
-    }
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.state.arn
   }
 
   # Only `Name`, for the default_tags reason recorded on the bucket above.
   tags = {
     Name = local.lock_table_name
+  }
+}
+
+# -----------------------------------------------------------------------------
+# GitHub Actions workload identity.
+#
+# This provider is account-scoped and therefore belongs in the once-per-account
+# bootstrap root rather than in dev and prod, where declaring the same issuer
+# twice would create a state-ownership conflict.
+# -----------------------------------------------------------------------------
+
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url = "https://token.actions.githubusercontent.com"
+
+  client_id_list = ["sts.amazonaws.com"]
+
+  # WHY : Assumptions: thumbprint_list is intentionally omitted. IAM retrieves
+  #       the top intermediate/root certificate thumbprint when the list is
+  #       absent, avoiding a source-pinned certificate value that would break
+  #       federation when GitHub rotates its chain.
+  tags = {
+    Name = "${var.name_prefix}-github-actions-oidc"
   }
 }
 
@@ -504,13 +733,6 @@ resource "aws_dynamodb_table" "state_lock" {
 #     concurrent-write hazard on the state the lock protects.
 #     `terraform force-unlock`, run by an operator who has checked who holds
 #     the lock, keeps that judgement with the person able to make it.
-#
-#   - No S3 access logging on the bucket. Alternatives Considered: it requires a
-#     destination bucket, which would itself need a logging destination -- the
-#     same regress this root exists to break -- and that bucket would be created
-#     here, outside the reach of the modules that own bucket configuration.
-#     CloudTrail S3 data events record the same access at account scope, are
-#     configured outside this root, and add nothing to bootstrap.
 #
 #   - No cross-region replication on the bucket. Alternatives Considered: it
 #     would place a second copy of every state version in another region, and it

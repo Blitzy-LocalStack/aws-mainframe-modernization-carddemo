@@ -183,9 +183,9 @@ import org.hibernate.annotations.Immutable;
  * privilege model established by {@code data-migration/sql/V0__schemas_and_roles.sql} gives the
  * reporting service login no privilege of any kind on a base relation in {@code ledger},
  * {@code account}, {@code card} or {@code reference}: that file withdraws any such privilege at
- * L885-L890 and leaves the login with usage on the {@code reporting} schema at L892 plus SELECT on
- * the relations there at L914, while the SELECT reaching the four source schemas is held instead
- * by the schema's owning role, granted for {@code reference} at L836, which is what the views
+ * L910-L915 and leaves the login with usage on the {@code reporting} schema at L917 plus SELECT on
+ * the relations there at L939, while the SELECT reaching the four source schemas is held instead
+ * by the schema's owning role, granted for {@code reference} at L861, which is what the views
  * resolve their own reads as. Pointing this mapping at the base relation would therefore fail on
  * privileges at run time, and it would also contradict this package's charter, which admits a
  * view and never a base relation. The views themselves are declared by
@@ -215,7 +215,7 @@ import org.hibernate.annotations.Immutable;
  * other service module is on its compile path to be imported from in the first place. The
  * database half is authored elsewhere and cited by path:
  * {@code data-migration/sql/V0__schemas_and_roles.sql} establishes the schemas and the roles, and
- * settles the read-only privileges at L836, L885-L890, L892 and L914. That is the same discipline
+ * settles the read-only privileges at L861, L910-L915, L917 and L939. That is the same discipline
  * the baseline read under, where the consuming program reached its five declared inputs through
  * job control alone, at {@code app/jcl/TRANREPT.jcl} L65-L74, and never through a compile-time
  * bond between programs.
@@ -311,7 +311,7 @@ import org.hibernate.annotations.Immutable;
  */
 @Entity
 @Immutable
-@Table(name = "transaction_categories", schema = "reporting")
+@Table(name = "v_transaction_categories", schema = "reporting")
 public class TransactionCategoryView {
 
     // Assumptions: the identity is the whole 6-byte group at app/cpy/CVTRA04Y.cpy L5, so it is

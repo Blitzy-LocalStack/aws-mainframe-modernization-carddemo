@@ -50,8 +50,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the oldest Terraform CLI release this configuration is declared to
-  #       load and evaluate correctly.
   # WHY : (1) Trade-offs: a floor, not the exact release CI installs. Every
   #       directory carries this same constraint -- each module, the
   #       bootstrap root and the two environment roots -- so `= 1.15.8` would

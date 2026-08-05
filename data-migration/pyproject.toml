@@ -35,51 +35,32 @@
 #   rationale and for the explicitly local way to iterate without installing.
 #
 # State at this checkpoint:
-#   This file is authored ahead of most of the package it configures, and the
-#   migration lands its artifacts in plan order, so several paths named
-#   throughout this document DO NOT EXIST YET and are authored at later indexes
-#   of the same plan. `src/carddemo_migration/` currently holds exactly two
-#   modules, `__init__.py` and `config.py`; the `copybook/`, `readers/`,
-#   `loaders/` and `verify/` subpackages, the `cli.py` module named by
-#   `[project.scripts]` below, the `tests/` tree named by `testpaths`, and this
-#   package's own README are all still to come. Measured consequences, so that a
-#   reader meets no surprise:
-#     - `ruff check data-migration` PASSES today over the two modules present.
-#       The docstring gate is live and is already being enforced.
-#     - `python -m pytest data-migration/tests` cannot run, because that
-#       directory does not exist; run from this directory, pytest exits 5 (no
-#       tests collected) and warns that `testpaths` matched nothing.
-#     - The distribution BUILDS and INSTALLS cleanly, and the wheel it produces
-#       contains those two modules. `import carddemo_migration` therefore works,
-#       while the console script `[project.scripts]` declares is installed as a
-#       wrapper that fails on first invocation; the `[project.scripts]` block
-#       below records exactly how.
-#   Every setting is nevertheless declared now, deliberately: the lint rules,
-#   the docstring convention, the import ban and the src layout are the
-#   constraints each of those later modules has to be written to satisfy, and a
-#   gate retrofitted after the modules exist is a gate whose first run is a
-#   backlog rather than a check.
-#
-# State at this checkpoint:
-#   This file is authored ahead of most of the package it configures, and the
-#   migration lands its artifacts in plan order, so several paths named
-#   throughout this document DO NOT EXIST YET and are authored at later indexes
-#   of the same plan. `src/carddemo_migration/` currently holds exactly two
-#   modules, `__init__.py` and `config.py`; the `copybook/`, `readers/`,
-#   `loaders/` and `verify/` subpackages, the `cli.py` module named by
-#   `[project.scripts]` below, the `tests/` tree named by `testpaths`, and this
-#   package's own README are all still to come. Measured consequences, so that a
-#   reader meets no surprise:
-#     - `ruff check data-migration` PASSES today over the two modules present.
-#       The docstring gate is live and is already being enforced.
-#     - `python -m pytest data-migration/tests` cannot run, because that
-#       directory does not exist; run from this directory, pytest exits 5 (no
-#       tests collected) and warns that `testpaths` matched nothing.
-#     - The distribution BUILDS and INSTALLS cleanly, and the wheel it produces
-#       contains those two modules. `import carddemo_migration` therefore works,
-#       while the console script `[project.scripts]` declares is installed as a
-#       wrapper that fails on first invocation; the `[project.scripts]` block
-#       below records exactly how.
+#   `src/carddemo_migration/` currently holds seven Python modules: `__init__.py`,
+#   `config.py`, `copybook/layouts.py`, `credentials.py`, `role_credentials.py`,
+#   `loaders/__init__.py` and `loaders/s3_stage.py`. The `copybook` directory has
+#   no `__init__.py` where `loaders` does; the built wheel was inspected and does
+#   include `carddemo_migration/copybook/layouts.py` as an implicit namespace
+#   child, so the asymmetry changes what is packaged not at all and is left as it
+#   is rather than corrected blind. The `readers/` and `verify/` packages and the
+#   `cli.py` module named by `[project.scripts]` remain later-index artifacts.
+#   Measured consequences:
+#     - `ruff check .` and `ruff format --check .` both pass over all twelve files
+#       this configuration governs, so the docstring gate is live for the code
+#       that exists.
+#     - `python -m pytest data-migration/tests` collects four test modules --
+#       test_config_name_contract, test_database_trust, test_reporting_views and
+#       test_s3_stage -- and all seventy-seven tests pass.
+#     - The distribution builds cleanly and its wheel contains every module above,
+#       so `import carddemo_migration` and
+#       `import carddemo_migration.copybook.layouts` both work, while the
+#       generated console-script wrapper still fails when invoked because
+#       `carddemo_migration.cli` is absent; the `[project.scripts]` block below
+#       records that deliberate staged boundary.
+#   Refactoring Rationale: an earlier revision of this header appeared twice
+#   verbatim and both copies omitted modules that had landed. One measured block
+#   removes the possibility that duplicate prose drifts internally, and the
+#   commands named above are the authority -- each answers the question exactly
+#   and none of them can fall out of date.
 #   Every setting is nevertheless declared now, deliberately: the lint rules,
 #   the docstring convention, the import ban and the src layout are the
 #   constraints each of those later modules has to be written to satisfy, and a
@@ -231,18 +212,14 @@ dependencies = [
 #   or not the wheel's generated script wrappers are present on PATH, whereas a
 #   bare `carddemo-migrate` silently depends on them. Keeping both means the
 #   documented path never relies on an installation side effect.
-# WHY : Assumptions: this entry is a TARGET declaration, not an installable
-#   command at this checkpoint. `src/carddemo_migration/cli.py` and the `main`
-#   callable it must expose are authored at a later index of the same plan, and
-#   so are the two documents named just above. What that means was measured
-#   rather than reasoned about: the wheel builds, `pip install` of it succeeds,
-#   and the wrapper script IS written to the environment's bin directory, so
-#   nothing fails at install time; invoking either `carddemo-migrate` or
-#   `python -m carddemo_migration.cli` then exits 1 with
-#   `ModuleNotFoundError: No module named 'carddemo_migration.cli'`. The failure
-#   is therefore loud, immediate and correctly attributed, which is why the entry
-#   is declared now rather than added with the module: the target name is part of
-#   the orchestration contract that this package's Dockerfile and the batch
+# WHY : Assumptions: this entry is a target declaration, not a working command
+#   in the current package. `src/carddemo_migration/cli.py` and its `main`
+#   callable are absent. The wheel builds and installs, and the wrapper is
+#   generated, but invoking either entry exits with `ModuleNotFoundError`. The
+#   package README and migration runbook state that limitation explicitly, so
+#   schema/security validation cannot be mistaken for a complete data cutover.
+#   The target name remains declared because it is part of the orchestration
+#   contract that this package's Dockerfile and the batch
 #   staging state are written against, and renaming it after those exist would
 #   change an interface rather than fill one in. Nothing here asserts that the
 #   command runs today.
@@ -452,13 +429,10 @@ ban-relative-imports = "all"
 #   configurations never see each other because each is the nearest config to its
 #   own files, which is why neither had to be edited to make room for the other.
 testpaths = ["tests"]
-# WHY : Assumptions: that directory is authored at a later index of the same
-#   plan, so this value currently names a path that does not exist. pytest treats
-#   that as a warning rather than an error and falls back to searching from the
-#   rootdir, collecting nothing and exiting 5. The value is declared now because
-#   it is what confines collection to this package once the tree lands; leaving
-#   it out and adding it later would mean the first test run in this directory
-#   searched the whole checkout.
+# WHY : Assumptions: this directory now exists and contains the S3 generation
+#   retention tests. Keeping testpaths explicit confines collection to this
+#   package as reader, loader and verification tests are added; without it a
+#   command run from this directory could walk into unrelated repository tests.
 
 # WHY : Assumptions: this accepts only the `test_*.py` half of pytest's default
 #   pair, dropping `*_test.py`. The ETL's test modules are all of the first form,
@@ -479,6 +453,14 @@ python_files = ["test_*.py"]
 #   xfail, so a verification test that opts out has to say why in the output
 #   where a reader will see it.
 addopts = ["--strict-markers", "--strict-config", "-ra"]
+
+# WHY : Assumptions: pytest-golden is part of the repository's pinned shared
+#   test environment even though this package does not currently declare a
+#   golden fixture. Its plugin loads for every pytest process and warns unless
+#   assertion-pass callbacks are enabled. Enabling the hook here removes that
+#   process-wide warning and keeps any future golden comparison on the plugin's
+#   safer verification path without changing collection or assertion results.
+enable_assertion_pass_hook = true
 
 # WHY : Assumptions: no markers are registered, and combined with
 #   `--strict-markers` above that means any marker a test wants must be declared

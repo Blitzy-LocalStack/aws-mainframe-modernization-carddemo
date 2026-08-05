@@ -15,7 +15,7 @@
 #   layer: app/bms/COSGN00.bms:L26-L28 declares the sign-on screen as
 #   `COSGN0A DFHMDI COLUMN=1, LINE=1, SIZE=(24,80)`, a fixed 24x80 character
 #   map, and app/csd/CARDDEMO.CSD:L378-L379 binds it to a CICS transaction with
-#   `DEFINE TRANSACTION(CC00) ... PROGRAM(COSGN00C)`. The five values below are
+#   `DEFINE TRANSACTION(CC00) ... PROGRAM(COSGN00C)`. The six values below are
 #   what a caller needs in order to publish a build into that path and to
 #   address it afterwards.
 #
@@ -37,9 +37,11 @@
 #   infra/modules/cloudfront-spa/main.tf instead.
 #
 # Return values:
-#   Five outputs, each of type string, in this order:
+#   Six outputs, each of type string, in this order:
 #     distribution_id ............ id of the CloudFront distribution, for the
 #                                  cache invalidation that follows a publish.
+#     distribution_arn ........... ARN used to scope the CloudFront KMS
+#                                  service-principal decrypt grant.
 #     distribution_domain_name ... the distribution's CloudFront-assigned
 #                                  hostname, the SPA's public entry point.
 #     spa_bucket_name ............ name of the origin bucket, the destination a
@@ -90,7 +92,7 @@
 #     consumer rather than a fragment leaning on the comment beside it: that
 #     table is drift-checked in CI, and a description that only makes sense
 #     next to its comment renders as a cell explaining nothing.
-#   - Trade-offs: this contract is deliberately NARROW -- five outputs where
+#   - Trade-offs: this contract is deliberately NARROW -- six outputs where
 #     main.tf creates sixteen resources and reads six data sources. The values
 #     that are produced and withheld are enumerated at the foot of this file
 #     rather than left to be noticed. What a narrow contract costs is that
@@ -98,7 +100,7 @@
 #     README together. What it buys is that every name here has a known
 #     consumer, so none of them pins an implementation detail of main.tf in
 #     place for the benefit of a caller that does not exist.
-#   - Alternatives Considered: one object-typed output carrying all five values,
+#   - Alternatives Considered: one object-typed output carrying all six values,
 #     which is fewer blocks and a single reference at each call site. Rejected
 #     -- infra/.terraform-docs.yml generates one table row per output, so a
 #     single object would publish one opaque row and hide the five descriptions
@@ -112,10 +114,10 @@
 # On `sensitive`: no output below is marked, and that is a decision rather than
 # an omission.
 #
-# Alternatives Considered: marking all five `sensitive = true`, which is the
+# Alternatives Considered: marking all six `sensitive = true`, which is the
 # defensive default some trees adopt for anything that looks like an
 # identifier. Rejected, on two specific grounds rather than as a preference.
-# First, none of these five values grants access on its own: the origin bucket
+# First, none of these six values grants access on its own: the origin bucket
 # is private, with this distribution's origin access control as its only reader
 # and a bucket policy that additionally denies any request not made over TLS;
 # the distribution serves nothing but the public static bundle a browser
@@ -145,8 +147,6 @@
 output "distribution_id" {
   description = "Id of the CloudFront distribution serving the SPA. The deployment pipeline passes it to a cache invalidation after uploading a new build, and an operator uses it to address the distribution from the CLI."
 
-  # WHAT: the distribution's id, published so that a publisher can invalidate
-  #       the edge caches after an upload.
   # WHY : Assumptions: a new SPA build reuses the SAME object key for its entry
   #       document -- main.tf serves var.default_root_object at `/` and rewrites
   #       its error responses to that same key -- so uploading a build
@@ -162,22 +162,39 @@ output "distribution_id" {
   value = aws_cloudfront_distribution.spa.id
 }
 
+output "distribution_arn" {
+  description = "ARN of the CloudFront distribution serving the SPA. The environment root passes this exact ARN back to the KMS module so the CloudFront service principal can decrypt only this distribution's SSE-KMS origin objects."
+
+  # WHY : Refactoring Rationale: the origin access control and S3 bucket policy
+  #       authorize object reads, but KMS evaluates its own key policy. Without
+  #       this cross-module handle every asset request returns 403 even though
+  #       the bucket policy is correct.
+  # WHY : Trade-offs: publishing the ARN adds one narrow producer-to-consumer
+  #       seam and avoids an account-wide `distribution/*` condition in the key
+  #       policy. The root wires the exact value; callers never reconstruct it.
+  value = aws_cloudfront_distribution.spa.arn
+}
+
 output "distribution_domain_name" {
   description = "CloudFront-assigned hostname of the distribution. This is the SPA's public entry point, the address that replaces a 3270 terminal session against CICS transaction CC00, and the environment roots re-export it as the deployed front-end host."
 
-  # WHAT: the CloudFront-assigned hostname, and deliberately not a URL composed
-  #       around it.
   # WHY : Trade-offs: returning a scheme-prefixed URL instead -- a scheme, this
   #       hostname and a trailing slash concatenated -- would be marginally
-  #       friendlier to paste, and it becomes wrong the moment the distribution
-  #       has an alternate domain name. main.tf sets `aliases = var.aliases`,
-  #       and when a caller supplies one the meaningful public address is the
-  #       alias rather than this hostname, so a composed URL would confidently
-  #       publish the address nobody uses. A bare hostname is correct on both
-  #       paths because it asserts nothing about scheme or about which name is
-  #       canonical, and it leaves composition to the caller, which is the only
-  #       party that knows whether it passed an alias.
+  #       friendlier to paste, and it is wrong for exactly the reason this module
+  #       now guarantees: the distribution ALWAYS has at least one alternate
+  #       domain name, because `aliases` is a required non-empty input, so the
+  #       meaningful public address is an alias and a composed URL built around
+  #       this hostname would confidently publish the address nobody uses. A bare
+  #       hostname is published because it asserts nothing about scheme and
+  #       nothing about which name is canonical; it remains the value a caller
+  #       needs for a DNS alias record pointing its own name here, which is what
+  #       this output is actually for.
   value = aws_cloudfront_distribution.spa.domain_name
+}
+
+output "distribution_hosted_zone_id" {
+  description = "Route 53 hosted-zone id of the CloudFront distribution, consumed by environment roots when they create the custom SPA alias without hard-coding CloudFront's global zone id."
+  value       = aws_cloudfront_distribution.spa.hosted_zone_id
 }
 
 
@@ -188,7 +205,6 @@ output "distribution_domain_name" {
 output "spa_bucket_name" {
   description = "Name of the private S3 bucket holding the built SPA bundle, and the destination the deployment pipeline syncs the ui/dist output into. This is neither the dataset bucket owned by the s3-datasets module nor the Terraform remote-state bucket owned by infra/bootstrap."
 
-  # WHAT: the bucket NAME -- not its id, and not its ARN.
   # WHY : Assumptions: the consumer is a sync of the built ui/dist output, and
   #       that command addresses its destination as `s3://<name>/`, so the bare
   #       name is the only form it can accept. `.bucket` is read rather than
@@ -197,12 +213,12 @@ output "spa_bucket_name" {
   #       provider's S3 resource while `.bucket` is the attribute DEFINED to be
   #       the bucket name -- reading `.id` would rest on a coincidence for a
   #       value the deployment path cannot tolerate being wrong.
-  # WHY : Assumptions: WARNING -- this package contains four versioned,
+  # WHY : Assumptions: WARNING -- this package contains three versioned,
   #       encrypted S3 buckets, and they are confusable precisely because they
-  #       are configured alike. Two belong to this module -- this one and the
-  #       module-private access-log bucket -- one is the dataset bucket in
-  #       infra/modules/s3-datasets, and one is the remote-state bucket in
-  #       infra/bootstrap. Publishing this one under a name that says `spa`
+  #       are configured alike. This module owns the SPA bucket, the dataset
+  #       bucket belongs to infra/modules/s3-datasets, and the remote-state
+  #       bucket belongs to infra/bootstrap. Publishing this one under a name
+  #       that says `spa`
   #       rather than a generic `bucket_name` is what stops a caller wiring a
   #       front-end publish at the dataset bucket or, worse, at the state bucket
   #       Terraform itself depends on. main.tf and variables.tf both carry this
@@ -214,7 +230,6 @@ output "spa_bucket_name" {
 output "spa_bucket_arn" {
   description = "ARN of the SPA origin bucket, for an IAM policy that grants a deployment role write access to this bucket and to no other. Published alongside spa_bucket_name because the two forms are not interchangeable."
 
-  # WHAT: the same bucket as the output above, in ARN form.
   # WHY : Assumptions: "why two outputs for one bucket" is the first question a
   #       reviewer asks here, and the answer is that an IAM policy statement's
   #       resource element takes an ARN and will not take a bare bucket name, so
@@ -234,6 +249,16 @@ output "spa_bucket_arn" {
   value = aws_s3_bucket.spa.arn
 }
 
+output "log_bucket_arn" {
+  description = "ARN of the CMK-encrypted S3 destination for CloudFront standard logging v2. The KMS module consumes it as an exact allowed S3 encryption context."
+  value       = aws_s3_bucket.logs.arn
+}
+
+output "log_delivery_source_arn" {
+  description = "Exact CloudWatch Logs delivery-source ARN for the distribution's standard logging v2 stream. The KMS key policy uses it to scope log-delivery data-key generation."
+  value       = aws_cloudwatch_log_delivery_source.cloudfront_access.arn
+}
+
 
 # -----------------------------------------------------------------------------
 # The origin access control, published as a diagnostic handle.
@@ -242,9 +267,6 @@ output "spa_bucket_arn" {
 output "origin_access_control_id" {
   description = "Id of the origin access control that signs this distribution's requests to the private origin bucket. Published so an operator diagnosing a 403 from the origin can confirm which origin access control the bucket policy is scoped to."
 
-  # WHAT: the origin access control's id -- the join between this distribution
-  #       and the origin bucket's policy, published for diagnosis rather than
-  #       for any automated consumer.
   # WHY : Assumptions: main.tf sets `signing_behavior = "always"` and
   #       `signing_protocol = "sigv4"` on this resource, and the origin bucket's
   #       policy grants `s3:GetObject` to the CloudFront service principal only
@@ -276,16 +298,15 @@ output "origin_access_control_id" {
 # commitment to a caller, and an output with no consumer pins an implementation
 # detail of main.tf in place for nobody's benefit.
 #
-# No access-log bucket name or ARN:
+# No access-log bucket name:
 #   Assumptions: aws_s3_bucket.logs is module-private in both directions.
-#   Nothing outside this module writes to it -- CloudFront delivers to it
-#   directly, addressed by `bucket_domain_name` inside main.tf's
-#   `logging_config` block -- and nothing outside reads it, because its
+#   Nothing outside this module writes to it -- the CloudWatch Logs delivery
+#   destination in main.tf addresses it by ARN -- and nothing outside reads it,
+#   because its
 #   encryption, versioning and retention are all governed here, the last by
-#   var.log_retention_days. Publishing it would widen the contract with no
-#   consumer on the other end. Its name is composed by the same rule as the
-#   origin bucket's with a `spa-logs` role token in place of `spa`, so this
-#   module's README can keep it discoverable without it becoming a promise.
+#   var.log_retention_days. Its ARN is published only because the KMS module
+#   consumes that exact bucket identity as an encryption-context boundary; the
+#   bucket name remains private because no deploy or operator workflow needs it.
 #
 # No KMS key ARN:
 #   Assumptions: the customer-managed key is an INPUT, var.s3_kms_key_arn,
@@ -295,29 +316,19 @@ output "origin_access_control_id" {
 #   record a dependency edge that does not exist.
 #
 # No ACM certificate ARN and no aliases:
-#   Assumptions: both are inputs as well -- var.acm_certificate_arn and
+#   Assumptions: both are required inputs -- var.acm_certificate_arn and
 #   var.aliases -- supplied by the environment root, which therefore already
 #   holds the values and has no reason to read them back. The same echoing
 #   objection applies, and a second one is specific to the certificate: it must
 #   be issued in a single fixed region regardless of where the rest of the stack
 #   is deployed, so re-publishing it from a module that inherits exactly one
 #   provider configuration would invite a caller to treat this module as the
-#   place that regional constraint is enforced. It is not; variables.tf records
-#   it, and CloudFront enforces it during apply.
-#
-# No distribution ARN:
-#   Assumptions: the one consumer of that ARN is inside this module. The origin
-#   bucket policy's source-ARN condition reads
-#   aws_cloudfront_distribution.spa.arn directly, so it needs no output to reach
-#   it, and no file in this package needs it from outside: the deployment path
-#   invalidates by id, not by ARN, and an IAM statement naming a distribution
-#   would be written in whichever module creates that role rather than here.
-#   Publishing it would be an addition with no nameable consumer, which is
-#   exactly the widening the five-value contract exists to refuse. If a consumer
-#   is ever found, this paragraph is what gets replaced by the output -- and by
-#   the consumer's name.
+#   place that regional constraint is discovered. variables.tf is where it is
+#   both recorded AND enforced -- it asserts the us-east-1 segment of the ARN, so
+#   a certificate from the wrong region is refused before any resource exists
+#   rather than by CloudFront partway through an apply.
 #
 # No `sensitive` marking on any output:
 #   Recorded above the outputs rather than here, because it is a property of the
-#   five values that ARE published rather than the absence of a sixth.
+#   six values that ARE published rather than the absence of a seventh.
 # =============================================================================

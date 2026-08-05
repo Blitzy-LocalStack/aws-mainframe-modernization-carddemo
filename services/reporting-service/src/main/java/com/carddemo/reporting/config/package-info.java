@@ -2,26 +2,6 @@
  * Spring configuration for the Reporting and Statement bounded context of the migrated
  * CardDemo system.
  *
- * <h2>Target contract, and the state of this directory at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every class name and count below states this package's <b>target
- * contract</b> as the migration plan assigns it, and not the set of files sitting beside
- * this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory held this file and
- * nothing else. That is measured rather than supposed: the enclosing module contained four
- * Java files in total, this charter plus the three carried by the context root and by its
- * {@code dto} and {@code service} subpackages, and no other type. A class named below that
- * has no file yet is therefore <b>planned</b>, not missing.</p>
- *
- * <p>Alternatives Considered: withholding this charter until the four classes it governs
- * exist. Rejected, because the charter is precisely what the author of each of those
- * classes works from -- which concern belongs here, which may not, and where the boundary
- * of the set lies -- so writing it last would leave the package uncharted across exactly
- * the interval in which a stated contract is needed. The accepted cost is that the
- * inventory reads as present tense unless the distinction is declared, which is the single
- * purpose of the paragraph above; a reader has one place to look to tell a target from a
- * measurement.</p>
- *
  * <h2>What this package holds</h2>
  *
  * <p>This package carries the Spring wiring for the reporting context and nothing else:
@@ -65,41 +45,25 @@
  * entry point, and mixing wiring into it removes the one location that can be read as a
  * pure statement of the context's charter.
  *
- * <h2>Documentation contract</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>Assumptions: this file exists because user-specified Rule 1 (Explainability) L15
- * requires a docstring on every module entry point, and in Java a package declaration is
- * that entry point. The grounding is L15 specifically and not the Validation Gate at L43,
- * because L43 opens with the words "Every new or modified function" and a package
- * declaration is not a function; citing L43 here would assert an obligation the rule does
- * not place on this construct. L15 carries no visibility qualifier, which is why the
- * obligation reaches this file whatever the accessibility of the classes it charters. A
- * {@code package-info.java} is the only construct able to carry Javadoc for a package,
- * which is why the obligation lands in this file rather than anywhere else, and the block
- * form used here is what L22 names for Java.
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <p>Assumptions: of the four docstring elements Rule 1 enumerates at L18 through L21,
- * only Purpose at L18 applies. A package declaration accepts no parameters, yields no
- * value and raises nothing, so the Parameters element at L19, the Return values element at
- * L20 and the Exceptions element at L21 are inapplicable here rather than omitted. No
- * at-clause is written to stand in for one of them, because a tag asserting a parameter or
- * a returned value that does not exist is a docstring describing something other than the
- * construct it documents. The two Checkstyle modules that act on this file demand that it
- * exist and that it carry Javadoc; neither demands an at-clause, and supplying one would
- * satisfy no rule while stating something untrue.
- *
- * <p>Assumptions: no author, no since and no version at-clause appears anywhere in this
- * file, because nothing requires one. The rule set at
- * {@code config/checkstyle/checkstyle.xml} omits the {@code JavadocStyle},
- * {@code WriteTag} and {@code JavadocParagraph} modules altogether, and the author and
- * version format properties of {@code JavadocType} are left unset there, so no gate asks
- * for any of the three. Two of them would also carry a maintenance cost with no reader
- * benefit, version history being what the revision control system already holds
- * authoritatively. This is worth distinguishing from a similarly named thing elsewhere in
- * this service: the common metrics configuration attaches a metric tag called version to
- * every measurement it publishes, which is a runtime label on telemetry and has no
- * relation to the Javadoc at-clause of the same name.
- *
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>Build interlock</h2>
  *
  * <p>Two Checkstyle modules act on this file and they are not redundant.
@@ -161,7 +125,7 @@
  * <p>Alternatives Considered: a {@code BatchConfig} class here, giving this context its own
  * batch job repository. Rejected, and the module's dependency set already reflects the
  * decision: no batch starter is on this module's classpath, and this module's
- * {@code pom.xml} records the omission in prose at its L463 to L472 rather than leaving it
+ * {@code pom.xml} records the omission in prose at its L465 to L474 rather than leaving it
  * to be inferred. The substantive reason is the direction of control. This context starts
  * a state machine execution and returns; the step ledger that records which runs and which
  * steps completed belongs to batch-service, which owns it. A second job repository here
@@ -170,7 +134,7 @@
  *
  * <p>Alternatives Considered: an {@code SqsConfig} class here, modelling the report request
  * as a queued message. Rejected, and again no queue starter is on the classpath, with this
- * module's {@code pom.xml} recording the reasoning at its L474 to L478. The baseline
+ * module's {@code pom.xml} recording the reasoning at its L476 to L484. The baseline
  * submission this context encodes was not a request and reply exchange: the queue defined
  * at {@code app/csd/CARDDEMO.CSD} L499 to L505 is declared {@code TYPEFILE(OUTPUT)} at
  * L502, write-only with no reply queue anywhere in the definition, so modelling it as an
@@ -201,8 +165,9 @@
  * based rather than modular. No {@code package.html}, superseded by the file you are
  * reading. No Lombok configuration, no module-local copy of the rule set or its
  * suppressions companion, and no import-control module, the package boundary having a
- * single enforcement site in the ArchUnit layering test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}.
+ * single enforcement site: the {@code architecture-rules} Surefire execution declared in
+ * {@code services/pom.xml}, which scans the shared kernel's test artifact into every module and
+ * selects the layering rules by the simple name {@code LayeringRulesTest}.
  *
  * <p>Alternatives Considered: giving this context a schema of its own, with tables, indexes
  * and a Flyway migration directory under this module, so that its datasource configuration
@@ -217,7 +182,7 @@
  * exactly, and a report disagreeing with the ledger it reports on is a support case rather
  * than a feature.
  *
- * <h2>What the platform used to carry</h2>
+ * <h2>Legacy platform contract</h2>
  *
  * <p>The CICS resource definitions at {@code app/csd/CARDDEMO.CSD}, 505 lines and
  * reference material that is never modified, expressed at the platform level several of the
@@ -243,59 +208,5 @@
  * module's classpath and no queue starter does. That design was a complete and functioning
  * operational model for its platform; this package encodes the same contract on a
  * different one.
- *
- * <h2>Decisions on this file itself</h2>
- *
- * <p>Alternatives Considered: the four category labels above are written in the plural,
- * un-parenthesised, colon-terminated spelling that user-specified Rule 1 uses at its L31
- * to L34, and that spelling is the only accepted one. The alternative spellings are not
- * cosmetic variants: a singular, bracketed or dash-terminated label is a label that a
- * literal-string search for the category will not find, which makes a documented rationale
- * read as absent to any audit looking for it. The census was measured in this repository
- * at authoring time with the C locale forced, and the canonical spelling is also the
- * majority one, which is worth recording so that no later reader "normalises" the plural
- * back: {@code Alternatives Considered:} appears on 530 lines, {@code Assumptions:} on
- * 1699, and {@code Trade-offs:} on 634 lines across 108 files, against 153 lines carrying
- * the parenthesised singular variant out of 1011 lines mentioning the category at all.
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full statement of the
- * convention.
- *
- * <p>Assumptions: those four labels were retyped by hand from user-specified Rule 1 L31 to
- * L34, which is pure 7-bit ASCII, and were not copied from {@code tests/README.md}, which
- * is not. That file establishes the house convention for the repository, its section
- * heading at L516 and its governing blockquote at L544 to L549, and it is a sound witness
- * to which four categories exist; it is not a witness to how they are spelled. Measured
- * byte-exactly with the C locale forced on the search itself, it carries 106 U+2011
- * non-breaking hyphens across 77 lines, and its L548 spells the fourth category with a
- * non-breaking hyphen, a closing bracket and no colon, three departures from the canonical
- * spelling inside a single token. Forcing the locale on the search is itself load bearing,
- * because in a UTF-8 locale the same byte pattern is interpreted as characters and reports
- * zero matches, and a check that cannot fail is not a check. This whole file is
- * consequently held to 7-bit ASCII, which is the property that makes such a byte reaching
- * a label here impossible rather than merely unlikely.
- *
- * <p>Assumptions: no entry anywhere in this file is written under the Refactoring
- * Rationale category, and the omission is deliberate. Rule 1 scopes that category at its
- * L32 to the replacement of existing code and requires the entry to say what was wrong
- * with the approach being replaced. This package replaces nothing: the COBOL baseline is
- * reference material, it is never modified, and it is not withdrawn, so the migration adds
- * a path rather than removing one. Recording a Refactoring Rationale where new code
- * merely differs from a reference it never displaced would state something factually
- * untrue about both.
- *
- * <p>Trade-offs: every justification in this file sits inside this Javadoc block rather
- * than beside a statement, which departs from the letter of user-specified Rule 1 L27 and
- * is nonetheless the only placement this file admits. L27 asks that a comment sit adjacent
- * to the code it explains; a package declaration has no statements, so there is no code
- * for a comment to be adjacent to, and the adjacency requirement is met vacuously rather
- * than waived. Note also that L28's instruction to explain why rather than what sits under
- * the inline-comment heading at L25 and so governs comments specifically, which is why the
- * prose above states what this package holds as well as why it holds it: stating the what
- * is L18's Purpose element, and L11 requires both halves. The cost accepted is that these
- * entries sit further from the behaviour they describe than an inline comment would, and
- * the compensation is that each one names the line, the count or the declared value it
- * rests on. A reader auditing this file should read the labelled entries above as the
- * rationale half of the conjunctive gate at L43, and should not conclude that the half was
- * skipped for want of somewhere to put it.
  */
 package com.carddemo.reporting.config;

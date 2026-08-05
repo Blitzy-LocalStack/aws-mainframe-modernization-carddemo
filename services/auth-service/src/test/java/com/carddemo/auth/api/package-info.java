@@ -145,24 +145,25 @@
  * for every exception a signature declares. A nested {@code record}, should either class declare
  * one, is a type in its own right and needs its own block with one param tag per component.</p>
  *
- * <h2>Three places where the machine is looser than the rule, and one where it is not</h2>
+ * <h2>Where the machine now matches the rule, and the one place it is looser</h2>
  *
- * <p>The first is overriding methods. {@code MissingJavadocMethod} leaves its allowed-annotations
- * list at the default of {@code Override}, so the audit tolerates a wholly missing Javadoc block on
- * an overriding method. The rule does not, at either line 15 or line 43. An inheritDoc tag on its
- * own satisfies none of the rule's lines 18 through 21 either, since it supplies no purpose, no
- * parameter description and no return description of its own.</p>
+ * <p>Two gaps this package previously recorded have since been closed in
+ * {@code config/checkstyle/checkstyle.xml}, and the correction is stated rather than quietly
+ * dropped, because the earlier wording told a reader that private and overriding methods were a
+ * review concern only. Both are now build failures. {@code MissingJavadocMethod} sets
+ * {@code allowedAnnotations} to the empty list, so the {@code Override} default no longer exempts
+ * an overriding method from carrying a block of its own; the rule never exempted one, at either
+ * line 15 or line 43, and an inheritDoc tag alone still satisfies none of the rule's lines 18
+ * through 21, since it supplies no purpose, no parameter description and no return description.
+ * The same module also runs at {@code scope="private"}, and because Checkstyle orders its scopes
+ * public, then protected, then package, then private and admits every narrower visibility, that
+ * reaches a {@code private} method directly. Its sibling {@code JavadocMethod} lists private among
+ * its access modifiers, so presence and completeness are now enforced by the same pair at the same
+ * visibility. The half-measure is still the trap worth naming: a private helper given a summary but
+ * no param tags is worse placed than one given nothing at all, because both modules can see it and
+ * will report every tag it lacks on top of the block it needs.</p>
  *
- * <p>The second is private members. {@code MissingJavadocMethod} runs at package scope, and
- * Checkstyle orders its scopes public, then protected, then package, then private, so a
- * package-level scope cannot reach a {@code private} method at all. Its sibling
- * {@code JavadocMethod} does list private among its access modifiers, and the rule's lines 15 and
- * 43 carry no visibility qualifier, so a private helper here is documented in full. The trap is the
- * half-measure specifically: a private helper given a summary but no param tags is worse placed
- * than one given nothing at all, because the completeness module can see it and will then report
- * every tag it lacks.</p>
- *
- * <p>The third runs the other way, and is recorded so that nobody gold-plates it.
+ * <p>The one remaining looseness runs the other way, and is recorded so that nobody gold-plates it.
  * {@code JavadocVariable} is deliberately absent from the audit, so a field -- a {@code MockMvc}, an
  * {@code ObjectMapper}, a mocked collaborator bean -- needs no Javadoc block. The rule agrees,
  * because it scopes its docstring requirement to functions, classes and module entry points, and a

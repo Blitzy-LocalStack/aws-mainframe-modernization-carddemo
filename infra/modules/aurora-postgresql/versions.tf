@@ -48,18 +48,15 @@
 #     here would collide with the caller's own configuration and leave the
 #     module usable by only one environment, defeating the reason it is
 #     shared.
-#   - Alternatives Considered: declaring the `hashicorp/random` provider was
-#     rejected. Nothing in this module generates a value -- master credentials
-#     are owned by infra/modules/secrets, which writes them into Secrets
-#     Manager, so this module consumes a secret reference and never creates a
-#     password. Declaring a provider it does not use would additionally be
-#     reported by tflint's terraform_unused_required_providers rule, which
-#     gates the infrastructure pipeline.
+#   - Refactoring Rationale: the random provider is now required for one
+#     non-credential value: the stable suffix on a final-snapshot identifier.
+#     The master password is still generated and managed inside AWS by RDS;
+#     adding this provider does not move credential ownership into Terraform.
+#     A generated suffix is preferred to `timestamp()` or `uuid()` because
+#     those functions change on every plan and would produce perpetual drift.
 # =============================================================================
 
 terraform {
-  # WHAT: the oldest Terraform CLI this configuration is contracted to be
-  #       parsed and planned by.
   # WHY : Trade-offs: this package is validated on 1.15.8, yet a floor is
   #       declared instead of that exact patch. A module is consumed by every
   #       root that calls it, so pinning one patch would reject any caller
@@ -70,8 +67,6 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the AWS provider range the module's Aurora Serverless v2
-    #       resources are written against.
     # WHY : Assumptions: a provider of 5.81.0 or later is required before an
     #       Aurora Serverless v2 cluster will accept a zero minimum capacity,
     #       which the dev environment relies on to scale down to nothing while
@@ -82,6 +77,25 @@ terraform {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.56"
+    }
+
+    # WHY : Assumptions: this is one of the two providers the whole package
+    #       admits, and it is already present in both environment roots' lock
+    #       files because infra/modules/secrets generates its credentials with
+    #       it -- so declaring it here adds a dependency edge inside this module
+    #       and no new provider to any deployment. The major is held for the same
+    #       reason as the AWS one: an unreviewed 4.x could change how a generated
+    #       value is kept, and this value's stability across applies is the whole
+    #       point of using a resource rather than a function.
+    # WHY : Alternatives Considered: composing the suffix from `timestamp()` or
+    #       from `uuid()` instead, which would need no provider at all. Both are
+    #       rejected at `local.final_snapshot_identifier`, where the argument is
+    #       recorded: each is re-evaluated on every plan, so the cluster would
+    #       show a perpetual in-place update for a value that only matters at
+    #       deletion.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.9"
     }
   }
 }

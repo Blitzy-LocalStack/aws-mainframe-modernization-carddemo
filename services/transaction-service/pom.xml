@@ -367,6 +367,25 @@
       proves nothing. That suite is authored at a later index of the same plan;
       this dependency and that binding are what let it run against a real engine
       on its first execution rather than being retrofitted afterwards.
+
+      Alternatives Considered: declaring only the two artifacts above and letting
+      each RepositoryIT publish the container's coordinates through
+      @DynamicPropertySource. Rejected, and the third artifact below is what
+      replaces it. Both mechanisms reach the same end, but only one can be the
+      documented one: src/test/resources/application-test.yml has to say how a
+      connection arrives, and a profile that offers two routes leaves the author
+      of the first RepositoryIT to discover by compilation failure which of them
+      this classpath supports. @ServiceConnection is chosen because
+      services/auth-service/pom.xml already declares the same artifact and its
+      profile already mandates the same annotation, so the two repository suites
+      of this reactor have one shape rather than two, and because it contributes
+      a JdbcConnectionDetails bean that the auto-configuration prefers over
+      spring.datasource.* outright - no property is hand-wired, so none can drift
+      from what the test actually connects to. Trade-offs: the cost is one more
+      test-scoped artifact on a module that could have managed without it. That
+      is accepted for the single documented mechanism; the alternative saves the
+      dependency and pays for it with a profile whose two routes cannot both be
+      followed.
     -->
     <dependency>
       <groupId>org.testcontainers</groupId>
@@ -376,6 +395,11 @@
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
       <scope>test</scope>
     </dependency>
 

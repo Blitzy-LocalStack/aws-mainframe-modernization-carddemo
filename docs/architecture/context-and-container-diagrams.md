@@ -49,10 +49,11 @@
 > the schema authority. Every service name and every schema name below is taken
 > from them verbatim; none is coined here.
 >
-> **Delivers, and who will consume it.** It delivers three diagrams — current
+> **Delivers, and who consumes it.** It delivers three diagrams — current
 > state, target state, and the one-way dependency between them — each followed by a
-> prose legend, plus the platform-primitive mapping table. Its declared consumers
-> are the root `README.md` and `MIGRATION_README.md`, which will each link this file
+> prose legend, plus the platform-primitive mapping table. Its consumers
+> are the root [`README.md`](../../README.md) and
+> [`MIGRATION_README.md`](../../MIGRATION_README.md), which link this file
 > by exactly the path `docs/architecture/context-and-container-diagrams.md`; the
 > nine architecture decision records under `docs/adr/`, which cite these diagrams as
 > the topology their decisions produce; and any reader who needs the whole system on
@@ -60,18 +61,20 @@
 > the contract: both peer documents in this folder already name this file by that
 > exact string, so a single character of drift breaks their Related-documents rows.
 >
-> **None of those consumers has landed yet, and that is stated rather than implied.**
-> The root `README.md` update is one of only three permitted modifications to a
-> pre-existing file and has not been made; `MIGRATION_README.md` does not exist; and
-> `docs/adr/` does not exist. At this checkpoint that consumer list is a contract to
-> be honoured rather than a set of existing references.
+> **Current state.** The root migration section, migration guide, and all nine
+> ADRs are present. Their links are part of the documentation contract and are
+> checked as existing repository paths rather than described as future consumers.
 >
 > **Caveats.** Four, stated here rather than left to the end. First, **every diagram
-> in this document is a design, not an observation.** The infrastructure is authored
-> and checked to the extent its current state admits; applying it to a live account
-> is an operator action outside this scope. Nothing here asserts that a provisioned
-> environment exists, and no element of any diagram was measured on a running
-> system, load-tested or benchmarked. Second, a substantial list of technologies is
+> in this document is a design, not an observation.** The infrastructure is partially
+> authored and checked to the extent its current state admits; applying it to a live account
+> is an operator action outside this scope. Nineteen Terraform directories validate,
+> but the two environment roots and the `network`, `observability` and
+> `step-functions-batch` modules have no resource graph; recursive TFLint therefore
+> reports the measured 86-warning incomplete-tree baseline. No deploy workflow,
+> runbook set or infrastructure-module README set is authored. Nothing here asserts
+> that a provisioned environment exists, and no element of any diagram was measured
+> on a running system, load-tested or benchmarked. Second, a substantial list of technologies is
 > deliberately **out of scope** and is enumerated in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope);
 > none of it appears as a node or an edge in any diagram, because in a topology
@@ -124,8 +127,8 @@ under the same four category names.
   them are given so a reader can repeat the measurement rather than trust it.
 - Alternatives Considered: **three separate diagrams rather than one combined
   before-and-after.** A single diagram showing both states with the mapping drawn as
-  edges between them was drafted and abandoned: at 44 programs, 10 datasets, 5
-  queues and 8 target services the cross-edges dominate, and the reader loses the
+  edges between them was drafted and abandoned: at 44 programs, 10 datasets, 6
+  target primary queues and 8 target services the cross-edges dominate, and the reader loses the
   ability to read either state on its own. The chosen split gives each state a
   diagram that stands alone, expresses the primitive-by-primitive correspondence as
   a table where one line per row is genuinely enough, and reserves a third, minimal
@@ -419,10 +422,10 @@ and the IMS parent-child relationship in
 ## Target state — AWS context and container
 
 The path the migration adds beside the baseline: a browser single-page application
-over an authenticated API edge, eight stateless services on serverless containers,
-one managed relational cluster holding eight schemas in subnets with no internet
-route, managed queues for the three decoupled flows, and a managed orchestrator
-driving the batch chain.
+over an API edge with one public sign-on route and authenticated business routes,
+eight stateless services on serverless containers, one managed relational cluster
+holding eight schemas in subnets with no internet route, managed queues for the
+three decoupled flows, and a managed orchestrator driving the batch chain.
 
 Service names and schema names are taken verbatim from
 [`service-catalog.md`](service-catalog.md).
@@ -430,28 +433,28 @@ Service names and schema names are taken verbatim from
 ```mermaid
 graph TB
     BROWSER["Browser<br/>single-page application<br/>React and TypeScript"]
-    CI["CI pipeline<br/>short-lived federated role assumption<br/>no long-lived credentials"]
+    CI["Target deployment workflow<br/>OIDC role assumption<br/>not authored"]
     REGISTRY[("Private container registry<br/>scan on push<br/>image reference placeholder only")]
-    OPS["Operator<br/>runbook commands"]
+    OPS["Operator<br/>target runbook commands<br/>not authored"]
 
     subgraph EDGE["Public edge"]
         CDN["Content delivery network<br/>origin access control<br/>single-page routing"]
         SPABUCKET[("Object store<br/>built application bundle")]
-        APIGW["HTTP API<br/>token authorizer<br/>validates signed claims"]
+        APIGW["HTTP API<br/>14 JWT route keys<br/>1 public sign-on route"]
         POOL["Managed user directory<br/>two groups: admin and user"]
     end
 
-    subgraph VPC["One region · three availability zones"]
+    subgraph VPC["Target VPC contract · one region · three availability zones"]
         subgraph PUB["Public subnets"]
             NAT["Egress only<br/>network address translation"]
         end
 
         subgraph APP["Private application subnets"]
             ALB["Internal load balancer<br/>reached from the edge<br/>through a private link"]
-            SVC["Eight services on serverless containers<br/>auth-service · account-service · card-service<br/>transaction-service · reference-service<br/>batch-service · authorization-service · reporting-service"]
-            BATCHTASK["Batch tasks<br/>chunk-oriented steps<br/>one task per orchestration state"]
-            ENDPOINTS["Interface endpoints<br/>registry · logs · secrets · keys<br/>queues · orchestration · parameters"]
-            S3GW["Gateway endpoint<br/>object store"]
+            SVC["Eight target services on serverless containers<br/>auth-service · account-service · card-service<br/>transaction-service · reference-service<br/>batch-service · authorization-service · reporting-service"]
+            BATCHTASK["Target batch tasks<br/>one task per orchestration state"]
+            ENDPOINTS["Target interface endpoints<br/>network resource graph absent"]
+            S3GW["Target gateway endpoint<br/>object store"]
         end
 
         subgraph DATA["Isolated data subnets · no internet route"]
@@ -459,10 +462,11 @@ graph TB
         end
     end
 
-    subgraph MSG["Managed queues · each with a dead-letter queue"]
-        FIFOREQ[["Authorization request<br/>ordered per card"]]
+    subgraph MSG["Six primary managed queues · each with a dead-letter queue"]
+        FIFOREQ[["Authorization request<br/>opaque per-card group<br/>quarantine boundary on failure"]]
         FIFOREP[["Authorization reply"]]
-        STDREQ[["Inquiry request"]]
+        ACCTREQ[["Account-inquiry request"]]
+        DATEREQ[["Date-inquiry request"]]
         STDREP[["Inquiry reply"]]
         ERRQ[["Error sink"]]
     end
@@ -470,22 +474,22 @@ graph TB
     subgraph ORCH["Batch orchestration"]
         SCHED["Schedule<br/>nightly trigger"]
         SFN["State machine<br/>retry · catch · timeout per state"]
-        DATASETS[("Versioned object store<br/>ten dataset families<br/>five noncurrent versions retained")]
+        DATASETS[("Versioned object store<br/>ten dataset families<br/>newest five logical generations retained by cleanup")]
     end
 
     subgraph XCUT["Cross-cutting"]
         KMS["Customer-managed keys<br/>with rotation"]
         SECRETS["Secret store<br/>values generated at provisioning time"]
-        OBS["Logs · metrics · traces<br/>alarms and a notification topic"]
+        OBS["Target logs · metrics · traces<br/>observability resource graph absent"]
     end
 
     BROWSER --> CDN
     CDN --> SPABUCKET
-    BROWSER -->|"bearer token"| APIGW
-    BROWSER -.->|"sign-in"| POOL
+    BROWSER -->|"public sign-on or bearer token"| APIGW
     POOL -.->|"signing keys"| APIGW
     APIGW -->|"private link"| ALB
     ALB --> SVC
+    SVC -.->|"server-side sign-on exchange"| POOL
     OPS -.-> SFN
 
     SVC --> AURORA
@@ -496,8 +500,9 @@ graph TB
     NAT -.->|"egress for image pull fallback"| APP
 
     FIFOREQ -.-> SVC
-    SVC -.->|"published from a transactional outbox"| FIFOREP
-    STDREQ -.-> SVC
+    SVC -.->|"prospective transactional outbox"| FIFOREP
+    ACCTREQ -.-> SVC
+    DATEREQ -.-> SVC
     SVC -.-> STDREP
     SVC -.-> ERRQ
 
@@ -523,7 +528,8 @@ graph TB
 %% counterpart here, for the reason given in the legend below.
 %% Reporting reads reach AURORA through SELECT-only cross-schema views on the
 %% WRITER. No read replica exists in this design.
-%% The DATA subgraph has no edge to NAT or to any public subnet, by construction.
+%% This is a target-contract diagram. The network, orchestration, observability and
+%% environment composition needed to make several drawn paths real are not authored.
 ```
 
 ### Target-state legend
@@ -538,22 +544,35 @@ present ones.
   screen turns; here it decomposes into four mechanisms, none of which is a
   server-side session store. Navigation becomes client-side router history, so **no
   server-side "next program" field exists at all**. Identity becomes signed token
-  claims validated on every request. Selection context — which account, which card,
-  which customer — becomes request path and query parameters, which is what makes
-  each request independently authorizable. And the first-entry-versus-re-entry
-  discriminator **disappears entirely**, because a stateless handler that returns a
-  field-error array has no turn to remember. The security consequence deserves
-  stating precisely rather than as a general improvement: in the baseline the
-  structure is storage the client receives and echoes back, so the field that
-  decides administrative access arrives *from the client* and a client could in
-  principle assert its own user type; here the group claim is signed by the directory
-  and validated per request, so the client cannot assert its own privileges at all.
+  claims validated on every protected request; the one public sign-on route performs
+  the server-side exchange that obtains the token before those requests begin.
+  Selection context — which account, which card, which customer — becomes request
+  path and query parameters, which is what makes each protected request independently
+  authorizable. And the first-entry-versus-re-entry discriminator **disappears
+  entirely**, because a stateless handler that returns a field-error array has no
+  turn to remember. The security consequence deserves stating precisely rather than
+  as a general improvement: in the baseline the structure is storage the client
+  receives and echoes back, so the field that decides administrative access arrives
+  *from the client* and a client could in principle assert its own user type; here the
+  group claim is signed by the directory and validated per protected request, so the
+  client cannot assert its own privileges at all.
   Statelessness then falls out as a consequence — with no session store and no
   sticky sessions, each service runs as several interchangeable instances behind the
   load balancer. The per-field decomposition is tabulated in
   [`service-catalog.md`](service-catalog.md); the authorization model and the
   encryption and isolation posture are specified in
-  `docs/architecture/security-and-identity.md`.
+  [`security-and-identity.md`](security-and-identity.md).
+- Refactoring Rationale: **uniform user-existence errors intentionally collapse two
+  baseline responses.** The browser submits the transient credential to the public
+  sign-on route; auth-service is intended to call Cognito's `USER_PASSWORD_AUTH`
+  flow rather than let the browser call the directory directly. With user-existence
+  errors suppressed, both an unknown user and a bad password return
+  `Wrong Password. Try again ...`; unrelated provider failures return
+  `Unable to verify the User ...`. The baseline's
+  `User not found. Try again ...` remains catalogued for traceability or a
+  deliberately selected legacy posture, but it is not a distinguishable public
+  response in the selected target posture. This is a security-driven behavioural
+  divergence, not preservation of all three sign-on messages.
 - Trade-offs: **reporting reads go to the writer through read-only cross-schema
   views, and there is deliberately no read-replica node.** The alternative — adding a
   replica and pointing reporting at it — was considered and is **out of scope**. It
@@ -568,11 +587,12 @@ present ones.
   through no base-table grant.
 - Trade-offs: **one region with three availability zones, and nothing more.**
   Multi-region topology and disaster-recovery failover are **out of scope** and
-  appear as no node and no edge anywhere in this document. Three zones give
-  tolerance of a single zone's loss, which is what the managed cluster's own
-  failover and the load balancer's cross-zone distribution are configured against.
-  The accepted cost is stated plainly: this design does not survive the loss of a
-  region, and nothing here should be read as claiming it does.
+  appear as no node and no edge anywhere in this document. The target three-zone
+  topology is intended to tolerate a single zone's loss through cluster failover and
+  load-balancer distribution; the network graph and environment composition that
+  would provide that topology are absent. The accepted cost is stated plainly: this
+  design does not survive the loss of a region, and nothing here should be read as
+  claiming that a deployed topology exists or has been failover-tested.
 - Alternatives Considered: **no streaming-platform node.** A log-based broker —
   Kafka or a managed stream — was considered for the three decoupled flows and
   rejected. The requirement the baseline actually expresses is request-reply: a
@@ -584,7 +604,7 @@ present ones.
   parity requirement asks for — while still requiring a reply mechanism built on
   top. Both are therefore out of scope, and the wire contract, correlation identity,
   ordering and deduplication guarantees are specified in
-  `docs/architecture/messaging-contracts.md`.
+  [`messaging-contracts.md`](messaging-contracts.md).
 - Alternatives Considered: **no cache node.** An in-memory cache tier was considered
   and rejected because the baseline has no cache at all, so adding one would
   introduce an invalidation problem that does not currently exist — and the first
@@ -592,18 +612,20 @@ present ones.
   comparison is designed to catch, such as a balance read after a posting write.
   Reference data is the plausible candidate and is small enough to be served from
   indexed lookups on the cluster. Managed caching is out of scope.
-- Assumptions: **the isolated data subnets have no route to the internet, and the
-  interface endpoints are what make that survivable.** The cluster sits in subnets
+- Assumptions: **the target isolated data subnets have no route to the internet, and
+  interface endpoints are what make that survivable.** The cluster is intended to sit in subnets
   with no gateway route in either direction, so it is unreachable from outside the
   private network by construction rather than by rule — which is what makes the
-  blast-radius claim in `docs/architecture/security-and-identity.md` a property of
+  blast-radius claim in
+  [`security-and-identity.md`](security-and-identity.md) a property of
   the topology rather than an aspiration. That isolation only works because service
   traffic to managed APIs — the registry, logs, the secret store, keys, queues, the
   orchestrator and the parameter store — leaves through interface endpoints inside
   the network, with a gateway endpoint for the object store, so no task needs a path
-  to the internet to reach the platform services it depends on. The one egress path
-  that does exist is drawn dashed and scoped: address translation from the private
-  application subnets only, never from the data subnets.
+  to the internet to reach the platform services it depends on. The target egress
+  path is drawn dashed and scoped: address translation from the private application
+  subnets only, never from the data subnets. The network module currently has no
+  resource graph, so these are intended absences and paths rather than deployed ones.
 - Alternatives Considered: **the node labels name a capability, not a product.** The
   diagram says "managed PostgreSQL cluster", "internal load balancer" and "managed
   user directory" where it could have named the specific services selected for each.
@@ -624,11 +646,12 @@ present ones.
 
 - Assumptions: **nine Maven modules, eight bounded contexts, and the diagram shows
   eight.** A ninth module, `common-lib`, sits alongside the eight services and is
-  the **shared kernel** — it owns no schema, exposes no endpoint and is deployed as
+  the **shared kernel** — it owns no schema, exposes no endpoint and is intended to be deployed as
   a library compiled into the other eight rather than as a container. It is
   deliberately not a node here, because a container diagram shows what is deployed
   and a library is not deployed on its own. The distinction matters when counting: a
-  build produces nine modules and deploys eight services. It exists because the
+  build contains nine modules and the target topology contains eight services; no
+  environment currently deploys them. It exists because the
   concerns it holds — fixed-point money, the record codecs, the error model, the
   page envelope — must have exactly one implementation, and it is the direct
   analogue of the single copybook include path every baseline program compiles
@@ -645,9 +668,9 @@ present ones.
   No registry hostname, account identifier or resource identifier appears anywhere
   in this document. Image references are shown as a placeholder because a concrete
   registry address is an account-specific value that has no place in version
-  control, and because the deployment authenticates by short-lived federated role
-  assumption rather than with a stored credential — so there is no long-lived secret
-  to name even if naming one were acceptable.
+  control. The target deployment contract uses short-lived federated role assumption
+  rather than a stored credential, but the workflow is not authored; the placeholder
+  therefore describes a target boundary rather than a current CI path.
 
 
 
@@ -665,21 +688,21 @@ migration. One line per row, with the owning sibling document named for the deta
 | Concern | Current primitive | Target counterpart | Contract preserved | Detail owned by |
 |---|---|---|---|---|
 | Online interaction | CICS pseudo-conversational tasks, continuity in `DFHCOMMAREA` | Stateless request handlers; identity from signed claims, selection from the request path | Screen-by-screen behaviour and every user-visible message string, verbatim | [`service-catalog.md`](service-catalog.md) |
-| Presentation | 21 BMS mapsets, fixed 24×80 character grid, extended field attributes | Single-page application delivered from an object store behind a content delivery network | Field semantics, function-key actions, error-highlight behaviour, message text | [`design-token-reference.md`](design-token-reference.md) |
+| Presentation | 21 BMS mapsets, fixed 24×80 character grid, extended field attributes | Target single-page application to be delivered from an object store behind a content delivery network | Field semantics, function-key actions, error-highlight behaviour, message text | [`design-token-reference.md`](design-token-reference.md) |
 | Program flow | `XCTL` and `LINK` between programs | `XCTL` becomes a client-side route change; `LINK` becomes a method or in-network call | Reachability of every online function | `docs/architecture/cobol-to-service-traceability.md` |
 | Record storage | 10 VSAM KSDS base clusters, `RECOVERY(NONE)`, `JOURNAL(NO)` | One managed PostgreSQL cluster, eight schemas, encrypted with automated backups | Primary keys, field lengths, decimal scale and sign semantics | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
 | Secondary access | 3 alternate indexes, two surfaced to CICS as files | Three real non-unique secondary indexes on the same columns | Every browse and lookup access path | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
 | Browse paging | `STARTBR` / `READNEXT` / `READPREV` / `ENDBR` with the cursor key in the session structure | Keyset pagination over the same key columns | Page boundaries and next/previous availability under concurrent inserts | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
 | Batch | 38 JCL jobs, `COND` step gating, DFSORT, 10 generation-dataset families | Scheduled trigger into a state machine invoking container tasks; dataset generations as object-store prefixes | Step order, condition-code semantics, generation retention, output bytes | `docs/architecture/batch-orchestration.md` |
-| Messaging | 5 IBM MQ queues, two different syncpoint disciplines | Managed queues — ordered where ordering matters, standard for inquiry, one error sink, each with a dead-letter queue | Field order and delimiter, correlation identity, reply routing, ordering guarantees | `docs/architecture/messaging-contracts.md` |
+| Messaging | 5 IBM MQ queues, two different syncpoint disciplines | Six primary managed queues — FIFO request/reply for authorization; separate account/date inquiry requests; one shared inquiry reply; one error sink — each with a dead-letter queue | Field order and delimiter, correlation identity, reply routing, ordering guarantees | [`messaging-contracts.md`](messaging-contracts.md) |
 | Extension datastores | IMS DL/I segments plus Db2 tables, joined by two-phase commit | One PostgreSQL schema; **two-phase commit is eliminated, not emulated** | Segment field layouts, value domains as check constraints, index order | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
-| Identity | `USRSEC` VSAM file holding a plaintext password field | Managed user directory; the two user-type values become two groups, surfaced as signed claims | The administrator-versus-user authorization split and all three sign-on messages | `docs/architecture/security-and-identity.md` |
-| System authorization | RACF, the external security manager | Least-privilege task roles plus directory groups — **a mapping, not a port** | Effective privilege boundaries | `docs/architecture/security-and-identity.md` |
+| Identity | `USRSEC` VSAM file holding a plaintext password field | Managed user directory; fixed `carddemo-admin`/`carddemo-user` groups surfaced as signed claims; auth-service handles the transient credential | Administrator-versus-user split preserved. **Intentional divergence:** unknown user and bad password both return `Wrong Password. Try again ...`; unrelated provider failures return `Unable to verify the User ...` | [`security-and-identity.md`](security-and-identity.md) |
+| System authorization | RACF, the external security manager | Least-privilege task roles plus directory groups — **a mapping, not a port** | Effective privilege boundaries | [`security-and-identity.md`](security-and-identity.md) |
 | Operations | Operator quiesce and resume around the batch window | Orchestration states that set and clear a read-only flag in a parameter store | The quiesce-and-resume bracket around the batch window | `docs/architecture/batch-orchestration.md` |
 | Ad-hoc job submission | An online program writes 80-byte JCL cards to `TDQUEUE(JOBS)` via `DDNAME(INREADER)` | A service starts an orchestration execution | The ability to request a report on demand from the online path | `docs/architecture/batch-orchestration.md` |
-| Deployment | A load library, refreshed by a resource-definition utility | Container images in a private registry, deployed by continuous integration using short-lived federated role assumption | Deployable-unit versioning and rollback capability | `docs/adr/` |
-| Infrastructure | Not expressed as code anywhere in the baseline | 16 reusable modules with two environment roots and a state backend | Nothing to preserve — this is net-new, and the row exists to record that | `infra/README.md` |
-| Observability | Job logs, `SYSOUT` and `SYSPRINT` output, the operator console | Centralised logs, metrics and traces, with alarms and a notification topic | Auditability of every batch step's outcome | `docs/architecture/observability.md` |
+| Deployment | A load library, refreshed by a resource-definition utility | Target container images in a private registry, to be deployed by continuous integration using short-lived federated role assumption; workflow not authored | Deployable-unit versioning and rollback capability | `docs/adr/` |
+| Infrastructure | Not expressed as code anywhere in the baseline | 16 module directories, bootstrap resources and two incomplete environment roots; network/observability/orchestration graphs remain absent | Nothing to preserve — this is net-new, and the row exists to record that | [`../../infra/README.md`](../../infra/README.md) |
+| Observability | Job logs, `SYSOUT` and `SYSPRINT` output, the operator console | Target centralised logs, metrics and traces, with alarms and a notification topic; only selected log resources/configuration are authored | Auditability of every batch step's outcome | [`observability.md`](observability.md) |
 
 ### Primitives with no cloud analogue
 
@@ -716,17 +739,17 @@ graph LR
         C3["Existing test suite<br/>the functional-parity oracle"]
     end
 
-    subgraph TARGET["Target state · AWS · every artifact created new"]
-        T1["9 Maven modules<br/>8 deployed services"]
-        T2["Single-page application<br/>21 screen routes"]
-        T3["Extract-transform-load<br/>and 16 infrastructure modules"]
+    subgraph TARGET["Target contract · AWS · authored incrementally"]
+        T1["9 Maven modules<br/>8 target services<br/>most business implementations absent"]
+        T2["Single-page application target<br/>21 screen routes"]
+        T3["Extract-transform-load package<br/>16 infrastructure module directories"]
     end
 
-    CURRENT ==>|"business rules extracted · contracts preserved · parity verified against"| TARGET
+    CURRENT ==>|"business rules extracted · contracts defined · parity to be verified against"| TARGET
 %% The dependency is one-way and total. Target code READS the baseline as its
 %% specification; it NEVER writes it. The current-state subgraph is byte-identical
-%% to what it was before this migration, and every node in the target subgraph is
-%% a new file in a new tree.
+%% to what it was before this migration. Target nodes describe contracted
+%% deployables; they do not claim each implementation or composition file exists.
 %% There is deliberately NO reverse edge: nothing in the target is a prerequisite
 %% for the baseline continuing to run exactly as it does.
 ```
@@ -773,7 +796,7 @@ continuing to operate.
 ### The deployment boundary
 
 **No diagram in this document depicts a running environment.** Every diagram is a
-design. The infrastructure is authored and checked to the extent its current state
+design. The infrastructure is partially authored and checked to the extent its current state
 admits, and applying it to a live account — with the cost that incurs — is an
 **operator action outside this scope**. Consequently:
 
@@ -785,10 +808,11 @@ admits, and applying it to a live account — with the cost that incurs — is a
   statement about the target state describes a design.
 
 [`service-catalog.md`](service-catalog.md) records the exact matrix of which
-infrastructure checks pass at this checkpoint and which are not yet runnable. That
-matrix is not restated here, because it changes as composition files land and one
-copy of it is easier to keep true than two. The exact provisioning and teardown
-commands belong to the runbooks under `docs/runbooks/`.
+infrastructure checks pass and which require a live account. That matrix is not
+restated here, because one copy is easier to keep true than two. The exact
+provisioning and teardown commands belong to
+[`../runbooks/deploy.md`](../runbooks/deploy.md) and
+[`../runbooks/teardown.md`](../runbooks/teardown.md).
 
 ### Explicitly out of scope
 
@@ -822,29 +846,22 @@ same care as the target diagram for exactly that reason.
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Five of the nine
-documents in this folder are authored at later indexes of the same plan, so their
-paths appear below — and everywhere above — as plain code spans rather than as
-links, per the Markdown convention in
-[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each
-becomes a link when the file it names exists. The distinction is mechanical and
-deliberate: it lets a reader tell a document that is written from a document that is
-contracted, without clicking to find out.
+All related architecture documents are present. Links are used so a stale path
+fails visibly instead of remaining an untestable future contract.
 
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The naming authority: per-service responsibilities, owned data, the inter-service dependency graph, and the full reconciliation of the repository's four component populations |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Field-by-field derivation from copybook to column, the alternate-index mapping, and the money invariant |
-| `docs/architecture/batch-orchestration.md` | The job-to-state mapping, condition-code semantics and generation-dataset handling |
-| `docs/architecture/messaging-contracts.md` | Queue mapping, the positional wire format, correlation, ordering and deduplication |
-| `docs/architecture/security-and-identity.md` | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
-| `docs/architecture/observability.md` | Logs, metrics, traces and alarms |
+| [`batch-orchestration.md`](batch-orchestration.md) | The job-to-state mapping, condition-code semantics and generation-dataset handling |
+| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, the positional wire format, correlation, ordering and deduplication |
+| [`security-and-identity.md`](security-and-identity.md) | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
+| [`observability.md`](observability.md) | Logs, metrics, traces and alarms |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from the 21 mapsets to screen routes and design tokens |
-| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix, the authoritative retirement register, and every documented behavioural divergence |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix, the authoritative retirement register, and every documented behavioural divergence |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |
 
 The in-repository precedent for this convention is
 [`tests/README.md`](../../tests/README.md) §12, whose explainability blockquote
 imposes the same obligation and names the same four justification categories used
 throughout this document.
-

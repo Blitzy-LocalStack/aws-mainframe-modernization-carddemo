@@ -3,24 +3,6 @@
  * correlation identity that travels with every request, and the keyset page
  * envelope that carries a browse cursor across a stateless boundary.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> Two concerns live here and nothing else does. A
  * correlation identity has to accompany a request from the edge through to the
  * log line, so that one unit of work can be reassembled afterwards out of
@@ -56,10 +38,21 @@
  *       whether a further page exists.</li>
  *   <li>{@code CorrelationIdFilter} -- correlation identity in, logging context
  *       and response header out. It accepts an identity supplied on the inbound
- *       request, mints one when none was supplied, publishes it to the logging
- *       context for the life of the request, and echoes it on the
- *       response.</li>
+ *       request, falls back to the request identifier the edge stamped when the
+ *       caller supplied none, mints one when neither is available, publishes the
+ *       result to the logging context for the life of the request, and echoes it
+ *       on the response.</li>
  * </ul>
+ *
+ * <p>Assumptions: the middle step of that resolution is what makes the identity
+ * canonical rather than merely present. Without it a request carrying no
+ * caller-supplied header produces an edge access-log line under the edge's own
+ * request identifier and service log lines under a value minted here that the
+ * edge never saw, so the two records of one request cannot be joined -- and a
+ * request with no caller header is the ordinary case. The header the fallback
+ * reads is named on the filter itself, and the reasoning for preferring the
+ * caller's value over the edge's is recorded there rather than repeated
+ * here.</p>
  *
  * <p>Three neighbouring concerns are pointedly absent. Exact decimal money and
  * its wire form belong to {@code com.carddemo.common.money}; the copybook
@@ -269,29 +262,32 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's target inventory is <b>17 production classes</b> and <b>9</b> package
- * charters -- one at the kernel root and one for each subpackage -- for <b>26</b>
- * compilation units in total. This package contributes two of the seventeen and
- * one of the nine. The breakdown is given so that a reader can re-derive the
+ * <p>The shared kernel's target inventory is <b>21 production classes</b> and <b>9</b> package
+ * charters -- one at the kernel root and one for each subpackage -- for <b>30</b>
+ * compilation units in total. This package contributes three of the twenty-one
+ * and one of the nine. The breakdown is given so that a reader can re-derive the
  * total instead of trusting it:
  *
  * <pre>
- * subpackage        production classes
+ * package           production classes
+ * common (root)                      1
  * money                              2
  * codec                              5
  * error                              3
- * web                                2
- * security                           1
+ * web                                3
+ * security                           3
  * observability                      1
  * time                               1
  * validation                         2
  * </pre>
  *
- * <p>Those eight sum to 17, the kernel root itself contributing none; adding the
- * nine charters gives 26.
+ * <p>Those nine sum to 21, the kernel root itself contributing one -- the
+ * auto-configuration class that registers this package's filter, and the meter
+ * filter, the money codec module and the error advice, in every service; adding the
+ * nine charters gives 30.
  *
- * <p>Assumptions: the authoritative totals are <strong>17 production classes and
- * 26 compilation units, 9 of the latter being charters</strong>. The canon above
+ * <p>Assumptions: the authoritative totals are <strong>21 production classes and
+ * 30 compilation units, 9 of the latter being charters</strong>. The canon above
  * is stated as a breakdown and not merely as a total for a reason: a bare total
  * invites a reader to trust it, whereas a per-subpackage list can be re-derived,
  * so any figure that does not reproduce these two sums is wrong on its face.

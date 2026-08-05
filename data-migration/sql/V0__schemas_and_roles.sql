@@ -43,19 +43,19 @@
 --     master user of an Amazon Aurora PostgreSQL cluster.
 --   - The server must be PostgreSQL 16 or newer. Section 1 asserts this rather
 --     than assuming it silently.
---   - No credential is established here. Each role is created able to log in
---     but with no password, so this artifact carries nothing that can
---     authenticate.
+--   - No credential is WRITTEN here, and every credential is APPLIED here. The
+--     caller sets carddemo.credential.<role> per role, as a bound parameter,
+--     before sending this script; section 6 applies each one and fails closed.
 --
 -- Post-state established:
 --   - Eight schemas exist -- auth, account, card, ledger, reference, batch,
 --     authorization, reporting -- each owned by its matching carddemo_* role.
 --   - Eight login roles exist -- carddemo_auth, carddemo_account,
 --     carddemo_card, carddemo_ledger, carddemo_reference, carddemo_batch,
---     carddemo_authorization, carddemo_reporting -- every one of them without
---     a password. These names are the source of truth: the datasource username
---     each service resolves, and the secret store entry each credential is
---     written to, must match them character for character.
+--     carddemo_authorization, carddemo_reporting -- each holding the credential
+--     section 6 applied to it. These names are the source of truth: the
+--     datasource username each service resolves, and the secret store entry
+--     each credential is written to, must match them character for character.
 --   - CREATE on schema public is revoked from PUBLIC.
 --   - carddemo_batch holds USAGE on ledger, account, card and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
@@ -70,14 +70,16 @@
 --     "permission denied to create role", detailing that only roles with the
 --     CREATEROLE attribute may create roles.
 --   - The eight roles already exist and the connecting role is neither a
---     superuser nor an administrator of them -- typically because a different
---     principal created them. Section 1's membership grant reports "permission
---     denied to grant role", detailing that only roles with the ADMIN option
---     may grant it. That refusal is correct rather than incidental: a principal
---     that does not administer these roles has no business configuring the
---     default privileges of the schemas they own. Resolve it by running the
---     bootstrap as the principal that owns the roles, not by loosening this
---     script.
+--     superuser nor an administrator of them. Section 1's membership grant
+--     reports "permission denied to grant role", and the refusal is correct: a
+--     principal that does not administer these roles has no business setting
+--     the default privileges of the schemas they own, nor their credentials.
+--     Run the bootstrap as the owning principal rather than loosening this.
+--   - A service role is left with no credential, because the caller supplied no
+--     carddemo.credential.<role> setting for it and none is already stored.
+--     Section 6 RAISES, naming every such role, so nothing commits. Setting
+--     carddemo.bootstrap_allow_missing_credentials to on downgrades that to a
+--     notice, and is intended for a local or CI engine only.
 --   - Section 1's membership grant is removed or reordered away, so the session
 --     can create roles but cannot act for the schema owners. Section 2's
 --     CREATE SCHEMA ... AUTHORIZATION then reports "must be able to SET ROLE"
@@ -90,12 +92,10 @@
 --   - It is run after a per-service migration has already created tables under
 --     a different owner. Nothing errors, but section 4's and section 5's
 --     default privileges are keyed on the owning role and so never reach those
---     pre-existing tables; the ON ALL TABLES statements alongside them exist to
---     repair exactly that case.
+--     pre-existing tables; the ON ALL TABLES statements exist to repair that.
 --   Every one of these cases that raises rolls the entire script back, leaving
 --   no half-built bootstrap behind. The last case is the exception that proves
---   why the repair statements are there: it raises nothing at all, so only the
---   ON ALL TABLES form can reach the tables it left behind.
+--   why the repair statements are there: it raises nothing at all.
 --
 -- Derivation:
 --   The eight contexts partition the baseline data that app/csd/CARDDEMO.CSD
@@ -117,10 +117,10 @@
 --     meta-command progress output, and buys one artifact that runs unchanged
 --     both under "psql -v ON_ERROR_STOP=1 -f" and through a driver cursor in
 --     data-migration/src/carddemo_migration.
---   - Assumptions: the script is sent as a literal script with NO bound
---     parameters. Section 1 contains format('%I', ...), and a driver asked to
---     interpolate parameters would try to consume that %I as one of its own
---     placeholders, then either fail or rewrite the statement.
+--   - Assumptions: THIS SCRIPT is sent as a literal script with NO bound
+--     parameters -- section 1 contains format('%I', ...), which a driver asked
+--     to interpolate would consume as a placeholder of its own. Each credential
+--     is therefore bound on a SEPARATE statement; section 6 records the shape.
 --   - Alternatives Considered: setting a search_path here -- on the roles or in
 --     the session -- was rejected. Each service already pins its schema in its
 --     own DataSourceConfig and in its Flyway default-schema, and a setting with
@@ -274,65 +274,110 @@ BEGIN
     LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = service_role) THEN
             -- WHY : Assumptions: every service connects as its own role, so each
-            -- role needs LOGIN. No password clause is written, and none may be:
-            -- a LOGIN role with no stored secret cannot authenticate under
-            -- scram-sha-256 with transport encryption enforced, so this artifact
-            -- carries no usable credential at all. That is what makes "no
-            -- secrets committed to the repository" a structural property of the
-            -- file rather than a claim about it.
+            -- role needs LOGIN. No password LITERAL is written here and none may
+            -- be, because a credential in this file is a credential in the
+            -- repository -- which is what makes "no secrets committed to the
+            -- repository" a structural property of this artifact rather than a
+            -- claim about it. The credential itself is applied by section 6, in
+            -- this same transaction, from a value the caller supplies out of
+            -- band, so no committed role ever exists without one.
             --
             -- WHY : Refactoring Rationale: an earlier revision of this comment
-            -- ended by saying the credential is "applied by an out-of-band
-            -- ALTER ROLE ... PASSWORD that never appears in source", and that
-            -- sentence was the defect. It described a step without naming what
-            -- performs it, which left the deployment with eight roles that
-            -- cannot authenticate and no delivered mechanism to make them able
-            -- to -- so the only way to finish provisioning was for an operator
-            -- to read each generated secret and type an ALTER ROLE by hand.
-            -- That is precisely the manual dependency this migration is
-            -- required not to have, and it is the worst possible place to
-            -- introduce one, because the value being typed is a credential:
-            -- it lands in a shell history, in a psql history file, and in the
-            -- server log whenever log_statement is anything but none.
+            -- named the applying mechanism as the SECRETS MANAGER ROTATION
+            -- FUNCTION configured through the rotation_lambda_arn and
+            -- rotation_automatically_after_days inputs of infra/modules/secrets,
+            -- and that sentence was the defect. No such function is provisioned
+            -- anywhere in this repository: rotation_lambda_arn defaults to null,
+            -- so both rotation resources in that module are created with zero
+            -- instances, and nothing else applied anything. The deployment was
+            -- therefore left with eight roles that cannot authenticate and no
+            -- delivered mechanism to make them able to, so the only way to
+            -- finish provisioning was for an operator to read each generated
+            -- secret and type an ALTER ROLE by hand. That is precisely the
+            -- manual dependency this migration is required not to have, and the
+            -- worst place to introduce one, because the value being typed is a
+            -- credential: it lands in a shell history, in a psql history file,
+            -- and in the server log whenever log_statement is not none.
             --
-            -- The mechanism is therefore named. Each service role's credential
-            -- is generated at apply time by infra/modules/secrets into one
-            -- Secrets Manager entry per role -- see that module's
-            -- service_credential_names input, whose element set is exactly the
-            -- role list above -- and is applied to the role by the SECRETS
-            -- MANAGER ROTATION FUNCTION configured for those entries through
-            -- that module's rotation_lambda_arn and
-            -- rotation_automatically_after_days inputs. The bootstrap step runs
-            -- this script first, so the roles exist, and then triggers the
-            -- first rotation, which is what sets each credential. Three
-            -- properties of that mechanism are the reason it is the one chosen:
-            -- it reads the secret and reaches the cluster entirely inside the
-            -- isolated data tier over TLS, so the credential is never on an
-            -- operator's terminal; every invocation is recorded, so applying a
-            -- credential is auditable rather than merely done; and rotation is
-            -- the same code path as first application, so a credential that can
-            -- be set can also be replaced without a second mechanism.
-            -- Section 6 of this script verifies the outcome and names any role
-            -- still lacking a stored credential.
+            -- The mechanism is therefore named, and there are THREE of them because a
+            -- deployed environment, a locally provisioned database and this script's own
+            -- bootstrap session need different ones. infra/modules/secrets generates each
+            -- service role's credential at apply time -- one Secrets Manager entry per
+            -- role, its element set exactly the role list above -- through the provider's
+            -- write-only argument, so the generated value appears in neither source nor
+            -- Terraform state. Which mechanism then APPLIES it to the role follows from
+            -- HOW the database was provisioned, and all three are delivered so that no
+            -- case is left with roles that exist and cannot authenticate:
             --
-            -- WHY : Alternatives Considered: having this script apply the
-            -- credentials itself, from values passed in as psql variables that
-            -- a caller read out of the secret store. Rejected on two counts.
-            -- PostgreSQL accepts no bind parameter in ALTER ROLE ... PASSWORD,
-            -- so the value has to be interpolated into SQL TEXT, which is
-            -- exactly how a credential reaches a history file and a statement
-            -- log. And it would make this file's correctness depend on being
-            -- invoked with a parameter sequence, which its own header forbids
-            -- for the separate reason that the anonymous blocks below use
-            -- dollar quoting.
+            --   section 6 of THIS script -- the bootstrap path. The caller opens ONE
+            --   session, sets one session setting per role -- carddemo.credential.<role>,
+            --   the role spelled exactly as in the array above -- passing the value it
+            --   read from that role's Secrets Manager entry as a BOUND parameter, and
+            --   then sends this script in that session. Section 6 reads each setting,
+            --   applies it with ALTER ROLE ... PASSWORD, clears the setting, and REFUSES
+            --   TO COMMIT if any login role is left without one. Two properties are why
+            --   this shape was chosen over any other: the binding happens on a separate
+            --   statement, so this script still takes no bound parameter of its own as
+            --   its header requires; and the ALTER ROLE is dynamic SQL inside a DO block,
+            --   which log_statement does not log and pg_stat_activity does not show, so
+            --   nothing logs the value. Trade-offs: under log_statement = all the
+            --   caller's own bind parameters are logged; the parameter group this stack
+            --   ships enables no statement logging, which is what bounds that residual
+            --   exposure, and section 6 refuses an unencrypted connection outright
+            --   because the same value crosses that transport as statement text.
             --
-            -- Alternatives Considered: a two-tier scheme -- NOLOGIN group
-            -- roles holding the privileges, plus separately created LOGIN users
+            --   the module-owned rotation function -- the deployed path for REPLACEMENT,
+            --   and not an option a root has to select: infra/modules/secrets declares
+            --   the function, its role, its encrypted log group, the invocation
+            --   permission for exactly the eight service secrets, and the rotation
+            --   attachment that triggers the first application. It reaches Aurora
+            --   through the RDS Data API using the RDS-managed master secret, which is
+            --   what lets it perform a FIRST application at all, and it can either
+            --   converge a passwordless role created by this script or create an absent
+            --   base role and its bounded `_clone` login before this script runs -- so
+            --   schema, grant and default-privilege convergence here is independent of
+            --   first-deployment ordering. Three properties make it the deployed choice
+            --   for every rotation after the first: the credential is never on an
+            --   operator terminal; CloudTrail and the function's own logs audit each
+            --   invocation without recording the value; and replacement follows the same
+            --   path every time, so there is one code path rather than two.
+            --
+            --   the authored Python entry points -- the path for a local or partially
+            --   provisioned cluster, and the one a reader with a psql prompt can run.
+            --   Either authored entry point applies the same generated secrets:
+            --   `python -m carddemo_migration.credentials`, or
+            --   carddemo_migration.role_credentials.bootstrap_role_credentials called as
+            --   the cluster master user. Each reads the secret, derives that role's
+            --   SCRAM-SHA-256 verifier LOCALLY and issues the ALTER ROLE that stores it,
+            --   so no plaintext credential reaches this server at all -- which is
+            --   strictly stronger than the bootstrap path above and is why it is the
+            --   recommended one wherever a program can hold the secret. It then logs in
+            --   as every role to prove the stored verifier matches what each service
+            --   will read. Re-running is safe, so a partial failure is repaired by
+            --   running the same step again rather than by reaching for another
+            --   mechanism.
+            --
+            -- Refactoring Rationale: an earlier revision of this comment named a
+            -- rotation function configured through that module's rotation_lambda_arn
+            -- input as what applies the credential, WITHOUT any mechanism being in
+            -- scope, and that was wrong in a way that blocked deployment: roles were
+            -- created without a credential and nothing applied one, so a bootstrap that
+            -- reported success produced a database no service could authenticate
+            -- against. It is worth keeping the reason, because it constrains what a
+            -- replacement function may be: the rotation functions AWS publishes for
+            -- PostgreSQL cannot perform a first application under single-user rotation,
+            -- since they authenticate with the credential they are replacing and these
+            -- roles have none. A rotation function is therefore only an answer here
+            -- because the one deployed authenticates as the master through the Data API
+            -- instead. Section 6 of this script both APPLIES what it was given and
+            -- REPORTS anything still outstanding, so no path is silent.
+            --
+            -- Alternatives Considered: a two-tier scheme -- NOLOGIN group roles
+            -- holding the privileges, plus separately created LOGIN users
             -- granted into them -- was rejected. The target design specifies one
             -- database role per bounded context; a second tier would double the
-            -- object count and double the number of places a privilege can be
-            -- granted, and across eight contexts it buys no additional
-            -- separation, because each group would have exactly one member.
+            -- object count and the places a privilege can be granted, and buys
+            -- no separation at all, because each group would hold one member.
             EXECUTE format('CREATE ROLE %I LOGIN', service_role);
 
         -- WHY : Refactoring Rationale: the ELSIF is the convergence half of an
@@ -380,7 +425,7 @@ BEGIN
         -- to change default privileges". Re-granting the membership WITH INHERIT
         -- TRUE, SET TRUE supplies exactly the two options those two checks read.
         -- The grant is idempotent, it leaves the auto-granted ADMIN OPTION
-        -- intact -- which the out-of-band password step still needs -- and the
+        -- intact -- which section 6's ALTER ROLE ... PASSWORD needs -- and the
         -- guard skips it entirely when the connecting role is a superuser,
         -- because pg_has_role reports true for a superuser on every mode. It is
         -- no escalation either: a role able to create these roles can already
@@ -511,7 +556,11 @@ ALTER SCHEMA "authorization" OWNER TO carddemo_authorization;
 -- affirmative defect -- so nothing inside this schema is created by a migration
 -- either. The views therefore belong to data-migration, but necessarily to a
 -- step ordered after the per-service migrations have created the tables they
--- read, not to this one. What this script does establish for that context is the
+-- read, not to this one. That step is data-migration/sql/V1__reporting_views.sql,
+-- which creates all four views WITH (security_barrier), assigns each to
+-- carddemo_reporting_owner, masks the card number that every ledger-derived view
+-- publishes, and grants SELECT on each view by name.
+-- What this script does establish for that context is the
 -- schema they live in, the owner that creates them, and the USAGE grant in
 -- section 5 the service role reads through; a view missing at run time is a
 -- data-migration defect to report rather than something for a service to create
@@ -856,7 +905,10 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_reporting_owner;
 -- SELECT granted on each named view once it exists. Those per-view grants are not
 -- issued here for the same reason no view is created here -- at this point no
 -- source table exists, so no view over one can -- and they belong to the same
--- later data-migration step that creates the views. The consequence worth stating
+-- later data-migration step that creates the views,
+-- data-migration/sql/V1__reporting_views.sql, which issues them one view at a time
+-- rather than schema-wide so a view added later is not readable by default. The
+-- consequence worth stating
 -- is the failure mode this produces: a reporting query against a view that has
 -- not been created, or that exists without its grant, fails with a permission or
 -- undefined-relation error naming the view. That is a provisioning defect
@@ -915,17 +967,61 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO carddemo_reporting;
 
 
 -- =============================================================================
--- 6. Credential and transport verification
+-- 6. Credential application, and the two assertions that must precede it
 --
--- WHY : Refactoring Rationale: this section exists because sections 1 to 5 could
--- previously complete successfully against a cluster on which none of the eight
--- service roles could authenticate, and against one storing credentials in a
--- weaker verifier than the design requires. Both are states in which the script
--- reports success and the deployment does not work, or works less securely than
--- it claims to, and neither was detectable from this file's output. What this
--- section adds is the two guarantees that can only be made BEFORE any credential
--- exists, plus a report of the one outcome that cannot be guaranteed from inside
--- SQL at all.
+-- WHY : Refactoring Rationale: this section previously verified and REPORTED
+-- only. It asserted the verifier algorithm and the transport, then raised a
+-- NOTICE naming any role that still had no stored credential and committed
+-- anyway -- because the mechanism it expected to apply those credentials, a
+-- Secrets Manager rotation function, ran after this script and outside it. That
+-- function is provisioned nowhere in this repository, so the notice described a
+-- step that never happened, and the bootstrap reported success against a
+-- database in which no service could authenticate. Section 1's comment records
+-- the same correction from the role-creation end.
+--
+-- This section now APPLIES each credential and then FAILS CLOSED. The order of
+-- the three parts is the whole design and cannot be rearranged:
+--
+--   1. Assert password_encryption. It decides how the value an ALTER ROLE
+--      supplies is STORED, and it is read as that statement executes, so it has
+--      to be asserted before the first one runs.
+--   2. Assert that this session is encrypted. The credentials cross this same
+--      connection, so an unencrypted session is eight credentials on the wire.
+--   3. Apply, then verify. Every role either receives the credential the caller
+--      supplied for it or is proved to hold one already; any role for which
+--      neither holds raises, and the whole transaction rolls back.
+--
+-- The caller's half of the contract, in full, because nothing in SQL can state
+-- it for itself: before sending this script, in the SAME session, set one
+-- session setting per role named
+--
+--     carddemo.credential.<role>          e.g. carddemo.credential.carddemo_auth
+--
+-- to the credential held in that role's Secrets Manager entry, PASSING IT AS A
+-- BOUND PARAMETER -- for example, with a driver:
+--
+--     SELECT set_config('carddemo.credential.carddemo_auth', %s, false)
+--
+-- and discard the session afterwards. A caller that cannot do this -- a local
+-- engine with no secret store, or a test fixture -- sets
+-- carddemo.bootstrap_allow_missing_credentials to on and accepts roles that
+-- cannot authenticate.
+--
+-- WHY : Alternatives Considered: interpolating each credential into the text of
+-- this file, or into a psql :variable, was rejected on two independent counts.
+-- A value in the file is a secret committed to the repository, which the
+-- migration forbids outright; and a value in a psql variable is interpolated
+-- into a statement the client sends, so it lands in the psql history file and in
+-- any statement log. A session setting carrying a bound parameter has neither
+-- property, and the ALTER ROLE built from it below is dynamic SQL inside a DO
+-- block, which log_statement does not log and pg_stat_activity does not display.
+--
+-- WHY : Trade-offs: the value is read back with current_setting, so it exists in
+-- this session's memory for the duration of the transaction. Each setting is
+-- therefore cleared as soon as it has been applied, which bounds the window to
+-- the loop below rather than to the life of the connection -- defence in depth
+-- rather than the primary control, since the primary control is that the caller
+-- discards the session.
 -- =============================================================================
 
 DO $$
@@ -941,8 +1037,18 @@ DECLARE
         'carddemo_authorization',
         'carddemo_reporting'
     ];
+    -- WHY : Assumptions: the supplied credential is held in a local variable for
+    -- exactly as long as it takes to build one statement from it. It is never
+    -- concatenated into a message, never returned, and never compared, so no
+    -- code path below can emit it. The three arrays alongside it hold ROLE NAMES
+    -- only, which is what lets every message in this section be specific about
+    -- which role is at fault while disclosing nothing about any credential.
+    supplied         text;
+    applied          text[] := ARRAY[]::text[];
+    already_set      text[] := ARRAY[]::text[];
     without_password text[] := ARRAY[]::text[];
     session_is_ssl   boolean;
+    authid_readable  boolean;
 BEGIN
     -- WHY : Assumptions: the verifier algorithm is asserted here, before any
     -- credential is applied, because this is the only artifact that runs at that
@@ -951,9 +1057,14 @@ BEGIN
     -- so a cluster left on md5 would store every one of the eight credentials as
     -- an MD5 verifier -- a value that is unsalted per-server, trivially
     -- brute-forced offline, and indistinguishable from a correct outcome
-    -- afterwards, because the rotation function reports success either way.
-    -- Asserting it here converts that into one sentence naming the setting and
-    -- the value it must hold. On Aurora the setting comes from the cluster
+    -- afterwards, because nothing downstream reports which verifier was used.
+    -- Asserting it here converts that into one sentence naming the setting and the
+    -- value it must hold. The assertion is kept unconditionally even though the
+    -- authored Python entry points derive their own SCRAM verifier, which this
+    -- setting does not govern: a cluster left on md5 stores a weaker verifier for
+    -- every credential set by any OTHER means -- section 6 below, or an operator's
+    -- break-glass ALTER ROLE -- and this is the only artifact positioned to say so.
+    -- On Aurora the setting comes from the cluster
     -- parameter group, which infra/modules/aurora-postgresql pins as a mandatory,
     -- non-overridable parameter for exactly this reason, so the two artifacts
     -- assert the same requirement from opposite ends.
@@ -967,11 +1078,12 @@ BEGIN
     END IF;
 
     -- WHY : Assumptions: the transport carrying THIS session is asserted because
-    -- it is the transport the credential-applying step uses. The rotation
-    -- function connects to the same cluster to issue its ALTER ROLE, and
-    -- PostgreSQL accepts no bind parameter there, so the credential travels as
-    -- statement text -- on a cleartext connection that is eight credentials
-    -- readable by anything on the path. Checking pg_stat_ssl for the current
+    -- it is the transport the credential-applying step uses. That step connects to
+    -- the same cluster to issue its ALTER ROLE statements, and although it derives
+    -- a SCRAM verifier rather than sending a password, a cleartext connection
+    -- still exposes the whole bootstrap -- every role name, every grant and the
+    -- verifier itself -- to anything on the path, and the eight service logins it
+    -- then performs to verify its work DO send credentials. Checking pg_stat_ssl for the current
     -- backend is the server's own answer to "was this connection encrypted",
     -- which is stronger than trusting a client-side sslmode the server cannot
     -- see.
@@ -994,8 +1106,8 @@ BEGIN
         IF coalesce(current_setting('carddemo.bootstrap_allow_insecure', true), 'off') <> 'on' THEN
             RAISE EXCEPTION
                 'CardDemo schema bootstrap refuses to run on an unencrypted '
-                'connection: the credential-applying step uses this same '
-                'transport and PostgreSQL accepts no bind parameter in '
+                'connection: the credentials this section applies cross this '
+                'same transport, and PostgreSQL accepts no bind parameter in '
                 'ALTER ROLE ... PASSWORD, so every service credential would '
                 'cross it as statement text. Connect with sslmode=verify-full, '
                 'or set carddemo.bootstrap_allow_insecure=on to acknowledge a '
@@ -1008,54 +1120,27 @@ BEGIN
             'local or CI engine only.';
     END IF;
 
-    -- WHY : Assumptions: whether a credential has actually been applied cannot be
-    -- guaranteed by this script -- the rotation function that applies it runs
-    -- after this script, by design, because the roles have to exist first -- so
-    -- the outcome is REPORTED rather than asserted. rolpassword is read from
-    -- pg_authid rather than pg_roles because pg_roles blanks that column for
-    -- every caller; the read therefore requires a superuser or a
-    -- pg_read_all_stats-equivalent bootstrap identity, and the whole check is
-    -- skipped rather than failed when the connecting role cannot see the
-    -- catalogue, since an unreadable catalogue is not evidence of a missing
-    -- credential.
-    -- WHY : Trade-offs: the report names the roles rather than counting them. A
-    -- count tells an operator that something is outstanding; the names tell them
-    -- which rotation to trigger, and on a partially completed bootstrap that is
-    -- the difference between one targeted action and re-running everything.
-    -- Nothing about the credential itself is read or printed -- only whether the
-    -- column is null -- so this check discloses no secret material.
-    IF has_table_privilege(CURRENT_USER, 'pg_authid', 'SELECT') THEN
-        SELECT coalesce(array_agg(candidate.role_name ORDER BY candidate.role_name), ARRAY[]::text[])
-          INTO without_password
-          FROM unnest(service_roles) AS candidate(role_name)
-          JOIN pg_authid ON pg_authid.rolname = candidate.role_name
-         WHERE pg_authid.rolpassword IS NULL;
+    -- WHY : Assumptions: rolpassword is read from pg_authid rather than pg_roles
+    -- because pg_roles blanks that column for every caller. The read therefore
+    -- needs a superuser or an equivalently privileged bootstrap identity, and
+    -- whether this session has it is established ONCE here rather than per role:
+    -- it is a property of the session, and asking eight times would suggest it
+    -- could differ between roles. An unreadable catalogue is deliberately NOT
+    -- treated as evidence that a credential exists -- see the else branch in the
+    -- loop -- because "I cannot look" and "it is present" are different facts and
+    -- conflating them is how the previous revision of this section committed a
+    -- database nothing could authenticate against.
+    authid_readable := has_table_privilege(CURRENT_USER, 'pg_authid', 'SELECT');
 
-        IF array_length(without_password, 1) > 0 THEN
-            RAISE NOTICE
-                'These service roles exist with no stored credential and cannot '
-                'yet authenticate: %. Trigger the Secrets Manager rotation '
-                'configured by infra/modules/secrets for each of them; that is '
-                'what applies the generated credential. Re-running this script '
-                'afterwards reports none outstanding.',
-                array_to_string(without_password, ', ');
-        END IF;
-    ELSE
-        RAISE NOTICE
-            'Skipping the credential-presence report: this role cannot read '
-            'pg_authid, so the absence of a credential cannot be distinguished '
-            'from the absence of permission to look.';
-    END IF;
-
-    -- WHY : Assumptions: the loop variable is declared and used so that the two
-    -- role inventories in this file cannot drift apart unnoticed. Section 1 owns
-    -- the authoritative array; this block restates it because a DO block has no
-    -- access to another block's variables, and the check below is what makes the
-    -- restatement safe rather than a second source of truth: it fails loudly if
-    -- a role named here does not exist, which is what a divergence between the
-    -- two arrays would produce.
     FOREACH service_role IN ARRAY service_roles
     LOOP
+        -- WHY : Assumptions: the loop variable is checked against pg_roles first
+        -- so that the two role inventories in this file cannot drift apart
+        -- unnoticed. Section 1 owns the authoritative array; this block restates
+        -- it because a DO block has no access to another block's variables, and
+        -- this check is what makes the restatement safe rather than a second
+        -- source of truth: it fails loudly if a role named here does not exist,
+        -- which is exactly what a divergence between the two arrays produces.
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = service_role) THEN
             RAISE EXCEPTION
                 'The role % is named in section 6 but was not created by '
@@ -1063,7 +1148,156 @@ BEGIN
                 'section 1 is authoritative.',
                 service_role;
         END IF;
+
+        -- WHY : Assumptions: nullif treats an empty setting as absent, because a
+        -- caller that resolved a secret to an empty string has failed rather than
+        -- supplied something. current_setting's second argument returns NULL for
+        -- a setting that was never set, so the unset and the empty cases converge
+        -- on one branch instead of one of them applying an empty password.
+        supplied := nullif(current_setting('carddemo.credential.' || service_role, true), '');
+
+        IF supplied IS NOT NULL THEN
+            -- WHY : Assumptions: a length floor is asserted because the failure it
+            -- catches is silent. infra/modules/secrets generates each value with
+            -- its password_length input, whose own validation refuses anything
+            -- below 16, so a shorter value here did not come from that generator:
+            -- it came from a truncated read, a wrong secret, or a placeholder. The
+            -- floor is stated as the same number rather than a rounder one so that
+            -- the two artifacts agree by construction. The message reports the
+            -- LENGTH and never the value.
+            IF length(supplied) < 16 THEN
+                RAISE EXCEPTION
+                    'The credential supplied for % is % characters long, and the '
+                    'minimum this bootstrap accepts is 16 -- the same floor '
+                    'infra/modules/secrets enforces on its password_length input. '
+                    'A shorter value did not come from that generator, so the '
+                    'session setting carddemo.credential.% was populated from the '
+                    'wrong source.',
+                    service_role, length(supplied), service_role;
+            END IF;
+
+            -- WHY : Assumptions: format('%I') quotes the role name and
+            -- format('%L') quotes the credential as a string literal, which is
+            -- what makes a dynamically built ALTER ROLE injection-safe for any
+            -- value the generator can produce -- including one containing a
+            -- quote, a backslash or a backslash-quote pair. PostgreSQL accepts no
+            -- bind parameter in ALTER ROLE ... PASSWORD, so literal quoting is
+            -- not a shortcut here, it is the only correct construction.
+            -- WHY : Assumptions: a value already shaped as a SCRAM verifier is
+            -- stored verbatim by PostgreSQL rather than hashed again, so a caller
+            -- that computes the verifier itself never puts the plaintext on the
+            -- wire at all. Nothing here needs to detect which form it was handed;
+            -- both are correct and the stronger one is available to a caller that
+            -- wants it. That is why this branch does no inspection of the value
+            -- beyond the length floor above.
+            EXECUTE format('ALTER ROLE %I PASSWORD %L', service_role, supplied);
+            applied := applied || service_role;
+
+            -- WHY : Trade-offs: the setting is cleared immediately after use, so
+            -- the value stops being readable through current_setting for the rest
+            -- of the transaction. This is defence in depth and not the primary
+            -- control -- the caller discarding the session is -- and it is worth
+            -- the one statement because the alternative leaves eight credentials
+            -- retrievable by anything that later runs in the same session, such
+            -- as a loader step that reuses the connection.
+            PERFORM set_config('carddemo.credential.' || service_role, '', false);
+            supplied := NULL;
+
+        ELSIF authid_readable THEN
+            -- WHY : Assumptions: with no value supplied, the only acceptable
+            -- outcome is that the role already holds one -- from an earlier run of
+            -- this script, or from a rotation. That is a fact this session can
+            -- establish, so it is established rather than assumed, and the two
+            -- outcomes are recorded separately so the notice below can distinguish
+            -- "already provisioned" from "applied now".
+            IF EXISTS (
+                SELECT 1
+                  FROM pg_authid
+                 WHERE pg_authid.rolname = service_role
+                   AND pg_authid.rolpassword IS NOT NULL
+            ) THEN
+                already_set := already_set || service_role;
+            ELSE
+                without_password := without_password || service_role;
+            END IF;
+
+        ELSE
+            -- WHY : Assumptions: no value supplied AND no way to check what is
+            -- stored is the fail-closed case, and it is deliberately treated as a
+            -- missing credential rather than as an unknown. The alternative --
+            -- skipping the check when the catalogue is unreadable, which is what
+            -- this section did before -- is what allowed a bootstrap to report
+            -- success on a cluster whose roles could not authenticate, because on
+            -- a managed cluster the bootstrap identity frequently cannot read
+            -- pg_authid at all. Under this branch a caller that supplies every
+            -- credential is unaffected, and only a caller that supplies none is
+            -- refused, which is the correct division.
+            without_password := without_password || service_role;
+        END IF;
     END LOOP;
+
+    -- WHY : Trade-offs: the outcome is reported as counts plus role names, never
+    -- as a per-role line, because eight notices per run buries the one line that
+    -- matters. Role names are safe to print -- they are already public in this
+    -- file -- and they are what an operator needs in order to act.
+    IF array_length(applied, 1) > 0 THEN
+        RAISE NOTICE
+            'Applied the supplied credential to % of 8 service roles: %.',
+            array_length(applied, 1), array_to_string(applied, ', ');
+    END IF;
+
+    IF array_length(already_set, 1) > 0 THEN
+        RAISE NOTICE
+            'These % service roles already held a stored credential and were '
+            'left untouched: %.',
+            array_length(already_set, 1), array_to_string(already_set, ', ');
+    END IF;
+
+    IF array_length(without_password, 1) > 0 THEN
+        -- WHY : Refactoring Rationale: this raises where the previous revision
+        -- emitted a notice and committed. The difference is the whole point of
+        -- the change: a bootstrap that commits eight roles no service can
+        -- authenticate as has produced a database that looks provisioned and is
+        -- not, and every consumer then fails later, further away, with a
+        -- password error that names nothing about this step. Failing here rolls
+        -- the entire script back -- it is one transaction -- so the next attempt
+        -- starts from a clean database rather than from a half-provisioned one.
+        -- WHY : Trade-offs: the opt-out below is what keeps this runnable
+        -- against a local or CI engine with no secret store, and it is shaped
+        -- like its neighbour carddemo.bootstrap_allow_insecure on purpose: it
+        -- has to be named on the invocation, so it appears in the command a
+        -- reviewer reads instead of living as a default in a file. A deployment
+        -- that sets it has opted into exactly the state this check exists to
+        -- prevent, and the notice says so in those terms.
+        IF coalesce(current_setting('carddemo.bootstrap_allow_missing_credentials', true), 'off') <> 'on' THEN
+            RAISE EXCEPTION
+                'CardDemo schema bootstrap refuses to commit: these service '
+                'roles have no credential and no service can authenticate as '
+                'them: %. Set one session setting per role -- '
+                'carddemo.credential.<role> -- to that role''s credential from '
+                'Secrets Manager, as a bound parameter, before sending this '
+                'script; infra/modules/secrets publishes one entry per role and '
+                'its service_credential_secrets output maps role name to entry. '
+                'Alternatively, apply the same secrets from a program that can '
+                'hold them: python -m carddemo_migration.credentials, or '
+                'carddemo_migration.role_credentials.bootstrap_role_credentials '
+                'called as the cluster master user -- both derive each SCRAM '
+                'verifier client-side, so no plaintext credential reaches this '
+                'server, and re-running this script afterwards reports none '
+                'outstanding. For a local or CI engine with no secret store, set '
+                'carddemo.bootstrap_allow_missing_credentials=on to accept roles '
+                'that cannot authenticate.',
+                array_to_string(without_password, ', ');
+        END IF;
+
+        RAISE NOTICE
+            'Committing with % service roles that hold no credential and cannot '
+            'authenticate: %. This is permitted only because '
+            'carddemo.bootstrap_allow_missing_credentials is on, and it is '
+            'supported for a local or CI engine only.',
+            array_length(without_password, 1),
+            array_to_string(without_password, ', ');
+    END IF;
 END
 $$;
 

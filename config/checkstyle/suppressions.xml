@@ -280,10 +280,13 @@ Alternatives Considered: every item below is a plausible entry that was
    site, which a generated mapper cannot hold." Each of those five behaviours
    is a decision a reader cannot recover from the code, which makes a mapper
    the HIGHEST value documentation target in the repository, not a candidate
-   for exemption. checkstyle.xml widens type scope to package for this exact
-   population, noting that a mapper "is often package-private precisely
-   because it is internal, and internal is where an undocumented type costs a
-   future reader most."
+   for exemption. checkstyle.xml widens type scope all the way to private for
+   this exact population, noting that a mapper "is often package-private
+   precisely because it is internal, and internal is where an undocumented
+   type costs a future reader most." Because Checkstyle's scope property is
+   inclusive downwards, private admits every narrower visibility as well, so a
+   private nested mapper helper is audited on the same terms as the mapper
+   itself.
 
 3. A service Application class or a config package : NEVER. These are the
    "module entry point" and configuration types that Rule 1's presence clause

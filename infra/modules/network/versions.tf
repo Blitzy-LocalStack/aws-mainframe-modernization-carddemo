@@ -67,7 +67,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: floor the CLI at 1.15.0 rather than pinning one release exactly.
   # WHY : Assumptions: 1.15.8 is the release this tree was authored and
   #       validated against, and 1.15.0 is the oldest that accepts the
   #       configuration syntax used across infra/. Trade-offs: a floor lets an

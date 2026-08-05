@@ -357,7 +357,6 @@ public enum FieldValidationFlag {
      *     {@link #ALTERNATE_BLANK_CODE} or the asterisk of {@link #BLANK_SCREEN_MARKER}
      */
     public char code() {
-        // WHAT: resolve the byte through an exhaustive switch over the three states.
         // WHY : Alternatives Considered: holding the byte in an instance field populated from each
         //       constant's argument list was the obvious shape and is unavailable, which was
         //       confirmed by compiling it rather than reasoned about. Java requires enum constants to
@@ -535,7 +534,6 @@ public enum FieldValidationFlag {
             return true;
         }
 
-        // WHAT: test each arm of the disjunction over the whole value independently.
         // WHY : Assumptions: the arms are evaluated over ALL characters separately rather than
         //       character by character against either pad, so a mixed value satisfies neither. The
         //       reasoning, and why the outcome stays safe, is on this method.
@@ -582,7 +580,6 @@ public enum FieldValidationFlag {
      *     whitespace, under the same condition
      */
     public Optional<FieldError> toFieldError(String field, String message) {
-        // WHAT: return early for an acceptable field, before either argument is examined.
         // WHY : Trade-offs: this makes the arguments unvalidated on the acceptable path, so a caller
         //       passing a null identity for a field that turns out to be acceptable is not told. The
         //       compromise is accepted deliberately, because the alternative reverses the baseline's
@@ -629,7 +626,6 @@ public enum FieldValidationFlag {
         Objects.requireNonNull(flagsByField, "flagsByField must not be null");
         Objects.requireNonNull(messageForField, "messageForField must not be null");
 
-        // WHAT: accumulate into a list that preserves the iteration order of the supplied map.
         // WHY : Assumptions: the order fields are reported in is part of the migrated behaviour, not
         //       an implementation detail, so it is preserved rather than sorted or grouped. The
         //       baseline highlights fields by running its forty expansions in the order they are
@@ -653,7 +649,6 @@ public enum FieldValidationFlag {
             Objects.requireNonNull(
                     state, () -> "flagsByField must not contain a null state, found one for " + field);
 
-            // WHAT: test the state before resolving the message, not as part of resolving it.
             // WHY : Trade-offs: this guard duplicates the acceptable-state test that
             //       toFieldError already performs, and the duplication is accepted because it is
             //       what makes the resolver lazy. Java evaluates an argument before the call it
@@ -775,4 +770,3 @@ public enum FieldValidationFlag {
         }
     }
 }
-

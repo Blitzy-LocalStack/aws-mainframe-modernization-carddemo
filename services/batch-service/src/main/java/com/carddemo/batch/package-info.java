@@ -2,25 +2,6 @@
  * Batch bounded context of the CardDemo mainframe-to-AWS migration: the Spring
  * Batch re-expression of the nightly z/OS batch pipeline.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and one
- * subpackage, {@code job}, which itself holds only its own charter. A type or test named below that
- * has no file yet is therefore <b>planned</b>, not missing, and a count below is a target total
- * rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> This package and its seven subpackages own the migrated
  * form of the batch work that ran under JCL and JES2 against VSAM: the
  * daily-transaction preflight, transaction posting, interest accrual, the
@@ -274,9 +255,11 @@
  * through the physical schema and never through code, which is what keeps a
  * shared table from becoming a shared deployable. A service module importing
  * another service module's {@code domain} package is forbidden, and the
- * prohibition is a test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * rather than a convention, so it cannot decay into a comment nobody runs.</p>
+ * prohibition belongs to the {@code architecture-rules} Surefire execution
+ * declared in {@code services/pom.xml} -- which scans the shared kernel's test
+ * artifact into every module and selects the layering rules by the simple name
+ * {@code LayeringRulesTest} -- rather than to a convention, so it is a rule a
+ * build evaluates rather than a comment nobody runs.</p>
  *
  * <h2>Boundaries this package does not cross</h2>
  *

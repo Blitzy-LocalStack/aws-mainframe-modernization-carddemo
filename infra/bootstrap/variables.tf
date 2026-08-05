@@ -17,7 +17,7 @@
 #   present, which is exactly how the gating validate and lint steps in
 #   .github/workflows/infra-ci.yml check it.
 #
-# Parameters -- the seven inputs, with the type and the consumer of each:
+# Parameters -- the nine inputs, with the type and the consumer of each:
 #   aws_region                 string. Region the backend is created in. Read
 #                              by `provider "aws"` in versions.tf, composed
 #                              into the default bucket name in main.tf, and
@@ -30,10 +30,10 @@
 #   lock_table_name            string, nullable. The same override for the
 #                              lock table; resolved by the matching
 #                              `coalesce` in main.tf.
-#   state_kms_key_arn          string, nullable. Customer-managed key for both
-#                              halves of the backend -- read by the bucket's
-#                              server-side-encryption configuration and by the
-#                              table's server-side-encryption block in main.tf.
+#   state_version_retention_days number. Minimum age for versions beyond the
+#                              retained recent-version count.
+#   state_noncurrent_versions_to_retain number. Recent versions retained.
+#   audit_log_retention_days number. Object-access audit-log horizon.
 #   state_bucket_force_destroy bool. Whether `terraform destroy` may delete a
 #                              bucket that still holds objects and versions.
 #                              Read by `force_destroy` in main.tf.
@@ -215,50 +215,39 @@ variable "lock_table_name" {
   }
 }
 
-# WHY this key is an optional input rather than a key this root creates, when
-# every datastore elsewhere in this migration is encrypted with a
-# customer-managed key -- Alternatives Considered: creating a CMK inside this
-# root was considered and rejected because it inverts the very dependency the
-# root exists to establish. Key management belongs to infra/modules/kms, and
-# that module's own state lives in the bucket this root creates -- so a key
-# created here could never be managed by the module that owns key management,
-# and a key created by that module cannot encrypt the bucket that has to exist
-# before the module can run at all. The circularity has no resolution inside one
-# apply, so the key becomes an input: an operator who already holds a suitable
-# key supplies its ARN, and an account with none still gets a working, encrypted
-# backend on the first apply.
-# Trade-offs: with null the bucket falls back to SSE-S3 (AES256) and the table to
-# AWS-owned encryption. Both encrypt at rest, and both give up exactly what a
-# customer-managed key would add -- there is no per-key CloudTrail trail of
-# decrypt calls and no key policy restricting who may read state, and state
-# files legitimately contain resource identifiers. That gap is accepted for the
-# state backend alone; every datastore holding application data at the
-# environment level does receive a customer-managed key, through
-# infra/modules/kms.
-# Alternatives Considered: two inputs, one key per resource. Rejected -- the
-# bucket and the table are two halves of one backend sharing a single blast
-# radius, so separate keys would double the key-policy surface while isolating
-# nothing: whoever can read the lock table can already reach the state it
-# guards.
-variable "state_kms_key_arn" {
-  description = "ARN of an existing customer-managed KMS key used to encrypt both halves of the backend. Read by the bucket's server-side-encryption configuration and by the table's server-side-encryption block in main.tf. Leave null to encrypt the bucket with SSE-S3 (AES256) and the table with AWS-owned encryption."
-  type        = string
-  default     = null
+variable "state_version_retention_days" {
+  description = "Minimum age in days before a state object version beyond the retained recent-version count may expire."
+  type        = number
+  nullable    = false
+  default     = 365
 
-  # WHY the check stops at an ARN shape rather than proving the key is usable
-  # Trade-offs: this value is handed straight to two AWS APIs that reject a
-  # malformed key reference with a message naming the bucket or the table rather
-  # than this input, so a cheap shape check moves the two common mistakes -- a
-  # bare key id, or an alias/<name> reference, pasted where a full ARN was asked
-  # for -- to plan time. Confirming that the key exists, is enabled, lives in
-  # this region and grants the caller kms:GenerateDataKey needs an API call, so
-  # it stays an apply-time failure. The partition is matched loosely so a
-  # GovCloud or China ARN is accepted rather than refused by a pattern written
-  # only for the commercial partition. The null guard is required for the same
-  # reason as the two overrides above.
   validation {
-    condition     = var.state_kms_key_arn == null || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$", var.state_kms_key_arn))
-    error_message = "state_kms_key_arn must be null to use SSE-S3, or a full KMS key ARN shaped arn:<partition>:kms:<region>:<account-id>:key/<key-id> -- a bare key id or an alias/<name> reference is not accepted."
+    condition     = floor(var.state_version_retention_days) == var.state_version_retention_days && var.state_version_retention_days >= 90 && var.state_version_retention_days <= 3653
+    error_message = "state_version_retention_days must be a whole number from 90 through 3653."
+  }
+}
+
+variable "state_noncurrent_versions_to_retain" {
+  description = "Number of newest noncurrent Terraform state versions retained regardless of age."
+  type        = number
+  nullable    = false
+  default     = 20
+
+  validation {
+    condition     = floor(var.state_noncurrent_versions_to_retain) == var.state_noncurrent_versions_to_retain && var.state_noncurrent_versions_to_retain >= 5 && var.state_noncurrent_versions_to_retain <= 100
+    error_message = "state_noncurrent_versions_to_retain must be a whole number from 5 through 100."
+  }
+}
+
+variable "audit_log_retention_days" {
+  description = "Finite lifecycle horizon for validated CloudTrail state-object data-event logs."
+  type        = number
+  nullable    = false
+  default     = 2557
+
+  validation {
+    condition     = floor(var.audit_log_retention_days) == var.audit_log_retention_days && var.audit_log_retention_days >= 365 && var.audit_log_retention_days <= 3653
+    error_message = "audit_log_retention_days must be a whole number from 365 through 3653."
   }
 }
 

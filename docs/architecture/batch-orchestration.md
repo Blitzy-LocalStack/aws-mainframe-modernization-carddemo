@@ -71,12 +71,12 @@
 > reader can repeat it. Where a narrative figure and a measured figure could
 > differ, the measured one is recorded.
 >
-> **Delivers, and who will consume it.** It delivers the eleven-state mapping with
+> **Delivers, and who consumes it.** It delivers the eleven-state mapping with
 > the JCL each state replaces, the inversion rule for condition codes, the ten
 > generation-dataset families and their retention equivalence, the restart design,
 > and the register of baseline artifacts observed while reading the batch tier. Its
-> declared consumers are `MIGRATION_README.md`, which lists this document in its
-> dependencies and will link it by exactly the path
+> consumers are [`MIGRATION_README.md`](../../MIGRATION_README.md), which lists
+> this document and links it by exactly the path
 > `docs/architecture/batch-orchestration.md`; `docs/adr/ADR-005-batch-orchestration.md`,
 > which records the orchestrator decision this document details;
 > `infra/modules/step-functions-batch/README.md` and
@@ -86,21 +86,17 @@
 > contract** — a single character of drift breaks a consumer that matches the
 > string literally.
 >
-> **None of those consumers has landed yet, and that is stated rather than
-> implied.** At this checkpoint `MIGRATION_README.md` does not exist, no ADR
-> exists, and no infrastructure module or runbook exists. Assumptions: a path in
-> this document that names a document not yet authored is written as a plain code
-> span rather than as a link, per the Markdown convention in
-> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — a link
-> that resolves to nothing is a defect a reader finds by clicking. A code span
-> becomes a link when the file it names exists.
+> **Current state.** The migration guide, ADR, infrastructure modules, batch
+> service README, and batch/data-migration runbooks are present. Their paths are
+> links rather than future contracts.
 >
 > **Caveats.** Four, stated up front rather than buried. First, this describes a
-> **target design**, not a running system: the state machine, its schedule and the
-> dataset bucket are authored as infrastructure-as-code and statically validated,
-> and applying them to a live account is an operator action outside this scope — so
-> nothing here asserts that a provisioned environment exists, and **no throughput,
-> duration or cost figure in this document is a measurement**. Second, a list of
+> **target design**, not a running system. The dataset module and generation
+> writer are implemented; the state machine and deployable roots are not. The
+> target paragraphs and Mermaid diagrams below are normative requirements until
+> the missing graph lands, so nothing here asserts that a provisioned environment
+> exists and **no throughput, duration or cost figure in this document is a
+> measurement**. Second, a list of
 > technologies is deliberately **out of scope** and is named as such in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope);
 > none of it is described anywhere below as delivered. Third, several **baseline
@@ -190,20 +186,23 @@ where each is stated, under the same four category names.
 
 ## The `carddemo-daily-batch` state machine
 
-The batch chain is one state machine, `carddemo-daily-batch`, started by a managed
-scheduler whose schedule expression is a per-environment infrastructure parameter
-rather than a value fixed by this document. Each state that does real work runs a
-container task through the **synchronous run-task integration**, so the state does
-not complete until the task does, and per-step arguments arrive as **container
-overrides** — the direct analogue of a JCL `PARM=` value and of a `DD DSN=`
-resolved at submission.
+**Target contract.** The batch chain will be one state machine,
+`carddemo-daily-batch`, started by a managed scheduler whose schedule expression
+is a per-environment infrastructure parameter rather than a value fixed by this
+document. Each state that does real work will run a container task through the
+**synchronous run-task integration**, so the state does not complete until the
+task does, and per-step arguments will arrive as **container overrides** — the
+direct analogue of a JCL `PARM=` value and of a `DD DSN=` resolved at submission.
+`infra/modules/step-functions-batch/main.tf` is absent, so the table and diagram
+in this section specify what that resource graph must implement; they do not
+describe a deployed state machine.
 
 | # | State | Replaces | Mechanism |
 |---|---|---|---|
 | 1 | `QuiesceOnlineWrites` | [`app/jcl/CLOSEFIL.jcl`](../../app/jcl/CLOSEFIL.jcl) L22–L30 — an SDSF operator command issuing `CEMT SET FIL(...) CLO` | Function setting a read-only flag in Parameter Store |
 | 2 | `StageSeedDatasets` | the `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [State 2](#state-2--stageseeddatasets-the-ten-load-branches) | `Map` state, one branch per dataset, each a synchronous run-task on the data-migration image |
 | 3 | `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline**; see [State 3](#state-3--cbtrn01c-has-no-jcl-driver-in-the-baseline) | Container task |
-| 4 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, then a `Choice` on the reject count that takes the warn path rather than failing |
+| 4 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, explicit run-scoped outcome handoff, then a `Choice` that distinguishes clean, warn and invalid/fatal outcomes |
 | 5 | `CalculateInterest` | [`app/jcl/INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L22–L41 driving `CBACT04C` | Container task; the business date arrives as a parameter, never as a clock read |
 | 6 | `BackupTransactions` | [`app/jcl/TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23–L67 | Container task exporting to a new object-store generation |
 | 7 | `CombineTransactions` | [`app/jcl/COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L22–L48 — a DFSORT merge followed by a `REPRO` reload | Container task using SQL ordering |
@@ -214,10 +213,10 @@ resolved at submission.
 
 ### Per-state resilience settings
 
-Every state carries all three settings; none is optional and none is inherited by
-default. The columns below give the shape, and the numeric interval and timeout
-values are per-environment parameters of `infra/modules/step-functions-batch` for
-the reason recorded in the final bullet of
+The target contract requires every state to carry all three settings; none is
+optional or inherited by default. The columns below give the required shape, and
+the numeric interval and timeout values will be per-environment parameters of
+`infra/modules/step-functions-batch` for the reason recorded in the final bullet of
 [WHY (non-obvious design decisions)](#why-non-obvious-design-decisions).
 
 | State | Integration | Timeout | Retry | Catch |
@@ -225,7 +224,7 @@ the reason recorded in the final bullet of
 | 1, 11 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient parameter-store or throttling error, exponential backoff | To `NotifyFailure` |
 | 2 | `Map` over ten branches, each a synchronous run-task | Explicit per branch **and** on the `Map` state | Up to 3 attempts per branch on task-launch failure | Branch catch aborts the `Map`, then to `NotifyFailure` |
 | 3, 5, 6, 7, 8, 9 | Synchronous run-task | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
-| 4 | Synchronous run-task, then a `Choice` | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
+| 4 | Synchronous run-task, read run-scoped posting outcome, then a `Choice` | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | Task/runtime or malformed outcome goes through cleanup, `NotifyFailure`, resume and `Fail` |
 | 10 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient connection error, exponential backoff | To `NotifyFailure` |
 
 Assumptions: the retry policies above are scoped to **launch and infrastructure
@@ -257,12 +256,16 @@ flowchart TD
     S1["1 QuiesceOnlineWrites<br/>replaces CLOSEFIL.jcl"] --> S2
     S2["2 StageSeedDatasets<br/>Map, 10 branches<br/>replaces the IDCAMS REPRO loads"] --> S3
     S3["3 PreflightDailyTransactions<br/>CBTRN01C - no JCL driver"] --> S4
-    S4["4 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] --> C4
+    S4["4 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] --> R4
 
-    C4{"Choice:<br/>reject count zero?"}
-    C4 -->|"yes - clean"| S5
-    C4 -->|"no - warn tier, RC 4<br/>inverts COND=4,LT"| W4["RecordRejectWarning"]
-    W4 --> S5
+    R4["ReadPostingOutcome<br/>run-scoped status handoff"] --> C4
+    C4{"Choice:<br/>returnCode + rejectCount"}
+    C4 -->|"RC 0 and rejects 0 - clean"| D4["DeletePostingOutcome"]
+    C4 -->|"RC 4 and rejects > 0 - warn"| W4["RecordRejectWarning"]
+    C4 -->|"any inconsistent value"| I4["InvalidPostingOutcome"]
+    W4 --> D4
+    D4 --> S5
+    I4 --> CP4["DeletePostingOutcomeIfPresent"]
 
     S5["5 CalculateInterest<br/>replaces INTCALC.jcl / CBACT04C<br/>business date is a parameter"] --> S6
     S6["6 BackupTransactions<br/>replaces TRANBKP.jcl<br/>writes a new generation"] --> S7
@@ -275,7 +278,7 @@ flowchart TD
     S1 -.->|Catch| NF
     S2 -.->|Catch| NF
     S3 -.->|Catch| NF
-    S4 -.->|Catch| NF
+    S4 -.->|Catch| CP4
     S5 -.->|Catch| NF
     S6 -.->|Catch| NF
     S7 -.->|Catch| NF
@@ -283,11 +286,58 @@ flowchart TD
     S9 -.->|Catch| NF
     S10 -.->|Catch| NF
 
+    CP4 --> NF
     NF["NotifyFailure"] --> RF["ResumeOnlineWritesOnFailure<br/>idempotent"]
     RF --> FA["Fail<br/>redrive resumes from the failed state"]
-%% The warn branch REJOINS the success path; a caught error does not. That
-%% asymmetry is the whole point of separating COND=(4,LT) from COND=(0,NE).
+%% The posting warn branch comes from CBTRN02C and the return-code contract.
+%% TRANBKP.jcl's COND=(4,LT) is local to that separate job and is not this edge.
 ```
+
+### The state-4 status handoff is explicit
+
+The posting warn branch cannot be inferred from
+[`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), and it also cannot be recovered from
+the optimized ECS integration's ordinary output: `runTask.sync` reports task and
+container metadata, not an application-defined reject count. The target
+`PostTransactions` task therefore receives a unique `run_id` and a run-scoped
+Parameter Store name such as
+`/carddemo/<environment>/batch/<run_id>/post-transactions`. Before it exits, it
+writes this JSON value:
+
+```json
+{
+  "returnCode": 4,
+  "processedCount": 42,
+  "rejectCount": 2
+}
+```
+
+The container exits zero for the two completed business outcomes — return code
+0 with no rejects, or return code 4 with one or more rejects — so the synchronous
+task reaches the business `Choice` instead of conflating a soft reject with a
+runtime failure. A fatal application outcome fails the task and follows the
+state's `Catch`. After a completed task, `ReadPostingOutcome` reads the exact
+run-scoped parameter, parses it with `States.StringToJson`, and applies these
+closed invariants:
+
+| Outcome | Required values | Next state |
+|---|---|---|
+| Clean | `returnCode = 0` and `rejectCount = 0` | Delete the parameter, then continue |
+| Warn | `returnCode = 4` and `rejectCount > 0` | Record the warning, delete the parameter, then continue |
+| Invalid | Any other pairing, missing parameter or malformed JSON | Delete the parameter if present, notify, resume online writes, then fail |
+
+Assumptions: the parameter name is unique per execution, contains no financial
+record data, and is deleted on both completed branches and on the failure path
+when it exists. The task role receives
+`ssm:PutParameter` only on its execution prefix; the state-machine role receives
+`ssm:GetParameter` and `ssm:DeleteParameter` on the same prefix. Alternatives
+Considered: encoding warn as the ECS process exit code was rejected because it
+turns a completed business result into infrastructure failure before a `Choice`
+can inspect it. Querying Aurora from the orchestrator was also rejected because
+Step Functions has no direct PostgreSQL integration and adding a Lambda solely to
+relay one result would duplicate the run ledger's application responsibility.
+The handoff is a **target design**: its state-machine IAM and status states are
+not authored yet.
 
 ### Why a container task per work step, and not a function
 
@@ -380,42 +430,45 @@ has, and it would add a state that can itself fail, so the chain would gain a
 failure mode it does not currently have while expressing nothing new. The `Catch`
 plus default edge covers the same two outcomes with one fewer moving part.
 
-Note that `COND=(0,NE)` gating is applied unevenly in the baseline and the target
-inherits the *effect*, not the unevenness: in
+Note that `COND=(0,NE)` gating is applied unevenly in the baseline; the target
+contract inherits the *effect*, not the unevenness. In
 [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) the two `IDCAMS` define steps at L24
 (`STEP10`) and L70 (`STEP50`) carry **no** `COND` at all, while the define at L47
-(`STEP30`) does. In the target every state is gated by its incoming edge, so the
-distinction disappears.
+(`STEP30`) does. In the future state machine every state will be gated by its
+incoming edge, so the distinction disappears.
 
 ### Form 2 — `COND=(4,LT)`: run only when the code is four or lower
 
 It reads "skip this step when four is *less than* the return code", so the step
-executes for codes zero through four and is bypassed from five upward. **One
-occurrence**, and it is the load-bearing one:
+executes for codes zero through four and is bypassed from five upward. There is
+**one occurrence**, and its scope is one JCL job:
 
 * [`app/jcl/TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L51 —
   `//STEP10 EXEC PGM=IDCAMS,COND=(4,LT)`, the step that re-defines the transaction
-  master cluster after the preceding step deleted it. The preceding `STEP05`
-  (L37–L45) deletes the cluster and its alternate index and then resets the code
-  with `IF MAXCC LE 08 THEN SET MAXCC = 0` at L42 and L45, so a "not found" delete
-  does not stop the define.
+  master cluster after the same job's `STEP05R` unload and `STEP05` delete. The
+  delete step at L37–L45 resets each `MAXCC <= 08` result to zero at L42 and L45,
+  so an absent cluster or alternate index does not prevent the define. A larger
+  local delete failure, or an earlier unload failure above four, causes `STEP10`
+  to be skipped.
 
-Assumptions: **this is precisely the reject-count semantic that posting sets.**
-[`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L230 executes
-`MOVE 4 TO RETURN-CODE` when it has written the reject stream, and the existing
-suite's return-code rubric records 4 as *warn / soft reject* rather than as
-failure — [`tests/README.md`](../../tests/README.md) §8. So the warn tier is a real
-outcome of a correct run, not an anomaly, and it must survive the translation. If
-the target collapsed codes zero and four into "success" it would lose the signal;
-if it collapsed four into "failure" then **a run that correctly rejected a
-transaction would be reported as a failed run**, and every night with a single bad
-card number would page an operator.
+This gate cannot observe `CBTRN02C`. `POSTTRAN.jcl` and `TRANBKP.jcl` are
+different jobs, and JCL `COND` evaluates return codes from earlier steps in the
+**same job**. The prior wording incorrectly treated the only syntactic
+`COND=(4,LT)` as provenance for the posting warn path.
 
-**Target.** An explicit `Choice` after state 4 that inspects the reject count
-reported by the task, routes a non-zero count through a `RecordRejectWarning`
-state, and then **rejoins the success path**. This is the only place in the chain
-where a non-clean outcome continues, and it is the reason the flow diagram above
-shows one branch rejoining and the `Catch` edges not rejoining.
+**Target mapping.** The specific gate retires with the VSAM
+delete-and-redefine mechanism. State 6 exports the relational transaction data
+without deleting and recreating its Aurora table, so there is no target redefine
+step to conditionally enter. An export/task failure follows state 6's `Catch`;
+successful export continues. Creating a `Choice` for this JCL occurrence would
+preserve syntax after the operation it guarded had disappeared.
+
+**The posting warn branch is independent.**
+[`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230 sets
+`RETURN-CODE` to 4 when `WS-REJECT-COUNT > 0`, and
+[`tests/README.md`](../../tests/README.md) §8 classifies 4 as warn/soft reject.
+That business contract, not `TRANBKP.jcl`, is why target state 4 must distinguish
+clean and warn outcomes through the explicit status handoff above.
 
 ### Form 3 — `INCLUDE COND=(...)`: record selection, never a step gate
 
@@ -436,8 +489,8 @@ rows the report contains. **Two occurrences**, both the same predicate:
   predicate in the procedure member discussed under
   [Observed baseline artifacts](#observed-baseline-artifacts).
 
-**Target.** A SQL `WHERE` clause on the processing date, bounded by the two report
-parameters:
+**Target.** A SQL `WHERE` clause on the real `ledger.transactions.proc_ts`
+`TIMESTAMP(6)` column, bounded by the two report-date parameters:
 
 ```sql
 -- Assumptions: the baseline compares TRAN-PROC-DT as CH (character) at one-based
@@ -445,7 +498,10 @@ parameters:
 -- GE/LE range and a DATE range select the same rows. That equivalence is what
 -- makes the inclusive bounds safe to carry across unchanged; a differently
 -- ordered date format would not survive the same translation.
-WHERE proc_date BETWEEN :report_start_date AND :report_end_date
+-- The half-open upper bound includes every timestamp on report_end_date while
+-- leaving proc_ts uncast so idx_transactions_proc_ts remains usable.
+WHERE proc_ts >= CAST(:report_start_date AS date)
+  AND proc_ts <  CAST(:report_end_date AS date) + INTERVAL '1 day'
 ```
 
 **It must never be modelled as a `Choice` state.** The accompanying
@@ -458,7 +514,7 @@ of the query, not a step in the chain.
 | JCL construct | What it gates | Target construct | What a naive copy would do |
 |---|---|---|---|
 | `COND=(0,NE)` | The step, on any non-zero predecessor code | Default success edge plus `Catch` | Run the step only on failure |
-| `COND=(4,LT)` | The step, from code five upward | Explicit `Choice` whose warn branch rejoins | Treat a correct reject run as a failure, or lose the warn signal |
+| `TRANBKP COND=(4,LT)` | That job's local VSAM redefine step, based on its own earlier steps | No direct state: the relational target does not delete/redefine the transaction table | Misattribute a local backup guard to the separate posting job |
 | `INCLUDE COND=(...)` | **Records**, inside a sort | SQL `WHERE` in the report query | Decide whether to run the report instead of which rows it contains |
 
 
@@ -494,15 +550,13 @@ grep -rn -A3 'DEFINE GENERATIONDATAGROUP' app/jcl
 | 9 | `DISCGRP.BKUP` | [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) L74 | L75, `SCRATCH` L76 | Reference-data refresh |
 | 10 | `DALYREJS` | [`DALYREJS.jcl`](../../app/jcl/DALYREJS.jcl) L25 | L26, `SCRATCH` L27 | State 4 — the reject stream |
 
-`infra/modules/s3-datasets` therefore provisions prefixes and lifecycle
-configuration for **ten** families. Assumptions: **a design that provisioned six
-would silently lose four retention policies** — and it would lose them silently,
-because a missing lifecycle rule produces no error at all. It produces a prefix
-that accumulates every version it is ever given, so the divergence from
-`LIMIT(5) SCRATCH` only becomes visible as a storage bill, long after the run that
-introduced it. The reject stream is the fourth of those four and the most
-consequential to lose, since it is the audit trail of every transaction the chain
-declined to post.
+The authored `infra/modules/s3-datasets` contract declares prefixes, versioning
+and lifecycle configuration for **ten** families, and publishes the effective
+logical count through `generation_retention_by_family`. Assumptions: **a design
+that declared six would silently omit four cleanup contracts**. The reject stream
+is the fourth of those four and the most consequential to lose, since it is the
+audit trail of every transaction the chain declined to post. The missing
+environment roots have not yet wired this output into batch task overrides.
 
 ### Relative generation references
 
@@ -527,8 +581,8 @@ generation being created by this step, `(0)` names the **current** one.
 Note the pattern at [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L37 and L44: the
 same `(+1)` is written by one step and read by the next **within one job**, which
 resolves to the same physical generation because a relative reference is fixed for
-the duration of the job. The target's equivalent is that the generation prefix is
-computed once per execution and passed to every state that touches it as a
+the duration of the job. The target equivalent will compute the generation prefix
+once per execution and pass it to every state that touches it as a
 container override, rather than each state deriving "the next generation" for
 itself. Assumptions: two states independently computing "next" would resolve to two
 different prefixes, and the reload at state 7 would then read an empty location
@@ -540,27 +594,32 @@ while the sort's output sat elsewhere.
 <domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/
 ```
 
-Inside a **versioned** bucket, with a lifecycle rule retaining **five noncurrent
-versions**. `(+1)` becomes a new `gen=` prefix; `(0)` resolves to the current one.
-The `dt=` component carries the business date the execution was given, not the date
-the objects were written, which is what keeps a rerun of an earlier business date
-landing where that business date's data belongs.
+The `dt=` component carries the injected business date, and `gen=` carries a
+four-digit logical generation number. `(+1)` becomes a new prefix; `(0)` resolves
+to the newest valid prefix in the family. The authored
+`data-migration/src/carddemo_migration/loaders/s3_stage.py` writer parses only this
+fixed shape, orders generations by `(business_date, generation)`, keeps the newest
+configured count and permanently deletes every object version and delete marker
+beneath prefixes that roll off. With the default count of five, staging a sixth
+logical generation scratches the oldest complete prefix.
 
-Assumptions: the retention equivalence rests on **bucket versioning plus
-noncurrent-version expiry** reproducing a semantic the mainframe expressed in the
-catalog. A generation data group is a catalog construct: the catalog knows the
-generations, their order, and that the sixth arrival displaces the first and
-`SCRATCH` releases it. Object storage has no such construct, so the target composes
-the same behaviour from two independent features, and both are required. Versioning
-alone would retain every generation forever; an expiry rule without versioning
-would have nothing to count. Trade-offs: the composition is not a perfect
-isomorphism — the mainframe's generation numbers are dense and ordered by the
-catalog, whereas the target's ordering comes from the explicit `gen=NNNN` prefix
-while the five-version count is enforced by the lifecycle rule underneath it. The
-accepted cost is that the retention count and the generation naming are enforced by
-two different mechanisms rather than one; the alternative, deriving order from
-object modification times, was rejected because it would make the generation
-sequence depend on write timing rather than on an explicit label.
+Bucket versioning and lifecycle remain necessary, but for a **different layer**:
+they protect and expire repeated writes of the same object key. Terraform's
+`newer_noncurrent_versions` counts versions of one key; it cannot count distinct
+current keys beneath `gen=0001/`, `gen=0002/` and so on. The shared
+`generation_retention_by_family` value keeps the writer's logical-prefix count and
+the lifecycle's same-key revision count under one configuration authority without
+claiming they are the same mechanism.
+
+Trade-offs: retention is enforced when a writer stages a generation rather than
+as an autonomous catalog service. That keeps the operation adjacent to the write
+that can exceed the limit and lets `delete_objects` report partial failures
+immediately. The cost is that every generation writer must use `stage_generation`;
+a direct `put_object` can bypass cleanup. The environment/task wiring that passes
+the Terraform output to every writer is therefore still required and is not yet
+authored. Deriving order from object modification times was rejected because a
+retry would then alter catalog order; the explicit date and generation labels make
+ordering deterministic.
 
 
 ## The restart story: there is no baseline checkpoint contract to preserve
@@ -606,17 +665,19 @@ to anyone who greps the whole repository.
 Refactoring Rationale: because the baseline's restart story is a commented-out
 hint, the target's restart design is a **documented improvement, not a
 reproduction**, and describing it as a port would be a false claim about the
-baseline. Two mechanisms provide it and they are complementary:
+baseline. It specifies two complementary mechanisms:
 
-* **Redrive** resumes a failed execution **from the failed state**, so the states
+* **Redrive** will resume a failed execution **from the failed state**, so states
   that already succeeded are not re-entered. This is the analogue of what the
-  commented `RESTART=STEP30` was reaching for.
-* **A durable per-step run ledger** in `batch.batch_run` gives every step an
-  idempotency key, so **a resumed step that already completed is a no-op**. Its
+  commented `RESTART=STEP30` was reaching for; the state machine that enables it
+  is not authored.
+* **A durable per-step run ledger** is defined in the authored
+  `batch.batch_run` DDL. Target job writers will give every step an idempotency
+  key, so **a resumed step that already completed is a no-op**. Its
   columns — `run_id`, `step_name`, `status`, `started_at`, `finished_at`,
   `return_code` — are specified in
   [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) and are
-  not restated here.
+  not restated here. No repository/job writer currently records those rows.
 
 Assumptions: the two mechanisms cover different failure modes and neither is
 sufficient alone. Redrive handles a state that failed and was never marked
@@ -626,12 +687,12 @@ reply — where redrive alone would re-enter a step that had already posted. Tog
 they make a resumed execution converge on the same end state as an uninterrupted
 one, which is the property golden-master comparison actually depends on.
 
-Trade-offs: the ledger is written by the same database transaction as the step's
-own work where the step writes to the database at all, which couples the ledger to
-the posting unit of work rather than keeping it in a separate store. An independent
-store was considered and rejected: a ledger that commits separately from the work
-it describes can disagree with it, which is exactly the failure the ledger exists
-to detect.
+Trade-offs: the target ledger write must share the same database transaction as
+the step's own work where the step writes to the database, coupling the ledger to
+the posting unit of work rather than keeping it in a separate store. An
+independent store was considered and rejected: a ledger that commits separately
+from the work it describes can disagree with it, which is exactly the failure the
+ledger exists to detect.
 
 
 ## State contracts preserved from the JCL
@@ -655,18 +716,19 @@ branch per job, and the branch list is fixed by that inventory:
 | [`TRANCATG.jcl`](../../app/jcl/TRANCATG.jcl) | `REPRO INFILE(TRANCATG) OUTFILE(TCATVSAM)` |
 | [`DUSRSECJ.jcl`](../../app/jcl/DUSRSECJ.jcl) | `REPRO INFILE(IN) OUTFILE(OUT)` |
 
-Each branch runs the data-migration image, whose readers and loaders are the
-`IDCAMS REPRO` equivalent. Alternatives Considered: a single task looping over ten
-datasets was rejected in favour of a `Map` with ten branches because a `Map` branch
-failure identifies *which* dataset failed in the execution history, whereas a loop
-inside one task reports one failure for the whole block and leaves the operator to
-read logs to find out which load did not complete.
+Each target branch will run the data-migration image, whose readers and loaders
+are the `IDCAMS REPRO` equivalent. Alternatives Considered: a single task looping
+over ten datasets was rejected in favour of a `Map` with ten branches because a
+`Map` branch failure identifies *which* dataset failed in the execution history,
+whereas a loop inside one task reports one failure for the whole block and leaves
+the operator to read logs to find out which load did not complete.
 
 ### State 3 — `CBTRN01C` has no JCL driver in the baseline
 
-**`CBTRN01C` is migrated as state 3 even though no member of `app/jcl` executes
-it.** This is stated explicitly because a reader comparing the state list against
-the JCL tree will otherwise go looking for a job that does not exist.
+**`CBTRN01C` is specified as state 3 even though no member of `app/jcl` executes
+it.** No corresponding `Job` bean exists yet. This is stated explicitly because
+a reader comparing the state list against the JCL tree will otherwise go looking
+for a job that does not exist.
 
 ```text
 # WHAT: show which JCL member drives each batch program, and that one program has
@@ -786,7 +848,7 @@ State 9 carries two report jobs, and the category-balance half is easy to overlo
   and the `OUTREC` at L53–L56 with `EDIT=(TTTTTTTTT.TT)` is the output edit mask.
 
 The job carries no `COND=` at all, so all three of its steps run unconditionally in
-the baseline; in the target they are one state reached by one edge.
+the baseline; the target design folds them into one state reached by one edge.
 
 ### The wait step retires with an analogue
 
@@ -915,15 +977,17 @@ L22–L28 and then emits **three distinct unload formats** from one program run 
 `LRECL=84, RECFM=VB` at L47. The other three read jobs are a single step with no
 dataset output at all.
 
-**Target mapping.** The SDSF operator quiesce **mechanism** is retired — there is
-no CICS region and no `CEMT` — while its **behaviour** is preserved as states 1 and
-11, which set and clear a read-only flag in Parameter Store bracketing the batch
-window. Alternatives Considered: revoking the online services' database write
-grants for the duration would enforce the quiesce in the database rather than in
-application code, and was rejected because a revoked grant surfaces to a user as a
-database error rather than as the read-only condition the flag lets a service
-report deliberately. The retirement of the mechanism is registered in
-`docs/architecture/cobol-to-service-traceability.md`.
+**Target mapping.** The SDSF operator quiesce **mechanism** retires — there will
+be no CICS region and no `CEMT` — while its **behaviour** is specified as states
+1 and 11, which will set and clear a read-only flag in Parameter Store bracketing
+the batch window. Those states are not authored. Alternatives Considered:
+revoking the online services' database write grants for the duration would enforce
+the quiesce in the database rather than in application code, and was rejected
+because a revoked grant surfaces to a user as a database error rather than as the
+read-only condition the flag lets a service report deliberately. The retirement
+of the mechanism is registered in
+`docs/architecture/cobol-to-service-traceability.md` once that register is
+authored.
 
 
 ## The procedure and control-card tier
@@ -950,9 +1014,9 @@ licence header — carries one functional line at L15:
 `REPRO INFILE(FILEIN) OUTFILE(FILEOUT)`. Assumptions: the control card names **data
 definitions, not datasets**, which is the whole reason one procedure and one control
 card serve four different jobs — the caller substitutes the datasets and the copy
-logic never changes. The target keeps that separation: the extract-transform-load
-image takes its source and target as parameters rather than embedding either, so a
-new dataset needs a new invocation and not new code.
+logic never changes. The target design keeps that separation: the
+extract-transform-load image will take its source and target as parameters rather
+than embedding either, so a new dataset needs a new invocation and not new code.
 
 Its three callers each override the same two definitions:
 [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23 (unloading the transaction master),
@@ -985,8 +1049,8 @@ through the `JCLLIB` order, the member named `REPROC` is the one that is found, 
 `TRANREPT.prc` — 82 lines that duplicate the report pipeline, including its own
 `INCLUDE COND=` at L45–L46 and its own `SYMNAMES` — is not reached by any caller in
 the repository. Recorded as an observed duplication. It is not asserted to be a
-defect, and the target has no equivalent construct: the report query exists once, in
-the reporting service.
+defect, and the target has no equivalent construct: the report query is specified
+once in the reporting service rather than duplicated as a procedure member.
 
 ### A duplicated step name
 
@@ -1036,11 +1100,10 @@ such ambiguity: L73's delete and L89's create both say 80, and the program agree
 execution treats "already exists" as success and the job is re-runnable.
 [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) and
 [`DALYREJS.jcl`](../../app/jcl/DALYREJS.jcl) carry no such guard. Recorded as an
-observed difference between the three jobs. In the target the property is uniform
-rather than per-statement, because the dataset prefixes and lifecycle rules are
-declared as infrastructure and re-applying an unchanged declaration is a no-op —
-which is what the acceptance criterion of an idempotent infrastructure package
-requires.
+observed difference between the three jobs. The target contract makes the
+property uniform rather than per-statement: the authored dataset module declares
+the prefixes and lifecycle rules once, and a future environment root must compose
+that unchanged declaration idempotently.
 
 ### A second, card-ordered copy of the transaction master
 
@@ -1154,7 +1217,7 @@ observations about the artifact.
 
 The CA-7 listing is a **completion-trigger graph**: each report's `TRIGGERED JOBS`
 section names the jobs that become eligible when this one completes. Those are
-dependency edges, and they are what the target reproduces — 28 of them, from
+dependency edges, and they are what the target design reproduces — 28 of them, from
 `CLOSEFIL → CBPAUP0J` at L43 through `PRTCATBL → OPENFIL` at L569. The payload
 spine is:
 
@@ -1209,7 +1272,8 @@ disclosed by the same table above: the four read-only unload jobs, the reference
 refresh jobs `TRANTYPE`, `TRANCATG` and `TCATBALF`, the extension jobs `CBPAUP0J`,
 `MNTTRDB2`, `TRANEXTR` and `DISCGRP`, and the text-to-PDF utility are not states of
 this machine. Their dispositions belong to the owning services and to
-`docs/architecture/cobol-to-service-traceability.md`.
+`docs/architecture/cobol-to-service-traceability.md` once that register is
+authored.
 
 The accepted cost of one machine is that work the artifacts placed in separate
 containers — most visibly interest calculation, which appears only in the monthly
@@ -1248,19 +1312,20 @@ leaf of the CA-7 dependency graph — it is an **intermediate node**:
 So the statement-creation job fed the text-to-PDF utility, which then fed both the
 wait step and the category-balance report job. Removing the middle node collapses
 that link, and the report job's predecessor edge has to be **re-parented onto the
-statement step**. That is exactly what the target does, and it is the structural
+statement step**. That is what the target graph must do, and it is the structural
 reason state 8 (`GenerateStatements`) precedes state 9 (`GenerateReports`) — the
 adjacency is inherited from the baseline graph with the retired node's edge spliced
 out, rather than chosen.
 
 Trade-offs: **what is lost is a PDF rendition of the statement, and no PDF
-equivalent is in scope.** The target's statement step writes plain text and HTML
-directly to object storage, so the intermediate conversion has no successor state
-and nothing downstream consumes a PDF. The alternative — carrying a rendering
-dependency into the statement service so the artifact set stays identical — was
-rejected because the utility being replaced is a third-party TSO product that is not
-part of this repository, so reproducing its output would mean choosing a different
-renderer and then owning the difference between two renderings of the same text.
+equivalent is in scope.** The target statement step is specified to write plain
+text and HTML directly to object storage, so the intermediate conversion has no
+successor state and nothing downstream consumes a PDF. The alternative — carrying
+a rendering dependency into the statement service so the artifact set stays
+identical — was rejected because the utility being replaced is a third-party TSO
+product that is not part of this repository, so reproducing its output would mean
+choosing a different renderer and then owning the difference between two
+renderings of the same text.
 The accepted cost is a narrower output set: two formats where the baseline produced
 three. This consequence is disclosed **both here and in the retirement table of**
 `docs/architecture/cobol-to-service-traceability.md`, so that a reader arriving from
@@ -1279,8 +1344,8 @@ that do not exist in the baseline** — a posted transaction whose category bala
 not yet moved, or an updated account whose transaction has not yet landed. The
 existing suite compares the posted records, the reject stream, the updated masters
 and the return code against golden masters, so it would observe those states and
-**correctly** report them as a parity failure. The batch tier therefore runs against
-the single cluster using a dedicated database role holding narrowly-scoped
+**correctly** report them as a parity failure. The target batch design therefore
+keeps the single cluster and a dedicated database role with narrowly-scoped
 cross-schema write grants on the ledger and account schemas **only**. That grant is
 specified once, in [`service-catalog.md`](service-catalog.md) and
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), and is not
@@ -1307,8 +1372,9 @@ the payload shape: `TYPEFILE(OUTPUT) RECORDSIZE(80)` with
 `RECORDFORMAT(FIXED)` — that is, 80-column fixed card images, which is what job
 control looked like when it was punched.
 
-**Target.** `reporting-service` starts an execution of a second, smaller state
-machine. The **submission tunnel is retired**; the **capability is preserved**. The
+**Target.** `reporting-service` will start an execution of a second, smaller state
+machine. Neither the caller nor that state machine is authored. The **submission
+tunnel retires**; the **capability is preserved by design**. The
 distinction matters because the two are easy to conflate: what disappears is the
 mechanism of writing card images into a queue that a reader picks up, and what
 remains is a caller in the online tier causing report work to run without waiting
@@ -1327,17 +1393,16 @@ kind of state machine.
 
 ### The deployment boundary
 
-The state machine, its schedule, the dataset bucket and the container task
-definitions are **authored as infrastructure-as-code and statically validated**. No
-execution of `carddemo-daily-batch` has been run against a live account, and no
-`terraform apply` against a real account is part of this scope — that is an operator
-action, and the exact commands belong to `docs/runbooks/deploy.md` and
-`docs/runbooks/batch-operations.md`. Consequently **no throughput, duration or cost
-figure in this document is a measurement**, and the two places where a number from a
-running system might be mistaken for one are called out where they appear: the CA-7
-`CPUTM`/`ELAPTM` attributes are artifact data points from a captured listing, and the
-per-state timeout values are per-environment parameters rather than observed
-durations.
+The dataset bucket module, generation writer, scheduler module and batch schema
+DDL are authored. The state-machine resource graph, container `Job` beans,
+environment roots, deploy workflow and batch-operations runbook are not. The
+existing HCL validates only as its own partial directories; recursive TFLint
+still reports the known findings in the missing `step-functions-batch` and root
+graphs. No execution of `carddemo-daily-batch` or complete environment plan
+exists. Consequently **no throughput, duration or cost figure in this document is
+a measurement**. The CA-7 `CPUTM`/`ELAPTM` values are artifact data from a
+captured listing, and the per-state settings above are target parameters rather
+than observed durations.
 
 ### Explicitly out of scope
 
@@ -1348,7 +1413,7 @@ this design:
 |---|---|
 | Multi-region and disaster-recovery topology | Single-region, three-availability-zone only |
 | Blue-green and canary deployment | Rolling service deployment only |
-| Kafka and Kinesis | The batch tier has no streaming requirement; the messaging requirement is request/reply and belongs to `docs/architecture/messaging-contracts.md` |
+| Kafka and Kinesis | The batch tier has no streaming requirement; the messaging requirement is request/reply and belongs to [`messaging-contracts.md`](messaging-contracts.md) |
 | Redis and ElastiCache | The baseline batch chain has no cache tier and none is required for parity |
 | Read replicas | Reporting reads go to the writer through read-only cross-schema views, per [`service-catalog.md`](service-catalog.md) |
 | The Db2 rewards extension, IMS DC, SFTP integration, exposing distributed transactions | Listed by the baseline itself as future work |
@@ -1362,12 +1427,13 @@ not deprecated and not disparaged here: it remains the functional-parity oracle
 against which the migrated chain is compared, which is only possible because it keeps
 working. **The migration adds a path, it does not remove one.**
 
-The comparison method is the existing suite's, unchanged: run the COBOL pipeline to
-produce golden outputs, run the equivalent migrated job over migrated data, and
-compare after the same timestamp normalisation. Assumptions: that method depends on
-the two properties this document has treated as contract — the injected business
-date, and the reject stream's fixed composition — so a target that read the clock or
-appended its rejects would break the comparison rather than fail it.
+The planned comparison method reuses the existing suite's oracle: run the COBOL
+pipeline to produce golden outputs, run the equivalent migrated job once its
+missing `Job` beans exist, and compare after the same timestamp normalisation.
+Assumptions: that method depends on the two properties this document has treated
+as contract — the injected business date and the reject stream's fixed
+composition — so a target that read the clock or appended its rejects would break
+the comparison rather than fail it.
 [`tests/README.md`](../../tests/README.md) §13 records the business rules the suite
 asserts verbatim, and §8 records the return-code rubric in which 4 is a warn rather
 than a failure. Its documented warn-level aggregate return code remains the green
@@ -1376,22 +1442,18 @@ state and must not be read as a regression introduced by this work.
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Several of the documents
-below are authored at later indexes of the same plan, so their paths appear here —
-and everywhere above — as plain code spans rather than as links, per the Markdown
-convention in [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md).
-Each becomes a link when the file it names exists.
+All related documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The canonical service names, `batch-service`'s responsibilities and owned data, and the cross-schema grant exception in full |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Every table and column the states read and write, including `batch.batch_run`, the reject record and the secondary index that replaces the alternate index |
-| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix, the retirement register and every documented behavioural divergence |
-| `docs/architecture/observability.md` | The logs, metrics, traces and alarms the states emit, and what `NotifyFailure` reaches |
-| `docs/architecture/messaging-contracts.md` | Queue mapping, wire format, correlation, ordering and deduplication — the asynchronous tier, which this chain does not use |
-| `docs/architecture/context-and-container-diagrams.md` | The current-state and target-state architecture diagrams this chain sits inside |
-| `docs/adr/ADR-005-batch-orchestration.md` | The orchestrator decision with its options, cost implications and risks |
-| `docs/runbooks/batch-operations.md` | Operating the chain: starting an execution, reading a failure, redriving, and the exact commands |
-| `docs/runbooks/data-migration.md` | The load and verification activity that state 2's branches perform |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix, the retirement register and every documented behavioural divergence |
+| [`observability.md`](observability.md) | The logs, metrics, traces and alarms the states emit, and what `NotifyFailure` reaches |
+| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, wire format, correlation, ordering and deduplication — the asynchronous tier, which this chain does not use |
+| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | The current-state and target-state architecture diagrams this chain sits inside |
+| [`../adr/ADR-005-batch-orchestration.md`](../adr/ADR-005-batch-orchestration.md) | The orchestrator decision with its options, cost implications and risks |
+| [`../runbooks/batch-operations.md`](../runbooks/batch-operations.md) | Operating the chain: starting an execution, reading a failure, redriving, and the exact commands |
+| [`../runbooks/data-migration.md`](../runbooks/data-migration.md) | The load and verification activity that state 2's branches perform |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |
 | [`tests/README.md`](../../tests/README.md) | The parity oracle: the three-layer suite, its markers, its return-code rubric and the business rules it asserts |

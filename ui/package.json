@@ -3,31 +3,6 @@
   "private": true,
   "version": "1.0.0",
   "description": "React 19 and TypeScript single-page application that replaces the AWS CardDemo 3270/BMS online screens with 21 browser routes.",
-  "//": [
-    "STAGED FOUNDATION. This manifest is authored ahead of the ui tree it",
-    "describes, so the scripts below are the module's ENTRY CONTRACT rather than",
-    "a set of commands that all run at this checkpoint. Every file each script",
-    "names that is absent today is authored at a later index of the same",
-    "migration plan: tsconfig.json (typecheck, build), eslint.config.js (lint),",
-    "vite.config.ts (dev, build, preview), vitest.config.ts (test, test:watch),",
-    ".prettierrc (format, format:write), src/main.tsx and public/favicon.svg",
-    "(both referenced by index.html, which is Vite's build input). Present in",
-    "the tree now: index.html, tsconfig.node.json, .env.example and",
-    "src/messages/messages.ts. Consequently `npm ci` succeeds and installs the",
-    "pinned tree, and no other script can be expected to succeed yet. The",
-    "scripts and pins are declared now on purpose: the dependency set, the",
-    "compiler ceiling and the exact script names are decisions the later modules",
-    "must be written against, and retrofitting them after 21 screens exist is",
-    "how a tree ends up with two conflicting build entry points.",
-    "ENGINES: the floor is >=22.22.0 rather than the >=22.12.0 that the Vite and",
-    "Vitest chain asks for, because react-router 8.3.0 - a direct dependency -",
-    "itself declares engines.node >=22.22.0, the highest floor anywhere in",
-    "package-lock.json. Stating the lower number would let `npm ci` install a",
-    "tree whose own constraint the manifest understates, so the only warning",
-    "would come from npm's per-package EBADENGINE check rather than from the",
-    "project's own contract. Node 22.22.0 also satisfies every other declared",
-    "range in the lock, including the ^22.13.0 that eslint-plugin-jsdoc requires."
-  ],
   "type": "module",
   "engines": {
     "node": "^22.22.0 || >=24.0.0"
@@ -35,9 +10,9 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
@@ -55,6 +30,14 @@
   },
   "carddemoDependencyRationale": {
     "$note": "Project-owned metadata that npm ignores. package.json is strict JSON and admits no comments, so the WHY that every other file in this tree carries as an inline comment lives here instead, keyed by the exact dependency entry it explains. Assumptions: each label key retains its trailing colon, so that the four canonical labels defined in docs/CODE_DOCUMENTATION_STANDARD.md appear here as exactly the literal, colon-terminated strings a fixed-string audit searches for. Dropping the colon because a JSON key is already delimited would produce a variant this repository does not accept. Trade-offs: only decisions that are NOT self-evident from the version string are recorded, because restating an obvious pin would bury the two that matter.",
+    "engines": {
+      "value": "^22.22.0 || >=24.0.0",
+      "Assumptions:": "the floor is 22.22.0 rather than the 22.12.0 the Vite and Vitest chain asks for, because react-router 8.3.0 -- a direct dependency -- itself declares engines.node >=22.22.0, the highest floor anywhere in package-lock.json. Stating the lower number would let `npm ci` install a tree whose own constraint the manifest understates, so the only warning would come from npm's per-package EBADENGINE check rather than from the project's own contract. Node 22.22.0 also satisfies every other declared range in the lock, including the ^22.13.0 that eslint-plugin-jsdoc requires."
+    },
+    "scripts": {
+      "Assumptions:": "typecheck runs tsc twice because this package holds TWO disjoint TypeScript projects, and `tsc -p` checks exactly one. tsconfig.json covers the browser sources under src; tsconfig.node.json covers vite.config.ts and vitest.config.ts, which execute under Node and are granted @types/node that browser code is deliberately denied. Checking only the app project left both build-configuration files unchecked by any compiler: eslint gives them type-aware LINT rules, but eslint does not report compiler diagnostics, so a genuine type error in either one failed nothing and surfaced later as a confusing build or test failure far from its cause.",
+      "Trade-offs:": "build delegates to `npm run typecheck` instead of repeating the two tsc invocations inline. The extra npm process is accepted because a repeated command string in a file that admits no comments is a drift hazard: an editor who extends typecheck and forgets build would silently return the bundle to the unchecked state this entry exists to close. Type-checking still precedes vite build, which is the property that matters, because esbuild strips types without checking them and a bare `vite build` will happily emit a bundle containing type errors."
+    },
     "react-router": {
       "version": "8.3.0",
       "Alternatives Considered:": "react-router-dom, which is the conventional choice and is deliberately ABSENT from this manifest. It has no release at major version 8 at all; its newest release is a thin re-export shim whose own dependency is react-router 7.18.1. Depending on it would therefore silently pin routing a full major version behind while looking like the safer, more idiomatic option. Every screen under ui/src/screens and ui/src/router.tsx import from react-router directly for this reason.",

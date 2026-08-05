@@ -431,11 +431,6 @@
         =============================================================================
          Test scope: unit, security, integration and architecture
         =============================================================================
-        WHAT: the six test only artifacts the *Test and *RepositoryIT classes
-              of this module will need, every version inherited. None of those
-              classes exists yet; the module's test tree is authored at a later
-              index of the same plan, and these declarations are what let it run
-              on its first execution rather than being retrofitted then.
         WHY : Assumptions: the parent already splits the two test phases, so
               nothing below needs a plugin binding here. Surefire runs *Test in
               the test phase and Failsafe runs *RepositoryIT in integration
@@ -530,8 +525,6 @@
         </dependency>
 
         <!--
-        WHAT: the shared kernel's TEST artifact, which carries the one rule
-              class those three boundaries are written in.
         WHY : Refactoring Rationale: the engine above was declared on its own,
               on the understanding that the rule class authored in common-lib
               applied here by inheritance. It did not. Maven resolution passes a

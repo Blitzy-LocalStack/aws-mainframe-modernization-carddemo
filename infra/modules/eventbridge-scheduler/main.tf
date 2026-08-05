@@ -229,6 +229,26 @@ data "aws_iam_policy_document" "permissions" {
     resources = [var.dead_letter_arn]
   }
 
+  # WHY : Assumptions: when the schedule payload is encrypted with a
+  #       customer-managed key, Scheduler reads that payload under this execution
+  #       role immediately before invoking the target. The role therefore needs
+  #       kms:Decrypt on that exact key; configuring kms_key_arn on the schedule
+  #       without this grant creates a schedule whose trigger is authorized to
+  #       start the state machine but cannot read the input it must send.
+  #       Alternatives Considered: granting GenerateDataKey here too, matching
+  #       the dead-letter statement below. Rejected because the execution role
+  #       only decrypts the already-stored schedule payload; the principal that
+  #       creates or updates the schedule owns the write-time key permission.
+  dynamic "statement" {
+    for_each = var.kms_key_arn == null ? [] : [var.kms_key_arn]
+
+    content {
+      sid       = "AllowSchedulePayloadDecryption"
+      actions   = ["kms:Decrypt"]
+      resources = [statement.value]
+    }
+  }
+
   # WHY : Alternatives Considered: emitted through a dynamic block over a
   #       one-or-zero element list, so that a queue relying on SQS-managed
   #       encryption mints no key grant at all. Granting the two actions
@@ -288,15 +308,11 @@ resource "aws_scheduler_schedule" "this" {
   flexible_time_window {
     mode = var.flexible_time_window_mode
 
-    # WHY : Assumptions: the module gates this attribute because nothing above
-    #       it does. `terraform validate` accepts a window length alongside mode
-    #       OFF -- confirmed by driving the pinned provider with exactly that
-    #       combination -- since validation checks each attribute's own schema
-    #       and not the relationship between two of them; the contradiction
-    #       surfaces only when the service rejects it, at apply, against a real
-    #       account. Resolving to null omits the attribute entirely rather than
-    #       sending a zero or a default, so the OFF case sends only what OFF
-    #       means and the FLEXIBLE case is the only one that carries a length.
+    # WHY : Assumptions: variables.tf validates the two inputs as one contract:
+    #       OFF requires null, while FLEXIBLE requires a whole number from 1 to
+    #       1440. This conditional is the resource-side translation of that
+    #       contract, omitting the attribute entirely for OFF rather than sending
+    #       a zero or a stale value and emitting it only for FLEXIBLE.
     maximum_window_in_minutes = var.flexible_time_window_mode == "FLEXIBLE" ? var.flexible_time_window_minutes : null
   }
 

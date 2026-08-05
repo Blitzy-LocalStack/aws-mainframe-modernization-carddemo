@@ -206,9 +206,11 @@
  *
  * <p>Assumptions: the reference seed data settles it beyond the declaration.
  * {@code app/data/ASCII/dailytran.txt} holds 300 records, of which 30 carry a
- * card number with a leading zero -- the second record's is
- * {@code 0927987108636232} -- and a numeric component would discard that zero
- * on the way out while still comparing equal on the way in. The symbolic maps
+ * card number with a leading zero, and a numeric component would discard that
+ * zero on the way out while still comparing equal on the way in. No example
+ * value is reproduced here: a primary account number does not belong in source
+ * prose even when it comes from the seed extract, and the aggregate count is
+ * what the type decision rests on. The symbolic maps
  * agree: {@code app/cpy-bms/COTRN01.CPY} declares {@code TCATCDI PIC X(4)} at
  * line 84 and {@code MIDI PIC X(9)} at line 120 where the record declares the
  * same two fields {@code PIC 9(04)} and {@code PIC 9(09)}, so even the

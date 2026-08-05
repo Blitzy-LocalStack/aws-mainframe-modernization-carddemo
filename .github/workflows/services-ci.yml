@@ -1,0 +1,234 @@
+# =============================================================================
+# .github/workflows/services-ci.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Builds and tests the nine-module Java reactor, enforces Java and Python
+#   documentation gates, validates the ETL package, and proves the eight service
+#   Dockerfiles build without publishing an artifact. GATING failures are Maven,
+#   Checkstyle, ArchUnit, Ruff, pytest, image builds, and required report upload;
+#   JUnit check annotation is ADVISORY and never changes the authoritative result.
+#
+# Parameters:
+#   workflow_dispatch.build_images permits a manual diagnostic run to omit the
+#   redundant Docker build while leaving every source and documentation gate on.
+# Return values:
+#   The workflow returns a failing status for any gate and uploads distinct Java
+#   and ETL reports even when a prior step fails.
+# Exceptions or errors:
+#   No COBOL runner return-code tolerance is imported: every non-zero tool exit is
+#   a real failure here. The advisory JUnit publisher alone tolerates failure.
+#
+# WHY (non-obvious design decisions):
+#   - Alternatives Considered: one serial job. Java and ETL do not consume each
+#     other's build products, so independent jobs expose failures in parallel.
+#   - Trade-offs: Maven and npm-style dependency caches add mutable shared state.
+#     Only setup-java's lock-keyed Maven cache is used; Python remains cacheless.
+#   - Assumptions: this workflow needs no AWS credential and receives no secret.
+# =============================================================================
+
+name: CardDemo Services CI
+
+# Assumptions: source, documentation, and workflow changes are included because
+# an over-narrow filter silently reports a green pull request without running
+# the owning gate. The immutable parity-oracle trees remain owned by tests.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "config/checkstyle/**"
+      - "data-migration/**"
+      - ".github/workflows/services-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "config/checkstyle/**"
+      - "data-migration/**"
+      - ".github/workflows/services-ci.yml"
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: "Build all eight service images after tests; disable only for a manual diagnostics-only rerun."
+        required: false
+        type: boolean
+        default: true
+
+# Assumptions: checkout requires repository read access. Check and pull-request
+# writes are granted per job only to the advisory JUnit publisher.
+permissions:
+  contents: read
+
+# Trade-offs: cancelling stale validation leaves no remote state or deployment
+# half-finished, so rapid updates replace redundant runs instead of queuing them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  java-services:
+    name: Build, test and gate the Java services
+    # Assumptions: pinning the runner avoids an unreviewed ubuntu-latest image
+    # change altering JDK, Docker, or shell behavior.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      # Assumptions: a full SHA is content-addressed; a mutable action tag can be
+      # repointed while this job's token remains trusted (CWE-1357).
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assumptions: Java 21 is the reactor toolchain. The Maven cache is scoped
+      # by the committed POM graph rather than by a branch-wide mutable key.
+      - name: Configure Java 21
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: corretto
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: services/pom.xml
+
+      # Assumptions: the reactor enforcer requires Maven 3.9 or newer. Verifying
+      # the published SHA-512 keeps the direct download as immutable as an action
+      # SHA while avoiding another third-party action.
+      - name: Install the reviewed Maven release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="3.9.16"
+          archive="apache-maven-${version}-bin.tar.gz"
+          expected="831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6"
+          curl -fsSLO "https://downloads.apache.org/maven/maven-3/${version}/binaries/${archive}"
+          printf '%s  %s\n' "$expected" "$archive" | sha512sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${version}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Java and Maven toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          mvn -version
+
+      # Assumptions: clean test runs Checkstyle at validate, ArchUnit under
+      # Surefire, and every module test without invoking the packaging-only
+      # repackage goal that modules without an application main class cannot use.
+      - name: Run the reactor test gates
+        shell: bash
+        run: mvn -B --no-transfer-progress -f services/pom.xml clean test
+
+      # Refactoring Rationale: this is deliberately redundant with the validate
+      # phase above so a missing Javadoc fails under a dedicated Rule 1 check name
+      # rather than being buried among compilation output.
+      - name: Run the Checkstyle documentation gate explicitly
+        shell: bash
+        run: mvn -B --no-transfer-progress -f services/pom.xml validate -DskipTests
+
+      # Refactoring Rationale: the architecture test also runs in the reactor,
+      # but its own step makes layer, cross-domain, or floating-money violations
+      # immediately distinguishable from business-test failures.
+      - name: Run the ArchUnit boundary gate explicitly
+        shell: bash
+        run: mvn -B --no-transfer-progress -f services/pom.xml -pl common-lib -Dtest=LayeringRulesTest test
+
+      # Trade-offs: CI repeats the Docker build that deploy.yml performs. The
+      # duplicate work catches a broken Dockerfile on a pull request without
+      # granting registry credentials or waiting for a deployment.
+      - name: Build all service images without pushing
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_images }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t dockerfiles < <(find services -mindepth 2 -maxdepth 2 -name Dockerfile -print | sort)
+          test "${#dockerfiles[@]}" -eq 8
+          for dockerfile in "${dockerfiles[@]}"; do
+            service="$(basename "$(dirname "$dockerfile")")"
+            docker build --file "$dockerfile" --tag "carddemo-ci/${service}:${GITHUB_SHA}" services
+          done
+
+      # Assumptions: a report upload is evidence of test execution. Missing
+      # reports fail loudly rather than turning an unexecuted suite green.
+      - name: Upload Java test reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-services-reports
+          path: |
+            services/*/target/surefire-reports/**
+            services/*/target/failsafe-reports/**
+            services/*/target/checkstyle-result.xml
+          if-no-files-found: error
+
+      # Trade-offs: annotations improve pull-request visibility, but this
+      # third-party action is advisory and cannot override Maven's exit status.
+      - name: Publish Java JUnit annotations
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
+        with:
+          report_paths: "services/*/target/surefire-reports/*.xml"
+          check_name: CardDemo Services Test Results
+          fail_on_failure: false
+
+  data-migration:
+    name: Lint and test the data-migration package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assumptions: Python 3.13 matches the ETL runtime image and the existing
+      # codec harness, preventing interpreter-dependent EBCDIC behavior drift.
+      - name: Configure Python 3.13
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      # Assumptions: the development closure includes the runtime manifest and
+      # adds Ruff, pytest and coverage. Both files are hash-complete, so
+      # --require-hashes verifies every resolved artifact instead of trusting a
+      # version pin alone.
+      - name: Install ETL dependencies
+        shell: bash
+        run: python -m pip install --require-hashes -r data-migration/requirements-dev.txt
+
+      # Assumptions: Ruff reads data-migration/pyproject.toml, including the
+      # pydocstyle D family that makes Rule 1 a build-failing Python gate.
+      - name: Run Ruff and the Python documentation gate
+        working-directory: data-migration
+        shell: bash
+        run: ruff check .
+
+      - name: Run ETL tests
+        shell: bash
+        run: |
+          mkdir -p data-migration-reports
+          python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
+
+      - name: Upload ETL test reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-data-migration-reports
+          path: data-migration-reports/**
+          if-no-files-found: error
+
+      - name: Publish ETL JUnit annotations
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
+        with:
+          report_paths: "data-migration-reports/*.xml"
+          check_name: CardDemo Data Migration Test Results
+          fail_on_failure: false

@@ -3,24 +3,6 @@
  * table {@code auth.users}, derived from a baseline COBOL record through an anti-corruption
  * boundary that this package deliberately does not implement itself.
  *
- * <h2>Target contract, not an inventory of this directory</h2>
- *
- * <p>Assumptions: the entity named above and described below is this package's <b>target
- * contract</b> as the migration plan assigns it, not a listing of the files that happen to sit
- * beside this one. The migration lands its artifacts in plan order and this charter is authored
- * first, so at the checkpoint that authored it this directory holds this charter and nothing else.
- * {@code User} is consequently <b>planned</b> rather than absent, and every statement below about
- * what it may and may not carry reads as a constraint on whoever authors that file, not as a
- * description of code already present.</p>
- *
- * <p>Alternatives Considered: withholding this charter until {@code User} exists. Rejected,
- * because the charter is exactly what the author of that entity works from -- which table it may
- * map, which two declared fields of the baseline record it may not carry across, which annotations
- * are out of bounds -- so writing it afterwards would leave the package unconstrained during the
- * one interval in which the constraint is what decides the code. The accepted cost is that an
- * inventory authored first reads as present tense unless the distinction is declared, and
- * declaring it is the whole of what this section does.</p>
- *
  * <h2>Purpose</h2>
  *
  * <p>The package root is {@code com.carddemo.auth} and {@code domain} is its persistence layer. A
@@ -46,42 +28,25 @@
  * mapping in this package assumes the {@code auth} schema already exists by the time the migration
  * runs and never attempts to create it.</p>
  *
- * <h2>How this charter meets the four docstring elements</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>The user-specified Explainability rule -- the single rule governing this project, and the
- * reason this file exists at all -- attaches at its line 15 the docstring duty to every module
- * entry point, and in Java a package declaration is that entry point and can carry a docstring
- * only inside a {@code package-info.java}. The Javadoc block is therefore not decoration on this
- * file; it is the file's entire reason to exist, and a bare {@code package} statement would be a
- * failure rather than a minimum. That rule enumerates four docstring elements at its lines 18 to
- * 21 and names a docstring omitting any of them among its forbidden patterns at its line 39, so a
- * reader has to be able to tell a declared inapplicability from an oversight:</p>
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <ul>
- *   <li><b>Purpose</b> is the section above.</li>
- *   <li><b>Parameters</b> -- a package accepts none, so the element is carried by the external
- *       contracts every mapping here is bound to and may not restate: the copybook layout that
- *       fixes each field's declared width, the migration that creates the table and its columns,
- *       and the schema bootstrap that must already have run. Those are the sections on the record
- *       this mapping derives from and on the anti-corruption boundary.</li>
- *   <li><b>Return values</b> -- a package yields none, so the element is carried by what this
- *       package exposes to its consumers: one mapping over one owned table, and four attributes
- *       that deliberately do not exist on it. That is the section on what this package does not
- *       hold.</li>
- *   <li><b>Exceptions</b> -- a package raises none. The element is carried by the two failure
- *       modes a reader has to plan for, both named in the sections below: an attribute mapped onto
- *       a column the migration does not create, which fails on first use rather than in review;
- *       and an import that crosses a layering boundary, which fails the architecture test instead
- *       of reaching production.</li>
- * </ul>
- *
- * <p>Assumptions: the mapping above is declared rather than left implicit because inventing
- * at-clauses instead would be worse than useless. Javadoc has no parameter, return or exception
- * concept for a package, and the repository rule set audits at-clause bodies for emptiness, so a
- * fabricated clause would either be discarded by the tool or reported by it. This charter
- * consequently carries no at-clause of any kind, and none for authorship, availability or revision
- * either, neither of which the rule nor the house convention asks for.</p>
- *
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>The record this mapping is derived from</h2>
  *
  * <p>The baseline record is {@code 01 SEC-USER-DATA}, declared at {@code app/cpy/CSUSR01Y.cpy}
@@ -256,77 +221,5 @@
  * each field needs -- which copybook line, which byte position, which declared width, and for the
  * two fields above why nothing is there at all -- has to be attached to the member itself, and
  * there is no member to attach it to until it is written out.</p>
- *
- * <h2>How this charter is audited</h2>
- *
- * <p>Assumptions: the prose convention these paragraphs follow is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} and the mechanical gate is
- * {@code config/checkstyle/checkstyle.xml} with its companion
- * {@code config/checkstyle/suppressions.xml}, bound to the Maven {@code validate} phase by
- * {@code services/pom.xml} so that it runs before compilation on every local build and not in
- * continuous integration alone. Where the governing rule, that configuration and that standard
- * could be read differently, the rule decides and the other two are read up to it rather than the
- * rule read down to them.</p>
- *
- * <p>Assumptions: two of that rule set's checks bear on this file, and they are a deliberate pair
- * split across the two levels of the configuration. One inspects the directory and asserts that a
- * {@code package-info.java} is present wherever an audited source file sits; the other inspects
- * this comment and asserts that the file carries Javadoc. A file holding nothing but a
- * {@code package} statement satisfies the first and fails the second, which is exactly the outcome
- * the pairing is built to produce. No escape written into this source can waive either finding:
- * the rule set configures a file-based suppression filter and no comment-based or annotation-based
- * one, that filter is set to fail when its companion file is absent rather than to pass having
- * suppressed nothing, and the companion is scoped to generated sources and test fixtures alone, so
- * nothing under a module's main source tree is suppressible at all. The rule's own validation gate
- * at its line 43 is conjunctive: it closes by stating that code missing either the docstring or
- * the decision rationale fails review, so the two obligations are independently fatal and neither
- * one compensates for the other.</p>
- *
- * <p>Assumptions: the justification labels used above -- {@code Alternatives Considered:},
- * {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:} -- are spelled as
- * the governing rule presents them at its lines 31 to 34 and as
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes them: plural, unparenthesised, each closed by
- * a colon, and carrying no emphasis markup. Trade-offs: this file is written in plain seven-bit
- * characters throughout, and phrases drawn from existing repository documentation are paraphrased
- * rather than copied out of it, because some of that prose punctuates with non-breaking hyphens
- * and dashes outside the ASCII range. A label copied from such a line looks correct, greps wrong,
- * and silently fails an audit searching for the canonical spelling; the cost is typographically
- * plainer prose and the gain is that every label and every quoted symbol here is
- * byte-predictable.</p>
- *
- * <p>Assumptions: {@code app/**} is read as this migration's specification and is never modified.
- * Every copybook and program line cited above still declares exactly what it always declared, and
- * the baseline continues to run unchanged; the existing test suite states that policy for the
- * whole tree, naming the COBOL programs, copybooks, job control, maps and seed data as reference
- * material. Nothing in this package is a source of truth for a record layout. The copybook is, and
- * it stays single-sourced there.</p>
- *
- * <p>Assumptions: this file declares a package, imports nothing and annotates nothing, and the
- * emptiness is load bearing. No import statement appears here, and no package-level annotation
- * either -- neither a nullability default nor a persistence-wide setting. An annotation would pull
- * a type into a compilation unit whose only function is documentation, and a persistence-wide
- * default declared here would silently govern every future attribute of the entity from a file
- * nobody opens while editing it. A reader who finds this file short on code has found it
- * correct.</p>
  */
 package com.carddemo.auth.domain;
-// Alternatives Considered: two cheaper shapes for this file were evaluated, and both fail the
-// build rather than merely reading thinner than the charter above. Omitting the file entirely
-// fails the directory-level JavadocPackage check, a file-set check that requires a
-// package-info.java wherever an audited source file sits, and User.java lands in this directory.
-// Providing the file but leaving it comment-free clears that check and then fails
-// MissingJavadocPackage, the tree-walking check that requires the file to carry Javadoc. The two
-// form an interlock, so satisfying either one alone is the documented failure mode rather than a
-// shortcut, and the block above is consequently this file's reason to exist and not ornament on
-// it. Independently of both checks, the governing rule attaches the docstring duty to every module
-// entry point at its line 15, and in Java a package declaration can carry a docstring only here.
-//
-// Alternatives Considered: placing this block ABOVE the package declaration, which is where a
-// reader would expect a comment about the declaration to sit. Rejected because the position is
-// forced rather than stylistic: MissingJavadocPackage recognises a package's documentation only
-// when the Javadoc block is the declaration's IMMEDIATELY preceding sibling, so interposing these
-// single-line comments between the block above and the declaration made that check report the
-// Javadoc as missing outright and failed the build. The two obligations -- a Javadoc block the
-// check can bind, and a rationale adjacent to the decision it explains -- are both satisfiable
-// only with the prose above the declaration and this block below it. That ordering was established
-// by running the gate and reading the violation, not by reasoning about it.

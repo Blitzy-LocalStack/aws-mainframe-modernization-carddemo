@@ -43,6 +43,25 @@ GitHub provides additional document on [forking a repository](https://help.githu
 ## Finding contributions to work on
 Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any 'help wanted' issues is a great place to start.
 
+## Migration code documentation
+
+Every new or modified artifact under `services/**`, `ui/**`,
+`data-migration/**`, `infra/**`, `docs/**`, and the migration workflows follows
+[the CardDemo code documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md).
+The AAP and Rule 1 are authoritative; linters implement only the subset they
+can decide and may not narrow the requirement.
+
+Pull requests must document purpose, parameters, return values, and exceptions
+in the language's standard docstring form. Adjacent rationale must explain
+non-obvious choices using the canonical labels `Alternatives Considered:`,
+`Refactoring Rationale:`, `Assumptions:`, or `Trade-offs:`. Statement-level
+comments that merely narrate what the next line does do not satisfy the rule.
+
+Assumptions: Java Checkstyle, UI ESLint/JSDoc, Python Ruff, Terraform
+lint/documentation drift, and workflow checks are build gates. Review still
+owns semantic accuracy and rationale quality because no linter can determine
+whether prose is true.
+
 
 ## Code of Conduct
 This project has adopted the [Amazon Open Source Code of Conduct](https://aws.github.io/code-of-conduct).

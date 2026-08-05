@@ -69,30 +69,28 @@
 > package, whose byte offsets must match §[The dataset, copybook and record-length
 > contract](#the-dataset-copybook-and-record-length-contract); the data-transfer
 > objects and mappers in every service; and the sibling documents
-> `docs/architecture/batch-orchestration.md`,
-> `docs/architecture/messaging-contracts.md`,
-> `docs/architecture/security-and-identity.md` and
+> [`batch-orchestration.md`](batch-orchestration.md),
+> [`messaging-contracts.md`](messaging-contracts.md),
+> [`security-and-identity.md`](security-and-identity.md) and
 > `docs/architecture/cobol-to-service-traceability.md`. The
 > catalog links this file by exactly the path
-> `docs/architecture/data-model-and-schema-mapping.md`, so the spelling is part of
+> [`docs/architecture/data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md),
+> so the spelling is part of
 > the contract.
 >
-> **None of those consumers has landed yet.** This document is authored ahead of
-> them on purpose, so that the migrations, layout module, transfer objects and
-> sibling documents can be written against one derivation instead of each deriving
-> its own. Concretely: of the per-service Flyway migrations only
-> `V1__reference.sql` and `V1__batch.sql` exist; the extract-transform-load layout
-> module does not; no service has a transfer object or mapper yet; and of the four
-> sibling documents named above, none exists. Assumptions:  a path here that names
-> a document not yet authored is written as a plain code span rather than as a link,
-> per the Markdown convention in
-> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — a link
-> resolving to nothing is a defect a reader finds by clicking. A code span becomes a
-> link when the file it names exists.
+> **Measured consumer status.** Five per-service Flyway files are authored across
+> four services: auth V1, batch V1, reference V1 plus V2, and transaction V1. The
+> extract-transform-load layout module exists, as do the batch, messaging and
+> security sibling documents. Reporting has one DTO and one mapper utility, but no
+> other service has an authored DTO/mapper implementation, and the traceability
+> matrix remains absent. Assumptions: a path naming an absent document is a code
+> span; an existing document is linked, per
+> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). This
+> prevents a target consumer from being presented as delivered.
 >
 > **Caveats.** Four, stated up front rather than buried. First, this describes a
-> **target design**: the infrastructure is authored to a foundation state and checked
-> to the extent that state admits (the measured per-check state is tabulated under
+> **target design**: the infrastructure is partially authored and statically checked
+> (the measured per-check state is tabulated under
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope)), and
 > applying it to a live account is an operator action outside this scope, so no
 > table below is asserted to exist in a provisioned database and no figure in this
@@ -117,8 +115,10 @@ read-only. The same reference status applies to `tests/**`, `scripts/**` and
 **Exactly three pre-existing files may be modified by this migration**, and naming
 them is what makes the additive claim above checkable rather than asserted: `README.md`,
 `CONTRIBUTING.md` and `.gitignore`. There is no fourth — every other artifact of the
-migration, every table derived below included, is a new file in a new tree. At this
-checkpoint only `.gitignore` has been modified.
+migration, every table derived below included, is a new file in a new tree. The
+current `.gitignore` contains the migration's build-output, state, plan-file and
+environment patterns; the root `README.md` and `CONTRIBUTING.md` migration updates
+remain unauthored.
 
 
 ## WHY (non-obvious design decisions)
@@ -513,7 +513,8 @@ Two properties of those four lines carry into the target.
 > written. Its intent — that this data is recoverable to a point in time — is
 > satisfied at the cluster level instead, by encrypted automated backups and
 > point-in-time recovery, which is where the security and
-> identity (`docs/architecture/security-and-identity.md`) document places it. It is recorded here as a
+> identity ([`security-and-identity.md`](security-and-identity.md)) document places
+> it. It is recorded here as a
 > **dropped attribute with a named replacement**, because an attribute that simply
 > disappears from a migration reads as an oversight, and the replacement is not an
 > index option so a reader will not find it by looking at the index.
@@ -770,7 +771,7 @@ into a comma-separated form will not find it by searching.
 > ordering it already relies on. Note also that `INCLUDE COND` here selects
 > *records*; it is not a step-gating condition code, and conflating the two forms is
 > a real hazard since they share the keyword — the step-gating semantics are covered
-> in `docs/architecture/batch-orchestration.md`.
+> in [`batch-orchestration.md`](batch-orchestration.md).
 
 ### Corroboration B: the category-balance record
 
@@ -880,28 +881,29 @@ columns rather than one opaque field:
 
 ## The eight schemas and their owners
 
-Ownership is schema-per-service, and the names below are taken verbatim from
-[`service-catalog.md`](service-catalog.md), which is the naming authority. There are
-**eight schemas for eight contexts**: six contexts own a schema and the tables in it,
-one owns a schema plus narrowly-scoped write grants outside it, and one owns a schema
-that holds no table at all.
+The target ownership model is schema-per-service, and the names below are taken
+verbatim from [`service-catalog.md`](service-catalog.md), which is the naming
+authority. There are **eight schemas for eight contexts**: six contexts own a schema
+and the tables designed for it, one owns a schema plus narrowly-scoped write grants
+outside it, and one owns a schema that holds no table at all.
 
-| Schema | Owning context | Tables |
-|---|---|---|
-| `auth` | `auth-service` | `users` |
-| `account` | `account-service` | `accounts`, `customers`, `card_xref` |
-| `card` | `card-service` | `cards` |
-| `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` |
-| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` |
-| `batch` | `batch-service` | `batch_run`, plus the batch framework's own job-repository tables |
-| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` |
-| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table** — read-only cross-schema views only, created by `data-migration/sql/V1__reporting_views.sql`, reachable by the `carddemo_reporting` login through `SELECT` on those views and through no base-table grant at all |
+| Schema | Owning context | Target tables or views | Authored migration status |
+|---|---|---|---|
+| `auth` | `auth-service` | `users` | `V1__auth.sql` authored |
+| `account` | `account-service` | `accounts`, `customers`, `card_xref` | no service migration authored |
+| `card` | `card-service` | `cards` | no service migration authored |
+| `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
+| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` | `V1__reference.sql` and `V2__seed_reference.sql` authored |
+| `batch` | `batch-service` | `batch_run`, plus the batch framework's own job-repository tables | `V1__batch.sql` authored |
+| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | no service migration authored |
+| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table** — four read-only cross-schema views | `data-migration/sql/V1__reporting_views.sql` authored; its account/card source migrations remain absent |
 
-`batch-service` additionally holds narrowly-scoped cross-schema **write** grants on
-`ledger.*` and `account.*` only. That is the one deliberate departure from
-database-per-service purity in the design, and it exists because transaction posting
-commits three rows — the transaction, its category balance and the account — as one
-unit of work. The decision, and the saga alternative it rejects, is recorded in
+When the bootstrap SQL is applied, `batch-service` receives narrowly-scoped
+cross-schema **write** grants on `ledger.*` and `account.*` only. That is the one
+deliberate departure from database-per-service purity in the design, and it exists
+because transaction posting commits three rows — the transaction, its category
+balance and the account — as one unit of work. The decision, and the saga
+alternative it rejects, is recorded in
 [`service-catalog.md`](service-catalog.md); it appears here only because it is why
 two schemas have a second writer.
 
@@ -984,7 +986,7 @@ fixed width and rule 2 applies; the two name fields are descriptive, so rule 3 g
 > untouched and continues to behave exactly as it does; the divergence is registered
 > in `docs/architecture/cobol-to-service-traceability.md`, and the
 > full identity mapping — including how `'A'` and `'U'` become group claims — is in
-> `docs/architecture/security-and-identity.md`.
+> [`security-and-identity.md`](security-and-identity.md).
 
 The `CHECK` constraint on `user_type` encodes the `'A'` / `'U'` domain that the
 baseline expresses as condition names in the shared session structure
@@ -1289,7 +1291,8 @@ recording.
 > documented here as a **capability the target adds**. Describing it as a migration
 > of an existing mechanism would misrepresent the baseline, which recovers from a
 > failed step by resubmitting from a step the operator selects. The orchestration
-> that uses this table is in `docs/architecture/batch-orchestration.md`.
+> that uses this table is in
+> [`batch-orchestration.md`](batch-orchestration.md).
 
 
 ### `authorization` — `authorization-service`
@@ -1406,22 +1409,27 @@ derivation.
 #### `authorization.auth_reply_outbox` — the fourth table, with no baseline source
 
 No copybook, segment or table in the baseline corresponds to this one, because the
-behaviour it exists for is a correction rather than a migration: the baseline publishes
-an authorization reply outside the unit of work that committed the decision, so a
-failure between the commit and the put loses a reply the data says was produced. A row
-written here inside the same transaction as the decision, and drained afterwards, is
-what closes that window. It holds the reply's routing and correlation, the card and
-transaction the reply belongs to, the moment it was written and the moment it was
-published; the queue attributes those fields feed are listed at the end of this
-subsection. It is created and owned by `authorization-service` alone, and the
-extract-transform-load path never loads into it.
+behaviour it exists for is a correction rather than a migration. The baseline uses
+`MQPMO-NO-SYNCPOINT` and publishes the reply **before** its database write and later
+CICS syncpoint. A reply can therefore escape even when the database write or commit
+subsequently fails; the queue and database do not form one atomic unit. The target
+contract instead writes an outbox row in the same transaction as the decision and
+drains it afterwards. The row holds routing and correlation, the card and transaction
+the reply belongs to, the moment it was written and the moment it was published.
+`authorization-service` is the target owner, and the extract-transform-load path
+never loads into it.
 
-Two indexes, both partial and both on unpublished rows only:
+**Measured implementation status:** the authorization module currently has no
+Flyway migration and no non-`package-info.java` main-source implementation. The
+table, both indexes, transactional writer, publisher and purge integration described
+below are therefore specified but not yet authored.
+
+Two target indexes, both partial and both on unpublished rows only:
 
 | Index | Definition | Why |
 |---|---|---|
 | `idx_auth_reply_outbox_pending` | `(created_at) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. |
-| `idx_auth_reply_outbox_group` | `(card_num, outbox_id) WHERE published_at IS NULL` | Per-card publication order. The reply queue groups by card, so the drain must send a card's pending replies in the order they were written; this index makes that ordering an index scan rather than a sort. |
+| `idx_auth_reply_outbox_group` | `(order_group_token, outbox_id) WHERE published_at IS NULL` | Per-card publication order through the purpose-scoped opaque group token. The drain sends one token's pending replies in write order without putting the primary account number in SQS metadata; this index makes that ordering an index scan rather than a sort. |
 
 > **Assumptions — publication state is a nullable timestamp rather than a status
 > column.** A `CHAR(1)` status with a check constraint was the alternative, matching
@@ -1434,35 +1442,43 @@ Two indexes, both partial and both on unpublished rows only:
 > as `published_at IS NOT NULL` rather than as an equality, which is one more
 > keyword in every query that touches it.
 
-> **Assumptions — retention is bounded by the existing purge job, not by a new
+> **Assumptions — target retention is bounded by the existing purge job, not by a new
 > one.** A published row has no further purpose, and rows accumulate at the rate
 > authorizations are decided. Deleting them at drain time was considered and
 > rejected: keeping a short published history is what lets an operator answer
 > whether a reply was ever sent for a given transaction, which is precisely the
-> question the baseline's lost-reply window made unanswerable. Rows are therefore
-> removed by the migrated `CBPAUP0C` purge job — the one that already expires
+> question the baseline's inconsistent queue/database window made unanswerable.
+> Rows are therefore to be removed by the migrated `CBPAUP0C` purge job — the one that already expires
 > pending authorizations — so retention is one scheduled job's concern rather than
 > two. Only rows with `published_at IS NOT NULL` are eligible; an unpublished row is
 > never purged, because purging one would lose the reply this table exists to
 > guarantee.
 
-> **Assumptions — this table is owned and created here, not by data-migration.** It
+> **Assumptions — this target table belongs in the service migration, not data-migration.** It
 > holds no migrated data, so the extract-transform-load path has nothing to load into
-> it; it is created by `authorization-service`'s own Flyway migration alongside the
-> three derived tables, and no other context reads or writes it. The queue attributes
-> that `card_num`, `transaction_id`, `correlation_id` and `reply_to_queue_url` feed
-> are specified in `docs/architecture/messaging-contracts.md`.
+> it; it is created by `authorization-service`'s own Flyway migration,
+> [`V1__authorization.sql`](../../services/authorization-service/src/main/resources/db/migration/V1__authorization.sql),
+> alongside the three derived tables, and no other context reads or writes it. Its
+> queue-attribute columns are `message_group_id`, `deduplication_id`,
+> `correlation_id` and `reply_queue_url`, and the first three carry
+> purpose-separated KEYED TOKENS rather than the values they stand for -- so neither
+> the primary account number nor the raw transaction tuple becomes SQS metadata or a
+> queue-telemetry dimension. The tokens are derived by `CsvAuthCodec` through
+> `OpaqueIdentifier`, and the attribute mapping they feed is specified in
+> [`messaging-contracts.md`](messaging-contracts.md).
 
 
 ### `reporting` — `reporting-service`, a schema with no tables
 
-`reporting-service` owns **no tables**, and the `reporting` schema nevertheless
-exists: it is the eighth of the eight schemas
+`reporting-service` owns **no tables**. The authored database bootstrap nevertheless
+defines `reporting` as the eighth of the eight schemas in
 [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
-creates, and it is where this context's read-only cross-schema views live. The
-context reads `ledger`, `account`, `card` and `reference` through those views under a database
-role holding `SELECT` alone, so it cannot write to another context's schema even in
-error.
+and [`V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
+authors the four read-only cross-schema views. Applying those scripts makes the
+context read `ledger`, `account`, `card` and `reference` through a login holding
+`SELECT` on the views alone. The artifacts have been executed successfully against a
+disposable PostgreSQL validation database; no provisioned application environment is
+claimed.
 
 Three properties of this schema differ from the other seven, and all three are
 deliberate:
@@ -1471,7 +1487,7 @@ deliberate:
 |---|---|---|
 | Database owner | the login role named after the schema | `carddemo_reporting_owner`, created `NOLOGIN` |
 | Contents | tables, indexes and constraints | views only, no table of any kind |
-| Created by | the owning service's own Flyway migration | `data-migration/sql/V1__reporting_views.sql`, applied after every per-service `V1__*.sql` |
+| Target creation authority | the owning service's own Flyway migration | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations |
 
 > **Assumptions — the owner is deliberately not the reporting login, and that is
 > the security property.** A schema's owner holds `CREATE` in it unconditionally.
@@ -1488,8 +1504,9 @@ deliberate:
 > **Assumptions — a view executes with its owner's privileges, which is why the
 > grant model has two halves.** `carddemo_reporting_owner` holds `USAGE` and `SELECT` on
 > `ledger`, `account`, `card` and `reference` because it owns the views and they
-> resolve their reads as it; `carddemo_reporting` holds `USAGE` on `reporting` plus
-> `SELECT` on the views there, and **no grant of any kind on a base table**. V0's
+> resolve their reads as it when the scripts are applied; `carddemo_reporting` then
+> holds `USAGE` on `reporting` plus `SELECT` on the views there, and **no grant of
+> any kind on a base table**. V0's
 > default privileges attach that `SELECT` to each new view automatically, so
 > `V1__reporting_views.sql` issues no `GRANT` and cannot get one wrong. An earlier
 > revision of V0 did the opposite — it made `carddemo_reporting` the schema owner and
@@ -1506,12 +1523,11 @@ deliberate:
 > schemas owned by four different services, so no single service's migration is the
 > right home for them: `reporting-service` deliberately has no `db/migration`
 > directory, and one appearing under that module would be a defect its own POM
-> records as such. `V1__reporting_views.sql` connects as the bootstrap principal and
+> records as such. The authored `V1__reporting_views.sql` connects as the bootstrap principal and
 > issues `SET ROLE carddemo_reporting_owner` before each `CREATE VIEW`, which is what makes
 > `carddemo_reporting_owner` their owner. A view missing at run time is a defect to report
-> against that artifact. That artifact is authored at a later index of this plan, so
-> at this checkpoint the schema, both roles and the four grants exist in
-> `V0__schemas_and_roles.sql` while the views themselves do not yet.
+> against that artifact. `V1__reporting_views.sql` is present, and its
+> verification scripts prove masked-view access and source-table denial.
 
 > Alternatives Considered: **a card-ordered projection instead of a second
 > table.** The statement generator reads transactions grouped by card, which invites
@@ -1617,7 +1633,7 @@ copybooks or COBOL programs, so the misspelling never leaves the source tree.
 > in `docs/architecture/cobol-to-service-traceability.md`, and the
 > **message payload field order and delimiter are unaffected** — the wire format is
 > positional, so renaming a field changes no byte on the queue. The wire contract is
-> in `docs/architecture/messaging-contracts.md`.
+> in [`messaging-contracts.md`](messaging-contracts.md).
 
 ```bash
 # WHAT: show how far each misspelling reaches, and in what kind of file.
@@ -1819,41 +1835,35 @@ registered — with what the target implementation does instead — in
 
 ### The deployment boundary
 
-The infrastructure that would host these schemas is **authored to a foundation
-state** and **checked to the extent that state admits**. Applying it to a live
+The infrastructure that would host these schemas is **authored and statically
+validated**. Applying it to a live
 account is an **operator action outside this scope**. Consequently **no table in this
 document is asserted to exist in a provisioned database**, no figure here was
 measured on a running system, and nothing below is load-tested or benchmarked. Every
 count, offset and length comes from the repository files named in the header; every
 schema statement describes a target design. The provisioning and teardown commands
-belong to the runbooks under `docs/runbooks/`, which are authored at later indexes of
-the same plan.
+belong to [`docs/runbooks/deploy.md`](../runbooks/deploy.md) and
+[`docs/runbooks/teardown.md`](../runbooks/teardown.md).
 
 **Assumptions — the measured state is given rather than the phrase, because
-"statically validated" is a claim a reader can check.** At this checkpoint the
-Terraform tree holds each directory's `versions.tf` and, for fourteen of them, its
-`variables.tf`; no `main.tf`, `outputs.tf` or `README.md` has landed anywhere, and
-neither has `infra/modules/step-functions-batch`. HCL parse and
-`terraform fmt -check -recursive infra/` **pass**; every `variable` carries a `type`
-and a `description`, and the provider constraints agree across every directory.
-`terraform validate` and `terraform plan` are **not runnable** without `terraform
-init` and a resource graph; a recursive `tflint` run **reports findings by design**,
-because `terraform_unused_declarations` fires for every variable no `main.tf` consumes
-yet and `terraform_standard_module_structure` fires for every directory missing its
-`main.tf` and `outputs.tf`; `terraform-docs --output-check` **fails** for want of any
-`README.md` to compare against; and the policy scan is a step in an
-infrastructure CI workflow that does not exist yet. Each of those clears as the
-composition files land. The same table, with the per-check detail, is in
+"statically validated" is a claim a reader can check.** All sixteen modules,
+both environment roots, and the bootstrap root have resource bodies and outputs.
+Formatting, initialized backend-free validation, recursive TFLint,
+terraform-docs drift across nineteen directories, graph-cycle checks, and the
+explicit material-security Checkov baseline pass. The complete soft scan remains
+visible beside that hard gate. The same table, with the per-check detail, is in
 [`service-catalog.md`](service-catalog.md) under its deployment boundary.
 
 **One consequence for this document specifically.** The schemas described above are
 created by
 [`../../data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
 which exists, and the tables in them by the per-service Flyway migrations, of which
-**two of seven** exist at this checkpoint — `V1__reference.sql` and `V1__batch.sql`.
-Every other table below is a derivation waiting for its migration, authored at a later
-index of the same plan. The derivation is the deliverable here; the migration that
-encodes it is a separate one.
+**six files across five of the seven table-owning services** exist: auth V1,
+authorization V1, batch V1, reference V1 plus V2, and transaction V1. Account and
+card migrations are absent, and for those two the derivation below remains
+authoritative rather than a provisioned table. Separately,
+`data-migration/sql/V1__reporting_views.sql` authors the four reporting views, which
+own no tables of their own.
 
 ### Explicitly out of scope
 
@@ -1862,7 +1872,7 @@ listed so that its absence is a recorded decision rather than an apparent omissi
 
 * **Read replicas** — reporting reads go to the writer through `SELECT`-only
   cross-schema views, for the reason given under
-  [`reporting-service`](#reporting-service--an-empty-schema-and-no-tables).
+  [`reporting-service`](#reporting--reporting-service-a-schema-with-no-tables).
 * **Application-level caching** — no in-memory cache tier of any kind. The baseline
   has none and none is required for parity, so every read in this model goes to the
   database.
@@ -1903,22 +1913,16 @@ oracle, and the existing mainframe deployment path is left exactly as it is.
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Six of the nine documents
-in this folder are authored at later indexes of the same plan, so their paths appear
-below — and everywhere above — as plain code spans rather than as links, per the
-Markdown convention in
-[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each becomes
-a link when the file it names exists, which lets a reader tell a written document from
-a contracted one without clicking.
+All related architecture documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The naming authority: service responsibilities, ownership and dependency edges |
-| `docs/architecture/context-and-container-diagrams.md` | The current-state and target-state architecture diagrams |
-| `docs/architecture/batch-orchestration.md` | Job-to-state mapping, condition-code semantics and generation-dataset handling |
-| `docs/architecture/messaging-contracts.md` | Queue mapping, the positional wire format, correlation, ordering and deduplication |
-| `docs/architecture/security-and-identity.md` | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
-| `docs/architecture/observability.md` | Logs, metrics, traces and alarms |
+| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | The current-state and target-state architecture diagrams |
+| [`batch-orchestration.md`](batch-orchestration.md) | Job-to-state mapping, condition-code semantics and generation-dataset handling |
+| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, the positional wire format, correlation, ordering and deduplication |
+| [`security-and-identity.md`](security-and-identity.md) | The identity mapping, the authorization model, encryption at rest and in transit, and network isolation |
+| [`observability.md`](observability.md) | Logs, metrics, traces and alarms |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from mapsets to screen routes and tokens |
-| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix and the authoritative register of every documented divergence |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix and the authoritative register of every documented divergence |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |

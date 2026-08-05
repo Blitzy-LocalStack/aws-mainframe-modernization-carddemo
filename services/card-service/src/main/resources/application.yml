@@ -18,10 +18,9 @@
 #   this module's single schema and single table are derived.
 #
 #   State at this checkpoint, stated once here rather than repeated at every key
-#   that names one of them. The migration lands its artifacts in plan order and
-#   this file is authored ahead of the module it configures, so three classes of
-#   artifact it references DO NOT EXIST YET and are authored at later indexes of
-#   the same plan:
+#   that names one of them. The two profile overlays named throughout this
+#   document now exist: application-dev.yml and application-prod.yml. Two other
+#   classes of artifact remain contracted at later indexes of the same plan:
 #     - db/migration/V1__card.sql, the single Flyway migration this module owns.
 #       Flyway does not fail on a location that resolves to nothing, so the
 #       service starts and reports zero migrations applied; the configured
@@ -33,12 +32,17 @@
 #       lands, the static-resource location and the springdoc keys below publish
 #       nothing, and the contract-versus-generated comparison they exist to make
 #       possible cannot yet be made.
-#     - application-dev.yml and application-prod.yml, the two profile overlays
-#       named throughout this document. They are authored at a later index of
-#       the same plan, so nothing currently overrides any value here and the
-#       statements below about what a profile MAY and MAY NOT vary are the
-#       constraint those overlays will be written to, not a description of
-#       overlays that exist.
+#   And one class of artifact named throughout this document HAS landed, so the
+#   statements about it describe rather than anticipate:
+#     - application-dev.yml and application-prod.yml, the two profile overlays.
+#       Both EXIST, so the statements below about what a profile MAY and MAY NOT
+#       vary are constraints those two files are held to. The development overlay
+#       raises this module's own package and the statement logger and holds the
+#       bind-parameter logger at this file's WARN; the production overlay narrows
+#       the exposure list back. A reader confirms the set with
+#       `ls services/card-service/src/main/resources`, which is how this paragraph
+#       is meant to be checked -- the previous version of it listed both overlays
+#       as absent after they had landed.
 #   Every key below is nevertheless declared now, deliberately: these are the
 #   decisions a module author needs settled BEFORE writing the first class, and a
 #   schema search path or a migration location retrofitted afterwards is exactly
@@ -147,7 +151,7 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# WHY : (1) both values are read by components built outside this repository
+# Assumptions: (1) both values are read by components built outside this repository
 #       tree, so neither is free to change on its own; (2) they are grouped
 #       first because everything below them is reached through this listener.
 # -----------------------------------------------------------------------------
@@ -171,7 +175,6 @@ server:
   port: 8080
 
   ssl:
-    # WHAT: the listener above serves HTTPS rather than cleartext HTTP.
     # WHY : (1) Refactoring Rationale: this block did not exist, and its absence
     #       left the load-balancer-to-task hop in cleartext while the hop in front
     #       of it was encrypted -- the alb module pins a TLS 1.2 floor on its
@@ -201,8 +204,8 @@ server:
     #       who can pull the image, and one key in one image is one key shared by
     #       dev and prod.
     #       (2) Assumptions: both values arrive from Secrets Manager, injected by
-    #       the task definition as SERVER_SSL_CERTIFICATE and
-    #       SERVER_SSL_CERTIFICATE_PRIVATE_KEY through the ECS container secrets
+    #       the task definition as CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through the ECS container secrets
     #       mechanism, so neither is stored in the task definition, in Terraform
     #       state or in plan output. They must be passed through the ecs-service
     #       module's secret_arns input and not through environment_variables,
@@ -217,8 +220,8 @@ server:
     #       datasource contract below. An absent certificate stops startup rather
     #       than falling back to cleartext, which would present as a healthy
     #       service that had stopped meeting the requirement this block exists for.
-    certificate: ${SERVER_SSL_CERTIFICATE}
-    certificate-private-key: ${SERVER_SSL_CERTIFICATE_PRIVATE_KEY}
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
 
     # WHY : (1) Assumptions: the two versions are named rather than left to the
     #       JDK default, which still negotiates the withdrawn TLS 1.1 and, on some
@@ -248,9 +251,34 @@ spring:
   application:
     name: card-service
 
+  # WHY : (1) Refactoring Rationale: this import replaces values that were either
+  #       absent here or duplicated per service. The console log pattern naming the
+  #       correlation and edge-request context keys, and the two metric tag values
+  #       the shared meter filter reads, are identical in every bounded context, and
+  #       before this line most services carried neither -- so the correlation
+  #       identity the shared filter published reached no log line and the meters
+  #       carried the "unspecified" tag fallback. The file lives in common-lib, the
+  #       one module every service already depends on and cannot compile without.
+  #       (2) Assumptions: config-data imports are resolved BEFORE the logging
+  #       system initialises, so a pattern supplied this way is in force for the
+  #       first line this service logs. That ordering is the reason the pattern can
+  #       live in an imported property file at all rather than in a logging
+  #       configuration resource.
+  #       (3) Assumptions: an imported document sits BENEATH this file in
+  #       precedence, so any key below overrides the shared default rather than
+  #       colliding with it, and the override is visible in this service's own file.
+  #       (4) Trade-offs: NOT marked optional. An absent classpath resource would
+  #       then be silently ignored, leaving the same defect this import corrects and
+  #       no error to explain it; a hard failure at startup names the missing
+  #       resource instead. The resource ships inside a jar this module's compile
+  #       path already requires, so the only way it can be absent is a packaging
+  #       defect worth failing on.
+  config:
+    import: "classpath:/carddemo-common-defaults.yml"
+
 
   # -----------------------------------------------------------------------------
-  # WHY : (1) every value that identifies or authenticates against a database is
+  # Assumptions: (1) every value that identifies or authenticates against a database is
   #       an unresolved placeholder, so this file cannot itself point at any
   #       environment; (2) the pool settings are a new degree of freedom
   #       introduced by the migration rather than a ported tunable, for the
@@ -402,8 +430,6 @@ spring:
       #   the message names the absent schema.
       connection-init-sql: "SET search_path TO card"
 
-      # WHAT: the transport-security terms every connection this pool opens is
-      #   made on, independent of whatever the injected URL happens to say.
       # WHY : Assumptions: the URL above arrives from the platform as an opaque
       #   string, so this file cannot inspect it and cannot rely on it carrying
       #   any TLS parameter. Driver properties set here are handed to the driver
@@ -438,7 +464,7 @@ spring:
 
 
   # -----------------------------------------------------------------------------
-  # WHY : (1) this module maps exactly one entity, onto one table, in one
+  # Assumptions: (1) this module maps exactly one entity, onto one table, in one
   #       schema, so the settings here are about boundaries rather than about
   #       mapping breadth; (2) the DDL decision is the load-bearing one and is
   #       recorded on ddl-auto below.
@@ -510,7 +536,7 @@ spring:
 
 
   # -----------------------------------------------------------------------------
-  # WHY : (1) schema ownership and code ownership ship in the same deployable,
+  # Assumptions: (1) schema ownership and code ownership ship in the same deployable,
   #       so the table and the entity that maps it cannot be applied out of
   #       step; (2) two of the six settings below - create-schemas and
   #       baseline-on-migrate - decide what happens when the schema is not in
@@ -589,7 +615,7 @@ spring:
     baseline-on-migrate: false
 
   # -----------------------------------------------------------------------------
-  # WHY : (1) identity is asserted by a signed token rather than by a field the
+  # Refactoring Rationale: (1) identity is asserted by a signed token rather than by a field the
   #       client sends, which is the whole point of the change recorded below;
   #       (2) only the issuer is configured here - which routes require which
   #       authority is code, and lives in config/SecurityConfig.java.
@@ -616,7 +642,7 @@ spring:
 
 
 # -----------------------------------------------------------------------------
-# WHY : (1) the health path is a deployment contract and is documented as one,
+# Trade-offs: (1) the health path is a deployment contract and is documented as one,
 #       not as a convenience; (2) the surface is kept to three endpoints because
 #       every endpoint exposed here is reachable from inside the private network
 #       without a token.
@@ -684,7 +710,7 @@ management:
       show-components: never
 
 # -----------------------------------------------------------------------------
-# WHY : (1) the served document has to agree with a hand-authored contract, so
+# Assumptions: (1) the served document has to agree with a hand-authored contract, so
 #       the settings below are chosen to make disagreement visible; (2) the
 #       version is pinned rather than inherited for the reason recorded on it.
 # -----------------------------------------------------------------------------
@@ -746,7 +772,7 @@ springdoc:
 
 
 # -----------------------------------------------------------------------------
-# WHY : (1) these are the floor, and adjusting them is the first of the four
+# Trade-offs: (1) these are the floor, and adjusting them is the first of the four
 #       axes the two profiles may vary; (2) two of the five exist to keep
 #       cardholder data out of log storage, which is recorded on them
 #       individually rather than asserted here.
@@ -785,10 +811,7 @@ logging:
     org.hibernate.orm.jdbc.bind: WARN
 
 # -----------------------------------------------------------------------------
-# WHAT: the values in this file that have no standard property name - the card
-#       list page size, and the three token properties every bearer token is
-#       checked against beyond the issuer.
-# WHY : (1) each is either a domain constant taken from the baseline or a
+# Alternatives Considered: (1) each is either a domain constant taken from the baseline or a
 #       security control the framework publishes no key for, so both are
 #       declared here instead of being written into a service class; (2) they
 #       live under a single carddemo namespace so that everything non-standard in
@@ -796,9 +819,6 @@ logging:
 # -----------------------------------------------------------------------------
 carddemo:
 
-  # WHAT: the three token properties every request's bearer token is checked
-  #       against, over and above the issuer and expiry the resource server
-  #       validates for itself.
   # WHY : (1) Assumptions: validating the issuer is not validating the token. The
   #       issuer-uri above makes the filter chain verify the signature, the
   #       issuer and the time claims, and that is where its guarantees end. One

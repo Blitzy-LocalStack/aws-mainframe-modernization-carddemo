@@ -193,12 +193,16 @@
  *
  * <h2>What this package contains, and which way the arrow points</h2>
  *
- * <p>Two compilation units live in this directory and there will be no third:
+ * <p>Four compilation units live in this directory and there will be no fifth:
  *
  * <ul>
- *   <li>{@code JwtRoleConverter} -- the one production class, reading the
+ *   <li>{@code JwtRoleConverter} -- reading the
  *       {@code cognito:groups} claim and yielding the granted authorities.</li>
- *   <li>this charter, the second compilation unit, which carries no declaration
+ *   <li>{@code CognitoAccessTokenValidator} -- asserting the three token checks
+ *       the issuer alone does not make: token use, client identity and scope.</li>
+ *   <li>{@code OpaqueIdentifier} -- the reversible surrogate that keeps a primary
+ *       account number out of a URL and out of a log line.</li>
+ *   <li>this charter, the fourth compilation unit, which carries no declaration
  *       beyond the package statement itself.</li>
  * </ul>
  *
@@ -236,25 +240,25 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's target inventory is 17 production classes and 9 package charter files,
- * for 26 compilation units in total. This package contributes 1 of those
- * production classes and 1 of those charters, which is 2 files in this
+ * <p>The shared kernel's target inventory is 21 production classes and 9 package charter files,
+ * for 30 compilation units in total. This package contributes 3 of those
+ * production classes and 1 of those charters, which is 4 files in this
  * directory and no more. The arithmetic is recorded so that a later reader can
  * tell a class that is missing from one that was never planned:
  *
  * <pre>
- * money 2 + codec 5 + error 3 + web 2 + security 1 + observability 1 + time 1 + validation 2 = 17
+ * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
  * </pre>
  *
  * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 1 + 3 + 6 + 4 + 3 + 2 + 2 + 2 + 3 = 26,
- * the root contributing its charter alone. And 17 production classes plus 9
- * charters is 26. All three paths agree, and this file is one of the nine
+ * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
+ * the root contributing its charter and the one auto-configuration class. And 21 production classes plus 9
+ * charters is 30. All three paths agree, and this file is one of the nine
  * charters.
  *
  * <p>Assumptions: this package's inventory depends on that repository-wide
- * allocation staying at one production class and one charter here, within an
- * authoritative kernel total of <strong>17 production classes and 26
+ * allocation staying at three production classes and one charter here, within an
+ * authoritative kernel total of <strong>21 production classes and 30
  * compilation units, 9 of them charters</strong>. The precision matters locally
  * rather than academically: an inflated total is exactly what would make a
  * second class in this directory look authorised, and the second class a reader

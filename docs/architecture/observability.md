@@ -2,9 +2,9 @@
 
 ---
 
-> **Purpose.** This document specifies how the migrated CardDemo stack is
-> observed — its log destinations and log record shape, its metric tags and metric
-> families, its traces, its alarms and its single notification topic — and it
+> **Purpose.** This document specifies the observability contract for the migrated
+> CardDemo stack — its log destinations and log record shape, its metric tags and
+> metric families, its traces, its alarms and its single notification topic — and it
 > derives every one of those from what the COBOL baseline already does. It
 > discharges the observability portion of **Deliverable 2** of the seven numbered
 > deliverables: *"/docs/architecture — target architecture diagram, service
@@ -72,42 +72,44 @@
 > shared kernel `common-lib`, which owns the correlation filter and the metric
 > tags; the eight bounded contexts named in
 > [`service-catalog.md`](service-catalog.md#the-eight-bounded-contexts), each of
-> which emits into its own log group; the `observability`,
+> which is to emit into its own log group; the `observability`,
 > `step-functions-batch`, `ecs-service` and `api-gateway-http` infrastructure
-> modules, which provision the groups, the dashboard, the alarms and the topic; and
+> modules, which collectively own the target groups, dashboard, alarms and topic; and
 > `docs/runbooks/batch-operations.md`, which is where an operator acts on what this
 > document specifies.
 >
-> **None of those consumers is complete, and that is stated rather than implied.**
-> Two of the four infrastructure modules named above have their input surface
-> authored and their resource bodies not yet — `infra/modules/observability` and
-> `infra/modules/step-functions-batch` each hold a `variables.tf` and a
-> `versions.tf` and no `main.tf` — and both environment roots under `infra/envs`
-> are in the same state. `docs/runbooks/batch-operations.md` does not exist. The
-> two shared-kernel classes this document depends on **do** exist and are cited by
-> line. Every default quoted below is therefore read from an authored input
-> declaration, not from a running system.
+> **Current state.** The observability, step-functions-batch, ecs-service, and
+> api-gateway-http modules have resource bodies and outputs; both environment
+> roots compose them; and the batch operations runbook exists. Every default
+> quoted below is read from authored configuration, not from a running system.
 >
-> **Caveats.** Five, stated up front rather than buried, because in an
+> **Caveats.** Six, stated up front rather than buried, because in an
 > observability document the temptation to write as though the telemetry were
 > already flowing is unusually strong. First: **no dashboard has rendered, no alarm
 > has fired, no trace has been sampled, and no benchmark or load test has been
-> run.** Every figure here is either quoted from a cited baseline line or read from
-> an authored configuration default; none is a measurement of the target. Second:
+> run. No environment root provisions even the authored log-group modules.** Every
+> figure here is either quoted from a cited baseline line or read from an authored
+> configuration default; none is a measurement of the target. Second:
 > **the repository defines no service-level objectives and none are invented
 > here** — there is no latency target, throughput target, availability percentage,
 > error budget or recovery-time objective anywhere in this document, and
 > [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives)
 > explains what is committed to instead. Third: the baseline is reference-only —
 > every line citation is a read, and nothing under [`app/`](../../app) is modified,
-> including the three known baseline defects, which are registered in
-> `docs/architecture/cobol-to-service-traceability.md` and are not fixed by this
+> including the three known baseline defects, which must be registered in the
+> contracted `docs/architecture/cobol-to-service-traceability.md` and are not fixed by this
 > document or by the work it specifies. Fourth: **the mainframe job-log path is
 > preserved intact** — the job cards, the output definitions and the transient-data
 > destination all continue to work exactly as they do; the migration adds a path, it
 > does not remove one. Fifth: the existing COBOL suite keeps its own workflow, its
 > own reporting and its own aggregate return code, and it remains the
-> functional-parity oracle.
+> functional-parity oracle. Sixth: **request metadata is classified rather than
+> declared anonymous.** Resolved paths are excluded because they carry PAN,
+> account and customer identifiers; the gateway retains only the route template.
+> CloudFront viewer logging and nginx document-request access logging are disabled.
+> The gateway deliberately retains `sourceIp`, which is personal data and therefore
+> makes that access-log group sensitive even though no resolved identifier is
+> stored.
 
 ---
 
@@ -248,7 +250,7 @@ things per job, each of which has a direct target counterpart.
 
 ### Where step output lands today
 
-These are the specific declarations the target's log streams replace. They are
+These are the specific declarations the target log-stream contract replaces. They are
 cited so that a reader can confirm that each migrated step had an output channel
 before it had a log group.
 
@@ -273,30 +275,32 @@ before it had a log group.
   place to look; it cannot be correlated across one unit of work, because nothing
   in a `SYSOUT` line ties it to the request or the nightly execution that produced
   it; and it cannot be filtered by field, because a line of prose has no fields.
-  The target keeps the same content — the same step messages, the same status codes,
-  the same reject counts — and changes only how it is addressed: one group per
-  producer, one structured record per event, one correlation identifier spanning the
-  whole unit of work. Writing that the target's logging is "more modern" would
+  The target is to keep the same content — the same step messages, status codes and
+  reject counts — while changing how it is addressed: one group per producer, one
+  structured record per event, one correlation identifier spanning the whole unit
+  of work. Writing that the target logging is "more modern" would
   document none of those three, and would give a reader no way to check whether the
   replacement actually delivers them.
 - Assumptions: **the numeric health signal and the human-readable log are two
-  distinct channels in the baseline, and the target keeps them distinct.** The step
+  distinct channels in the baseline, and the target contract keeps them distinct.** The step
   return code is what the next step's gate reads; the job log is what a person
   reads. The gating semantics themselves belong to
   [`batch-orchestration.md`](batch-orchestration.md#the-condition-code-inversion),
   which covers the inversion in full and is not restated here. The observability
-  consequence is the part this document owns: a target step publishes a numeric
-  outcome that drives the state machine's edges *and* writes a structured record
-  that a person reads, and the two are not collapsed into one. Collapsing them —
+  consequence is the part this document owns: a target step is to publish a numeric
+  outcome that drives the state machine's edges *and* write a structured record
+  that a person reads. Neither path is implemented yet, and the two must not be
+  collapsed into one. Collapsing them —
   emitting only a log line and having the orchestrator parse it — is the failure
   mode this assumption exists to forbid, because a log format change would then
   silently become a control-flow change.
 - Trade-offs: the reject stream stays **data**, not telemetry.
   [`POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L34–L38 declares the rejects as
   their own fixed-length output with its own generation, entirely separate from the
-  two log definitions at L26–L27, and the target preserves that separation: reject
-  records land in the ledger schema and in an object-store generation, while the
-  *count* of them is what becomes a metric. The alternative — routing reject
+  two log definitions at L26–L27, and the target contract preserves that separation:
+  reject records are to land in the ledger schema and an object-store generation,
+  while only their *count* becomes a metric. The writer and meter are not authored.
+  The alternative — routing reject
   records into the log stream because they describe failures — was rejected because
   it would put business data under a log-group retention policy, where it would age
   off on a telemetry schedule rather than a records-retention one, and would make
@@ -340,8 +344,9 @@ an error, it is a **record type** with a declared identity.
 > equal to 122 rather than to something larger. The command that re-derives this is
 > in [Reproducing the measurements](#reproducing-the-measurements).
 
-The target log record is a JSON object with a field per row of that table, plus the
-correlation identifier and the three common tags. Four of the mappings are
+The target contract defines a JSON object with a field per row of that table, plus
+the correlation identifier and the three common tags. No application JSON encoder
+or logger configuration is authored at this checkpoint. Four of the mappings are
 **decisions rather than identities**, and each is disclosed below rather than
 presented as a port.
 
@@ -365,12 +370,14 @@ archived record:
   informational, and its emission is unconditional — the record is written whenever
   the paragraph is performed. There is no mechanism to raise or lower verbosity for
   a running program, so a level below informational would have no way to be
-  suppressed and would simply add volume. The target's logging framework filters by
-  level at runtime, and the service configuration already pins specific loggers
-  precisely so that they *cannot* be lowered — `org.springframework.security` and
+  suppressed and would simply add volume. The target logging framework is to filter
+  by level at runtime, and the authored service configuration already pins specific
+  loggers so they *cannot* be lowered — `org.springframework.security` and
   `org.hibernate.orm.jdbc.bind` are both held at `WARN` in
   [`application.yml`](../../services/auth-service/src/main/resources/application.yml)
-  for the reason given in [What is never logged](#what-is-never-logged). A `DEBUG`
+  for the reason given in
+  [Sensitive-data logging contract and current controls](#sensitive-data-logging-contract-and-current-controls).
+  A `DEBUG`
   level is therefore useful in the target in a way it could not have been in the
   baseline, and its addition is what makes those pins meaningful controls rather
   than comments.
@@ -419,19 +426,19 @@ Three of its six declared values name platforms the target does not run.
   get nothing. The re-based domain is `application`, `web`, `persistence`,
   `messaging` and `batch`: five layers, mapped from the baseline's four observed
   values plus one for the tier the target adds.
-- Refactoring Rationale: **the target derives the subsystem value from the
-  adapter that failed rather than setting it by hand, and there is one place in the
-  baseline where the hand-set value disagrees with the failing component.** At
+- Refactoring Rationale: **the target contract derives the subsystem value from
+  the adapter that failed rather than setting it by hand, and there is one place in
+  the baseline where the hand-set value disagrees with the failing component.** At
   [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) L419 the
   location code is `'M003'` — the `M` prefix belongs to the same
   subsystem-letter-plus-ordinal scheme as `M001`, `M004` and `M005`, all three of
   which set the messaging value — while L421 immediately below it sets `ERR-CICS`.
   The paragraph is `3100-READ-REQUEST-MQ` and the failure it reports is a failed
   message get. Two independently hand-set fields describing one failure can
-  disagree, and here two do. In the target the layer tag is emitted by the adapter
-  that raised the exception, so the value cannot contradict the component that
-  produced it; the accepted cost is that the tag is no longer freely choosable at
-  the throw site, which is the point.
+  disagree, and here two do. The future structured logger is therefore to obtain the
+  layer tag from the adapter that raised the exception, so the value cannot
+  contradict the component that produced it; the accepted cost is that the tag is
+  no longer freely choosable at the throw site, which is the point.
 
 ### The two code slots are re-based, not dropped
 
@@ -446,9 +453,9 @@ and L928.
 - Assumptions: **two slots are kept because one failure genuinely produces two
   codes, and the pairing is the diagnostic unit.** The baseline's pattern is
   consistent across all fourteen sites: a completion or response code says *that*
-  the operation failed, and a reason code says *why*. The target keeps both — a
-  persistence error code and the framework exception class that wrapped it are two
-  different facts, and collapsing them into one string forces whoever reads the
+  the operation failed, and a reason code says *why*. The target contract keeps
+  both: a persistence error code and the framework exception class that wrapped it
+  are two different facts, and collapsing them into one string forces whoever reads the
   record to parse the two back out of prose. The pairing is the baseline's own
   convention rather than an artefact of one program, and the measurement below
   establishes that.
@@ -494,11 +501,13 @@ this document.
   scope of any one message, so there is no message identity available to write. The
   effect is that the record carries whatever the field last held, because the
   copybook is included into working storage and nothing clears it between messages.
-  The target moves custody from the application to the request scope: the identifier
-  is placed in the logging context by a filter, so every record emitted while
-  handling a unit of work carries it without the emitting code naming it, and every
-  record emitted outside one carries none rather than carrying a stale value. The
-  gap being closed is measurable rather than hypothetical — beyond the three sites
+  The authored filter is designed to move custody from the application to request
+  scope by placing the identifier in the logging context. Until each service
+  registers it, that custody change is not in effect. Once registered, every record
+  emitted while handling a unit of work is to carry the identifier without the
+  emitting code naming it, and records outside one are to carry none rather than a
+  stale value. The gap being addressed is measurable rather than hypothetical —
+  beyond the three sites
   above, the **24** unstructured sites measured in the previous section carry no
   correlation identity at all, and neither does any of the several hundred other
   free-text emission statements in the tree.
@@ -513,9 +522,9 @@ this document.
   first is a log-record grouping key that the program fills from a business value —
   a card number at L428 and L777, a cross-reference card number at L499 and L511, an
   account identifier at L546 and L559, a customer identifier at L594 and L607 — and
-  the second is the transport identifier the requester chose. **The target uses the
-  transport identifier for both**, which is why 24 is the width that governs; the
-  business values that the baseline put in the grouping key remain available as
+  the second is the transport identifier the requester chose. **The target contract
+  uses the transport identifier for both**, which is why 24 is the governing width.
+  The business values that the baseline put in the grouping key remain available as
   their own log fields, where they can be queried by name instead of by position.
 
 ---
@@ -523,9 +532,8 @@ this document.
 ## The three message-width regimes, and what collapses
 
 A message in the baseline does not have *a* width. Three different fixed-layout
-carriers declare three different sizes for the text they carry, and the target
-collapses two of them on the log side while the third survives untouched on the
-presentation side.
+carriers declare three different sizes for the text they carry. The target contract
+collapses two on the log side while preserving the third on the presentation side.
 
 | Width | Fields | Authoritative citation | Carrier | Disposition |
 |---|---|---|---|---|
@@ -561,12 +569,12 @@ they are given here rather than left to be inherited from a summary.
   eight-character culprit is the same program-name width as `ERR-PROGRAM`, which is
   what lets both records be read as naming the same thing in the same field.
 
-- Trade-offs: **the target log record carries one unbounded message string, and
-  the collapse applies to the log record only.** Three fixed widths existed because
+- Trade-offs: **the target log-record contract carries one unbounded message
+  string, and the collapse applies to the log record only.** Three fixed widths existed because
   three different fixed-layout carriers had three different field sizes — a
   program-local constant buffer, a 122-byte transient-data record and an abend work
-  area — and **none of those three carriers survives** into the target: a JSON log
-  field has no declared width and no padding. Preserving 50 and 72 as validated
+  area — and **none of those three carriers is to survive** into the target: a JSON
+  log field has no declared width and no padding. Preserving 50 and 72 as validated
   string lengths was the alternative and was rejected because it buys nothing and
   costs something specific: the message would be truncated at a boundary that no
   longer corresponds to any storage or display constraint, and a truncated exception
@@ -602,9 +610,9 @@ declared `PIC X(06)` at L51 and L52, and L998–L999 move them into the record.
 > declarations: the row it *stores* carries a full timestamp, while the record it
 > *logs* carries a six-character date that cannot express a century.
 
-- Assumptions: **the target emits full timestamps with microsecond precision, and
-  any path that reads the six-character form must supply the century from context
-  rather than from the data.** The assumption this rests on is an external
+- Assumptions: **the target logger is to emit full timestamps with microsecond
+  precision, and any path that reads the six-character form must supply the century
+  from context rather than from the data.** The assumption this rests on is an external
   data-format contract, not a preference: a `YYMMDD` value is ambiguous by
   construction, and there is no field anywhere in the 122-byte record that resolves
   it. Two consequences follow and both are specific. An ETL or log-ingest path that
@@ -666,31 +674,32 @@ because four of its five actions have a direct target counterpart:
 | L1001–L1006 | Write the 122-byte record to the transient-data destination, with the no-condition option | Emit the structured record to the container's log stream, on a path that cannot raise |
 | L1008–L1010 | `IF ERR-CRITICAL PERFORM 9990-END-ROUTINE` | The `FATAL` tier: a record at that level accompanies termination rather than merely describing it |
 
-- Refactoring Rationale: **the target pairs a global exception handler with a
+- Refactoring Rationale: **the target is to pair a global exception handler with a
   structured logger, and the baseline already proves the pattern's value by
-  invoking it from fourteen sites in one program.** The two designs differ in
-  exactly one respect, and it is the one that matters: the baseline reaches the
-  emission point by an explicit `PERFORM` written at each site, whereas the target
-  reaches it by exception propagation into a single `@RestControllerAdvice`. What
+  invoking it from fourteen sites in one program.** Neither the handler nor the
+  structured application logger is authored at this checkpoint. The two designs
+  differ in exactly one respect, and it is the one that matters: the baseline
+  reaches the emission point by an explicit `PERFORM` written at each site, whereas the target
+  is to reach it by exception propagation into a single `@RestControllerAdvice`. What
   was wrong with the old arrangement is therefore not the centralisation — that was
   already right — but the *reachability*: a new error path in the baseline is
   silent until somebody remembers to add the `PERFORM`, and nothing about the
   omission looks wrong, because the surrounding code reads exactly like the paths
-  that do log. Propagation removes that failure mode by making the emission
-  unavoidable rather than remembered. The measurable evidence that the failure mode
-  is real is in the same repository: the **24** sites measured in
+  that do log. The planned propagation removes that failure mode by making the
+  emission unavoidable rather than remembered. The measurable evidence that the
+  failure mode is real is in the same repository: the **24** sites measured in
   [The two code slots are re-based, not dropped](#the-two-code-slots-are-re-based-not-dropped)
   emit the identical response-and-reason pair through an unstructured statement
   instead, spread across **nine** programs that never adopted the record at all.
 - Assumptions: **emission must not be able to fail the work it is describing.**
   Both platform calls in the paragraph carry the no-condition option — L986 for the
   time request and L1005 for the write — so a failure to log cannot raise a
-  condition and cannot change the program's path. The target holds the same
-  property: the structured logger writes to the container's standard streams, which
-  the log driver forwards, and a forwarding failure is a delivery problem rather
-  than a request failure. This is an assumption rather than a preference because
-  the alternative has a name and a consequence: a logger that throws turns a
-  handled business rejection into an unhandled server error, so the request the
+  condition and cannot change the program's path. The target must hold the same
+  property: the future structured logger is to write to the container's standard
+  streams, which the log driver forwards, and a forwarding failure is to remain a
+  delivery problem rather than a request failure. This is an assumption rather than
+  a preference because the alternative has a name and a consequence: a logger that
+  throws turns a handled business rejection into an unhandled server error, so the request the
   operator is trying to diagnose fails *because* it was being diagnosed.
 
 ---
@@ -716,20 +725,55 @@ Three facts from that treatment are load-bearing for logging:
   message.
 
 Correlation is therefore carried in **transport metadata**, not reconstructed from
-business fields — and the target's HTTP analogue is a filter in the shared kernel
-rather than a convention.
+business fields. The authored HTTP analogue is a filter class in the shared kernel
+rather than a convention, and it is registered for every service by the kernel's own
+auto-configuration — `CardDemoCommonAutoConfiguration.ServletCorrelationConfiguration`
+publishes it as a `FilterRegistrationBean` at `CORRELATION_FILTER_ORDER`, so a service
+gets the identity handling by depending on the kernel rather than by remembering to
+wire a filter.
 [`CorrelationIdFilter`](../../services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java)
-does four things, each traceable to one of the facts above:
+does five things, each traceable to one of the facts above:
 
 | Behaviour | Where | Baseline lineage |
 |---|---|---|
-| Accept an inbound identifier if the caller supplied one, and echo it back unchanged | `CORRELATION_ID_HEADER` = `X-Correlation-Id`, L241 | L745 — echoed verbatim |
-| Mint one when the caller supplied none, rather than refusing the request | L555 | L746 — originate what was not supplied |
-| Place it in the logging context, so every line emitted while serving the request carries it | `CORRELATION_ID_MDC_KEY` = `correlationId`, L256; put at L422, removed at L440 | L40's `ERR-EVENT-KEY`, with custody moved off the application |
-| Bound it to 24 characters | `CORRELATION_ID_MAX_LENGTH` = 24, L277 | L45's `WS-SAVE-CORRELID PIC X(24)` |
+| Accept an inbound identifier when the caller supplied one **that conforms**, and echo it back unchanged | `CORRELATION_ID_HEADER` = `X-Correlation-Id`, L202; read at L485 through `inboundCorrelationId` at L583, adopted at L498, echoed on the response at L891 | L745 — echoed verbatim |
+| **Refuse a supplied identifier that does not conform**, with `400 Bad Request` naming the constraint and the observed length, rather than serving the request under an identity the caller never chose | decided at L487, refused by `rejectNonconformingIdentity` at L696 | L411–L412 — the inbound value is saved verbatim into the 24-byte area; the baseline substitutes nothing |
+| Adopt the **edge request identifier** when the caller supplied no correlation header and the edge supplied one that conforms, so a request already identified upstream is not given a second identity | `REQUEST_ID_HEADER` = `X-Request-Id`, L275; `fallbackCorrelationId` at L646–L657, bounded at 64 by `REQUEST_ID_MAX_LENGTH`, L304 | no baseline analogue — the edge itself is new, and the gateway's own request identifier is what replaces the region's task number |
+| Mint one **only** when neither header supplied a usable value | `generateCorrelationId` at L851, reached from L656 | L746 — originate what was not supplied |
+| Place both identities in the logging context, so every line emitted while serving the request carries them | `CORRELATION_ID_MDC_KEY` = `correlationId`, L217, put at L501 and removed at L531; `REQUEST_ID_MDC_KEY` = `requestId`, L286, put at L511 and removed at L539 | L40's `ERR-EVENT-KEY`, with custody moved off the application |
+| Bound it to 24 characters over one closed alphabet, which is the constraint the refusal above enforces | `CORRELATION_ID_MAX_LENGTH` = 24, L238; alphabet at `ACCEPTED_PUNCTUATION` = `-_.`, L344, applied by `conformsWithin` at L782 | L45's `WS-SAVE-CORRELID PIC X(24)` |
 
-**One identifier joins three transports**, and the diagram below is scoped to that
-claim rather than to the architecture, which is owned by
+**The caller-facing consequence is published here because a caller has to build
+against it.** A supplied `X-Correlation-Id` must be 1 to 24 characters drawn from one
+closed, token-safe alphabet — ASCII letters, digits, and the three punctuation marks
+`-`, `_` and `.` — so a value outside that, a 36-character hyphenated UUID being the
+common length case and a header carrying a space or a control character being the
+malformed case, is refused rather than replaced. Omitting the header entirely is
+always valid: the filter then adopts the edge's own `X-Request-Id` when that conforms
+within its own 64-character bound, and mints an identifier when it does not. The refusal message names the constraint
+and the observed length and never echoes the offending value, so a header carrying
+control characters cannot be reflected back into a response.
+
+- Assumptions: **a nonconforming identifier is refused rather than quietly replaced,
+  because a replaced identity is a correlation failure that looks like a success.**
+  Substituting a generated value returns `200` with a `X-Correlation-Id` the caller
+  never sent, so the caller records one identity, every server-side record carries
+  another, and the two are never joined — discovered during an incident, when the log
+  the identifier existed for has already been written. Widening the contract to admit
+  the 36-character form was the alternative and is rejected in
+  [`CorrelationIdFilter`](../../services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java)
+  itself: the width is the 24 characters of `WS-SAVE-CORRELID` at
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) L45, the
+  same identity round-trips through the queue attribute that field became, and an
+  identifier accepted synchronously that the asynchronous path could not carry would
+  move the failure to where it is far harder to see. The cost accepted is that a
+  caller sending a wrong-shaped header now gets a failed request where it previously
+  got a working one; that is the point, because `400` is actionable at the one moment
+  the caller can act.
+
+**The target contract joins three transports under one identifier**, and the
+diagram below is scoped to that requirement rather than to the architecture, which
+is owned by
 [`context-and-container-diagrams.md`](context-and-container-diagrams.md).
 
 ```mermaid
@@ -756,25 +800,26 @@ graph LR
     BLG --> D
     D --> T[["One notification topic per env"]]
 %% Solid edges carry the identifier; dotted edges are telemetry emission.
-%% Nothing in this diagram has been provisioned -- see the deployment boundary.
+%% The classes and some log-group resources exist; registration, composition, tracing and dashboards do not.
 ```
 
-The identifier travels the solid edges and the telemetry travels the dotted ones,
-which is the distinction the diagram exists to make: a log record is not passed from
+Under the target contract, the identifier travels the solid edges and telemetry
+travels the dotted ones. That is the distinction the diagram exists to make: a log
+record is not passed from
 one component to the next, but the value that lets three records be joined is.
 
-On the synchronous path the value is the HTTP header, captured at the edge as well as
-in the service — the API Gateway access log format at
+On the synchronous path the value is to be the HTTP header, captured at the edge as
+well as in the service. The authored API Gateway access-log format at
 [`infra/modules/api-gateway-http/main.tf`](../../infra/modules/api-gateway-http/main.tf)
-L198–L214 emits a JSON line whose last field reads the same
-`x-correlation-id` header, so an edge record and a service record for one request
-share a value. On the asynchronous path it is a message attribute, mapped from the
-transport descriptor exactly as
+L228–L242 reads the same `x-correlation-id` header into its final field. No
+application logging configuration currently emits the corresponding service
+record, so the join is specified but not demonstrated. On the asynchronous path it
+is to be a message attribute, mapped from the transport descriptor exactly as
 [`messaging-contracts.md`](messaging-contracts.md#message-descriptor-to-message-attribute)
-specifies. On the batch path it is the execution identity of the state-machine run,
-recorded alongside each step in the durable step ledger that
+specifies. On the batch path it is to be the execution identity of the state-machine
+run, recorded alongside each step in the durable step ledger that
 [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve)
-describes.
+describes. The listener, state machine and ledger writer are not authored.
 
 - Assumptions: **the filter lives in the shared kernel because the header name
   and the message-attribute name are cross-service contracts, not per-service
@@ -787,8 +832,8 @@ describes.
   which produce a request that cannot be followed across a service boundary. The
   shared-kernel boundary this relies on is fixed by
   [`service-catalog.md`](service-catalog.md#the-eight-bounded-contexts), which
-  records `common-lib` as a library deployed inside the eight services rather than
-  as a ninth service.
+  records `common-lib` as a library dependency of the eight services rather than as
+  a ninth service. Runtime registration remains each service's responsibility.
 - Assumptions: **the identifier is not a credential and must not be treated as
   one.** It is written to a response header and into log output, both of which are
   read by tooling that is not the caller, so it carries no authority and confers
@@ -799,26 +844,26 @@ describes.
 
 ---
 
-## Logs: groups, format, retention and what is never written
+## Logs: groups, format, retention and sensitive-data boundaries
 
 ### Log groups
 
-One group per producer. Names are given in their parameterised form; **no account
-identifier, resource identifier, endpoint or hostname appears anywhere in this
-document.**
+The target contract assigns one group per producer. Names are given in their
+parameterised form; **no account identifier, resource identifier, endpoint or
+hostname appears in any group name.**
 
-| Producer | Group name | Created by | Stream key |
+| Producer | Group name | Authoring status | Stream key |
 |---|---|---|---|
-| Each of the eight bounded contexts | `/aws/ecs/<prefix>-<service>-<env>` | [`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf) L120, group at L398 | The stream prefix is the service name, L660 |
+| Each of the eight bounded contexts | `/aws/ecs/<prefix>-<service>-<env>` | [`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf) L116, group at L811 | The stream prefix is the service name, L660 |
 | The batch task family | `/aws/ecs/<prefix>-<batch-service>-<env>` | The same module, instantiated for the batch task | The same convention |
 | The nightly chain's execution history | The state machine's own group | `infra/modules/step-functions-batch` | One stream per execution |
-| The edge | `/aws/vendedlogs/apigateway/<prefix>-<env>` | [`infra/modules/api-gateway-http/main.tf`](../../infra/modules/api-gateway-http/main.tf) L160, group at L534 | One access-log line per request |
+| The edge | `/aws/vendedlogs/apigateway/<prefix>-<env>` | [`infra/modules/api-gateway-http/main.tf`](../../infra/modules/api-gateway-http/main.tf) L179, group at L718 | One access-log line per request |
 | A producer with no resource of its own | `<prefix>-<env>/<suffix>` | `infra/modules/observability`, from its `log_group_names` input | As the producer writes it |
 
 - Assumptions: **the group name is composed rather than left to be generated,
   because the task execution policy has to scope its write permission to one group.**
   [`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf)
-  L332–L333 names exactly that group's identifier in the policy, so a service can
+  L378–L379 names exactly that group's identifier in the policy, so a service can
   write to its own group and to no other. A generated name would force either a
   wildcard permission — which lets a misconfigured service write outside its own
   retention and encryption policy — or a second apply to discover the name. The
@@ -826,19 +871,20 @@ document.**
   operator feels during an incident: a single query across the prefix covers every
   service without enumerating them.
 - Trade-offs: **the `log_group_names` input of the observability module defaults
-  to empty, and the emptiness is the decision.** Every producer in this stack that
-  writes logs already owns its group — the eight services through `ecs-service`, the
-  nightly chain through `step-functions-batch`, the edge through
-  `api-gateway-http` — so creating a duplicate here would leave an empty group that
-  still bills and that an operator opening it would reasonably read as the producer
-  having gone silent. The input exists for the case that has no Terraform resource of
-  its own, where the alternative is worse: an implicitly created group carries the
-  service default of unlimited retention and no customer-managed key.
+  to empty, and the intended ownership split is still a contract.** The ECS and API
+  modules author their own groups, so a future observability resource graph must not
+  duplicate them. The state-machine group does not yet exist, however, and the
+  empty input by itself creates nothing. Treating an input declaration as a log
+  destination was rejected because it would make a planned resource look delivered.
 
 ### Format
 
-Structured JSON, one object per event, with the field set derived in
+The **target application format** is structured JSON, one object per event, with
+the field set derived in
 [The baseline's own structured-logging schema](#the-baselines-own-structured-logging-schema).
+No application JSON encoder or logger configuration is authored. The only authored
+JSON format is the API Gateway access-log object in
+`api-gateway-http/main.tf` L245–L259.
 
 - Assumptions: **the format is JSON so that a field can be queried rather than
   pattern-matched out of prose**, and the concrete difference is a query an operator
@@ -848,10 +894,11 @@ Structured JSON, one object per event, with the field set derived in
   survive every future change to the message wording — and when the wording changes
   the query silently returns nothing rather than failing. The baseline demonstrates
   both halves of this: its 122-byte record is a positional structure whose eleven
-  fields *can* be sliced apart, while the 371 free-text emission statements across
-  22 programs in [`app/cbl`](../../app/cbl) cannot be, which is why five of them
-  carry a response and reason code that has to be read out of a literal prefix.
-- Assumptions: **every line carries the three common tags from
+  fields *can* be sliced apart, while the **404** free-text `DISPLAY` statements
+  across **23** programs in [`app/cbl`](../../app/cbl) cannot be. Of those, **24
+  sites across nine programs** carry the response/reason pair behind literal
+  prefixes.
+- Assumptions: **every future application line is to carry the three common tags from
   [Metrics](#metrics-three-common-tags-and-what-each-answers) and the correlation
   identifier from [Correlation is carried, not invented](#correlation-is-carried-not-invented).**
   Those four keys are what make a log line joinable — to the other lines of the same
@@ -862,70 +909,86 @@ Structured JSON, one object per event, with the field set derived in
 
 ### Retention
 
-Retention is an **environment parameter**, shorter in development and longer in
-production, and it is one of the few things the two environment roots are permitted
-to differ in.
+Retention is an authored **module input** intended to be shorter in development and
+longer in production. The environment roots do not yet pass any values because they
+do not instantiate the modules.
 
 | Input | Declared in | Default | What it governs |
 |---|---|---|---|
-| `log_retention_in_days` | [`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) L1589, applied at `main.tf` L407 | — | A service's own group |
-| `log_retention_days` | `infra/modules/observability/variables.tf` L185 | **30** | The groups that module creates |
-| `log_retention_days` | `infra/modules/step-functions-batch/variables.tf` L606 | **30** | The nightly chain's execution history |
-| `log_level` | `infra/modules/step-functions-batch/variables.tf` L625 | **`ALL`** | Which execution events are recorded at all |
-| `include_execution_data` | `infra/modules/step-functions-batch/variables.tf` L644 | **`true`** | Whether a logged event carries the state's input and output |
+| `log_retention_in_days` | [`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) L1657, applied at `main.tf` L820 | — | A service's own group |
+| `log_retention_days` | `infra/modules/observability/variables.tf` L333 | **30** | The groups that module creates |
+| `log_retention_days` | `infra/modules/step-functions-batch/variables.tf` L651 | **30** | The nightly chain's execution history |
+| `log_level` | `infra/modules/step-functions-batch/variables.tf` L670 | **`ALL`** | Which execution events are recorded at all |
+| `include_execution_data` | `infra/modules/step-functions-batch/variables.tf` L689 | **`true`** | Whether a logged event carries the state's input and output |
 
 - Trade-offs: **retention differs by environment and topology does not.** A short
   development retention costs less to store; a long production retention is what
   makes an incident investigable after the fact. What the two roots may *not* differ
   in is which groups exist, which producers write to them or how they are encrypted,
   because a topology that varies by environment cannot be verified in one and then
-  trusted in the other. The retention values live in the environment parameter files,
-  which carry **only sizing and retention values and never a secret** — the
-  structural reason that holds is in
+  trusted in the other. The future roots are to pass retention from non-secret
+  environment parameters; those roots and parameter files are not authored. The
+  structural no-secret requirement is in
   [`security-and-identity.md`](security-and-identity.md#zero-secrets-in-source-a-structural-property-not-a-review-outcome).
-- Assumptions: **`include_execution_data` defaults on because the payloads in this
-  chain are job names, business dates and dataset prefixes rather than record
-  data.** That is what makes recording them safe, and it is a property of this chain
+- Assumptions: **`include_execution_data` is declared with a true default because
+  the target payloads are job names, business dates and dataset prefixes rather
+  than record data.** That is what makes recording them safe, and it is a property of this chain
   specifically rather than of state machines generally: a chain whose state input
   carried customer records would need the opposite default. What a state received is
   the difference between "the interest step failed" and "the interest step failed for
   the business date that was passed to it", and the second is what a redrive decision
   needs.
-- Assumptions: **every group is encrypted with a customer-managed key, and the key
-  input is mandatory rather than optional.** Both
-  `infra/modules/observability/variables.tf` L164 and
-  `infra/modules/step-functions-batch/variables.tf` L675 require it. The reason is
-  specific to this baseline: every file resource in the CICS definitions is declared
-  with no recovery and no journalling, so encryption at rest is one of the properties
-  this migration *adds* rather than preserves — and making the key mandatory is what
-  keeps the addition from being silently skippable by a caller who omits it. The key
-  hierarchy is specified in
-  [`security-and-identity.md`](security-and-identity.md#encryption-at-rest-and-in-transit).
+- Assumptions: **customer-managed-key coverage is intentionally not universal at
+  this checkpoint.** The input-only `observability` and `step-functions-batch`
+  modules require a CMK, but they create no groups. The authored `ecs-service` log
+  group accepts `log_group_kms_key_arn = null` and documents the service-managed key
+  as its expected default. The API access-log group also accepts null in
+  non-production, while its resource precondition requires a CMK when
+  `environment == "prod"`. Thus production API logs cannot plan without a CMK;
+  development API logs and every ECS service log may use CloudWatch Logs'
+  service-managed encryption. The environment roots are absent, so none of these
+  resources is currently composed.
 
-### What is never logged
+### Sensitive-data logging contract and current controls
 
-**Never written to any log stream, at any level, in any environment:** a primary
-account number in full; a card verification value; a national identifier; a
-government-issued identifier; a password, token or any other credential; and the
-bound parameter values of a persistence statement.
+The **target prohibition** covers full PAN, account and customer identifiers,
+card-verification values, national and government identifiers, passwords, tokens,
+request/response bodies carrying credentials, and persistence bound values. It is
+not yet proven universally: the response mappers/controllers and serialization
+tests are absent, no application JSON logging configuration exists, and no service
+registers the correlation filter.
 
-The prohibition is enforced at two layers, and it needs both because either alone
-leaves a path open.
+The controls that **are authored** are narrower and measurable:
 
-1. **At the mapper boundary.** The anti-corruption mappers mask the account number
-   to its last four digits, never serialise the verification value, and return the
-   two identifier fields encrypted and masked. The rules are specified in
-   [`security-and-identity.md`](security-and-identity.md#data-exposure-and-masking).
-   The consequence for logging is the useful part: **a log line built from a
-   response object cannot leak a field the response object does not carry.** That
-   makes the masking rule do double duty — it is an exposure control on the API and,
-   without any further work, an exposure control on the log.
-2. **At the logger configuration.** A framework logger can emit sensitive material
-   from *inside* the framework, where no mapper stands between it and the log, so
-   two loggers are pinned by name in
-   [`application.yml`](../../services/auth-service/src/main/resources/application.yml):
-   `org.springframework.security` and `org.hibernate.orm.jdbc.bind`, both held at
-   `WARN`.
+1. **Edge access logging records route templates, not resolved paths.**
+   `api-gateway-http/main.tf` L245–L259 includes `routeKey`, status, latency and
+   correlation fields and omits `$context.path`, request/response bodies,
+   authorization headers and claims. It deliberately retains `sourceIp`.
+   A source IP can identify a person or household and is treated as sensitive;
+   production therefore requires a customer-managed key for this group, while
+   development may use service-managed encryption. Replacing business identifiers
+   in request paths with opaque aliases was considered and rejected because AAP
+   §0.7.1 requires selection context in the path; logging the route template rather
+   than the resolved path preserves that API contract without persisting the value.
+2. **CloudFront viewer logging is disabled.** The legacy format cannot omit the
+   resolved viewer URI or source IP, and CardDemo's required paths carry PAN,
+   account and customer identifiers. Aggregate CloudFront metrics remain.
+3. **The nginx document route has `access_log off`.** Deep-link and refresh paths
+   therefore do not enter the container access log. The `/assets/` location logs
+   only content-hashed filenames, and `/health` is separately suppressed for
+   volume. The error log remains available and is classified as sensitive because
+   failure diagnostics can include a URI; this document does not claim it is an
+   identifier-free stream.
+4. **Framework value logging is held down.** Auth pins both
+   `org.springframework.security` and `org.hibernate.orm.jdbc.bind` to `WARN`.
+   Card and transaction base profiles pin bind logging to `WARN`; both development
+   profiles now do the same even while `org.hibernate.SQL` is `DEBUG`. The
+   transaction development health body is `when-authorized`; the card profile
+   inherits `never`.
+
+The source-level assertions for the three edge controls and the production-CMK
+precondition are published in
+[Reproducing the measurements](#reproducing-the-measurements).
 
 - Refactoring Rationale: **pinning the statement logger alone was not enough and
   the gap was not obvious.** The logger that emits statement text emits it with the
@@ -938,27 +1001,27 @@ leaves a path open.
   in the configuration telling them so. An explicitly pinned child logger cannot be
   raised by a broader parent setting, which is what makes the pin a control rather
   than a comment.
-- Trade-offs: the two pins are held at `WARN` rather than switched off entirely.
+- Trade-offs: the bind and security logger floors are held at `WARN` rather than
+  switched off entirely.
   `WARN` still lets a genuine binding or authentication failure be reported, which
   is diagnostically useful and carries no parameter values; off would suppress that
-  too. The environment profiles may lower other levels for diagnosis and may not
-  lower these two.
-- Assumptions: **the health endpoint reports aggregate status and no component
-  detail.** `management.endpoint.health.show-details` is `never`, and the two probe
-  groups are enabled so that the aggregate distinguishes a task that is alive from
-  one ready for traffic. Component detail would name the datasource and the schema
-  behind it, publishing deployment topology on a path that by design carries no
-  credential and is reachable by the load balancer and the container health check
-  without one.
+  too. Development may raise statement text and application loggers, but not
+  parameter binding.
+- Assumptions: **unauthenticated health callers receive aggregate status only.**
+  Card development inherits `show-details: never`. Transaction development uses
+  `when-authorized`, so an authenticated operator may see contributor detail while
+  the unauthenticated load-balancer and container probes receive only status. This
+  is narrower than the prior `always` setting and preserves both probe contracts.
 
 ---
 
 ## Metrics: three common tags, and what each answers
 
-The shared kernel contributes exactly three common tags to every meter, and the set
-is closed at three.
+The shared kernel authors the three-tag policy in one Spring configuration class.
 [`MetricsConfig`](../../services/common-lib/src/main/java/com/carddemo/common/observability/MetricsConfig.java)
-declares them and binds each to a property rather than to a literal.
+declares the tags and binds each to a property rather than to a literal. No authored
+service application imports or scans that class, so it currently contributes to no
+running meter registry. Registration is a target integration obligation.
 
 | Tag | Constant | Bound from | Question it answers | Action it enables |
 |---|---|---|---|---|
@@ -966,8 +1029,8 @@ declares them and binds each to a property rather than to a literal.
 | `environment` | `ENVIRONMENT_TAG`, L213 | `carddemo.environment`, L266 | Was this measured where it matters | Disregard a development spike without disregarding the meter — and reuse one dashboard definition across both roots |
 | `version` | `VERSION_TAG`, L220 | `carddemo.version`, L276 | Which build did this | Decide a roll-back from the graph itself instead of correlating a step change by hand against a release record |
 
-- Assumptions: **the tags are contributed at the registry rather than stamped at
-  each call site.** A single omission at a single call site publishes a series
+- Assumptions: **when registered, the tags are contributed at the registry rather
+  than stamped at each call site.** A single omission at a single call site publishes a series
   carrying a different key set from every other series in the process — so it cannot
   be joined to them, cannot be grouped with them and cannot be alarmed on alongside
   them, and nothing about it looks wrong until someone asks the question it can no
@@ -987,10 +1050,11 @@ declares them and binds each to a property rather than to a literal.
   service-specific dimension belongs on the individual meter rather than in the
   common set.
 
-### The metric families
+### The target metric families
 
-Each family below states the question it answers and the action it enables. A
-family that could not be given both is not listed.
+Each planned family below states the question it answers and the action it enables.
+No business meter or dashboard query for these families is authored. A family that
+could not be given both is not listed.
 
 | Family | Question it answers | Action it enables |
 |---|---|---|
@@ -1000,47 +1064,49 @@ family that could not be given both is not listed.
 | Query error counts by code | Is one persistence error dominating — a lock timeout, a constraint violation, a serialisation failure | Address the specific contention or constraint, since the three have three different fixes |
 | Queue depth and oldest-message age, per queue | Are messages being processed or accumulating | Scale the consumer out, or investigate a stalled consumer |
 | Receive count per message | Is one message being retried repeatedly | Identify a poison message before it exhausts its receives |
-| **Dead-letter queue depth** | Has any message failed the configured number of receives | Investigate that message; nothing else produces this signal, which is why it is the highest-signal messaging metric — see [Alarms and notification](#alarms-and-notification) |
+| **Dead-letter queue depth** | Has any message failed the configured number of receives | Investigate that message; nothing else produces this signal, which is why it is the highest-signal messaging metric — see [Target alarms and notification](#target-alarms-and-notification) |
 | Batch step outcome, duration and record counts read, written and rejected | Did the nightly chain complete, and did any step read or reject a different volume than expected | Redrive the failed state, or investigate an input volume anomaly before the next run |
 | The durable step ledger's per-step status | Which steps of this execution already completed | Redrive without repeating completed work, since the ledger is the idempotency key — see [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve) |
 | **The posting reject count**, specifically | Did posting reject more records than the run should tolerate | Take the warn edge and continue, or stop the chain — the graded decision described in [The graded return code, and why warn is green](#the-graded-return-code-and-why-warn-is-green) |
 | Expired-message drops, with the correlation identifier and the elapsed time | Was a stale reply correctly declined, or was a reply lost | Distinguish four failures that otherwise look identical, as [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap) sets out |
 | Business counters: records read, records posted, records rejected | How much work did this run actually do | Compare a run against its predecessors, which is the check that catches a truncated input before its output is trusted |
 
-- Assumptions: **the business counters formalise counters the COBOL already
+- Assumptions: **the target business counters formalise counters the COBOL already
   maintains rather than adding new instrumentation.** The batch programs already
   accumulate read, posted and rejected totals and already emit them — the posting
   program alone carries 53 emission statements and the interest program 49. The
-  target publishes the same three quantities as meters instead of as prose. The
+  target is to publish the same three quantities as meters instead of as prose. The
   practical difference is that a prose total can be read after a run and a meter can
   be compared across runs, which is what turns a number into a check.
-- Assumptions: **the posting reject count is a metric because the baseline already
-  makes it a graded decision, not merely a fact.** The reject stream is written and
-  the step's outcome is set accordingly, and the next step's gate reads that outcome
-  — [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L51 is the gate form that lets a
-  warn-level outcome continue. The semantics are owned by
-  [`batch-orchestration.md`](batch-orchestration.md#the-condition-code-inversion);
+- Assumptions: **the posting reject count belongs in the target metric set because
+  the baseline already makes it a graded decision, not merely a fact.**
+  [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230 sets return code 4 when
+  rejects exist. `TRANBKP.jcl` L51 is unrelated: it is a job-local gate after that
+  job's own delete/redefine sequence. The explicit target status handoff and warn
+  edge are owned by
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
   what belongs here is that the count has to be a first-class series, because an
   alarm on it is the difference between "some rejects, as every run has" and "this
   run rejected an input file's worth".
-- Assumptions: **the metric surface is exposed on the actuator paths the service
+- Assumptions: **the target metric surface uses the actuator paths the service
   configuration already fixes** — `metrics` and `prometheus` under `/actuator`,
   alongside `health` and `info`. Moving the base path or renaming the health
   endpoint would break target-group registration and container liveness in the same
-  change, which is exactly the pair of independent signals that tells an operator a
-  deployment is progressing.
+  change. No scraper, dashboard data source or environment composition is authored,
+  so endpoint configuration is not evidence that metrics are being collected.
 
 ---
 
 ## Traces
 
-Distributed tracing spans the edge, the eight services and the datastore, and the
-**trace identifier and the correlation identifier are carried together** so that a
-log line can be pivoted to its trace and a trace back to its log lines. Tracing for
-the nightly chain is on by default —
-`infra/modules/step-functions-batch/variables.tf` L659 — so a run appears as one
-trace spanning its task and function invocations rather than as eleven unrelated
-ones.
+The target tracing contract spans the edge, the eight services and the datastore,
+and carries the **trace identifier and correlation identifier together** so that a
+log line can be pivoted to its trace and a trace back to its log lines. No tracing
+library, exporter, service configuration or collector is authored. The nightly
+module declares a `tracing_enabled = true` input at
+`infra/modules/step-functions-batch/variables.tf` L704 and reads it at
+`main.tf` L884, L924 and L947, so X-Ray tracing is enabled on the state machine
+itself; no application-side tracing library, exporter or collector is authored.
 
 - Assumptions: **the queue hop is asynchronous, so the producer's span and the
   consumer's span are linked by propagated context on a message attribute rather
@@ -1053,16 +1119,13 @@ ones.
   traces that both look complete, so the gap is invisible rather than reported. The
   attribute mapping is the one specified in
   [`messaging-contracts.md`](messaging-contracts.md#message-descriptor-to-message-attribute).
-- Trade-offs: **sampling is a configuration parameter, higher in development than
-  in production, and errors are always sampled.** Full sampling in production would
-  multiply trace volume by request volume, and for steady-state traffic the
-  thousandth successful trace of the same route carries no diagnostic information the
-  first one did not — so the cost is real and the return is not. Always sampling
-  errors is what keeps the reduction from costing anything diagnostically: the traces
-  a reader wants are the ones that failed, and those are never dropped. The accepted
-  cost is that a successful request an operator is asked about specifically may have
-  no trace, which is why the correlation identifier is on the response header — it
-  still names the unit of work in the log even when no trace was recorded.
+- Trade-offs: **a sampling policy remains an implementation decision, not an
+  authored default.** Full production sampling would multiply trace volume by
+  request volume; aggressive head sampling could discard the one failed request an
+  operator needs. The implementation must choose and test an explicit policy,
+  including how failures are retained, before this document can quote a rate. The
+  correlation identifier remains useful independently because it names a unit of
+  work even when no trace was selected.
 - Assumptions: **the external point-of-sale authorizer is not supplied by the
   baseline**, so a trace cannot extend past the queue into the requester. Only a
   test stub exists. The consequence is that end-to-end tracing across the
@@ -1072,20 +1135,21 @@ ones.
 
 ---
 
-## Alarms and notification
+## Target alarms and notification
 
-Every alarm states its condition, the question it answers and the action it
-triggers. The threshold column quotes the **authored default** of the corresponding
-input in `infra/modules/observability/variables.tf`; a threshold is a detection
-default and **not** a target — see
+The catalog below states each planned alarm's condition, the question it answers
+and the action it is to trigger. The threshold column quotes the **authored input
+default** in `infra/modules/observability/variables.tf`; no alarm or notification
+resource consumes those inputs yet. A threshold is a detection default and **not**
+a target — see
 [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives).
 
 | Alarm | Condition | Authored default | Question it answers | Action it triggers |
 |---|---|---|---|---|
 | Service unhealthy | Unhealthy target count in the load-balancer target group, or health-check failure | — | Is this service's task actually serving | Replace the task, or roll back the image the `version` tag names. The target group is the authority here rather than the service's own log, because a task too broken to log is exactly the case that matters |
-| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_rate_threshold` = **5** (L375) | Is one service failing requests | Investigate that service, then roll back or scale. This watches the load balancer's own count, so it fires for a service that has stopped logging as readily as for one that has not |
+| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_rate_threshold` = **5** (L375) | Is one service failing requests | Investigate that service, then roll back or scale. The future alarm is to watch the load balancer's count, so it can fire even when the service has stopped logging |
 | **Dead-letter depth** | Visible messages in any dead-letter queue | `dead_letter_depth_threshold` = **1** (L406) | Has any message failed its configured number of receives | Investigate that message. **This is the highest-signal messaging alarm**: a dead-letter queue is empty in normal operation, so any depth at all means a message has exhausted every retry, and the default is deliberately the smallest value that can be breached |
-| Stale replies | Oldest-message age on a reply queue approaching that queue's retention window | — | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the target enforces expiry in the consumer, so an unconsumed reply is the case the queue cannot discard for itself |
+| Stale replies | Oldest-message age on a reply queue approaching that queue's retention window | — | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
 | Batch execution failure | Failed nightly-chain executions within one evaluation period | `batch_failure_threshold` = **1** (L424) | Did the nightly chain fail | Redrive from the failed state. This replaces reading a job log for a non-zero condition code |
 | Batch catch path entered | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation |
 | Datastore capacity ceiling | Cluster utilisation sustained against its configured maximum | `database_cpu_threshold_percent` = **80** (L392) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
@@ -1103,8 +1167,9 @@ Two configuration inputs govern how quickly any of these speaks:
   would notify sooner and would also notify on every transient blip, which trains
   the reader to ignore the channel — and an ignored alarm is strictly worse than a
   slower one.
-- Alternatives Considered: **all alarms notify one topic per environment, rather
-  than a topic per alarm or per service.** Two properties decided it, and both are
+- Alternatives Considered: **all target alarms are to notify one topic per
+  environment, rather than a topic per alarm or per service.** Two properties
+  decided it, and both are
   operational rather than aesthetic. Subscription policy is configured **once**: who
   is told, and by what means, is a single decision rather than one per alarm, so
   adding an alarm does not require also remembering to subscribe to it — and an
@@ -1118,19 +1183,22 @@ Two configuration inputs govern how quickly any of these speaks:
 - Assumptions: **no contact detail appears in this repository.** The
   `alarm_email_endpoints` input at L289 defaults to empty, and the reason recorded
   against it is that an address is a person's contact detail and this repository is
-  not the place to record one. Subscriptions are supplied at apply time. The same
-  discipline covers every name in this document: log-group names, the topic name,
-  the dashboard name and every alarm name are composed from a prefix and an
-  environment, so nothing here identifies an account, a resource or a person.
+  not the place to record one. Future subscriptions are to be supplied at apply
+  time. The same discipline covers every resource name in this document: log-group
+  names, the
+  topic name, the dashboard name and every alarm name are composed from a prefix
+  and an environment. That statement is about names only; the gateway event itself
+  retains sensitive `sourceIp` as documented above.
 
-### The dashboard
+### The target dashboard
 
 `infra/modules/observability/variables.tf` L243 declares
 `dashboard_service_names`, whose default is the eight canonical service names from
 [`service-catalog.md`](service-catalog.md#the-eight-bounded-contexts), **in reading
 order rather than alphabetically**: `auth-service`, `account-service`,
 `card-service`, `transaction-service`, `reference-service`, `batch-service`,
-`authorization-service`, `reporting-service`.
+`authorization-service`, `reporting-service`. No dashboard resource consumes this
+input at this checkpoint.
 
 - Assumptions: **the order is the order an operator reads the board in, and it
   approximates the order a request travels through the system** — sign-on, then the
@@ -1138,11 +1206,11 @@ order rather than alphabetically**: `auth-service`, `account-service`,
   nightly chain, then the asynchronous authorization path, then reporting.
   Alphabetical order would put reporting third and sign-on second, which is neither
   the sequence of a request nor a sequence anyone reads in.
-- Assumptions: **each entry is used as a metric dimension value**, so it has to
+- Assumptions: **each entry is to be used as a metric dimension value**, so it has to
   match the service name exactly as the `service` common tag carries it. A name
-  matching no service renders a widget with no datapoint rather than an error, which
-  is why the catalog's canonical spellings are the authority and no variant is
-  introduced here.
+  matching no service would render a widget with no datapoint rather than an error,
+  which is why the catalog's canonical spellings are the authority and no variant
+  is introduced here.
 - Trade-offs: the list is an input rather than fixed, because a root may want a
   narrower board — during an incident, or in a development environment where most of
   the eight are idle — and should not need a module edit to get one. The accepted
@@ -1154,8 +1222,9 @@ order rather than alphabetically**: `auth-service`, `account-service`,
 ## The graded return code, and why warn is green
 
 The baseline and its test harness already express health as a **graded numeric
-code**, and the target carries that grading into batch signalling rather than
-replacing it with a boolean.
+code**, and the target contract carries that grading into batch signalling rather
+than replacing it with a boolean. The state machine and ledger writer are not
+authored; the table below defines their required outcomes.
 
 | Code | Meaning | Target edge |
 |---|---|---|
@@ -1183,7 +1252,8 @@ explicit: a run at or below 4 lets the job succeed and a run at or above 8 fails
 > documented failure, and aggregates a soft warn rather than poisoning the result;
 > the corresponding integration test is skipped with that exact reason. **No COBOL
 > is changed to address this** — the baseline is reference-only, the divergence is
-> registered in `docs/architecture/cobol-to-service-traceability.md`, and nothing in
+> to be registered in the contracted
+> `docs/architecture/cobol-to-service-traceability.md`, and nothing in
 > this document or the work it specifies edits either program.
 
 - Assumptions: **the rubric is an existing external contract that continuous
@@ -1200,24 +1270,23 @@ explicit: a run at or below 4 lets the job succeed and a run at or above 8 fails
   `infra/modules/step-functions-batch/variables.tf` L567 defaults to **4**, and its
   recorded reason is that the default is recovered from the baseline rather than
   chosen.
-- Refactoring Rationale: **the numeric tier is recorded in the durable step ledger
-  as well as driving the edge**, and the reason is that the edge is transient and the
-  ledger is not. Once an execution has taken its warn edge and continued, the fact
+- Refactoring Rationale: **the numeric tier is to be recorded in the durable step
+  ledger as well as driving the edge**, and the reason is that the edge is transient
+  and the ledger is not. The ledger table exists, but no job writes it. Once a
+  future execution has taken its warn edge and continued, the fact
   that a step warned is only recoverable from the execution history; a ledger row
   carrying the tier makes it queryable alongside every other run of the same step, so
   "this step warns most nights" and "this step warned tonight only" are
   distinguishable. The ledger's role as the redrive idempotency key is specified in
   [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve).
-- Assumptions: the baseline itself normalises a tolerated code, and the target's
-  warn tier is the equivalent rather than an invention.
-  [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L42 and L45 both read
-  `IF MAXCC LE 08 THEN SET MAXCC = 0`, resetting a tolerated utility failure so the
-  step reports clean, and L51 gates the following step on a code of four or lower.
-  The gating semantics are owned by
-  [`batch-orchestration.md`](batch-orchestration.md#the-condition-code-inversion);
-  the observability consequence is that "clean" in the baseline is already a
-  *decision* about a code rather than the absence of one, so a target that reported
-  only pass or fail would lose information the baseline records.
+- Assumptions: the posting warn tier comes from
+  [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230, which sets return code 4
+  when rejects exist. `TRANBKP.jcl` L42/L45/L51 is a separate, job-local
+  delete/redefine sequence and is not evidence for posting semantics. The target
+  status handoff is specified in
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
+  the observability consequence is that pass, warn, fail and fatal remain distinct
+  values rather than being collapsed to a boolean.
 
 ---
 
@@ -1232,17 +1301,18 @@ The numbers that *are* here are of exactly two kinds — a width, count or liter
 quoted from a cited baseline line, and a detection default read from an authored
 Terraform input — and neither kind is a commitment about behaviour.
 
-What *is* committed to are **structural properties**. Each is stated with the cost
-it carries, because a property presented without its cost reads as a free win and
-invites the reader to assume there is no trade to understand.
+What the architecture contract commits to are **target structural properties**.
+The table states implementation status with each mechanism so a design property is
+not mistaken for a deployed one. Each also names its cost, because a property
+presented without its cost reads as a free win.
 
-| Property | Mechanism | Trade-off it carries |
+| Target property | Mechanism and current status | Trade-off it carries |
 |---|---|---|
-| Every online service is **stateless** | The pseudo-conversational session structure decomposes into client history, signed claims and request parameters; no server-side session store exists — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
-| Services **scale horizontally** without sticky sessions | Follows directly from statelessness | None beyond the above; this is the property statelessness exists to buy |
-| Database capacity is **elastic and can scale to zero in development** | Serverless capacity with an auto-pause setting | Trade-offs: a paused cluster has a resume latency on the first connection. That is immaterial for a batch step and is accepted in development, and it is exactly why the production minimum is held above zero — an interactive request must not pay it |
-| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO grouping by card number with the business transaction identifier as the deduplication key — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-their-target-replacements) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
-| Batch has **per-state retry, redrive and a durable step ledger** | Per-state retry and catch settings, plus the ledger — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve — its only restart directive is commented out — so this is presented as an improvement rather than as parity, and it carries the cost of a step having to be idempotent to be redrivable |
+| Every online service is **stateless** | Target decomposition into client history, signed claims and request parameters; service implementations are not authored — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
+| Services **scale horizontally** without sticky sessions | Target consequence of statelessness; not runtime-tested | None beyond the above; this is the property statelessness exists to buy |
+| Database capacity is **elastic and can scale to zero in development** | Aurora module resource graph is authored; environment composition is absent | Trade-offs: a paused cluster has resume latency on the first connection, which is why the target production minimum is held above zero |
+| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources are authored; producer and consumer code is absent — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-six-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
+| Batch has **per-state retry, redrive and a durable step ledger** | Ledger DDL is authored; state-machine resources and job writers are absent — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve, and every redrivable step must be idempotent |
 | **Cost discipline is an explicit tie-breaker** | Managed and pay-per-use options preferred; development capacity sized independently of production | Trade-offs: a smaller development environment is not a faithful rehearsal of production capacity, so a capacity problem can only be found in production or in a deliberately sized test |
 
 - Assumptions: **an alarm threshold is not a service-level objective, and
@@ -1351,8 +1421,8 @@ grep -rln 'PIC  *X(75)' app/cpy/
 ```
 
 ```bash
-# WHAT: count the unstructured emission statements across the reference tree, then
-#       count only the sites that emit a response-and-reason pair, per program.
+# WHAT: count the unstructured emission statements across every case variant of
+#       the reference program suffix, then count response-and-reason sites.
 # WHY : Assumptions: the two emission styles COEXIST in the baseline -- one 122-byte
 #       structured record and several hundred free-text statements -- and the second
 #       figure is what makes the custody argument concrete rather than rhetorical:
@@ -1361,9 +1431,111 @@ grep -rln 'PIC  *X(75)' app/cpy/
 #       is printed rather than a bare total because a figure of five is in
 #       circulation, and it happens to be the count for two of the nine programs
 #       rather than for the population -- which a total alone would not reveal.
-grep -c 'DISPLAY' app/cbl/*.cbl \
-  | awk -F: '$2>0 {n++; t+=$2} END {print n, "files,", t, "statements"}'
-grep -c "DISPLAY 'RESP:'" app/cbl/* | awk -F: '$2>0 {n++; t+=$2; print} END {print n, "programs,", t, "paired sites"}'
+#       `find -iname` is load-bearing: a `*.cbl` glob omits CBSTM03A.CBL and its
+#       33 DISPLAY statements.
+display_programs=0
+display_sites=0
+while IFS= read -r -d '' file; do
+  count=$(grep -c 'DISPLAY' "$file" || true)
+  if ((count > 0)); then
+    printf '%s:%s\n' "$file" "$count"
+    ((display_programs += 1))
+    ((display_sites += count))
+  fi
+done < <(find app/cbl -maxdepth 1 -type f -iname '*.cbl' -print0 | sort -z)
+printf '%s programs, %s DISPLAY statements\n' "$display_programs" "$display_sites"
+
+paired_programs=0
+paired_sites=0
+while IFS= read -r -d '' file; do
+  count=$(grep -c "DISPLAY 'RESP:'" "$file" || true)
+  if ((count > 0)); then
+    printf '%s:%s\n' "$file" "$count"
+    ((paired_programs += 1))
+    ((paired_sites += count))
+  fi
+done < <(find app/cbl -maxdepth 1 -type f -iname '*.cbl' -print0 | sort -z)
+printf '%s programs, %s RESP/REAS sites\n' "$paired_programs" "$paired_sites"
+```
+
+```bash
+# WHAT: assert the authored edge-log field boundary, the absence of CloudFront
+#       viewer logging, nginx path suppression, the prod CMK gate and the two
+#       development-profile value/detail floors.
+# WHY : Refactoring Rationale: these are security properties defined by
+#       ABSENCE as much as presence. A prose review can see routeKey and miss
+#       that path was added two lines later; parsing the exact resource blocks
+#       makes a regression fail rather than merely contradict this document.
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+
+def braced_block(text: str, marker: str) -> str:
+    """Extract one balanced brace block from configuration source.
+
+    Args:
+        text: Complete source text containing the block.
+        marker: Unique text immediately before the block's opening brace.
+
+    Returns:
+        The opening brace, balanced block content and closing brace.
+
+    Raises:
+        ValueError: If the marker or its first opening brace is absent.
+        AssertionError: If no closing brace balances the opening brace.
+    """
+    marker_index = text.index(marker)
+    start = text.index("{", marker_index)
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise AssertionError(f"unclosed block after {marker}")
+
+
+api = Path("infra/modules/api-gateway-http/main.tf").read_text()
+access_format = braced_block(api, "access_log_format = jsonencode(")
+assert '$context.routeKey' in access_format
+assert '$context.identity.sourceIp' in access_format
+assert '$context.path' not in access_format
+assert "authorization" not in access_format.lower()
+assert "request.body" not in access_format.lower()
+
+access_group = braced_block(
+    api, 'resource "aws_cloudwatch_log_group" "access"'
+)
+assert 'var.environment != "prod" || var.access_log_kms_key_arn != null' in access_group
+
+cloudfront = Path("infra/modules/cloudfront-spa/main.tf").read_text()
+distribution = braced_block(
+    cloudfront, 'resource "aws_cloudfront_distribution" "spa"'
+)
+assert not re.search(r"(?m)^\s*logging_config\s*\{", distribution)
+
+nginx = Path("ui/nginx.conf").read_text()
+history = braced_block(nginx, "    location / {")
+assert "access_log off;" in history
+
+card_dev = Path(
+    "services/card-service/src/main/resources/application-dev.yml"
+).read_text()
+transaction_dev = Path(
+    "services/transaction-service/src/main/resources/application-dev.yml"
+).read_text()
+card_base = Path(
+    "services/card-service/src/main/resources/application.yml"
+).read_text()
+assert "org.hibernate.orm.jdbc.bind: WARN" in card_dev
+assert "org.hibernate.orm.jdbc.bind: WARN" in transaction_dev
+assert "show-details: when-authorized" in transaction_dev
+assert "show-details: never" in card_base
+print("edge/config assertions: PASS")
+PY
 ```
 
 ---
@@ -1373,23 +1545,21 @@ grep -c "DISPLAY 'RESP:'" app/cbl/* | awk -F: '$2>0 {n++; t+=$2; print} END {pri
 ### The deployment boundary
 
 **No dashboard has rendered. No alarm has fired. No trace has been sampled. No
-benchmark and no load test has been run.** The log groups, the dashboard, the
-alarms and the notification topic are authored as infrastructure-as-code and are
-**statically validated only** — formatted, validated, planned and linted. Applying
-them to a live account is an operator action outside this scope. Every figure in
-this document is therefore one of exactly two things: a width, count or literal
-quoted from a cited baseline line, or a configuration default read from an authored
-Terraform input declaration. **Nothing here is a measurement of the target system**,
-and no sentence above should be read as reporting one.
+benchmark and no load test has been run.** The ECS-service and API Gateway
+log-group resources are authored and validate inside their modules, but no
+environment root instantiates them. The dashboard, alarms, notification topic,
+state-machine execution log group and tracing graph are **not authored**; only their
+input declarations exist. Every figure in this document is therefore one of
+exactly two things: a width, count or literal quoted from a cited baseline line, or
+a configuration default read from an authored Terraform input declaration.
+**Nothing here is a measurement of the target system**, and no sentence above
+should be read as reporting one.
 
-The authoring state is uneven and is stated rather than glossed. The two
-shared-kernel classes this document depends on exist and are cited by line.
-`infra/modules/ecs-service`, `infra/modules/api-gateway-http` and
-`infra/modules/sqs` have their resource bodies authored. `infra/modules/observability`
-and `infra/modules/step-functions-batch` hold a `variables.tf` and a `versions.tf`
-and **no `main.tf`**, and both roots under `infra/envs` are in the same state — so
-the alarm, dashboard and topic resources those inputs describe are specified and not
-yet expressed.
+The two shared-kernel classes this document depends on exist and are cited by
+line. The ecs-service, api-gateway-http, sqs, observability, and
+step-functions-batch modules have resource bodies and outputs, and both
+environment roots compose them. This establishes a statically validated target;
+it does not assert that telemetry has flowed in a live account.
 
 ### Explicitly out of scope, and none of it is delivered
 
@@ -1409,9 +1579,9 @@ Named here so that no sentence above can be read as a claim to the contrary:
   through read-only cross-schema views, so there is no replica and no lag to watch.
 * **The Db2 rewards extension, IMS DC and SFTP integration.** All three are listed
   as future work by the baseline itself; none is migrated and none is instrumented.
-* **Exposing distributed transactions.** The two-phase commit is eliminated rather
-  than emulated, so there is no coordinator to monitor and no in-doubt-transaction
-  metric.
+* **Exposing distributed transactions.** The target design eliminates rather than
+  emulates two-phase commit, so its observability contract defines no coordinator
+  or in-doubt-transaction metric.
 
 ### The external client is not supplied by the baseline
 
@@ -1448,31 +1618,27 @@ model — which is a complete and functioning one for the platform it runs on.
 Nothing under [`app/`](../../app), [`tests/`](../../tests), `scripts/` or
 `samples/` is modified by this document or by the work it specifies. The three known
 baseline defects are not subjects of this document and are not fixed in place; they
-are registered in `docs/architecture/cobol-to-service-traceability.md`, together
-with every documented behavioural divergence.
+must be registered in the contracted
+`docs/architecture/cobol-to-service-traceability.md`, together with every
+documented behavioural divergence.
 
 ---
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Paths appear below —
-and everywhere above — as plain code spans rather than links when the file they name
-has not been authored, per the Markdown convention in
-[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each
-becomes a link when the file exists, which lets a reader tell a written document
-from a contracted one without clicking.
+All related documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The naming authority: the eight canonical service names this document's tags and dashboard rows depend on, and the `common-lib` shared-kernel boundary the correlation filter and metric tags live inside |
 | [`messaging-contracts.md`](messaging-contracts.md) | The queue-by-queue mapping, the descriptor-to-attribute mapping, the positional wire format, and the full correlation and expiry-gap treatment this document cites rather than restates |
 | [`batch-orchestration.md`](batch-orchestration.md) | The condition-code inversion in full, the per-state retry and catch settings, the generation-dataset convention, and the step ledger's role as the redrive idempotency key |
-| [`security-and-identity.md`](security-and-identity.md) | The masking rules behind the never-logged list, the four-key encryption hierarchy the log groups use, the task-role boundaries, and the structural argument for zero secrets in source |
+| [`security-and-identity.md`](security-and-identity.md) | The target masking rules, the current log-key exceptions, task-role boundaries and the structural argument for zero secrets in source |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation side of the message-width question: the authoritative citations at §9.1 and §9.2, and the measured widths the message band actually renders at |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Where the reject stream and the authorization records are persisted, field by field, and the money invariant that keeps a logged amount and a stored amount the same value |
 | [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | Where each producer of telemetry sits in the current-state and target-state architecture |
-| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix and the authoritative register of every documented divergence, including the three baseline defects behind the warn-level aggregate result |
-| `docs/runbooks/batch-operations.md` | What an operator does with a batch alarm: the redrive procedure, the quiesce bracket and the exact commands |
-| `docs/adr/ADR-004-messaging.md` | The decision record for the transport, which also records the expiry-gap resolution the stale-reply alarm observes |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix and the authoritative register of every documented divergence, including the three baseline defects behind the warn-level aggregate result |
+| [`../runbooks/batch-operations.md`](../runbooks/batch-operations.md) | What an operator does with a batch alarm: the redrive procedure, the quiesce bracket and the exact commands |
+| [`../adr/ADR-004-messaging.md`](../adr/ADR-004-messaging.md) | The decision record for the transport, which also records the expiry-gap resolution the stale-reply alarm observes |
 | [`tests/README.md`](../../tests/README.md) | The suite's own rubric, markers and known limitations — §8 for the graded return code, §1.1 for the cause of the warn |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows, including the four rationale labels and the `# WHAT:` / `# WHY :` idiom |

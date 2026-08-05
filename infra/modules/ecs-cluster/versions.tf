@@ -40,8 +40,10 @@
 #   - Alternatives Considered: `required_version` is an open-ended floor rather
 #     than an exact pin, because a shared module is consumed by roots that
 #     carry constraints of their own.
-#   - Trade-offs: the provider is bounded to one minor series, so patch releases
-#     arrive unattended but a provider major cannot.
+#   - Trade-offs: the provider constraint admits the supported 6.x major line,
+#     while the calling root lock file selects one reviewed release and checksum
+#     set. Minor upgrades are therefore possible only through an explicit lock
+#     update even though the reusable module does not prohibit them.
 #   - Alternatives Considered: no `provider` block is declared here, so the
 #     calling root keeps control of region, account and provider aliasing.
 #   - Alternatives Considered: `hashicorp/random` is deliberately absent,
@@ -62,12 +64,19 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the one provider this module requires, bounded to a minor series.
-    # WHY : Trade-offs: `~> 6.56` accepts 6.56.x patch releases but refuses a
-    #       provider major, so a breaking change to a resource schema cannot
-    #       reach this module through an unattended upgrade. The compromise
-    #       accepted is that moving to a provider major becomes a deliberate,
-    #       reviewed edit of this line.
+    # WHY : Trade-offs: `~> 6.56` means `>= 6.56.0, < 7.0.0`; it admits later
+    #       6.x minor releases and refuses 7.x, so a breaking change to a
+    #       resource schema cannot reach this module through an unattended
+    #       upgrade. The compromise accepted is that moving to a provider major
+    #       becomes a deliberate, reviewed edit of this line. A narrower
+    #       `~> 6.56.0` range was rejected because the root lock file, not a
+    #       reusable module constraint, is the mechanism that selects one
+    #       reviewed release.
+    # WHY : Assumptions: this module deliberately has no local lock file. The
+    #       calling environment root owns `.terraform.lock.hcl`, currently
+    #       resolving AWS provider 6.57.1, and CI uses `-lockfile=readonly`.
+    #       Changing that exact version or checksum set therefore requires a
+    #       reviewed lock-file diff rather than an unattended resolution.
     # WHY : Assumptions: every module and every root under infra/ declares this
     #       identical constraint, so Terraform resolves one provider version
     #       for the whole configuration; a constraint that diverged in a single

@@ -78,7 +78,6 @@
 # -----------------------------------------------------------------------------
 
 variable "name_prefix" {
-  # WHAT: the leading component of the composed cluster name.
   # WHY : Assumptions: every resource in this infrastructure package is named
   #       carddemo-<component>-<env> -- the request queues, the dataset
   #       bucket and the nightly batch state machine all follow it. The
@@ -117,8 +116,6 @@ variable "name_prefix" {
 }
 
 variable "environment" {
-  # WHAT: the deployment-environment discriminator in the composed cluster
-  #       name, supplied by whichever root is calling.
   # WHY : Alternatives Considered: defaulting this to "dev" was rejected.
   #       Terraform reports nothing when a default is silently accepted, so
   #       a prod root that forgot the argument would plan and apply a cluster
@@ -151,7 +148,6 @@ variable "environment" {
 }
 
 variable "cluster_name" {
-  # WHAT: an explicit cluster name that replaces the composed one outright.
   # WHY : Alternatives Considered: two other shapes were rejected. Making the
   #       name a required input would force both roots, and every future
   #       root, to restate the carddemo-<component>-<env> convention by hand,
@@ -180,8 +176,6 @@ variable "cluster_name" {
 # -----------------------------------------------------------------------------
 
 variable "container_insights" {
-  # WHAT: the value main.tf writes into the cluster's containerInsights
-  #       setting, which selects the cluster-level monitoring tier.
   # WHY : Assumptions: the module specification for `ecs-cluster` is "Fargate
   #       cluster, Container Insights", so the default is the on value. The
   #       policy scan in .github/workflows/infra-ci.yml runs at high and
@@ -221,8 +215,6 @@ variable "container_insights" {
 }
 
 variable "capacity_providers" {
-  # WHAT: the capacity providers main.tf associates with the cluster before
-  #       any service or task can reference them.
   # WHY : Assumptions: the compute decision recorded in
   #       docs/adr/ADR-002-compute-platform.md selects Fargate for the eight
   #       services and Step-Functions-invoked Fargate tasks for batch, so the
@@ -283,8 +275,6 @@ variable "capacity_providers" {
 }
 
 variable "default_capacity_provider_strategy" {
-  # WHAT: how the cluster places a task that names neither a launch type nor
-  #       a strategy of its own.
   # WHY : Trade-offs: the default reserves a base of one task on on-demand
   #       Fargate and then apportions everything above that base four to one
   #       in favour of on-demand. The mechanism matters and is worth stating
@@ -394,8 +384,6 @@ variable "default_capacity_provider_strategy" {
 # -----------------------------------------------------------------------------
 
 variable "execute_command_log_group_name" {
-  # WHAT: the name of an EXISTING CloudWatch log group that execute-command
-  #       session output is redirected to.
   # WHY : Alternatives Considered: creating the log group inside this module
   #       was rejected. Log groups are owned by `ecs-service`, which creates
   #       one per service, and by `observability`, which owns the group,
@@ -416,7 +404,6 @@ variable "execute_command_log_group_name" {
 }
 
 variable "execute_command_logging" {
-  # WHAT: which log destination the cluster uses for execute-command output.
   # WHY : Assumptions: the default is "DEFAULT" because that is the value the
   #       ECS API itself applies when the parameter is omitted -- it routes
   #       session output through whatever awslogs configuration the task
@@ -464,13 +451,6 @@ variable "execute_command_logging" {
 }
 
 variable "kms_key_arn" {
-  # WHAT: the customer-managed KMS key that encrypts the execute-command
-  #       channel between the operator's client and the container. main.tf
-  #       feeds it to the cluster's `kms_key_id` argument, which is spelled
-  #       for a key identifier but documented to accept a full key reference
-  #       as well; the input keeps the longer name because that is the form
-  #       the environment root has, having taken it from the `kms` module's
-  #       output.
   # WHY : Assumptions: the key is never created here. The four customer-managed
   #       keys in this package -- for the database, object storage, the secret
   #       store and the queues -- are owned by the sibling `kms` module and
@@ -504,8 +484,6 @@ variable "kms_key_arn" {
 # -----------------------------------------------------------------------------
 
 variable "tags" {
-  # WHAT: the module-specific keys main.tf merges onto the two resources it
-  #       creates, alongside the set they inherit from the calling root.
   # WHY : Assumptions: this map is ADDITIVE, not a replacement. The calling
   #       root configures the aws provider with `default_tags`, and every
   #       resource in this module inherits that set without restating it, so

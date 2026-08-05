@@ -413,6 +413,13 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
   #       provider names, so a caller cannot name one either.
   capacity_providers = var.capacity_providers
 
+  # WHY : Assumptions: this is a DEFAULT only for a RunTask or CreateService call
+  #       that names neither a launch type nor its own capacity-provider strategy.
+  #       infra/modules/ecs-service now supplies an explicit on-demand FARGATE
+  #       strategy for interactive services, so those services intentionally
+  #       override this mix; Step Functions or another caller that omits a
+  #       strategy inherits it. Naming that boundary prevents this cluster-level
+  #       setting from being read as proof that every service uses Spot.
   # WHY : Trade-offs: the default strategy this receives reserves a base on
   #       on-demand Fargate and apportions everything above that base in favour
   #       of on-demand, and the MECHANISM is what bounds the exposure: ECS

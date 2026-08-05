@@ -1,0 +1,129 @@
+# =============================================================================
+# CardDemo migration | services/common-lib/src/main/resources/carddemo-common-defaults.yml
+# The ONE definition of the structured log line and of the three metric tag
+# values, shared by every migrated service.
+# =============================================================================
+#
+# Purpose:
+#   Carries the three cross-cutting configuration values that have to be identical
+#   in every bounded context, so that they are written once here rather than
+#   copied into eight application.yml files:
+#
+#     1. logging.pattern.console -- the console layout, which names the two
+#        mapped-diagnostic-context keys the shared correlation filter publishes.
+#     2. carddemo.environment / carddemo.version -- the two metric tag values
+#        the shared meter filter reads. The third tag value, the service name,
+#        is spring.application.name and is genuinely per-service, so it is NOT
+#        defaulted here.
+#     3. OpenTelemetry export defaults -- traces, logs and OTLP metrics stay off
+#        outside a deployment that explicitly supplies the task-local collector.
+#
+# How a service consumes it:
+#   One line in the service's own application.yml:
+#
+#     spring:
+#       config:
+#         import: "classpath:/carddemo-common-defaults.yml"
+#
+#   Imported values sit BENEATH the importing file in precedence, so a service
+#   that has a reason to override the pattern still can, and the override is
+#   visible in that service's own file.
+#
+# WHY this file exists at all (Refactoring Rationale):
+#   Only one service carried a console pattern naming the correlation key, so the
+#   correlation identity the filter published reached the log output of exactly
+#   one of them; the framework's default pattern names no context key, so the
+#   identity was present in the context and absent from every line. And most
+#   services supplied no value for the environment and version tags, so their
+#   meters carried the "unspecified" fallback the meter filter substitutes. Both
+#   defects have the same shape -- a shared component correctly written and then
+#   not given the configuration it reads -- so both are answered in one place.
+#
+# WHY a classpath import rather than eight copies (Alternatives Considered):
+#   Eight identical literals were the obvious alternative and were rejected: the
+#   pattern names context keys owned by a class in this module, so a key renamed
+#   in the class has to be renamed in every copy, and a copy missed produces a
+#   line with an empty field rather than an error. An environment post-processor
+#   contributing the same defaults programmatically was also considered and
+#   rejected as a second registration file plus a class, to deliver values that
+#   are static text. Config-data import is resolved before the logging system
+#   initialises, so a pattern supplied this way is in force for the first line a
+#   service logs.
+#
+# WHY not a logback include (Trade-offs):
+#   A logback-spring.xml fragment would also single-source the layout, and it was
+#   rejected because it would bind every service to one logging implementation
+#   and would express the metric tag values nowhere -- leaving two mechanisms for
+#   two halves of one concern. A property file expresses both.
+# =============================================================================
+
+logging:
+  pattern:
+    # WHY : (1) Assumptions: traceId and spanId are contributed by Micrometer
+    #       tracing, while correlationId and requestId are the two keys
+    #       com.carddemo.common.web.CorrelationIdFilter puts into the mapped
+    #       diagnostic context and removes in a finally block. The four fields
+    #       have different origins and remain separate so one service line can
+    #       pivot to its distributed trace and to the matching API Gateway edge
+    #       record without replacing the caller's correlation identity.
+    #       (2) Assumptions: the ":-" default in each substitution renders an
+    #       empty field rather than the literal text "correlationId_IS_UNDEFINED"
+    #       that an unqualified reference emits when the key is absent. A key IS
+    #       absent on any line logged outside a request -- startup, shutdown, a
+    #       scheduled task -- so without the default every such line would carry a
+    #       spurious token.
+    #       (3) Trade-offs: the four context identifiers are bracketed and
+    #       separated by a single space rather than emitted as key=value pairs.
+    #       Bracketing keeps the line readable in a terminal during development,
+    #       which is where a console pattern is actually read; a structured JSON
+    #       encoder is the right answer for machine parsing and is a
+    #       deployment-time choice that would replace this pattern wholesale
+    #       rather than amend it.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%X{traceId:-} %X{spanId:-} %X{correlationId:-} %X{requestId:-}] %logger{36} : %msg%n"
+
+management:
+  logging:
+    export:
+      otlp:
+        # WHY : Assumptions: ECS already forwards stdout and stderr to the
+        #       customer-key-encrypted service log group. A second OTLP log
+        #       exporter would duplicate every event and its storage charge
+        #       without adding a correlation field.
+        enabled: false
+
+  otlp:
+    metrics:
+      export:
+        # WHY : Assumptions: the task-local collector scrapes the existing
+        #       Prometheus endpoint and exports those meters through CloudWatch
+        #       EMF. Enabling this exporter as well would publish each meter
+        #       twice through two independent temporality paths.
+        enabled: false
+
+  tracing:
+    export:
+      otlp:
+        # WHY : Assumptions: the OpenTelemetry starter is shared by every
+        #       service, including local builds and tests where no collector is
+        #       listening. Defaulting export on would turn a missing deployment
+        #       sidecar into repeated connection failures in otherwise valid
+        #       local runs. ECS overrides this default with OTEL_TRACES_EXPORTER
+        #       and the task-local endpoint, so the deployed path stays explicit.
+        enabled: false
+
+carddemo:
+  # WHY : Assumptions: ONE environment-variable name for the environment label,
+  #       CARDDEMO_ENVIRONMENT, and no second spelling anywhere. An earlier
+  #       revision had one service addressing its Parameter Store path from
+  #       CARDDEMO_ENV while every other deployment and metric path used
+  #       CARDDEMO_ENVIRONMENT; two names for one value means a task definition
+  #       that sets one of them produces a service whose metrics are labelled and
+  #       whose configuration is not, or the reverse, with nothing failing.
+  # WHY : Trade-offs: the fallback is the literal "unspecified" rather than a
+  #       plausible value such as "dev". A wrong-but-plausible default is the
+  #       worse failure: a production task whose variable was not injected would
+  #       publish its series under the development label and be silently merged
+  #       with it on every graph and every alarm. "unspecified" is a value no
+  #       dashboard filter matches, so the omission is visible where it matters.
+  environment: ${CARDDEMO_ENVIRONMENT:unspecified}
+  version: ${CARDDEMO_VERSION:unspecified}

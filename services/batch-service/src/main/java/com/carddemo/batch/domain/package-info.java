@@ -2,24 +2,6 @@
  * JPA entity mappings for the batch bounded context: one type per fixed-length record the
  * nightly z/OS chain read or wrote, plus the single table this module owns outright.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every type name, table name and count below describes this package's
- * <b>target contract</b> as the migration plan assigns it, not the set of files present beside
- * this one today. The migration lands its artifacts in plan order and this charter is authored
- * first, so at the checkpoint that authored it this directory holds this charter and nothing
- * else. A type named below that has no file yet is therefore <b>planned</b>, not missing, and a
- * count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until the eight entities it governs
- * exist. Rejected, because the charter is what the authors of those entities work from -- which
- * table each one may touch, which annotations it may not carry, which precision its money
- * columns take -- so writing it last would leave the package with no stated contract during
- * exactly the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is what the
- * paragraph above is for; that paragraph is the single place a reader has to look to tell a
- * target from a measurement.</p>
- *
  * <h2>Purpose</h2>
  *
  * <p>The package root is {@code com.carddemo.batch}, and {@code domain} is the entity layer
@@ -34,41 +16,25 @@
  * constrain: which physical column, of which type, length and scale, in which schema, each
  * field of each baseline record lands on.</p>
  *
- * <h2>How this charter meets the four docstring elements</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>The user-specified Explainability rule -- the single rule governing this project, and the
- * reason this file exists at all -- attaches at its line 15 the docstring duty to every module
- * entry point, and in Java a package declaration is that entry point and can carry a docstring
- * only in a {@code package-info.java}. The Javadoc block is therefore not decoration on this
- * file; it is the file's entire reason to exist, and a bare {@code package} statement would be a
- * failure rather than a minimum. The rule enumerates four docstring elements at its lines 18 to
- * 21, and its line 39 names a docstring that omits any of them among its forbidden patterns, so
- * a reader has to be able to find all four rather than take their presence on trust:</p>
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <ul>
- *   <li><b>Purpose</b> is the section immediately above.</li>
- *   <li><b>Parameters</b> -- a package accepts none, so the element is carried by the external
- *       contracts every mapping here is bound to and cannot restate: the copybook layouts that
- *       fix each field's type, length and scale; the owning services' migrations that create the
- *       tables, columns and indexes; and the narrowly-scoped database grant that admits this
- *       module to those tables at all. Those are the sections on the schema-ownership boundary,
- *       on the two money precisions, and on the dropped {@code FILLER}.</li>
- *   <li><b>Return values</b> -- a package yields none, so the element is carried by what this
- *       package exposes to its consumers: seven mappings over tables another service owns, one
- *       entity over the single table this module owns, and the parity surface that makes every
- *       column decision observable. That is the section on what this package exposes.</li>
- *   <li><b>Exceptions</b> is the section on failure modes, which names the two a caller has to
- *       plan for and states which of the two is not this module's fault.</li>
- * </ul>
- *
- * <p>Assumptions: the mapping is declared rather than left implicit because inventing
- * {@code @param}, {@code @return} and {@code @throws} at-clauses instead would be worse than
- * useless. Javadoc has no parameter, return or exception concept for a package, and the
- * repository rule set at {@code config/checkstyle/checkstyle.xml} audits at-clause bodies for
- * emptiness, so a fabricated clause would either be discarded by the tool or flagged by it.
- * This charter consequently carries no at-clause of any kind, and none for authorship,
- * availability or revision either.</p>
- *
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>What this package holds, and which contract each mapping is bound to</h2>
  *
  * <p>Eight entity types belong here and no ninth; with this charter the directory holds nine
@@ -222,10 +188,10 @@
  * <p>Alternatives Considered: a Maven dependency on {@code transaction-service} and
  * {@code account-service}, so that their existing entities could be reused directly. Rejected on
  * two independent grounds. A service module importing another service module's {@code domain}
- * package is forbidden outright, and the prohibition is an executable architecture test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/}
- * {@code LayeringRulesTest.java} rather than a review convention, so the import would fail the
- * build rather than draw a comment. Independently of the test, a compile-time dependency between
+ * package is forbidden outright, and the prohibition belongs to the layering rules the
+ * {@code architecture-rules} Surefire execution in {@code services/pom.xml} selects by the simple
+ * name {@code LayeringRulesTest} rather than to a review convention, so the import fails a build
+ * rather than drawing a comment. Independently of the test, a compile-time dependency between
  * two independently deployable services reintroduces exactly the coupling that bounded contexts
  * exist to remove: the two would then have to be built, versioned and released together, and a
  * field added for one service's reasons would land in the other's build.</p>
@@ -319,8 +285,9 @@
  * plan's transformation rule T3 fixes the representation as {@code NUMERIC(p,2)} in SQL,
  * {@code BigDecimal} at scale 2 in Java, and a JSON string on any wire.
  * {@code float}, {@code double} and bare JSON numbers are forbidden in the money path, and the
- * prohibition is an executable assertion in {@code LayeringRulesTest} rather than a review note,
- * so an entity here cannot introduce a {@code double} without failing the build. A JSON number is
+ * prohibition belongs to the layering rules the {@code architecture-rules} Surefire execution
+ * selects by the simple name {@code LayeringRulesTest} rather than to a review note, so an entity
+ * here cannot introduce a {@code double} without failing a build. A JSON number is
  * parsed into an IEEE-754 double by most clients, which destroys exactness at precisely the
  * boundary a user reads. The arithmetic helpers live in {@code com.carddemo.common.money.Money}
  * and are never re-declared per entity, which is the Java analogue of single-sourcing a record
@@ -578,51 +545,5 @@
  *       seven-subpackage shape, the exit-status contract and the invariants this package
  *       inherits.</li>
  * </ul>
- *
- * <h2>Authoring notes</h2>
- *
- * <p>Trade-offs: this file is restricted to ASCII. Where a cited source carries a non-breaking
- * hyphen or an em dash, this charter uses an ASCII hyphen-minus or a pair of ASCII hyphens;
- * wording is otherwise unchanged and only those punctuation code points are normalised.
- * {@code tests/README.md} is the one file in this repository that uses the non-breaking hyphen,
- * and it uses it inside the very words a charter like this has to reproduce, including all four
- * justification labels. Copying a label from there yields text that looks correct, greps wrong,
- * and silently fails an audit searching for the canonical spelling. The cost of the restriction is
- * typographically plainer prose; the gain is that every label and every quoted phrase here is
- * byte-predictable.</p>
- *
- * <p>Assumptions: the four justification labels used throughout -- {@code Alternatives
- * Considered:}, {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:} --
- * are spelled as the Explainability rule presents them at its lines 31 to 34: plural,
- * unparenthesised, each followed immediately by a colon. Three of the four are used;
- * {@code Refactoring Rationale:} labels no paragraph here, and its absence is deliberate rather
- * than an omission: the rule defines that label at its line 32 as applying when existing code is
- * replaced, and nothing in this package replaces anything. The COBOL stays byte-identical and
- * keeps running, so an ordinary difference between a baseline record and a mapping over it is
- * labelled {@code Alternatives Considered:} or {@code Assumptions:} instead. Labelling it a
- * refactoring would assert a replacement that did not happen.</p>
- *
- * <p>Assumptions: the documentation gate that audits this file is
- * {@code config/checkstyle/checkstyle.xml} with its companion
- * {@code config/checkstyle/suppressions.xml}, bound to the Maven {@code validate} phase in
- * {@code services/pom.xml}, so it runs before compilation on every local build and not only in
- * continuous integration. Two of its checks bear on this file and they are a deliberate pair: one
- * asserts that a {@code package-info.java} exists in a directory holding compilation units, and
- * the other asserts that the file carries Javadoc. A file holding nothing but a {@code package}
- * statement satisfies the first and fails the second, which is exactly the outcome the pairing is
- * designed to produce. The rule set configures no comment-based or annotation-based suppression
- * filter, so there is no in-code bypass, and the companion suppression file is scoped to generated
- * sources and test fixtures alone, so nothing under {@code src/main/java} can be suppressed out of
- * the gate. The Explainability rule's validation gate at its line 43 is conjunctive: it closes by
- * stating that code missing either the docstring or the decision rationale fails review, so the
- * two obligations are independently fatal and neither compensates for the other.</p>
- *
- * <p>Assumptions: this file declares a package and imports nothing, and the emptiness is load
- * bearing. No {@code import} statement appears here, and no package-level annotation either --
- * neither a nullability default nor a persistence-wide setting. An annotation would drag a type
- * into a compilation unit whose only function is documentation, and a persistence-wide default
- * declared here would apply to eight mappings of which seven describe tables this module does not
- * own, which is exactly the DDL-passive boundary recorded above. A reader who finds this file
- * short on code has found it correct.</p>
  */
 package com.carddemo.batch.domain;

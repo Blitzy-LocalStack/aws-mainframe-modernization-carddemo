@@ -2,25 +2,6 @@
  * Root package of the transaction-service module, the LEDGER bounded context of
  * the CardDemo mainframe-to-microservices migration.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter
- * describes the package's <b>target contract</b> as the migration plan assigns it,
- * not the set of files present beside this one today. The migration lands its
- * artifacts in plan order and this charter is authored first, so at the checkpoint
- * that authored it this directory holds this charter and nothing else, and no subpackage of it
- * exists yet. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> This package roots the Java re-expression of the CardDemo
  * transaction ledger: the four CICS transactions that list, view and add
  * transactions and that take a bill payment, migrated from z/OS COBOL running
@@ -186,12 +167,12 @@
  *
  * <p>This context neither owns nor imports {@code Account}, {@code Card},
  * {@code CardXref}, {@code Customer} or {@code User}. Cross-service
- * {@code domain} imports are forbidden outright, and the prohibition is a test
- * rather than a convention: the ArchUnit layering rules authored at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * are re-run by this module against its own classes, and they additionally keep
- * AWS and web types out of {@code domain} and binary floating-point types out of
- * the money path. Cross-context data is reached over HTTP, never by import.
+ * {@code domain} imports are forbidden outright, and the prohibition belongs to a
+ * build rule rather than to a convention: the shared kernel's layering rules,
+ * selected by the simple name {@code LayeringRulesTest}, are evaluated against
+ * this module's own compiled classes, and they additionally keep AWS and web
+ * types out of {@code domain} and binary floating-point types out of the money
+ * path. Cross-context data is reached over HTTP, never by import.
  *
  * <p>Assumptions: authored once is not executed everywhere, and the difference is why this module
  * carries two declarations of its own rather than relying on inheritance. Maven hands a dependency's
@@ -204,9 +185,9 @@
  * {@code com.carddemo:common-lib} in {@code dependenciesToScan}, so the class is collected from that
  * artifact and run against THIS module's own compiled classes. This module additionally declares the
  * ArchUnit engine at test scope in its own POM, because test scope is not transitive and the
- * assertion API has to resolve wherever the class executes. That rule class is authored at a later
- * index of the same plan and does not exist yet, so at this checkpoint the prohibition is carried by
- * review; the three declarations above are what make it executable the moment the class lands.
+ * assertion API has to resolve wherever the class executes. Those four declarations are the whole of
+ * the delivery mechanism, and they are what makes one authored rule class enforce this boundary in
+ * every module instead of in the one module that declares it.
  *
  * <p>Assumptions: the baseline reaches other contexts' records directly,
  * because one CICS region shares one file set, and two of the four programs

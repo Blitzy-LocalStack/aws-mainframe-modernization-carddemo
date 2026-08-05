@@ -284,39 +284,12 @@ resource "aws_ecr_repository" "this" {
   #       load-library stanzas at L489-L496 that between them held every
   #       executable module the region could run carry no encryption
   #       attribute of any kind.
-  #       Alternatives Considered: a `dynamic "encryption_configuration"`
-  #       block driven by a one-or-empty list, the usual idiom for emitting a
-  #       block only sometimes. Rejected because the block is wanted in BOTH
-  #       cases here and only its contents differ, so the dynamic form would
-  #       wrap a generator around a block that is always produced and leave a
-  #       reader to work out that the list is never empty. A static block
-  #       with a conditional type reads as what is actually true: encryption
-  #       is always configured, and only the key varies.
-  #       Assumptions: a null argument is an ABSENT argument in Terraform,
-  #       which is what makes the static form correct rather than merely
-  #       shorter. The registry rejects a key supplied alongside `AES256`, so
-  #       the fallback path must pass no key at all -- and `kms_key` set to a
-  #       null `var.kms_key_arn` is not sent, so it does not.
-  #       Assumptions: when non-null, the value arrives as the `kms` module's
-  #       output threaded through the calling root. A key identifier is never
-  #       written as a literal in this package, because module outputs are the
-  #       only sanctioned source of runtime identifiers and a literal would
-  #       bind this module to one account.
-  #       Trade-offs: null is a supported value rather than an error, so this
-  #       module stays usable before any customer-managed key exists -- which
-  #       matters because key creation and these repositories sit in the same
-  #       apply. The accepted cost is that a caller who forgets to wire the
-  #       key silently receives registry-managed `AES256` instead of failing.
-  #       The partial mitigation is the infrastructure pipeline's policy scan,
-  #       and the boundary is worth stating precisely because it is easy to
-  #       over-read: scanning this configuration asserts that encryption is
-  #       configured AT ALL -- that this block exists -- which catches a
-  #       repository left unencrypted but not a caller who left the key null.
-  #       Choosing the customer-managed key therefore remains the calling
-  #       root's responsibility, discharged by wiring the `kms` module's
-  #       output into this input.
+  #       Refactoring Rationale: the former nullable branch silently selected
+  #       registry-managed AES256 when a caller forgot the key. Every complete
+  #       root already provisions the shared data CMK, so treating its absence
+  #       as a valid mode made the documented architecture optional.
   encryption_configuration {
-    encryption_type = var.kms_key_arn != null ? "KMS" : "AES256"
+    encryption_type = "KMS"
     kms_key         = var.kms_key_arn
   }
 }

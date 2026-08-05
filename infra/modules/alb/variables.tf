@@ -16,8 +16,9 @@
 #   infra/envs/prod, and they WIRE these values rather than author them:
 #   `subnet_ids` and `alb_security_group_id` come from the network module, the
 #   `target_group_arn` inside each `service_routes` entry from the seven
-#   load-balanced ecs-service instantiations, `certificate_arn` from ACM, and
-#   `access_logs_bucket` from the module that owns the logging bucket.
+#   load-balanced ecs-service instantiations, and the certificate ARN plus its
+#   verified DNS name from the environment's ACM/DNS authority. The module owns
+#   its access-log bucket and delivery policy directly.
 #
 # Parameters:
 #   The module's parameters ARE the `variable` blocks below, and each one
@@ -27,15 +28,16 @@
 #   because the Inputs table generated into README.md -- whose freshness is
 #   drift-checked in CI -- is produced from those same declarations.
 #
-#   Thirteen parameters in two groups, and the groups are the declaration
+#   Fourteen parameters in two groups, and the groups are the declaration
 #   order:
 #     - Six REQUIRED, carrying no default, because no safe value can be
 #       invented for an identifier only the caller knows: environment,
 #       subnet_ids, alb_security_group_id, certificate_arn,
-#       access_logs_bucket, service_routes.
-#     - Seven DEFAULTED, where a default is both safe and the compliant
+#       certificate_domain_name, service_routes.
+#     - Eight DEFAULTED, where a default is both safe and the compliant
 #       choice: name_prefix, ssl_policy, access_logs_prefix,
-#       enable_deletion_protection, idle_timeout, health_check_path, tags.
+#       legacy_elb_log_delivery_account_arn, enable_deletion_protection,
+#       idle_timeout, health_check_path, tags.
 #
 # Returns:
 #   None. A variables file has no return value. What this module publishes to
@@ -53,7 +55,7 @@
 #       idle-timeout range, the listener-rule priority range.
 #     - Crossed wires between modules, where two different identifiers are
 #       both opaque strings: a subnet id passed where a security-group id
-#       belongs, or a bucket ARN where a bucket NAME belongs.
+#       belongs, or a listener certificate ARN paired with an invalid DNS name.
 #     - Invariants AWS cannot check on our behalf: two availability zones
 #       actually distinct, listener-rule priorities actually unique.
 #
@@ -99,14 +101,11 @@
 #     a decision because nearly every load-balancer example declares one, so
 #     its absence reads as an oversight until explained.
 #   - Assumptions: no port, protocol, CIDR, ingress or egress input -- the
-#     load-balancer security group is created and owned by the network module
-#     and is only CONSUMED here, so this module declares no
-#     aws_security_group and no aws_security_group_rule. The permitted matrix
-#     is fixed for the whole package -- load balancer to application on 8080,
-#     application to Aurora on 5432, application to interface endpoint on 443
-#     -- and an input accepting an arbitrary or unrestricted range would make
-#     that matrix a per-caller decision, which is the thing owning the group
-#     in one module exists to prevent.
+#     load-balancer security group is created by network and only CONSUMED here.
+#     api-gateway-http adds the exact SG-referenced VPC-Link-to-ALB 443 ingress
+#     because it is the only module that can see both endpoints without a
+#     dependency cycle. This module declares no rule and exposes no arbitrary or
+#     unrestricted range.
 #   - Trade-offs: declaration order is required-then-defaulted rather than
 #     alphabetical. Alphabetical is the obvious alternative and is easier to
 #     scan for one known name, but it interleaves the inputs a caller MUST
@@ -115,9 +114,9 @@
 #     reader hunting a single name may look in two places, and the generated
 #     Inputs table in README.md gives them a sorted view anyway.
 #   - Assumptions: nothing here is marked `sensitive`, because none of these inputs
-#     carries a secret. The certificate is referenced by ARN and its private
-#     key never leaves ACM, the logging bucket is named rather than
-#     credentialed, and no password, token or key material is accepted at all.
+#     carries a secret. The certificate is referenced by ARN and domain name
+#     while its private key never leaves ACM, and no password, token or key
+#     material is accepted at all.
 #     `sensitive` is therefore withheld deliberately -- applying it would
 #     redact these values from plan output, which is exactly where a reviewer
 #     confirms that the subnets and routes are the intended ones.
@@ -234,12 +233,11 @@ variable "alb_security_group_id" {
   type        = string
 
   # WHY : Assumptions: the permitted traffic matrix is fixed for the whole
-  #       package and is expressed once, in the network module that creates
-  #       this group. This module only ATTACHES it -- no aws_security_group,
-  #       no aws_security_group_rule, and no port, protocol or CIDR input --
-  #       so there is no path through this module by which the group could be
-  #       widened or opened to unrestricted ingress. The constraint is stated
-  #       on the input so that it travels with the value a reader is holding.
+  #       package. The network module creates this group and api-gateway-http
+  #       adds only the SG-referenced VPC Link ingress on 443. This module only
+  #       ATTACHES it -- no security-group resource and no port, protocol or
+  #       CIDR input -- so there is no path through this interface by which the
+  #       group could be widened or opened to unrestricted ingress.
   #       Assumptions: the network module publishes several opaque identifier
   #       strings -- subnet ids, a VPC id and this group id -- and Terraform
   #       type-checks all of them as `string`, so a crossed wire between two
@@ -258,6 +256,7 @@ variable "alb_security_group_id" {
 variable "certificate_arn" {
   description = "ARN of the ACM certificate the HTTPS listener presents, provisioned and validated outside this module."
   type        = string
+  nullable    = false
 
   # WHY : Assumptions: the certificate is issued and its domain validated
   #       outside this module, and only its ARN crosses the boundary -- the
@@ -266,49 +265,29 @@ variable "certificate_arn" {
   #       literal for a second reason that is not about reuse: a certificate
   #       ARN embeds an account identifier and a region, and neither may
   #       appear anywhere in this tree.
-  #       Alternatives Considered: a regular expression asserting the ARN's
-  #       textual shape, as is done for the security-group id above. Rejected
-  #       here on two grounds -- writing that expression would itself
-  #       hard-code the partition-and-service prefix this file must not
-  #       contain, and the value arrives from an ACM resource attribute rather
-  #       than being typed by hand, so a malformed string is not the way this
-  #       input actually goes wrong.
+  #       Refactoring Rationale: a complete shape check is retained at the
+  #       module boundary because the environment root exposes this as an
+  #       operator-supplied non-secret input. A listener accepts only an ACM
+  #       certificate ARN in the same region; a crossed KMS or CloudFront ARN
+  #       is otherwise rejected only after the load balancer exists.
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$", var.certificate_arn))
+    error_message = "certificate_arn must be a complete regional ACM certificate ARN of the form arn:<partition>:acm:<region>:<account-id>:certificate/<id>."
+  }
 }
 
-variable "access_logs_bucket" {
-  description = "Name of the S3 bucket that receives the load balancer's access logs. A bucket NAME, not a bucket ARN."
+variable "certificate_domain_name" {
+  description = "Bare DNS name covered by certificate_arn and verified by the API Gateway private integration when it connects to this HTTPS listener."
   type        = string
+  nullable    = false
 
-  # WHY : Trade-offs: no null value and no `enabled` companion, so access
-  #       logging cannot be switched off through this module. A nullable input
-  #       was considered and rejected: the policy scan gates load-balancer
-  #       access logging at HIGH severity (checkov CKV_AWS_91), so an off path
-  #       would let a caller produce a load balancer that fails the scan merely
-  #       by omitting an argument, and the module would have supplied the
-  #       means. Requiring the bucket makes the compliant configuration the
-  #       only configuration this module can build.
-  #       The logs are also the only record of which caller reached
-  #       which service, for which the baseline had no equivalent -- all eight
-  #       file resources in app/csd/CARDDEMO.CSD are defined RECOVERY(NONE)
-  #       JOURNAL(NO), so nothing recorded access or supported reconstructing
-  #       it.
-  #       Assumptions: the bucket already carries the policy admitting the
-  #       regional log-delivery principal to write to it. That is a property of
-  #       the bucket, owned by whichever module creates it -- a load balancer
-  #       cannot grant itself the write -- so if the policy is absent the apply
-  #       fails on the delivery test rather than on anything declared here.
-
-  # WHY : Assumptions: this attribute takes a bucket NAME. The module that owns
-  #       the bucket exposes both a name and an ARN, both typed `string`, so
-  #       passing the ARN type-checks, plans clean, and fails only during the
-  #       delivery test at apply -- after the load balancer itself has been
-  #       created. The character class is what separates the two: a bucket name
-  #       admits neither a colon nor a slash, and an ARN contains both. The
-  #       three-to-63-character span the pattern enforces is the S3
-  #       bucket-name limit.
+  # WHY : Assumptions: the ALB listener consumes the ARN while API Gateway must
+  #       verify a DNS name, and Terraform cannot derive the latter from the
+  #       former. Requiring both values makes that cross-module TLS prerequisite
+  #       explicit instead of leaving the private integration to guess.
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.access_logs_bucket))
-    error_message = "access_logs_bucket must be an S3 bucket NAME of 3 to 63 lowercase characters (letters, digits, dots and hyphens), not a bucket ARN."
+    condition     = can(regex("^[A-Za-z0-9*]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$", var.certificate_domain_name))
+    error_message = "certificate_domain_name must be a bare DNS name covered by the listener certificate, with no scheme, port or path."
   }
 }
 
@@ -334,7 +313,7 @@ variable "service_routes" {
   #       integration, which does not traverse this load balancer, so there is
   #       nothing for a rule to route to. The edge modules agree by construction:
   #       infra/modules/api-gateway-http publishes no /batch route either.
-  #       Alternatives Considered (a) hard-coding the seven service names and
+  #       Alternatives Considered: (a) hard-coding the seven service names and
   #       their path patterns inside the module: rejected because a routing
   #       change would then be a change to the module every environment
   #       shares, and the module would stop being reusable; routing policy
@@ -401,6 +380,33 @@ variable "service_routes" {
     error_message = "every service_routes entry must list at least one path pattern; a listener rule cannot be created without a condition."
   }
 
+  # WHY : Assumptions: the API version travels in the PATH, and this load balancer
+  #       sits BEHIND the HTTP API that publishes those paths. Every route key that
+  #       edge publishes is under `/api/v1/`, and the integration forwards the
+  #       request path unchanged, so a pattern here that omits the prefix can never
+  #       match anything the gateway sends. The symptom of that divergence is this
+  #       listener's own 404 for a service that is running and healthy, produced by
+  #       a routing table that reads as though it covers the service -- so the
+  #       check exists to make the two edge layers unable to disagree by
+  #       configuration.
+  #       Alternatives Considered: rewriting or stripping the prefix at the gateway
+  #       so this layer could keep matching unversioned paths. Rejected because
+  #       forwarding the path untouched is what lets a reader see, from either
+  #       layer alone, exactly which requests reach which service; a rewrite would
+  #       split that fact across two places and neither would be authoritative.
+  #       Trade-offs: the check pins the MAJOR version this module routes, so
+  #       publishing `/api/v2` alongside `/api/v1` needs an edit here as well as at
+  #       the gateway. That is the intent rather than the cost: a second live
+  #       version is a deliberate act on both edge layers, not something one
+  #       environment's tfvars can introduce on one of them only.
+  validation {
+    condition = alltrue([
+      for route in values(var.service_routes) :
+      alltrue([for pattern in route.path_patterns : startswith(pattern, "/api/v1/")])
+    ])
+    error_message = "every service_routes path pattern must begin with \"/api/v1/\", the versioned prefix the api-gateway-http route keys publish; a pattern without it can never match a request forwarded from that edge."
+  }
+
   # WHY : Assumptions: `priority` is supplied by the caller rather than derived
   #       from map ordering, because priorities must be unique on a listener
   #       and are evaluated lowest-first -- they ARE the routing precedence.
@@ -417,7 +423,7 @@ variable "service_routes" {
     error_message = "every service_routes priority must be between 1 and 50000, the range an Application Load Balancer listener rule accepts."
   }
 
-  # WHY : Trade-offs: four separate conditions on one variable rather than one
+  # WHY : Trade-offs: five separate conditions on one variable rather than one
   #       compound condition, accepted because a compound condition can carry
   #       only ONE error_message -- a caller who duplicated a priority would be
   #       told to check their routes instead of being told which invariant
@@ -473,7 +479,7 @@ variable "name_prefix" {
 }
 
 variable "ssl_policy" {
-  description = "Predefined ELB security policy the HTTPS listener negotiates with, fixing the protocol versions and ciphers it will accept."
+  description = "Predefined ELB security policy the HTTPS listener negotiates with. The module accepts only the TLS 1.3 policy with a TLS 1.2 floor because no environment may lower the listener protocol."
   type        = string
 
   # WHY : Assumptions: this policy negotiates TLS 1.3 with a TLS 1.2 FLOOR, so
@@ -490,28 +496,51 @@ variable "ssl_policy" {
   #       Gateway private integration reaching this listener over the VPC
   #       Link, and it negotiates modern TLS, so there is no legacy client
   #       whose breakage would be the price of refusing them.
-  #       Alternatives Considered: constraining this input to an allow-list of
-  #       policies known to floor at TLS 1.2, which would make the floor
-  #       mechanical rather than conventional. Rejected because AWS publishes
-  #       new policies -- including restricted-cipher and post-quantum
-  #       key-exchange families that also floor at 1.2 -- and a fixed list
-  #       would refuse a compliant one, forcing a module edit to adopt it. The
-  #       floor is held instead by this default plus the policy scan, and the
-  #       input stays open so a caller can move to a newer family without
-  #       touching the module.
+  #       Alternatives Considered: accepting any policy whose name appears to
+  #       include TLS 1.2. Rejected because the name is not a machine-readable
+  #       guarantee about every cipher and protocol the managed policy enables;
+  #       admitting a new family is therefore a reviewed module change rather
+  #       than a caller-controlled way to bypass the shared floor.
   default = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+
+  validation {
+    condition     = var.ssl_policy == "ELBSecurityPolicy-TLS13-1-2-2021-06"
+    error_message = "ssl_policy must remain ELBSecurityPolicy-TLS13-1-2-2021-06. The internal listener's TLS 1.2 floor is non-overridable in every environment."
+  }
+}
+
+variable "access_logs_bucket" {
+  description = <<-EOT
+    Name of an existing S3 bucket to write load-balancer access logs to. Leave
+    null to have this module create and own the bucket, with encryption, a public
+    access block, a TLS-only policy and the ELB log-delivery grant. Supply the
+    shared terminal bucket published by infra/modules/observability when one stack
+    should have a single log destination; both environment roots do.
+  EOT
+  type        = string
+  default     = null
+
+  # WHY : Assumptions: the value is a bucket NAME rather than an ARN, because that
+  #       is what the aws_lb access_logs block takes. A shape check is deliberately
+  #       limited to the S3 naming rules -- this module cannot prove the bucket
+  #       carries the delivery grant ALB validates while enabling logging, and the
+  #       owning module's own policy is what does.
+  validation {
+    condition     = var.access_logs_bucket == null || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.access_logs_bucket))
+    error_message = "The access_logs_bucket must be a valid S3 bucket name of 3 to 63 lower-case characters, or null to have this module create its own."
+  }
 }
 
 variable "access_logs_prefix" {
   description = "Key prefix under which the load balancer writes access-log objects inside the logging bucket."
   type        = string
 
-  # WHY : Assumptions: the logging bucket is shared with other producers, and
-  #       the load balancer writes beneath "<prefix>/AWSLogs/...". A prefix is
-  #       what makes these objects addressable as a set, so a lifecycle rule
-  #       can expire load-balancer logs on their own schedule without matching
-  #       an unrelated key. Defaulting it rather than leaving it empty means
-  #       that separation exists even when the caller says nothing about it.
+  # WHY : Assumptions: this module now owns a dedicated logging bucket, and ELB
+  #       still writes beneath `<prefix>/AWSLogs/...`. Keeping an explicit
+  #       prefix makes the delivery-policy resource and operator queries share
+  #       one visible object root instead of relying on the empty-prefix special
+  #       case. Defaulting it means that structure exists when the caller says
+  #       nothing.
   default = "alb"
 
   # WHY : Assumptions: the load balancer supplies its own separator between the
@@ -523,6 +552,23 @@ variable "access_logs_prefix" {
   validation {
     condition     = !startswith(var.access_logs_prefix, "/") && !endswith(var.access_logs_prefix, "/")
     error_message = "access_logs_prefix must neither begin nor end with \"/\"; the load balancer supplies the separator between the prefix and the log key."
+  }
+}
+
+variable "legacy_elb_log_delivery_account_arn" {
+  description = "Optional regional ELB service-account root ARN used only where the legacy pre-service-principal access-log delivery model remains required. Null uses the modern logdelivery.elasticloadbalancing.amazonaws.com principal alone."
+  type        = string
+  default     = null
+
+  # WHY : Alternatives Considered: looking the legacy account up through the
+  #       deprecated aws_elb_service_account data source was rejected because it
+  #       hides a regional prerequisite inside this module and cannot represent
+  #       partitions uniformly. An explicit optional ARN keeps the exceptional
+  #       legacy grant visible in the environment root while the modern service
+  #       principal remains the default path.
+  validation {
+    condition     = var.legacy_elb_log_delivery_account_arn == null || can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:root$", var.legacy_elb_log_delivery_account_arn))
+    error_message = "legacy_elb_log_delivery_account_arn must be null or an IAM account-root ARN of the form arn:<partition>:iam::<account-id>:root."
   }
 }
 

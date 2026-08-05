@@ -441,9 +441,16 @@
     Alternatives Considered: (a) own a schema and migrate it, as the other seven
     services do, and as the parent's managed versions for both artifacts would
     make trivial. Rejected because this module is assigned NO owned tables. It
-    reads read-only cross-schema views under a role holding SELECT-only grants,
-    and both the views and the grants are bootstrapped by
-    data-migration/sql/V0__schemas_and_roles.sql. A migration tool here would
+    reads read-only cross-schema views under a role holding SELECT-only grants.
+    Those are bootstrapped in two ordered steps that this module owns neither of:
+    data-migration/sql/V0__schemas_and_roles.sql establishes the reporting schema,
+    its login-less owning role and the revocation of every source-schema privilege
+    from the service role, and data-migration/sql/V1__reporting_views.sql declares
+    the masked security-barrier views and grants SELECT on each of them by name.
+    The split is not incidental: a view cannot be created before the table it
+    reads, and at the point V0 runs no table exists anywhere, which is why the
+    views are a later step rather than part of the bootstrap. A migration tool here
+    would
     claim ownership of objects this module must not own, and two owners of one
     object is how a schema drifts. (b) add an Aurora read replica so that
     reporting reads never touch the writer. Rejected because a replica adds cost

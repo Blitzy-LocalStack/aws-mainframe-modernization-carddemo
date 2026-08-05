@@ -1,28 +1,6 @@
 /**
  * Spring Data JPA data-access boundary of the pending-authorization bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else, and the sibling {@code api}, {@code service}, {@code domain} and {@code mapper}
- * packages of this module hold nothing at all. A type or test named below that has no file yet is
- * therefore <b>planned</b>, not missing, and a count below is a target total rather than a
- * measurement of the directory. In particular the integration tests named here are the
- * {@code *RepositoryIT} classes Failsafe is configured to match, and none of them exists yet.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every interface it governs exists.
- * Rejected, because the charter is what the authors of those interfaces work from -- which type
- * belongs here, which may not, and where the boundary with the service layer falls -- so writing it
- * last would leave the package with no stated contract during exactly the interval in which one is
- * needed. This package is also the first of {@code api}, {@code service}, {@code mapper} and
- * {@code repository} in this module to be written, so the seam recorded below is the module's first
- * statement of it and the three later packages align to it rather than restating it. The cost of
- * authoring it first is that its inventory reads as present tense unless the distinction is
- * declared, which is what the paragraph above is for.</p>
- *
  * <h2>Purpose</h2>
  *
  * <p>Purpose: this package is the persistence boundary of the authorization bounded context. The
@@ -213,10 +191,10 @@
  * {@code cpy/CIPAUDTY.cpy} carries the transaction and approved amounts as {@code COMP-3} at L34
  * and L35, and {@code ddl/AUTHFRDS.ddl} carries the two relational amounts as
  * {@code DECIMAL(12,2)} at L12 and L13. A binary floating-point value cannot hold a decimal cent
- * exactly, and the resulting error is silent rather than loud, which is why the prohibition is
- * asserted by the ArchUnit layering test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * and so fails a test rather than a reading.
+ * exactly, and the resulting error is silent rather than loud, which is why the prohibition belongs
+ * to the layering rules the {@code architecture-rules} Surefire execution in
+ * {@code services/pom.xml} selects by the simple name {@code LayeringRulesTest}, and so is settled by
+ * a build rather than by a reading.
  *
  * <p>Assumptions: the shared kernel is the only intra-reactor dependency available to this package.
  * Transformation rule T2 of the migration plan states the discipline in Java terms -- one former

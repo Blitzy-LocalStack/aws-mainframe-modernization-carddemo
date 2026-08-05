@@ -62,10 +62,14 @@
 #     not. A bound parameter can carry the primary account number that every
 #     response masks; a statement text carries the predicate and no values.
 #     Detail at logging.level and at spring.jpa.show-sql.
-#   Trade-offs: the health body is widened to carry its contributor detail,
-#     which names the datasource and the migration state on an endpoint whose
-#     two pollers are both unauthenticated. Detail at
-#     management.endpoint.health.show-details.
+#   Trade-offs: the probe health body stays sanitized and the contributor detail
+#     moves to a named, authorization-gated health group. The aggregate path is
+#     polled by the container HEALTHCHECK and the load balancer target group,
+#     both unauthenticated, so it answers with the status word alone; an operator
+#     entitled to the datasource and migration state asks
+#     /actuator/health/diagnostics for it. Detail at
+#     management.endpoint.health.show-details and at
+#     management.endpoint.health.group.
 #   Assumptions: two diagnostic endpoints are added and four are still
 #     withheld -- heapdump and loggers for reasons that survive being in `dev`.
 #     Detail at management.endpoints.web.exposure.include.
@@ -125,10 +129,8 @@ spring:
   datasource:
 
     hikari:
-      # WHAT: a narrower pool than the ten the base sizes, and one that is
-      #       permitted to empty completely.
       # WHY : (1) Assumptions: the base leaves this decision open on purpose.
-      #       Its note at application.yml L293 to L299 sizes ten against a
+      #       Its note at application.yml L319 to L326 sizes ten against a
       #       connection budget Aurora enforces for the whole cluster, shared
       #       with seven peer services and the batch role, and leaves widening
       #       to "a profile that knows its environment's instance size". This
@@ -156,7 +158,6 @@ spring:
       maximum-pool-size: 4
       minimum-idle: 0
 
-      # WHAT: longer to acquire a connection, shorter to keep an unused one.
       # WHY : (1) Assumptions: the base's ten seconds is shorter than the
       #       window this environment needs, so raising it is not a loosening
       #       of convenience. The first connection opened after the cluster has
@@ -178,29 +179,26 @@ spring:
       #       the idle window unambiguous.
       #       (3) Assumptions: max-lifetime is deliberately NOT overridden. The
       #       base sets fifteen minutes to bound how long a pooled socket can
-      #       outlive an Aurora failover, reasoned at application.yml L307 to
-      #       L312, and a failover is not an environment-specific event: both
+      #       outlive an Aurora failover, reasoned at application.yml L333 to
+      #       L341, and a failover is not an environment-specific event: both
       #       environments run the same cluster shape, so a value chosen
       #       against failover behaviour would be wrong to move for sizing.
       #       (4) Assumptions: all three keys bind as millisecond integers and
-      #       not as durations, as the base records at application.yml L303 to
-      #       L306, so the values below are thirty seconds and one minute. The
+      #       not as durations, as the base records at application.yml L329 to
+      #       L332, so the values below are thirty seconds and one minute. The
       #       `20s` duration form used for the shutdown phase would silently
       #       fail to bind here.
       connection-timeout: 30000
       idle-timeout: 60000
 
   jpa:
-    # WHAT: held at the base value. Statement logging IS enabled in this
-    #       profile, but through the logging framework further down, never
-    #       through this key.
     # WHY : (1) Assumptions: this is the first key a reader looking for SQL in
     #       a development profile reaches for, which is why it is restated with
     #       its value unchanged instead of left to inheritance. Silence here
     #       would read as an oversight rather than as a decision.
     #       (2) Alternatives Considered: switching it on, which is the obvious
     #       route and the wrong one. The base records the mechanism at
-    #       application.yml L461 to L467 -- this key echoes statements through
+    #       application.yml L480 to L486 -- this key echoes statements through
     #       the provider straight to standard output, so no logger level can
     #       filter it. Two consequences decide it. Output that bypasses the
     #       logging framework also bypasses the diagnostic context
@@ -216,7 +214,6 @@ management:
   endpoints:
     web:
       exposure:
-        # WHAT: two diagnostic endpoints added to the base pair, which stays.
         # WHY : (1) Assumptions: this key REPLACES the base list rather than
         #       extending it, so a name omitted here is an endpoint withdrawn.
         #       `health` is listed first and is not optional in any
@@ -226,10 +223,9 @@ management:
         #       equally structural reason -- the module ships a Prometheus
         #       registry whose only purpose is to publish that endpoint.
         #       (2) Assumptions: `flyway` earns its place on a specific failure
-        #       mode. The base records at application.yml L367 to L378 that
-        #       Flyway does not fail on a migration location resolving to
-        #       nothing: it starts, reports zero migrations applied, and
-        #       reports healthy. A service that applied its migration and one
+        #       mode. The health endpoint reports the same status whether
+        #       Flyway applied a migration or found nothing to apply: it starts,
+        #       reports what it applied, and reports healthy either way. A service that applied its migration and one
         #       that silently applied none are therefore indistinguishable from
         #       outside, on a schema that is the system of record for posted
         #       money. This endpoint is what separates them. It is verified
@@ -262,38 +258,85 @@ management:
         include: health,prometheus,flyway,threaddump
   endpoint:
     health:
-      # WHAT: the health body now carries its contributor detail instead of a
-      #       bare status.
-      # WHY : (1) Trade-offs: the detail this reveals is the datasource and
-      #       Flyway contributors -- whether the pool can reach the cluster,
-      #       and what migration state the schema is in -- and both pollers of
-      #       this endpoint are unauthenticated, so it is readable by anything
-      #       that can reach the task inside the private application subnets.
-      #       In `dev` that names a database and a migration version in an
-      #       environment holding no customer data, whose credentials are
-      #       distinct from every other environment's, and it answers the two
-      #       questions a failed deployment here actually raises -- did the
-      #       pool connect, and did the migration run -- without a shell on the
-      #       task. In `prod` the identical body would name the system of
-      #       record for posted money to any caller inside the network while
-      #       telling an operator nothing CloudWatch does not already carry, so
-      #       `prod` keeps the base value and the two overlays differ here on
-      #       purpose.
-      #       (2) Assumptions: the base pins this at `never` and says at
-      #       application.yml L626 to L637 that pinning it means a profile
-      #       cannot widen it without deleting a documented decision. This is
-      #       that widening, so the decision is replaced in the open here
-      #       rather than quietly overwritten. The endpoint itself is neither
-      #       renamed nor removed, because it backs the container HEALTHCHECK
-      #       and the load balancer target group in every environment.
-      show-details: always
+      # WHY : (1) Refactoring Rationale: an earlier revision of this profile set
+      #       `always` here, on the reasoning that `dev` holds no customer data
+      #       and that a failed deployment raises exactly the two questions the
+      #       detail answers. That was withdrawn, because neither premise is a
+      #       control this file can enforce: which data an environment holds is
+      #       a property of that environment, and which profile a task activates
+      #       is a property of its task definition, so `always` in a file that
+      #       ships alongside `prod` is one deployment variable away from
+      #       publishing the datasource and migration state of the system of
+      #       record for posted money. Both pollers of this endpoint -- the
+      #       container HEALTHCHECK and the load balancer target group -- are
+      #       unauthenticated, so whatever the aggregate body carries is
+      #       readable by anything that can reach the task inside the private
+      #       application subnets.
+      #       (2) Assumptions: `when-authorized` keeps the probe answer
+      #       sanitized and moves the detail behind an authenticated caller
+      #       rather than deleting it. An unauthenticated poll receives the
+      #       status word alone, which is all either poller reads; a caller
+      #       presenting a token carrying the role named below receives the
+      #       contributor detail. The two questions a failed deployment raises
+      #       are therefore still answerable without a shell on the task, by
+      #       whoever is entitled to ask them.
+      #       (3) Trade-offs: an operator now has to authenticate to read the
+      #       detail, where previously a plain request inside the network
+      #       sufficed. That is the cost, and it buys a profile whose exposure
+      #       does not depend on an assumption about the environment it lands
+      #       in. Alternatives Considered: keeping `always` and relying on the
+      #       task security group to bound who can reach the port. Rejected
+      #       because that group admits the whole application tier by design --
+      #       every other service's task can reach it -- so it bounds the
+      #       network and not the audience.
+      show-details: never
+      show-components: never
+
+      # WHY : Assumptions: the role is named explicitly rather than left unset.
+      #       Unset, the framework treats ANY authenticated caller as authorized,
+      #       and an authenticated caller here is any holder of a valid user-pool
+      #       token -- an ordinary cardholder included, and a cardholder is not an
+      #       operator. The value is the authority JwtRoleConverter publishes for
+      #       the administrative Cognito group, named as a constant there
+      #       (ADMIN_AUTHORITY) so the two cannot drift apart.
+      #       Assumptions: the actuator's authorization test delegates to the
+      #       servlet role check, which prepends the framework's role prefix to a
+      #       value that does not already carry one, while this system's
+      #       authorities are the provider's group names with NO prefix. The
+      #       consequence is stated rather than glossed: this arrangement fails
+      #       CLOSED. Until the resource-server configuration grants a caller the
+      #       named role, the group below discloses the status word and nothing
+      #       else -- which is the same answer the probe path gives, and the safe
+      #       direction to fail in.
+      roles: carddemo-admin
+
+      group:
+        # WHY : (1) Assumptions: the detailed diagnostics live on their own path,
+        #       /actuator/health/diagnostics, and the aggregate path keeps the
+        #       sanitized answer above. That split is the whole point: the two
+        #       pollers of the aggregate path -- the container HEALTHCHECK and the
+        #       load balancer target group -- are unauthenticated and read only
+        #       the status word, so they must not be answered with contributor
+        #       detail, while an operator asking the named path is a distinct,
+        #       authorizable audience and is distinguishable in an access log.
+        #       (2) Assumptions: the contributor names are the ones this module
+        #       actually registers -- `db` from the datasource, `flyway` from the
+        #       migration endpoint the exposure list above admits, `diskSpace`
+        #       and `ping` from the framework defaults -- so the group resolves
+        #       rather than silently matching nothing.
+        #       (3) Trade-offs: the two questions a failed deployment raises --
+        #       did the pool connect, and did the migration run -- are answered
+        #       on this path for a caller entitled to ask, and the `flyway`
+        #       endpoint above answers the second one for the same audience. What
+        #       is given up is reading either answer out of an unauthenticated
+        #       probe reply, which is exactly the disclosure being closed.
+        diagnostics:
+          include: db,flyway,diskSpace,ping
+          show-details: when-authorized
+          show-components: when-authorized
 
 logging:
   level:
-    # WHAT: this project's own package drops to DEBUG and the framework-routed
-    #       SQL statement logger is raised with it, while bind-parameter
-    #       logging is held down. root, org.springframework and org.hibernate
-    #       are left at the base WARN and do not appear here at all.
     # WHY : (1) Assumptions: com.carddemo at DEBUG is what makes the
     #       transcribed logic auditable against the COBOL it came from. Two
     #       chains need it. The keyset pagination replacing the CICS browse of

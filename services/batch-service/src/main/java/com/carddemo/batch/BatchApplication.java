@@ -2,6 +2,9 @@ package com.carddemo.batch;
 
 import java.util.Collection;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.ExitStatus;
 import org.springframework.batch.core.job.Job;
@@ -27,6 +30,25 @@ import org.springframework.context.ConfigurableApplicationContext;
  * nightly chain reads the status this class publishes. The two contracts are
  * therefore stated in full below rather than left to be inferred from the code, because an ambiguity
  * here propagates outward into infrastructure that this repository's Java cannot correct.</p>
+ *
+ * <h2>What is not yet runnable, stated before either contract</h2>
+ *
+ * <p><strong>Assumptions: no {@link Job} bean exists in this module yet, so no {@code --job=} value
+ * can currently complete a run.</strong> This class is authored ahead of the seven jobs it launches:
+ * {@link #JOB_NAMES} is the argument contract those beans must satisfy, not an inventory of beans
+ * that exist. Both contracts below are therefore TARGET contracts, and the two things that already
+ * hold today are worth separating from the two that do not. What holds: argument parsing, validation
+ * and the usage diagnostic run without a database, a credential or a job bean, and
+ * {@link #resolveJob} fails FAST and BY NAME -- it raises with the requested token and the registry's
+ * actual contents, which for an empty registry is an empty list, so the failure reads as "no job is
+ * registered" rather than as a null dereference or a hung task. What does not hold: an invocation
+ * with a valid token and a valid business date reaches that failure rather than running work, and
+ * the exit-status contract below cannot be exercised end to end until the beans land. Trade-offs:
+ * publishing the closed token set before the beans exist is deliberate -- the orchestration state
+ * machine and each job bean are authored against it, so it has to be settled first -- and the cost
+ * is exactly this paragraph, which a reader needs in order to tell a not-yet-authored bean from a
+ * misspelled one. Each job bean must register under its token EXACTLY, because the token is an
+ * orchestration contract rather than an internal label.</p>
  *
  * <h2>Contract one: the argument contract</h2>
  *
@@ -123,15 +145,32 @@ import org.springframework.context.ConfigurableApplicationContext;
  *
  * <p>Refactoring Rationale: the mechanism that consumes this status is replaced, and the
  * replacement inverts the sense of the original, which is the easiest error to make in the whole
- * translation. A job-control condition code is a SKIP predicate. The only such gate in the baseline
- * is {@code app/jcl/TRANBKP.jcl:51}, which reads {@code //STEP10 EXEC PGM=IDCAMS,COND=(4,LT)} --
- * "skip this step when 4 is less than the accumulated return code" -- so the step RUNS when the
- * code is 4 or lower. An orchestration choice is a RUN predicate, so the equivalent gate is spelled
- * {@code rc <= 4} with the comparison the other way round. What was wrong with carrying the
- * original spelling across is concrete: a state predicate written {@code rc > 4} to mirror the
- * {@code COND} keyword would run the consuming step exactly when the baseline skipped it and skip
- * it exactly when the baseline ran it, and every clean night would look correct because a clean
- * night reports {@code 0} either way.</p>
+ * translation. A job-control condition code is a SKIP predicate. The only gate in the baseline with
+ * a non-zero threshold is {@code app/jcl/TRANBKP.jcl:51}, which reads
+ * {@code //STEP10 EXEC PGM=IDCAMS,COND=(4,LT)} -- "skip this step when 4 is less than the
+ * accumulated return code" -- so the step RUNS when the code is 4 or lower. An orchestration choice
+ * is a RUN predicate, so the equivalent gate is spelled {@code rc <= 4} with the comparison the
+ * other way round. What was wrong with carrying the original spelling across is concrete: a state
+ * predicate written {@code rc > 4} to mirror the {@code COND} keyword would run the consuming step
+ * exactly when the baseline skipped it and skip it exactly when the baseline ran it, and every clean
+ * night would look correct because a clean night reports {@code 0} either way.</p>
+ *
+ * <p><strong>Assumptions: that gate is NOT the consumer of this class's warn tier, and the two must
+ * not be conflated.</strong> A {@code COND} parameter is evaluated against the return codes of
+ * earlier steps IN THE SAME JOB and can see nothing outside it, so {@code TRANBKP.jcl:51} gates its
+ * own job's cluster redefine against its own job's preceding steps -- {@code STEP05R}, a
+ * {@code REPROC} copy, and {@code STEP05}, an {@code IDCAMS} delete whose code that step then
+ * normalises to zero with {@code IF MAXCC LE 08 THEN SET MAXCC = 0} at L42 and L45. It cannot
+ * observe {@code CBTRN02C}, which runs in a different job entirely: {@code app/jcl/POSTTRAN.jcl:23}
+ * reads {@code //STEP15 EXEC PGM=CBTRN02C} and carries no {@code COND} at all, so nothing in the
+ * baseline job control consumes posting's {@code 4} downstream. The warn tier's authority is
+ * therefore the PROGRAM's own contract -- {@code app/cbl/CBTRN02C.cbl:229} testing
+ * {@code IF WS-REJECT-COUNT > 0} and line 230 moving {@code 4} to {@code RETURN-CODE}, together with
+ * the four committed {@code return_code.expected} files that record it -- and NOT an inherited
+ * job-control gate. {@code TRANBKP.jcl:51} is cited above solely as the one place the baseline
+ * demonstrates the inverted SENSE of a threshold comparison, which is the translation hazard being
+ * described; the threshold value coinciding with posting's warn code is a coincidence and reading it
+ * as a data path would invent a dependency the baseline does not have.</p>
  *
  * <p>Trade-offs: the graded numeric scale is quarantined to this one surface. The parity oracle
  * under {@code tests/} grades 0, 2, 4, 8 and 16 and treats a warn-level aggregate as its green
@@ -218,8 +257,10 @@ public class BatchApplication {
      * The seven accepted {@code --job=} tokens, in nightly-chain order followed by the two
      * unscheduled jobs.
      *
-     * <p>Each token is the name a job bean registers under, so this list is simultaneously the set
-     * of accepted arguments and the set of names looked up in the registry.</p>
+     * <p>Each token is the name a job bean <em>must</em> register under, so this list is
+     * simultaneously the set of accepted arguments and the set of names looked up in the registry. It
+     * is a target contract: no bean carries any of these names yet, and the class-level
+     * documentation states what that does and does not mean for a run.</p>
      *
      * <p>Assumptions: the set is closed at seven and the tokens are byte-identical to the names the
      * charter of {@code com.carddemo.batch.job} requires its beans to register under. The
@@ -287,6 +328,75 @@ public class BatchApplication {
      * that never ran a single record. Eight is the lowest value that the gate refuses.</p>
      */
     public static final int EXIT_STATUS_HARD_FAILURE = 8;
+
+    /**
+     * The stable code reported when the command line is malformed.
+     *
+     * <p>Refactoring Rationale: the three codes here exist because every failure this class reports
+     * used to be an unstructured sentence on standard error. A sentence cannot be alarmed on: the
+     * operator dashboard that has to distinguish "the orchestrator passed the wrong arguments" from
+     * "the job itself abended" would have to match on prose that any edit to a message silently
+     * changes. A code is a contract -- it can be filtered, counted and alarmed on, and it survives
+     * rewording of the message beside it.</p>
+     *
+     * <p>Assumptions: the codes are tiered by CAUSE, not by severity, because all three end in the
+     * same hard-failure exit tier and the exit status therefore distinguishes none of them. This one
+     * means the run never started and the fault is in what was passed to it.</p>
+     */
+    public static final String ERROR_CODE_USAGE = "CARDDEMO-BATCH-0001";
+
+    /**
+     * The stable code reported when the job was reached but did not complete.
+     *
+     * <p>Assumptions: this covers both a context that failed to start and an exception raised while
+     * the job was running. The two are one code because the remedial action is the same -- read the
+     * logged cause -- whereas the code below is a different code precisely because its remedial action
+     * differs.</p>
+     */
+    public static final String ERROR_CODE_JOB_FAILED = "CARDDEMO-BATCH-0002";
+
+    /**
+     * The stable code reported when the run ended in a fatal virtual-machine error.
+     *
+     * <p>Assumptions: this is separate from {@link #ERROR_CODE_JOB_FAILED} because an
+     * {@link Error} says something different about the run and calls for a different response. An
+     * exception means the job logic or its data was wrong and a rerun with the same inputs will fail
+     * the same way; an {@link Error} means the RUNTIME failed -- memory exhausted, a class that will
+     * not link -- so the same inputs may well succeed on a task with more memory, and the operator's
+     * next step is to look at the task's sizing rather than at the night's data.</p>
+     */
+    public static final String ERROR_CODE_FATAL = "CARDDEMO-BATCH-0003";
+
+    /**
+     * The environment variable naming the run this task belongs to.
+     *
+     * <p>Assumptions: the orchestrator supplies its execution name here through the container
+     * override, so every line this process logs can be tied back to the state-machine execution that
+     * started it. Without it the eleven tasks of one night's chain are eleven unrelated log streams and
+     * nothing joins them.</p>
+     */
+    public static final String RUN_ID_VARIABLE = "CARDDEMO_BATCH_RUN_ID";
+
+    /**
+     * The logging-context key the run identifier is published under.
+     *
+     * <p>Assumptions: this is the SAME key the shared correlation filter uses for a web request, and
+     * deliberately so. The one console pattern in {@code carddemo-common-defaults.yml} renders that key,
+     * so a batch line and a request line carry their identifier in the same position and one query
+     * finds both. Choosing a batch-specific key would have needed a second pattern.</p>
+     */
+    public static final String CORRELATION_MDC_KEY = "correlationId";
+
+    /**
+     * The logger for this entry point.
+     *
+     * <p>Assumptions: failures are written through the logging pipeline rather than to standard error,
+     * so they carry the timestamp, level, correlation identifier and logger name the shared pattern
+     * emits, and so the platform's log driver receives one structured record per failure instead of an
+     * unattributed sentence followed by an unattributed stack trace. The USAGE diagnostic below is the
+     * one exception and says why at its own call site.</p>
+     */
+    private static final Logger LOG = LoggerFactory.getLogger(BatchApplication.class);
 
     /**
      * Runs the one job named on the command line and terminates the process with that job's status.
@@ -363,6 +473,15 @@ public class BatchApplication {
             jobName = requiredJobName(args);
             businessDate = requiredBusinessDate(args);
         } catch (IllegalArgumentException rejection) {
+            // WHY : Assumptions: this ONE diagnostic goes to standard error as well as to the log,
+            //       and it is the only one that does. It is raised before any context exists, so the
+            //       logging configuration this module ships has not been applied and the logger below
+            //       may still be writing through a default appender at a default level -- while an
+            //       operator running the image by hand to discover the argument contract needs the
+            //       usage text on the terminal whatever the logging state is. Every failure raised
+            //       AFTER the context is up goes to the logger alone.
+            LOG.error("event=batch.usage.rejected code={} reason={}", ERROR_CODE_USAGE,
+                    rejection.getMessage());
             System.err.println("carddemo batch: " + rejection.getMessage());
             System.err.println(usage());
             return EXIT_STATUS_HARD_FAILURE;
@@ -381,6 +500,16 @@ public class BatchApplication {
      *     actually completed cleanly
      */
     private static int runInContext(String[] args, String jobName, String businessDate) {
+        // WHY : Assumptions: the run identifier is published into the logging context BEFORE the
+        //       context is built, so the framework's own startup lines carry it too. Publishing it
+        //       after startup would leave the lines most useful during a failed start -- the ones that
+        //       name an unreachable database or an unresolvable parameter -- as the only lines in the
+        //       night's chain that nothing joins to an execution.
+        // WHY : Trade-offs: an absent variable yields the literal below rather than a generated
+        //       value. A generated identifier would be unique and would correlate with nothing, so a
+        //       reader would have no way to tell an un-orchestrated run from an orchestrated one whose
+        //       override was missing; a fixed literal says which of the two it is.
+        MDC.put(CORRELATION_MDC_KEY, runIdentifier());
         ConfigurableApplicationContext context = null;
         // WHY : Assumptions: the status is pre-set to the failure tier and only lowered by an
         //       observed outcome, which is the baseline's own idiom -- its APPL-RESULT field is set
@@ -391,24 +520,43 @@ public class BatchApplication {
         try {
             context = SpringApplication.run(BatchApplication.class, args);
             exitStatus = startJob(context, jobName, businessDate);
-        } catch (Throwable failure) {
-            // WHY : Assumptions: every throwable is caught, including an Error, because the process
-            //       exit status is the only channel by which this container reports anything and the
-            //       interpreter's own status for an uncaught throwable is 1. One satisfies the
-            //       orchestration gate rc <= 4, so a step killed by an out-of-memory error would be
-            //       read as a soft outcome and the chain would continue past it. Catching here
-            //       cannot mask the failure: exitStatus was pre-set above and is never lowered on
-            //       this path.
-            System.err.println("carddemo batch: job '" + jobName + "' did not complete: " + failure);
+        } catch (Exception failure) {
+            // WHY : Assumptions: an Exception means the job logic or the night's data was wrong, so
+            //       the code reported is the job-failed code and the operator's next step is to read
+            //       the cause. The throwable is passed to the logger as the LAST argument rather than
+            //       being formatted into the message, which is what makes the pipeline render the
+            //       stack as part of the same structured record instead of as unattributed lines on a
+            //       separate stream.
             // WHY : Assumptions: the trace is emitted by this class because nothing else will. The
             //       framework reports a STARTUP failure through its own analysers, but a throwable
             //       raised after the context is running is reported by no framework path, so a
-            //       hard-failure tier without a trace would leave the failure-notification state
-            //       with nothing to route on.
-            failure.printStackTrace(System.err);
+            //       hard-failure tier without a trace would leave the failure-notification state with
+            //       nothing to route on.
+            LOG.error("event=batch.job.failed code={} job={} businessDate={} fault={}",
+                    ERROR_CODE_JOB_FAILED, jobName, businessDate, failure.getClass().getName(),
+                    failure);
+        } catch (Error fatal) {
+            // WHY : Refactoring Rationale: an Error is caught SEPARATELY, where a single catch of
+            //       Throwable previously covered both. Catching it at all remains necessary and the
+            //       original reasoning stands: the exit status is the only channel this container has,
+            //       and the interpreter's own status for an uncaught throwable is 1, which satisfies
+            //       the orchestration gate of four or less -- so a step killed by an out-of-memory
+            //       error would present to the orchestrator as a SOFT outcome and the chain would
+            //       carry on into interest accrual over unposted transactions. What the single catch
+            //       lost was the distinction: an Error says the RUNTIME failed rather than the job,
+            //       so the same inputs may well succeed on a task with more memory and the operator's
+            //       next step is the task's sizing rather than the night's data. A separate code is
+            //       what lets a dashboard tell those two apart.
+            // WHY : Trade-offs: the context is deliberately NOT handed to the framework's exit helper
+            //       on this path -- see the guard below. After an Error the runtime may be unable to
+            //       complete a normal shutdown, and an exit helper that itself fails would replace a
+            //       reported hard failure with an unreported one.
+            LOG.error("event=batch.job.fatal code={} job={} businessDate={} fault={}",
+                    ERROR_CODE_FATAL, jobName, businessDate, fatal.getClass().getName(), fatal);
+            return clearContextAndReturn(exitStatus);
         }
         if (context == null) {
-            return exitStatus;
+            return clearContextAndReturn(exitStatus);
         }
         final int reported = exitStatus;
         // WHY : Alternatives Considered: calling close on the context and then System.exit with the
@@ -416,7 +564,48 @@ public class BatchApplication {
         //       AND consults every exit-code generator the context declares, taking the greatest
         //       magnitude, so a generator contributed by a starter can still raise the status of a
         //       run this class judged clean. Closing by hand would silently drop that contribution.
-        return SpringApplication.exit(context, () -> reported);
+        return clearContextAndReturn(SpringApplication.exit(context, () -> reported));
+    }
+
+    /**
+     * Clears the run identifier from the logging context and passes an exit status straight through.
+     *
+     * <p>Trade-offs: this exists instead of a {@code finally} block, and the difference is observable.
+     * A {@code finally} attached to the try above would run BEFORE the framework's exit helper is
+     * called, so the shutdown lines and any exit-code generator's output -- the last lines of a failing
+     * run, and the ones an operator reads first -- would be the only lines in the night's chain
+     * carrying no run identifier. Clearing at each return point keeps the identifier attached for the
+     * whole of the process's logging life. The cost is that a new return path has to remember to call
+     * this, which is why every return in the caller goes through it.</p>
+     *
+     * <p>Assumptions: clearing matters even though the process exits immediately afterwards, because
+     * the caller is also invoked directly by tests that share one thread; a leaked entry would attach
+     * one test's run identifier to the next test's log lines.</p>
+     *
+     * @param exitStatus the status to return unchanged
+     * @return {@code exitStatus}, unmodified
+     */
+    private static int clearContextAndReturn(int exitStatus) {
+        MDC.remove(CORRELATION_MDC_KEY);
+        return exitStatus;
+    }
+
+    /**
+     * Resolves the identifier that ties every line this process logs to the run that started it.
+     *
+     * <p>Assumptions: the value is read from the environment rather than from a program argument,
+     * because the orchestrator supplies it as a container environment override while the two program
+     * arguments are the job's own contract. Keeping them in different channels means a change to the
+     * observability wiring cannot alter the argument contract that
+     * {@link #execute(String[])} validates.</p>
+     *
+     * @return the orchestrator's run identifier when {@link #RUN_ID_VARIABLE} is set to a non-blank
+     *     value, and the fixed token {@code unorchestrated} otherwise, which distinguishes a manual
+     *     run from an orchestrated run whose override was omitted
+     */
+    private static String runIdentifier() {
+        String supplied = System.getenv(RUN_ID_VARIABLE);
+        return supplied == null || supplied.isBlank() ? "unorchestrated" : supplied.trim();
     }
 
     /**

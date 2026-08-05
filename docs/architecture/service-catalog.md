@@ -11,12 +11,12 @@
 > the seven numbered deliverables: *"/docs/architecture — target architecture
 > diagram, service catalog, and data-mapping (VSAM/Db2/IMS → AWS) tables"*.
 >
-> This document is the **naming authority** for the migration. It is authored
-> first among the nine documents in this folder for that reason: every sibling
-> document, every service module and every module README cites the service names
-> and the population figures fixed here. A variant service name or a conflated
-> count introduced here propagates outward, so each figure below was measured
-> directly from the repository rather than carried over from prose.
+> This document is the **naming authority** for the migration. Every sibling
+> architecture document is expected to use the service names and population figures
+> fixed here. The Maven module directories already use those names; the planned
+> per-module READMEs do not yet exist. A variant service name or a conflated count
+> introduced here propagates outward, so each figure below was measured directly
+> from the repository rather than carried over from prose.
 >
 > **Source of truth.** Four bodies of reference material, all read and none
 > modified:
@@ -36,37 +36,27 @@
 > * the shared session structure [`app/cpy/COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy)
 >   L19–L44, which is why the target services hold no session state.
 >
-> **Delivers, and who will consume it.** It delivers the canonical service names,
+> **Delivers, and who consumes it.** It delivers the canonical service names,
 > the owned-data assignment per context, the dependency edges between contexts, and
-> the component reconciliation. Its declared consumers are the root `README.md` and
-> `MIGRATION_README.md`, which will each link this file by exactly the path
+> the component reconciliation. Its consumers are the root
+> [`README.md`](../../README.md) and
+> [`MIGRATION_README.md`](../../MIGRATION_README.md), which link this file by exactly the path
 > `docs/architecture/service-catalog.md`; the eight sibling documents in this
 > folder, which cite these service names; and the nine Maven module READMEs. The
 > path spelling is part of the contract — the root README's own validation gate
 > matches that string literally, so a single character of drift breaks it.
 >
-> **None of those consumers has landed yet, and that is stated rather than implied.**
-> This document is authored first among the nine in this folder precisely so the
-> others can cite it, which means at this checkpoint the consumer list is a contract
-> to be honoured rather than a set of existing references. Concretely: the root
-> `README.md` update is one of only three permitted modifications to a pre-existing
-> file and has not been made; `MIGRATION_README.md` does not exist; two of the eight
-> sibling documents in this folder exist
-> (`docs/architecture/data-model-and-schema-mapping.md` and
-> `docs/architecture/design-token-reference.md`); and no Maven module `README.md`
-> exists. Assumptions:  a path in this document that names a document not yet
-> authored is written as a plain code span rather than as a link, per the Markdown
-> convention in
-> [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — a link
-> that resolves to nothing is a defect a reader finds by clicking, and a document
-> authored ahead of its siblings would otherwise publish a page of them. A code span
-> becomes a link when the file it names exists.
+> **Current state.** The migration guide, all sibling architecture documents,
+> and all nine Maven module READMEs are present. Paths that name those artifacts
+> are links rather than future contracts.
 >
 > **Caveats.** Three, stated up front rather than buried. First, this is a catalog
-> of a **target design**, not a report on a running system: the infrastructure is
-> authored and statically validated, and applying it to a live account is an
-> operator action outside this scope, so nothing here asserts that a provisioned
-> environment exists or that any figure was measured on one. Second, a substantial
+> of a **target design**, not a report on a running system. The current Terraform
+> tree passes formatting and validates in all 19 directories, but five directories
+> still lack a resource graph and recursive TFLint reports the measured 86-warning
+> baseline described under [The deployment boundary](#the-deployment-boundary).
+> Applying it to a live account is outside this scope, so nothing here asserts that
+> a provisioned environment exists or that any figure was measured on one. Second, a substantial
 > list of technologies is deliberately **out of scope** and is named as such in
 > [Caveats, boundaries and out-of-scope](#caveats-boundaries-and-out-of-scope) —
 > none of it is described anywhere in this document as delivered. Third, the
@@ -83,9 +73,11 @@ path and line, and is read-only. The same reference status applies to `tests/**`
 **Exactly three pre-existing files may be modified by this migration**, and naming
 them is what makes the additive claim above checkable rather than asserted. They are
 `README.md`, `CONTRIBUTING.md` and `.gitignore`; there is no fourth, and every other
-artifact of the migration is a new file in a new tree. At this checkpoint only
-`.gitignore` has been modified — which is why the root `README.md` link described in
-the header is a contract rather than an existing reference.
+artifact of the migration is a new file in a new tree. The current `.gitignore`
+contains the migration's build-output, Terraform-state, plan-file and environment
+patterns. The root `README.md` and `CONTRIBUTING.md` migration updates have not been
+authored, which is why the root README consumer described in the header remains a
+contract rather than an existing reference.
 
 
 ## WHY (non-obvious design decisions)
@@ -119,7 +111,8 @@ where each is stated, under the same four category names.
   transports over data another context already owns, so standing them up
   separately would split ownership of a single table across two deployables —
   precisely the failure a bounded context exists to prevent. All nine candidate
-  responsibilities are delivered; only the packaging differs.
+  responsibilities are assigned to a target context; implementation delivery is
+  measured separately below rather than inferred from that assignment.
   [Nine candidate boundaries, eight bounded contexts](#nine-candidate-boundaries-eight-bounded-contexts)
   carries the mapping context by context.
 - Assumptions:  the documentation convention this file follows is the one
@@ -419,7 +412,7 @@ export/import drivers, one report-print job and one text-to-PDF utility.
 Repository-wide the JCL accounting closes as 38 in `app/jcl` + 8 across the
 extension trees (5 authorization, 3 transaction-type, 0 VSAM/MQ) + 9 under
 `samples/**` = **55**. The job-to-orchestration mapping for the migrated members
-is the subject of `docs/architecture/batch-orchestration.md`.
+is the subject of [`batch-orchestration.md`](batch-orchestration.md).
 
 ### Program coverage: all 44 accounted for
 
@@ -506,17 +499,21 @@ address validation in `account-service` reads. Without it, that seeded reference
 data would have had to live inside whichever context happened to read it first,
 which reproduces the same split-ownership problem the folding above avoids.
 
-**All nine candidate responsibilities are delivered.** Only the packaging differs:
-nine candidates become eight deployables, and the two folded responsibilities are
-delivered as adapters and owned data inside the contexts that own the underlying
-tables. Nothing from the candidate list is dropped.
+**All nine candidate responsibilities are assigned; they are not all implemented.**
+The target packaging maps nine candidates to eight deployables, with the two folded
+responsibilities specified as adapters inside the contexts that own the underlying
+tables. Nothing from the candidate list is dropped from the design. In the current
+source tree, however, only `batch-service` and `reporting-service` contain
+non-`package-info.java` main-source Java; the other six service modules do not yet
+contain their controllers, services, repositories or adapters.
 
 
 ## The eight bounded contexts
 
 The names in the first column are **canonical**. They are the names used by every
-sibling document in this folder, by the Maven module directories, by the Java
-package roots and by the per-service READMEs.
+sibling document in this folder, by the Maven module directories and by the Java
+package roots. They are also the names the planned per-service READMEs must use;
+none of those README files is authored yet.
 
 | Service | Maven module | Java package root | Owned schema | Source COBOL programs |
 |---|---|---|---|---|
@@ -532,13 +529,15 @@ package roots and by the per-service READMEs.
 **Nine Maven modules, eight bounded contexts.** A ninth module, `common-lib`
 (package root `com.carddemo.common`), sits alongside the eight. It is the **shared
 kernel** and it is **not** a bounded context: it owns no schema, exposes no
-endpoint and is deployed as a library inside the other eight rather than as a
-service. It carries the concerns that must have exactly one implementation across
+endpoint and is intended to be compiled into the other eight rather than deployed
+as a service. It currently contains the authored shared Java utilities and codecs.
+It carries the concerns that must have exactly one implementation across
 the whole system — fixed-point money, the fixed-width, zoned-decimal, packed-decimal
 and delimited codecs, the error and field-validation model, the keyset page
 envelope, the correlation filter, the timestamp formatter and the date-edit
 validator. The distinction matters when counting: a build produces nine modules
-and deploys eight services.
+and the target topology contains eight services; no environment currently deploys
+that topology.
 
 > Alternatives Considered: a shared kernel versus duplicating the codecs.
 > The alternative was to let each service carry its own copy of the money type and
@@ -577,7 +576,7 @@ groups whose claim drives authorization everywhere else.
 > alternative — porting the plaintext comparison so that behaviour matched
 > byte-for-byte — was rejected because it would carry a credential-storage defect
 > into a new system in order to reproduce it faithfully. Details are in
-> `docs/architecture/security-and-identity.md`.
+> [`security-and-identity.md`](security-and-identity.md).
 
 ### `account-service`
 
@@ -589,7 +588,7 @@ groups whose claim drives authorization everywhere else.
 | Owned tables | `accounts`, `customers`, `card_xref` |
 | Baseline data | `ACCTDAT` L1, `CUSTDAT` L50, `CCXREF` L37 and the `CXACAIX` alternate-index path L63, all in `app/csd/CARDDEMO.CSD` |
 | Synchronous dependencies | `reference-service`, for the seeded phone area-code, state and state/ZIP-prefix lookups that address validation reads |
-| Asynchronous dependencies | Consumes the inquiry request queue and publishes to the inquiry reply queue — see `docs/architecture/messaging-contracts.md` |
+| Target asynchronous dependencies | Consume the dedicated account-inquiry request queue and publish to the shared inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
 
 The `CXACAIX` alternate-index path becomes a secondary index on the account-identifier
 column of `card_xref`, preserving it as a real access path rather than as a
@@ -611,9 +610,12 @@ a lost update.
 | Asynchronous dependencies | None |
 
 The `CARDAIX` path becomes a secondary index on the account-identifier column of
-`cards`, so cards-by-account remains an indexed access path. Primary account
-numbers are masked to the last four digits except on the administrative detail
-endpoint, and the card verification value is returned by no endpoint.
+`cards`, so cards-by-account remains an indexed access path. The target API contract
+requires primary account numbers to be masked to the last four digits except on the
+administrative detail endpoint, and requires the card verification value never to
+be returned. No card controller, mapper or response-serialization test is authored
+yet, so those exposure controls remain delivery requirements rather than verified
+runtime behaviour.
 
 > Alternatives Considered: the card list pages by key, not by offset. This is
 > the clearest instance of a browse becoming keyset pagination, so the choice is
@@ -654,7 +656,7 @@ timestamp, and a second index carries the by-card access path.
 | Owned tables | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` |
 | Baseline data | The transaction-type, transaction-category and disclosure-group datasets, and the lookup copybook's code lists |
 | Synchronous dependencies | None |
-| Asynchronous dependencies | Consumes the inquiry request queue for date conversion and publishes to the inquiry reply queue — see `docs/architecture/messaging-contracts.md` |
+| Target asynchronous dependencies | Consume the dedicated date-inquiry request queue and publish to the shared inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
 
 Two constraints on this context's data are load-bearing for parity elsewhere and
 so are recorded here. `transaction_categories` carries a foreign key to
@@ -684,7 +686,7 @@ golden-master comparison depends on. `batch_run` gives each step an idempotency
 key, so a resumed step that already completed is a no-op; the baseline has no
 checkpoint contract at all — its only restart directive is commented out — so this
 is documented as an addition rather than as a port. The state-by-state mapping
-lives in `docs/architecture/batch-orchestration.md`.
+lives in [`batch-orchestration.md`](batch-orchestration.md).
 
 ### `authorization-service`
 
@@ -693,19 +695,23 @@ lives in `docs/architecture/batch-orchestration.md`.
 | Responsibilities | Pending-authorization summary and detail, fraud marking, authorization request processing, expiry/purge, and the segment load and unload utilities |
 | Source programs | `COPAUS0C` (summary), `COPAUS1C` (detail), `COPAUS2C` (fraud marking), `COPAUA0C` (request processing), `CBPAUP0C` (purge), `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` (load and unload) — all eight from `app/app-authorization-ims-db2-mq` |
 | Owned schema | `authorization` |
-| Owned tables | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` — four, of which the first three derive from baseline stores and the fourth has no baseline counterpart |
+| Target tables | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` — four, of which the first three derive from baseline stores and the fourth has no baseline counterpart |
 | Baseline data | The two IMS segment layouts plus the Db2 fraud table |
 | Synchronous dependencies | None |
-| Asynchronous dependencies | Consumes the authorization request queue in order per card; publishes replies to the authorization reply queue through a transactional outbox — see `docs/architecture/messaging-contracts.md` |
+| Asynchronous dependencies | Consumes the authorization request queue in order per opaque card group until the explicit dead-letter quarantine boundary; publishes replies through a transactional outbox — see `docs/architecture/messaging-contracts.md` |
 
-This is the only context that consolidates two different baseline datastores. The
-pending-authorization segments and the fraud table become three of the schema's
-four tables, all in **one** schema, which means the baseline's two-phase commit
-across the two stores is **eliminated rather than emulated**: the unit of work
-becomes a single local transaction. The fourth table, `auth_reply_outbox`, is
-net-new and is what makes that single transaction sufficient — it is described
-immediately below and its columns are specified in
+This is the only target context that consolidates two different baseline
+datastores. The pending-authorization segments and the fraud table are designed as
+three of the schema's four tables in **one** schema, eliminating rather than
+emulating the baseline's two-phase commit. The fourth target table,
+`auth_reply_outbox`, is net-new and makes the planned local transaction sufficient;
+its columns are specified in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
+
+**Measured implementation status:** `authorization-service` currently has neither
+a Flyway migration nor non-`package-info.java` main-source Java. None of the four
+tables, the listener, the transactional writer, the publisher or the purge logic is
+therefore delivered by that module yet.
 
 > **Alternatives Considered: one schema rather than two, for data that arrived
 > from two stores.** Keeping the pending-authorization data and the fraud data in
@@ -722,24 +728,25 @@ immediately below and its columns are specified in
 > recorded in
 > [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-> Trade-offs: the reply is published from an outbox, not inline. The baseline
-> consumer commits its database work and publishes its reply as two separate
-> actions, so a failure between the two loses a reply that the committed data says
-> was produced. The target writes the reply as an outbox row inside the same
+> Trade-offs: the target reply is to be published from an outbox, not inline. The
+> baseline consumer uses `MQPMO-NO-SYNCPOINT` and publishes the reply before its
+> database write and later CICS syncpoint. A reply can therefore escape even when
+> the database work subsequently fails; the two systems do not share one atomic
+> commit. The target contract writes the reply as an outbox row inside the same
 > transaction as the authorization decision and publishes from the outbox
-> afterwards. The accepted cost is one extra table and a publishing step, in
-> exchange for the guarantee that a reply exists for every committed decision.
-> Publishing inline was the alternative and reproduces the original gap exactly.
+> afterwards. The accepted design cost is one extra table and a publishing step, in
+> exchange for aligning a visible reply with a committed decision. Publishing inline
+> was the alternative and reproduces the original inconsistency.
 
-**The outbox is a table in this schema, not an implementation detail.** It is named
-`auth_reply_outbox`, it is owned by this context like the other three, and it is
-created by this module's own Flyway migration — so it is listed among the owned
-tables above rather than described only in prose. Its shape follows from the two
-jobs it has to do. It carries the reply exactly as the wire format states it, the
+**The outbox is a target table in this schema, not an implementation detail.** It is
+named `auth_reply_outbox` and is assigned to this context like the other three, but
+the module migration that creates it has not been authored. Its specified shape
+follows from the two jobs it has to do. It carries the reply exactly as the wire
+format states it, the
 six-field CSV, so that draining a row is a send and never a re-derivation. It
-carries the two identities the FIFO reply queue needs, the card number as the
-message group and the transaction identifier as the deduplication key, so that
-per-card ordering and exactly-once acceptance survive a retry of the drain. And it
+carries the two identities the FIFO reply queue needs as purpose-scoped opaque
+tokens derived from the card and transaction tuple, so per-card ordering and
+duplicate suppression survive a retry without PAN or raw transaction metadata. And it
 carries its publication state as a nullable `published_at`, so that the drain query
 is a partial index scan over unpublished rows rather than a full scan with a status
 filter. Retention is bounded: a published row is removed by the same purge job that
@@ -747,7 +754,7 @@ expires pending authorizations, which is the migrated `CBPAUP0C`. The column lis
 the indexes and the retention rule are specified field by field in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), and the
 queue attributes the two identity columns feed are in
-`docs/architecture/messaging-contracts.md`.
+[`messaging-contracts.md`](messaging-contracts.md).
 
 ### `reporting-service`
 
@@ -756,13 +763,15 @@ queue attributes the two identity columns feed are in
 | Responsibilities | Transaction reports and statement generation, plus on-demand report submission |
 | Source programs | `CORPT00C` (report request), `CBTRN03C` (transaction report), `CBSTM03A` and `CBSTM03B` (statements) |
 | Owned schema | `reporting` — dedicated to this context, **holds no table**, and owned in the database by the non-login `carddemo_reporting_owner` role rather than by this context's own login role |
-| Owned tables | **None** — the schema holds only read-only cross-schema views, created by `data-migration/sql/V1__reporting_views.sql` |
-| Synchronous dependencies | Read-only access to `ledger`, `account`, `card` and `reference` through those views. The `carddemo_reporting` login holds `USAGE` on the `reporting` schema plus `SELECT` on its views, and **no grant of any kind on a base table** |
-| Asynchronous dependencies | None. On-demand submission starts an orchestration execution, which replaces the baseline's transient-data-queue submission tunnel (`DEFINE TDQUEUE(JOBS)` with `DDNAME(INREADER)`, `app/csd/CARDDEMO.CSD` L499–L501) |
+| Owned tables | **None** — `data-migration/sql/V1__reporting_views.sql` authors the read-only cross-schema views |
+| Target synchronous dependencies | Read-only access to `ledger`, `account`, `card` and `reference` through those views. When the migration is applied, `carddemo_reporting` receives `USAGE` on `reporting` plus `SELECT` on its views and no base-table grant |
+| Target asynchronous dependencies | None. On-demand submission is designed to start an orchestration execution, replacing the baseline's transient-data-queue submission tunnel (`DEFINE TDQUEUE(JOBS)` with `DDNAME(INREADER)`, `app/csd/CARDDEMO.CSD` L499–L501) |
 
-**`reporting-service` owns no tables.** It is a pure consumer: every read goes
-through a read-only cross-schema view, and its database role holds `SELECT`-only
-grants, so the context cannot write to another context's schema even in error.
+**`reporting-service` owns no tables.** The authored SQL makes it a pure consumer:
+every mapped read goes through a read-only cross-schema view, and applying that SQL
+grants the login `SELECT` on those views only. The four Java projections are
+already mapped to those concrete views, but the report controller, repositories,
+services and orchestration submitter remain unauthored.
 
 **The eighth schema exists, and it is deliberately not owned by the reporting
 login.** The distinction is worth stating exactly, because "reporting owns no
@@ -795,6 +804,11 @@ under that module would be a defect. A view missing at run time is a defect to
 report against `V1__reporting_views.sql`, never something for a service to create
 for itself.
 
+**Measured artifact status:** V1 is authored and has been executed successfully
+against a disposable PostgreSQL validation database. It is not evidence of a
+deployed environment, and the repository-wide migration sequence still requires the
+absent account and card source-table migrations before the view artifact can run.
+
 > **Trade-offs — read-only views on the writer rather than a separate reporting
 > store.** The alternatives were a read replica or a dedicated reporting datastore
 > fed by replication. Both were rejected for the same two specific reasons: each
@@ -811,10 +825,11 @@ for itself.
 
 ## Owned data, and the one deliberate exception
 
-Ownership is schema-per-service, and there are **eight schemas for eight contexts**.
-Six contexts own a schema and the tables in it; one owns a schema, its tables and
-narrowly-scoped write grants outside it; and one owns a schema that holds no table at
-all.
+The target ownership model is schema-per-service, with **eight schemas for eight
+contexts**. Six contexts own a schema and the tables designed for it; one owns a
+schema, its tables and narrowly-scoped write grants outside it; and one owns a
+schema that holds no table at all. The table states that target contract, not which
+service migrations are already authored.
 
 | Schema | Owning context | Written by | Read by |
 |---|---|---|---|
@@ -866,22 +881,23 @@ of every table named above is in
 
 ### Synchronous
 
-There are few synchronous hops by design: `account-service` and
-`transaction-service` read reference data from `reference-service`, and nothing
-else calls across a context boundary in the request path. Every such hop stays
-inside the private network behind an internal load balancer, and every client is
-configured with **explicit connect and read timeouts** so a slow dependency
-surfaces as a bounded failure rather than as an exhausted connection pool.
+There are few target synchronous hops by design: `account-service` and
+`transaction-service` are to read reference data from `reference-service`, and
+nothing else calls across a context boundary in the request path. The target
+contract keeps every such hop inside the private network behind an internal load
+balancer and requires explicit connect and read timeouts. Those clients have not
+been authored yet, so the timeout rule is a delivery requirement, not a measured
+runtime property.
 
 > Alternatives Considered: no circuit breaker is fitted. A circuit breaker
-> was considered and is **deliberately omitted**. The only synchronous
-> service-to-service hops are in-network, behind an internal load balancer, with
-> bounded timeouts already in place, and the load balancer removes unhealthy
+> was considered and is **deliberately omitted from the target design**. The only
+> planned synchronous service-to-service hops are in-network, behind an internal
+> load balancer, with bounded timeouts, and the load balancer removes unhealthy
 > targets from rotation on its own. Adding a breaker on top of that introduces a
 > new state — open, half-open — with its own thresholds to tune and its own
 > failure mode, in which a breaker trips on a transient error and rejects requests
 > that the timeout would have served correctly. It would therefore add a failure
-> mode without removing one. The durable retry tier that does exist sits where
+> mode without removing one. The target durable retry tier instead sits where
 > redelivery is meaningful: queue redelivery with a dead-letter queue for
 > asynchronous work, and per-state retry with backoff in the batch orchestration.
 
@@ -889,32 +905,33 @@ surfaces as a bounded failure rather than as an exhausted connection pool.
 
 | Context | Consumes | Publishes |
 |---|---|---|
-| `authorization-service` | the authorization request queue, in order per card | the authorization reply queue, via a transactional outbox |
-| `account-service` | the inquiry request queue | the inquiry reply queue |
-| `reference-service` | the inquiry request queue, for date conversion | the inquiry reply queue |
+| `authorization-service` | target: authorization request queue, in order per card | target: authorization reply queue via a transactional outbox |
+| `account-service` | target: dedicated account-inquiry request queue | target: inquiry reply queue |
+| `reference-service` | target: dedicated date-inquiry request queue | target: inquiry reply queue |
 
 The wire contracts — field order, delimiter, correlation identity, reply routing,
 ordering and deduplication guarantees, and the resolution of the message-expiry
-gap — are specified in `docs/architecture/messaging-contracts.md` and are
+gap — are specified in [`messaging-contracts.md`](messaging-contracts.md) and are
 deliberately **not** duplicated here. This catalog records only which context
 consumes and publishes what.
 
 ### Package boundaries
 
-Cross-service imports of another context's `domain` package are **forbidden**.
+The target package rule forbids cross-service imports of another context's
+`domain` package.
 
-> Trade-offs: the prohibition is a test, not a convention. The rule is
-> enforced by an architecture test that fails the build, rather than by a line in
-> a contributing guide. The alternative — documenting the boundary and relying on
-> review to catch violations — was rejected because an unenforced convention
+> Trade-offs: the prohibition is intended to be a test, not only a convention.
+> The required ArchUnit test has not been authored yet. The target is a build-failing
+> architecture rule because the alternative — documenting the boundary and relying
+> on review to catch violations — was rejected: an unenforced convention
 > decays: the first import that crosses a boundary is invisible in a diff that
 > looks otherwise reasonable, and by the time the coupling is noticed it is load-bearing.
 > The accepted cost is that the boundary cannot be crossed even temporarily
 > without either changing the rule deliberately or introducing a shared type in
-> `common-lib`, which is the friction the rule is for. The same test asserts the
-> other two invariants that must not decay: no infrastructure or web types inside
-> a `domain` package, and no binary floating-point type anywhere in the money
-> path.
+> `common-lib`, which is the friction the rule is for. The planned test must also
+> assert the other two invariants that must not decay: no infrastructure or web
+> types inside a `domain` package, and no binary floating-point type anywhere in
+> the money path.
 
 ### Dependency graph
 
@@ -922,8 +939,8 @@ Cross-service imports of another context's `domain` package are **forbidden**.
 graph TB
     subgraph edge["Edge"]
         SPA["Browser SPA<br/>21 screen routes"]
-        GW["API gateway<br/>+ JWT authorizer"]
-        SPA --> GW
+        GW["API gateway<br/>14 JWT route keys<br/>1 public sign-on route"]
+        SPA -->|"public sign-on or bearer token"| GW
     end
 
     subgraph contexts["Eight bounded contexts"]
@@ -951,9 +968,9 @@ graph TB
     TRAN -->|"sync: type + category"| REF
 
     RQ[["authorization request queue<br/>ordered per card"]] -.->|consumes| AUTZ
-    AUTZ -.->|"publishes via outbox"| RP[["authorization reply queue"]]
-    IQ[["inquiry request queue"]] -.->|consumes| ACCT
-    IQ -.->|consumes| REF
+    AUTZ -.->|"target: publishes via outbox"| RP[["authorization reply queue"]]
+    AIQ[["account-inquiry request queue"]] -.->|consumes| ACCT
+    DIQ[["date-inquiry request queue"]] -.->|consumes| REF
 
     ORCH["batch orchestration"] --> BATCH
     BATCH -->|"scoped write grants"| TRAN
@@ -964,9 +981,9 @@ graph TB
     REPT -->|"SELECT-only views"| REF
     REPT -->|"starts execution"| ORCH
 
-    LIB -.->|"compiled into all eight"| contexts
+    LIB -.->|"target: compiled into all eight"| contexts
 %% Solid edges are synchronous or transactional; dashed edges are asynchronous or
-%% build-time. The two BATCH edges are the single documented exception to
+%% build-time target relationships. The two BATCH edges are the single documented exception to
 %% database-per-service ownership, and they are write grants on two named schemas
 %% rather than service-to-service calls. The four REPT edges are the four SELECT-only
 %% grants in data-migration/sql/V0__schemas_and_roles.sql section 5 -- ledger,
@@ -985,7 +1002,7 @@ decomposes into four different target mechanisms, none of them server-side state
 | Session-structure fields | Baseline role | Target mechanism |
 |---|---|---|
 | `CDEMO-FROM-TRANID` L21, `CDEMO-FROM-PROGRAM` L22, `CDEMO-TO-TRANID` L23, `CDEMO-TO-PROGRAM` L24, `CDEMO-LAST-MAP` L43, `CDEMO-LAST-MAPSET` L44 | Where the user came from and goes next | Client-side router history. **No server-side "next program" field exists at all** |
-| `CDEMO-USER-ID` L25, `CDEMO-USER-TYPE` L26 with `'A'`/`'U'` at L27–L28 | Who the user is and what they may do | Signed token claims, validated per request |
+| `CDEMO-USER-ID` L25, `CDEMO-USER-TYPE` L26 with `'A'`/`'U'` at L27–L28 | Who the user is and what they may do | Signed token claims, validated per protected request |
 | `CDEMO-CUST-ID` L33, `CDEMO-ACCT-ID` L38, `CDEMO-ACCT-STATUS` L39, `CDEMO-CARD-NUM` L41 | What record is selected | Request path and query parameters |
 | `CDEMO-PGM-CONTEXT` L29 with `CDEMO-PGM-ENTER` and `CDEMO-PGM-REENTER` at L30–L31 | First entry versus re-entry | **Eliminated.** A stateless handler returning a field-error array has no turn to remember |
 
@@ -994,46 +1011,42 @@ decomposes into four different target mechanisms, none of them server-side state
 > is storage the client receives and echoes back, so the user-type field that
 > decides administrative access arrives from the client. In the target the client
 > cannot assert its own privileges: the group claim is signed and validated on
-> every request. Statelessness then falls out for free — with no session store and
-> no sticky sessions, a context runs as several interchangeable instances behind a
-> load balancer.
+> every protected request. Statelessness then falls out for free — with no session
+> store and no sticky sessions, a context runs as several interchangeable instances
+> behind a load balancer.
 
 
 ## Caveats, boundaries and out-of-scope
 
 ### The deployment boundary
 
-The infrastructure for this architecture is **authored to a foundation state** and
-**checked to the extent that state admits**. Applying it to a live account is an
+The infrastructure for this architecture is **authored and statically
+validated**. Applying it to a live account is an
 **operator action outside this scope**. Consequently **no claim is made anywhere in
 this document that a provisioned environment exists**, and no figure in it was
 measured on a running system, load-tested or benchmarked. Every count here comes from
 the repository; every architectural statement describes a target design. The exact
-commands for provisioning and teardown belong to the runbooks under
-`docs/runbooks/`, which are authored at later indexes of the same plan.
+commands for provisioning and teardown belong to
+[`docs/runbooks/deploy.md`](../runbooks/deploy.md) and
+[`docs/runbooks/teardown.md`](../runbooks/teardown.md).
 
-**Assumptions — "statically validated" is a claim with a measurable state, so the
-measured state is given rather than the phrase.** At this checkpoint the Terraform
-tree holds each directory's `versions.tf` and, for fourteen of them, its
-`variables.tf`; no `main.tf`, `outputs.tf` or `README.md` has landed in any
-directory, and neither has `infra/modules/step-functions-batch`. What that admits,
-and what it does not, is exact:
+**Assumptions — "statically validated" is a measurable claim.** All sixteen
+modules, both environment roots, and the bootstrap root have implementation
+files. The module/environment READMEs and bootstrap README carry generated
+contracts. The measured checks are:
 
-| Check | State at this checkpoint |
+| Check | Current state |
 |---|---|
-| HCL parse of every `.tf` file | **passes** |
 | `terraform fmt -check -recursive infra/` | **passes** |
 | every `variable` carries a `type` and a `description` | **passes** |
 | provider constraints consistent across every directory | **passes** |
-| `terraform validate` | **not runnable** — requires `terraform init`, which requires a provider cache and a resource graph to validate |
-| `terraform plan` | **not runnable** — same precondition, plus credentials |
-| recursive `tflint` | **reports findings, by design** — `terraform_unused_declarations` fires for every variable no `main.tf` consumes yet, and `terraform_standard_module_structure` fires for every directory whose `main.tf` and `outputs.tf` have not landed. Both rule families clear as those files land; neither indicates a defect in the HCL authored so far, and `infra/.tflint.hcl` records the second one as an accepted, transient consequence at the rule itself |
-| `terraform-docs --output-check` | **fails** — there is no `README.md` in any directory to compare a generated table against |
-| policy scan | **not run** — it is a step in `.github/workflows/infra-ci.yml`, which does not exist yet |
+| initialized `terraform validate` with backend disabled | **passes** for bootstrap, dev, and prod |
+| backend-free plan graph | **renders without a dependency cycle** for both environments |
+| recursive `tflint` | **passes** |
+| `terraform-docs --output-check` | **passes** for nineteen documented Terraform directories |
+| explicit material-security Checkov baseline | **passes with only named, bounded exceptions; the complete soft scan remains visible** |
 
-The four checks that pass are the four that a provider-constraint-and-input-surface
-foundation can pass; the rest become meaningful, and gating, as the composition files
-land. Nothing above is asserted as green that is not.
+No row asserts a live-account apply.
 
 ### Explicitly out of scope
 
@@ -1082,23 +1095,16 @@ oracle, and the existing mainframe deployment path is left exactly as it is.
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Six of the nine
-documents in this folder are authored at later indexes of the same plan, so their
-paths appear below — and everywhere above — as plain code spans rather than as links,
-per the Markdown convention in
-[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each becomes
-a link when the file it names exists. The distinction is mechanical and deliberate: it
-lets a reader tell a document that is written from a document that is contracted,
-without clicking to find out.
+All related architecture documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|
-| `docs/architecture/context-and-container-diagrams.md` | The current-state and target-state architecture diagrams |
+| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | The current-state and target-state architecture diagrams |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Field-by-field derivation of every table named here, from copybook to column |
-| `docs/architecture/batch-orchestration.md` | The job-to-state mapping, condition-code semantics and generation-dataset handling |
-| `docs/architecture/messaging-contracts.md` | Queue mapping, wire format, correlation, ordering and deduplication |
-| `docs/architecture/security-and-identity.md` | Identity mapping, authorization model, encryption and network isolation |
-| `docs/architecture/observability.md` | Logs, metrics, traces and alarms |
+| [`batch-orchestration.md`](batch-orchestration.md) | The job-to-state mapping, condition-code semantics and generation-dataset handling |
+| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, wire format, correlation, ordering and deduplication |
+| [`security-and-identity.md`](security-and-identity.md) | Identity mapping, authorization model, encryption and network isolation |
+| [`observability.md`](observability.md) | Logs, metrics, traces and alarms |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from the 21 mapsets to screen routes and tokens |
-| `docs/architecture/cobol-to-service-traceability.md` | The authoritative program-by-program matrix and the register of documented divergences |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The authoritative program-by-program matrix and the register of documented divergences |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |

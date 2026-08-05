@@ -9,30 +9,19 @@
 //   Node-executed config files, and the two projects are disjoint by design --
 //   see the third bullet below.
 //
-//   Four consumers depend on this project, and three of them run it by the same
-//   literal command, `tsc --noEmit -p tsconfig.json`: the `typecheck` script in
-//   ui/package.json, the first half of that manifest's `build` script (which
-//   only reaches `vite build` if this check passes), and the type-check gate in
-//   .github/workflows/ui-ci.yml. The fourth consumer, ui/eslint.config.js, does
-//   not run tsc at all; it names this project as the source of type information
-//   for typescript-eslint, which is what allows the eslint-plugin-jsdoc rules
-//   that enforce Rule 1 across this package to evaluate rather than silently
-//   skip. Both of those gates therefore rest on the `include` at the foot of
-//   this file, which is why its rationale is the longest one here.
-//
-//   STATE AT THIS CHECKPOINT. The migration lands its artifacts in plan order
-//   and this project is authored ahead of most of the tree it governs. Of the
-//   files named above, ui/package.json exists today; ui/eslint.config.js,
-//   .github/workflows/ui-ci.yml, ui/vite.config.ts, ui/vitest.config.ts and
-//   ui/src/test/setup.ts are each authored at a later index of the same plan.
-//   Under ui/src only src/messages/messages.ts is present so far. Two
-//   consequences, neither of them a defect. Unlike its sibling project, this one
-//   already matches real input, so `tsc --noEmit -p tsconfig.json` genuinely
-//   checks source today rather than reporting an empty include list -- which is
-//   exactly the property the `include` rationale below exists to protect.
-//   And `npm run build` gets through this check and then stops at `vite build`,
-//   because Vite's own config and the src/main.tsx entry point that index.html
-//   loads are later artifacts; nothing here asserts otherwise.
+//   Three consumers depend on this project. ui/package.json's `typecheck` script
+//   runs it as the first of its two invocations, `tsc --noEmit -p tsconfig.json`
+//   followed by the same command against tsconfig.node.json, so that BOTH
+//   projects are compiler-checked rather than only this one; that manifest's
+//   `build` script delegates to `npm run typecheck` and only reaches `vite build`
+//   if both checks pass. ui/eslint.config.js does not run tsc at all; it names
+//   this project as the source of type information for typescript-eslint, which
+//   is what allows the eslint-plugin-jsdoc rules that enforce Rule 1 across this
+//   package to evaluate rather than silently skip. The third consumer is
+//   .github/workflows/ui-ci.yml, which invokes that same `typecheck` script as a
+//   required step, so a type error fails the pipeline and not only a local build.
+//   All three gates therefore rest on the `include` at the foot of this file,
+//   which is why its rationale is the longest one here.
 //
 // WHY (non-obvious design decisions):
 //   - Alternatives Considered: the stock Vite react-ts layout, whose root
@@ -121,32 +110,51 @@
     // backticks rather than in its JSON spelling on purpose, so that a literal
     // search of this file for the quoted form finds nothing and the absence is
     // verifiable by the same grep that would catch a regression.
-    // Assumptions: the two entries that ARE listed are forward contracts on two
-    // sibling files, and they move together with them. `vitest/globals` is
-    // correct only because ui/vitest.config.ts enables Vitest's globals, which
-    // is what lets a test call `describe`, `it` and `expect` without importing
-    // them; `@testing-library/jest-dom` is correct only because
-    // ui/src/test/setup.ts imports that package's matchers, which is what makes
-    // `toBeInTheDocument` and `toHaveAttribute` type-check. If either sibling
-    // stops doing its half, its entry here becomes a declaration of something
-    // untrue and must be removed with it.
+    // Assumptions: the list is EMPTY, and empty is not the same as absent. An
+    // empty array suppresses the automatic inclusion of every installed @types
+    // package; deleting the key altogether would do the opposite and pull all of
+    // them in, @types/node among them, which would hand browser code the very
+    // `process` and `Buffer` globals the paragraph above exists to withhold. The
+    // empty array is therefore the mechanism that enforces that decision, not a
+    // leftover from emptying the list.
+    // Refactoring Rationale: this list previously carried `vitest/globals` and
+    // `@testing-library/jest-dom`, which granted test-only ambient declarations
+    // to every file in the project -- all 21 screens, the theme bridge, the API
+    // clients and the message catalog included. A screen could then reference
+    // `expect`, `vi` or `toBeInTheDocument` and type-check cleanly, even though
+    // none of those exists in a deployed browser bundle. That is the same class
+    // of defect as admitting `process`, so it is refused for the same reason.
+    // Test APIs are now imported where they are used instead: ui/vitest.config.ts
+    // sets `globals` to false, so a test imports `describe`, `it` and `expect`
+    // from 'vitest' by name, and ui/src/test/setup.ts imports
+    // '@testing-library/jest-dom/vitest', whose module augmentation extends
+    // Vitest's own Assertion interface. That augmentation reaches every test
+    // without an entry here because setup.ts lives under ui/src and is part of
+    // this project, so the matchers type-check from an import rather than from an
+    // ambient global that production code could also reach.
     // Assumptions: the `import.meta.env` typing that browser configuration
-    // depends on does NOT come from this list. It arrives through a triple-slash
-    // `/// <reference types="vite/client" />` in a declaration file under
-    // ui/src, which resolves even here -- a populated `types` array suppresses
-    // only the AUTOMATIC inclusion of installed @types packages, never an
-    // explicit reference. Verified against this project: the reference form
-    // type-checks `import.meta.env.VITE_API_BASE_URL`, whereas the same
-    // expression without it does not.
+    // depends on does NOT come from this list. It arrives through the
+    // triple-slash `/// <reference types="vite/client" />` on the last line of
+    // ui/src/vite-env.d.ts, which resolves even here -- a populated `types`
+    // array suppresses only the AUTOMATIC inclusion of installed @types
+    // packages, never an explicit reference. Verified by running the compiler
+    // both ways against this exact configuration: with that file present,
+    // `const base: string = import.meta.env.VITE_API_BASE_URL` type-checks and
+    // `npm run typecheck` exits 0; with the file moved aside, the identical
+    // expression fails as TS2339 "Property 'env' does not exist on type
+    // 'ImportMeta'". The entry that would otherwise be needed here is therefore
+    // accounted for by a file, and the two move together: deleting
+    // ui/src/vite-env.d.ts breaks every screen that reads the API base URL, and
+    // the failure names `import.meta` rather than the deleted file.
     // Alternatives Considered: naming vite/client in this list instead, which is
     // the reflex fix when that expression fails to compile. It is rejected
     // because this list applies to every file in the project simultaneously, and
     // vite/client carries 65 ambient `declare module` statements for CSS-module
     // and asset specifiers alongside the env typing -- so every screen and every
     // test would silently gain the ability to import specifiers this tree does
-    // not use, and the narrow list above would stop meaning anything. A single
+    // not use, and the empty list above would stop meaning anything. A single
     // declaration file keeps the widening local and reviewable.
-    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    "types": [],
 
     // Assumptions: Vite and esbuild own emission for this tree, so no consumer
     // anywhere reads a tsc output -- the two scripts that invoke this project
@@ -303,12 +311,14 @@
   // load-bearing line in the file. The stock Vite react-ts root pairs an empty
   // `files` array with a `references` list, delegating all membership to the
   // referenced projects -- and `tsc -p` does not traverse project references.
-  // Only `tsc -b` does, and nothing in this repository invokes `-b`: all three
-  // callers run the literal `tsc --noEmit -p tsconfig.json` (the `typecheck`
-  // and `build` scripts in ui/package.json, both declared today, and the
-  // type-check gate in .github/workflows/ui-ci.yml). Under the stock shape each
-  // of those commands would resolve an empty file list, check nothing, and exit
-  // 0 -- a gate that cannot fail, reporting success over a tree of type errors.
+  // Only `tsc -b` does, and nothing in this repository invokes `-b`: every
+  // caller reaches this project through the literal `tsc --noEmit -p
+  // tsconfig.json` -- ui/package.json's `typecheck` script runs it directly, its
+  // `build` script reaches it by delegating to `npm run typecheck`, and the
+  // planned type-check gate in .github/workflows/ui-ci.yml runs the same command
+  // again. Under the stock shape every one of those paths would resolve an empty
+  // file list, check nothing, and exit 0 -- a gate that cannot fail, reporting
+  // success over a tree of type errors.
   // ui/eslint.config.js would inherit the same emptiness from the other
   // direction, leaving typescript-eslint with no typed source and silently
   // disabling the JSDoc documentation gate with it. Two gates, one root cause.

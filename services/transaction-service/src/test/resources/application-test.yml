@@ -4,23 +4,29 @@
 # Purpose:
 #   The Spring `test` profile for transaction-service, the LEDGER bounded
 #   context of the CardDemo mainframe-to-microservices migration. It is an
-#   OVERLAY on src/main/resources/application.yml [present], active whenever
+#   OVERLAY on src/main/resources/application.yml, active whenever
 #   the test classpath resolves profile `test`, and it changes only what a
 #   build host must change: where the database connection comes from, on what
 #   terms that connection is opened, how the `ledger` schema is reached on a
 #   database that starts empty, and how loudly the run reports itself. Every
 #   other value is inherited from the base document rather than restated here.
 #
-#   What consumes this file. Two shapes of test read it. Both are stated here
-#   as forward contracts, because src/test/java is [planned] and holds a single
-#   package-info today, so no class named below exists yet to be inspected:
+#   What consumes this file. Two shapes of test read it, and both are stated
+#   here as TARGET contracts. Naming a class below is never a claim that the
+#   class is on disk: this tree is landed in plan order, so a named class
+#   without a file yet is planned rather than missing, and the present contents
+#   of src/test/java are read from the directory itself or from
+#   `mvn -f services/transaction-service/pom.xml test` rather than from this
+#   comment, which could not stay accurate as each class arrives. The reactor
+#   states the same reading convention once, at services/pom.xml lines 73 to 92.
+#   The two shapes are:
 #     - every *RepositoryIT, which Failsafe runs against a real PostgreSQL
 #       container. These are the only tests that open a connection, apply
-#       db/migration/V1__ledger.sql [present] and query the four `ledger`
+#       db/migration/V1__ledger.sql and query the four `ledger`
 #       tables;
 #     - every context-loading *Test, which Surefire runs. These bind no
 #       listener and reach no database.
-#   Records those tests read live in the sibling fixtures/ folder [planned].
+#   Records those tests read live in a sibling fixtures/ folder.
 #
 #   The four tables this context owns are ledger.transactions,
 #   ledger.daily_transactions, ledger.transaction_rejects and
@@ -34,90 +40,67 @@
 #   IN THIS FILE, and neither does an issuer or any other endpoint value. The
 #   container supplies the connection coordinates at run time; see decision 1.
 #
-#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md [present].
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md.
 #
 # WHY (non-obvious design decisions):
 #
-#   - Assumptions: YAML has no docstring construct, so the project
-#     Explainability rule reaches this file through its "module entry point"
-#     wording at rule line 15 and the allowance on standard docstring formats
-#     at line 22. A profile is the entry point of the test runtime, so the
-#     language-appropriate analogue is this ruled header block plus a labelled
-#     rationale line sitting directly above each key it explains. That is also
-#     the form docs/CODE_DOCUMENTATION_STANDARD.md prescribes for a
-#     configuration key, and the reason no statement in this file carries a
-#     narrating comment: the same standard forbids a statement-level WHAT
-#     comment in a .yml file outright, and the rule's own first forbidden
-#     pattern is a comment that restates the code beside it.
-#   - Assumptions: the Explainability gate over this file is REVIEW, not a
-#     linter. config/checkstyle/checkstyle.xml [present] declares
-#     <module name="Checker"> at line 158 and narrows it with
-#     fileExtensions="java" at line 185, and the aggregator binds that ruleset
-#     to the Maven validate phase under execution id
-#     checkstyle-documentation-gate. A .yml file is therefore outside the
-#     Checker's reach entirely, so nothing mechanical inspects the prose below.
-#     Authoring discipline and human review are the only protection, which is
-#     exactly where the rule leaves it at line 43 and where tests/README.md
-#     section 12 leaves the equivalent house obligation at its line 549.
-#   - Alternatives Considered: an in-memory database, and H2 by name, in place
-#     of a container. Rejected. Detail at spring.datasource.hikari.
-#   - Assumptions: a database container starts empty, and the migration this
-#     module owns creates no schema of its own. Detail at
-#     spring.flyway.create-schemas.
-#   - Assumptions: schema resolution cannot come from the connection string in
-#     this profile, and the search-path pin the base relies on fails silently
-#     rather than loudly on an empty database. Detail at
-#     spring.flyway.default-schema and
-#     spring.jpa.properties.hibernate.default_schema.
-#   - Assumptions: Flyway needs a second artifact beyond its engine, and this
-#     profile is the one place in the whole build where that requirement is
-#     actually exercised. Detail at spring.flyway.enabled.
-#   - Refactoring Rationale: Hibernate asserts the migrated schema here instead
-#     of ignoring it, which is a deliberate divergence from the base profile.
-#     Detail at spring.jpa.hibernate.ddl-auto.
-#   - Trade-offs: a lazy association touched outside a transaction fails in the
-#     test rather than resolving quietly. Detail at spring.jpa.open-in-view.
-#   - Trade-offs: statement and bind-parameter logging stay floored off,
-#     because a bound parameter in this context can be a sixteen-digit card
-#     number. Detail at spring.jpa.show-sql and at `logging`.
-#   - Assumptions: transport security is loosened for a container database and
-#     for nothing else. Detail at
-#     spring.datasource.hikari.data-source-properties.
-#   - Assumptions: the resource-server issuer is emptied rather than left to
-#     the base placeholder, because the condition that reads it resolves
-#     placeholders strictly and would abort context startup. Detail at
-#     spring.security.oauth2.resourceserver.jwt.issuer-uri.
-#   - Assumptions: several keys are deliberately ABSENT, and each absence is a
-#     decision with a reasonable alternative rather than an oversight. They are
-#     recorded together in the block immediately below, because an absent key
-#     has no line to sit beside.
+# - Assumptions: the Explainability gate over this file is REVIEW, not a linter.
+#   config/checkstyle/checkstyle.xml narrows its Checker with
+#   fileExtensions="java", and the aggregator binds that ruleset to the Maven
+#   validate phase under execution id checkstyle-documentation-gate, so a .yml
+#   file is outside the Checker's reach entirely and nothing mechanical inspects
+#   the prose below. Authoring discipline and human review are the only
+#   protection, which is where the rule and tests/README.md section 12 both leave
+#   the equivalent obligation. YAML has no docstring construct, so the analogue
+#   used here is this header block plus a labelled rationale line directly above
+#   each key it explains.
+# - Every other setting carries its own labelled rationale at the setting, so the
+#   container-over-H2 choice, the schema creation, the two schema-resolution
+#   pins, Flyway's second artifact, the stricter ddl-auto, the closed
+#   open-in-view, the floored statement logging, the loosened transport security
+#   and the emptied issuer are each argued there rather than summarised twice.
+# - Assumptions: several keys are deliberately ABSENT, and each absence is a
+#   decision with a reasonable alternative rather than an oversight. They are
+#   recorded together in the block immediately below, because an absent key has no
+#   line to sit beside.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# DELIBERATE ABSENCES. Each entry is a key this profile could plausibly carry
-# and does not. Recorded so that a reader does not restore one as an apparent
+# DELIBERATE ABSENCES. Each entry is a key this profile could plausibly carry and
+# does not. Recorded so that a reader does not restore one as an apparent
 # omission, and so that the two absences which are themselves load-bearing
 # decisions - the pinned clock and the paging contract - are documented at the
 # only place available to them.
 #
 # 1. The datasource URL, user name and credential keys, and any host, port or
 #    connection string.
-#    Alternatives Considered: writing them here, which is what a profile that
-#      has not thought about it does. Rejected because the container's port is
-#      assigned at run time, so a written connection string either addresses
-#      nothing or addresses whichever database happens to be listening on a
-#      developer's machine - and the second failure mode is worse than the
+#    Alternatives Considered: writing them here. Rejected because the container's
+#      port is assigned at run time, so a written connection string either
+#      addresses nothing or addresses whichever database happens to be listening
+#      on a developer's machine - and the second failure mode is worse than the
 #      first, because it passes.
 #    Assumptions: the container supplies those coordinates to the test context
-#      instead. Two routes do that and both leave this file unchanged: a
-#      Testcontainers @ServiceConnection on the PostgreSQLContainer field of a
-#      *RepositoryIT, which needs the spring-boot-testcontainers artifact that
-#      services/auth-service/pom.xml declares at its line 343 and this module's
-#      POM does not yet carry; or @DynamicPropertySource, which needs nothing
-#      beyond the Testcontainers 2.0.5 modules already on this module's test
-#      classpath. Either way the coordinates arrive as a bean or a dynamic
-#      property and never as text in this document, which is why no credential
-#      appears here to be committed.
+#      instead, through exactly ONE mechanism. Every *RepositoryIT in this module
+#      annotates its PostgreSQLContainer field @ServiceConnection, which
+#      contributes a JdbcConnectionDetails bean; the auto-configuration reads the
+#      connection from that bean and never consults spring.datasource.url, so the
+#      base document's placeholder is bypassed rather than overridden. The
+#      annotation comes from spring-boot-testcontainers, which this module's POM
+#      declares at test scope beside the two Testcontainers modules, so the
+#      mechanism this file documents is the mechanism the classpath supports.
+#      Coordinates therefore arrive as a bean and never as text in this document,
+#      which is why no credential appears here to be committed.
+#    Alternatives Considered: @DynamicPropertySource, which would need nothing
+#      beyond the Testcontainers modules and would let this module carry one less
+#      test-scoped artifact. Rejected, and rejected as an EITHER/OR rather than
+#      recorded as a second permitted route: a profile that documents two ways in
+#      lets the author of the first *RepositoryIT pick the one this classpath does
+#      not support and find out by compilation failure. One documented mechanism
+#      is the point of naming it here at all. @ServiceConnection is the one chosen
+#      because services/auth-service/pom.xml and its own test profile already use
+#      it, so both repository suites in this reactor have a single shape, and
+#      because it hand-wires no property and so cannot drift from what the test
+#      really connects to.
 #    Trade-offs: the base document's three placeholders stay unresolved during
 #      a test run. That is safe and it is not an accident:
 #      configuration-property binding leaves an unresolvable placeholder as
@@ -127,108 +110,98 @@
 #      issuer key further down is the whole reason that one key needs different
 #      treatment.
 #
-# 2. Every `server.*` key, including the listener port and the transport
-#    settings of the HTTPS listener the base profile enables.
-#    Assumptions: neither shape of test in this module binds a listener. A
-#      context-loading *Test drives MockMvc, which starts no web server, and a
-#      *RepositoryIT reaches only the database. The base pins its port to 8080
-#      because this module's Dockerfile EXPOSEs that port and the internal load
-#      balancer's target group forwards to it, so the value is a deployment
-#      contract that a test has no standing to renegotiate. The inherited
-#      listener block is therefore inert here rather than misconfigured, and
-#      that is why its certificate placeholders never resolve and never matter.
+# 2. Every `server.*` key, including the listener port and the transport settings
+#    of the HTTPS listener the base profile enables.
+#    Assumptions: neither shape of test binds a listener - a context-loading
+#      *Test drives MockMvc, which starts no web server, and a *RepositoryIT
+#      reaches only the database. The base pins its port because this module's
+#      Dockerfile EXPOSEs it and the internal load balancer's target group
+#      forwards to it, so the value is a deployment contract a test has no
+#      standing to renegotiate. The inherited listener block is inert here rather
+#      than misconfigured, which is why its certificate placeholders never resolve
+#      and never matter.
 #
 # 3. Any Spring Cloud AWS key, any queue or messaging key, and any key naming a
 #    local AWS emulator.
 #    Assumptions: this module declares neither io.awspring.cloud nor
-#      software.amazon.awssdk, verified by resolving its test classpath. This
-#      bounded context owns no queue, so there is no messaging configuration
-#      class here at all. Naming a key from a library that is absent binds
-#      nothing and would read as a missing dependency, inviting the next reader
-#      to add the library rather than remove the key. Those concerns belong to
+#      software.amazon.awssdk, verified by resolving its test classpath, and this
+#      bounded context owns no queue. Naming a key from an absent library binds
+#      nothing and would read as a missing dependency, inviting the next reader to
+#      add the library rather than remove the key. Those concerns belong to
 #      authorization-service and batch-service.
 #
 # 4. Any Batch key, and any job-repository setting.
 #    Assumptions: this module declares no spring-boot-starter-batch and owns no
 #      job repository. The nightly jobs that write ledger.transactions run in
-#      batch-service, under the narrowly scoped cross-schema grant that
-#      data-migration/sql/V0__schemas_and_roles.sql [present] issues to
-#      carddemo_batch at its lines 644 and 666. A batch starter enabled here
-#      would create job-repository tables in a schema that does not own them.
+#      batch-service, under the narrowly scoped cross-schema grant
+#      data-migration/sql/V0__schemas_and_roles.sql issues to carddemo_batch at
+#      its lines 644 and 666. A batch starter enabled here would create
+#      job-repository tables in a schema that does not own them.
 #
 # 5. Any in-memory database configuration.
-#    Alternatives Considered: covered as a decision at
-#      spring.datasource.hikari, because the reason is specific to what the
-#      repository suite exists to prove rather than a general preference.
+#    Alternatives Considered: covered as a decision at spring.datasource.hikari,
+#      because the reason is specific to what the repository suite exists to prove
+#      rather than a general preference.
 #
 # 6. Flyway's destructive clean operation and the key that governs it.
-#    Assumptions: the base pins that control so that no profile can enable a
-#      drop against a ledger. A container database is discarded whole when the
-#      run ends, so there is nothing for a test-side setting to protect and no
-#      artifact for it to produce.
+#    Assumptions: the base pins that control so no profile can enable a drop
+#      against a ledger. A container database is discarded whole when the run
+#      ends, so there is nothing for a test-side setting to protect.
 #
 # 7. Any key naming the size of a page, a page number, or an offset-and-limit
 #    query.
 #    Assumptions: paging in this context is KEYSET paging over the same key
-#      columns the CICS browse walked, carried by the PageResponse envelope
-#      from common-lib - items, firstKey, lastKey and a next-page indicator
-#      discovered by fetching one row more than a page holds, which is exactly
-#      how the COBOL discovers it.
-#    Refactoring Rationale: an offset-and-limit query is rejected outright
-#      because under concurrent inserts it skips and repeats rows, changing
-#      observable behaviour that browse-by-key does not. Exposing the size of a
-#      page as a tunable property would additionally let a test drift from the
-#      screen contract the baseline establishes, so that number lives in code
-#      beside the query and its one-extra-row probe, where the two can be read
-#      together.
+#      columns the CICS browse walked, carried by common-lib's PageResponse
+#      envelope - items, firstKey, lastKey and a next-page indicator discovered by
+#      fetching one row more than a page holds, which is exactly how the COBOL
+#      discovers it.
+#    Refactoring Rationale: an offset-and-limit query is rejected outright because
+#      under concurrent inserts it skips and repeats rows, changing observable
+#      behaviour that browse-by-key does not. Exposing page size as a tunable
+#      property would additionally let a test drift from the screen contract the
+#      baseline establishes, so that number lives in code beside the query and its
+#      one-extra-row probe, where the two can be read together.
 #
 # 8. Any clock or current-time property.
-#    Assumptions: the twenty-six character timestamp is a copybook contract
-#      rather than a formatting preference. app/cpy/CSDAT01Y.cpy declares
-#      05 WS-TIMESTAMP at line 42 and its thirteen members across lines 43 to
-#      55 - 9(04), '-', 9(02), '-', 9(02), ' ', 9(02), ':', 9(02), ':', 9(02),
-#      '.', 9(06) - sum to exactly 26, giving 'YYYY-MM-DD HH:MM:SS.mmmmmm' with
-#      the space at character 11 and the point at character 20.
-#      app/cbl/COBIL00C.cbl corroborates the geometry from a program rather
-#      than a layout: line 264 moves a ten-character date to
-#      WS-TIMESTAMP(01:10) and line 265 moves an eight-character time to
-#      WS-TIMESTAMP(12:08), leaving characters 11 and 20 to the FILLERs, while
-#      line 266 moves ZEROS to WS-TIMESTAMP-TM-MS6 so bill payment emits
+#    Assumptions: the twenty-six character timestamp is a copybook contract rather
+#      than a formatting preference. app/cpy/CSDAT01Y.cpy declares 05 WS-TIMESTAMP
+#      at line 42 and its thirteen members across lines 43 to 55 - 9(04), '-',
+#      9(02), '-', 9(02), ' ', 9(02), ':', 9(02), ':', 9(02), '.', 9(06) - sum to
+#      exactly 26, giving 'YYYY-MM-DD HH:MM:SS.mmmmmm' with the space at character
+#      11 and the point at character 20. app/cbl/COBIL00C.cbl corroborates the
+#      geometry from a program rather than a layout: line 264 moves a
+#      ten-character date to WS-TIMESTAMP(01:10) and line 265 an eight-character
+#      time to WS-TIMESTAMP(12:08), leaving characters 11 and 20 to the FILLERs,
+#      while line 266 moves ZEROS to WS-TIMESTAMP-TM-MS6 so bill payment emits
 #      '.000000' and orig_ts equals proc_ts. Determinism for that value is
 #      supplied as a BEAN and not as a property, which is why this file sets
 #      nothing for it: common-lib's TimestampFormatter takes the clock as a
-#      parameter at its line 418 and throws rather than reading an ambient one,
-#      recording at its lines 401 to 406 that a clock pinned to a single
-#      instant yields one predictable rendering whereas a method reading the
-#      ambient clock could not be asserted against at all. A test therefore
-#      supplies a clock pinned to one instant through the Clock.fixed factory,
-#      as common-lib's own TimestampFormatterTest already does.
-#    Alternatives Considered: reading the ambient clock and normalising the
-#      value before comparison. Rejected for this module. Normalisation is the
-#      parity oracle's technique for a batch program whose output is compared
-#      against a committed file, and tests/fixtures/README.md section 6.3
-#      establishes its precise asymmetry: only the runtime processing timestamp
-#      is masked, while an input originating timestamp is load-bearing and must
-#      be a literal. No such committed comparison file covers this module at
-#      all - the four programs it migrates, COTRN00C, COTRN01C, COTRN02C and
-#      COBIL00C, are online CICS programs, and tests/README.md section 1.1
-#      records that those cannot be run end to end without a CICS runtime - so
-#      injecting determinism at the source is the only mechanism available. It
-#      is also the house direction: tests/README.md section 11, whose heading
-#      is at line 475, states at lines 488 to 489 that business dates are
-#      injected rather than read from the wall clock so that reruns produce
-#      identical output.
+#      parameter and throws rather than reading an ambient one, so a test supplies
+#      a clock pinned to one instant through Clock.fixed.
+#    Alternatives Considered: reading the ambient clock and normalising the value
+#      before comparison. Rejected for this module. Normalisation is the parity
+#      oracle's technique for a batch program whose output is compared against a
+#      committed file, and tests/fixtures/README.md section 6.3 establishes its
+#      precise asymmetry: only the runtime processing timestamp is masked, while an
+#      input originating timestamp is load-bearing and must be a literal. No such
+#      committed comparison file covers this module at all - the four programs it
+#      migrates, COTRN00C, COTRN01C, COTRN02C and COBIL00C, are online CICS
+#      programs, and tests/README.md section 1.1 records that those cannot be run
+#      end to end without a CICS runtime - so injecting determinism at the source
+#      is the only mechanism available. It is also the house direction:
+#      tests/README.md section 11 states that business dates are injected rather
+#      than read from the wall clock so that reruns produce identical output.
 #
-# 9. The project's own JWT-validation namespace, and the base document's
-#    Jackson, springdoc and management keys.
-#    Assumptions: the JWT-validation keys are read by a configuration class
-#      this module has not yet authored, so the binding style that decides
-#      whether an unresolved placeholder is tolerated is not yet observable
-#      from the code; a context-loading test that installs the filter chain
-#      arranges those values for itself. The remaining three groups settle
-#      encoding, the published contract and the Actuator surface, and a test
-#      changes none of them, so restating them would add drift surface and
-#      answer no question.
+# 9. The project's own JWT-validation namespace, and the base document's Jackson,
+#    springdoc and management keys.
+#    Assumptions: the JWT-validation keys are read by this context's own security
+#      configuration rather than by framework auto-configuration, so whether an
+#      unresolved placeholder is tolerated is a property of that class and not of
+#      this file. A context-loading test that installs the filter chain therefore
+#      arranges those values for itself, which keeps the arrangement beside the
+#      assertion depending on it. The remaining three groups settle encoding, the
+#      published contract and the Actuator surface, and a test changes none of
+#      them, so restating them would add drift surface and answer no question.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -346,7 +319,7 @@ spring:
     #   second one here, and only reference-service carries a seed migration.
     #   The eight schemas, the per-service roles and the whole cross-schema
     #   privilege graph live in data-migration/sql/V0__schemas_and_roles.sql
-    #   [present], whose lines 454 to 539 create those schemas including
+    #  , whose lines 454 to 539 create those schemas including
     #   `ledger` at line 463. That file is NOT on this classpath and cannot be
     #   reached from this location, so no test run can apply another context's
     #   bootstrap into `ledger`, and nothing but this module's own migration

@@ -3,13 +3,12 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the CardDemo PRODUCTION environment root. Two
-#   of these inputs configure the root's own aws provider; the other ten are the
-#   ENTIRE axis along which this environment is permitted to differ from
+#   of these inputs configure the root's own aws provider; the others are the
+#   explicit values consumed by the shared topology. The two roots are
 #   infra/envs/dev. That constraint is the point of this file: the two roots are
-#   required to be identical in topology and to differ only in sizing and
-#   retention, so this file declares exactly the same twelve variable names, with
-#   the same types and the same validation, as infra/envs/dev/variables.tf. Only
-#   the DEFAULTS differ, and every one that differs says why at the declaration.
+#   required to be identical in topology and to differ only in environment
+#   identity, sizing, retention, protection and production edge certificate
+#   inputs. This file declares the same twenty-nine variable names as dev.
 #
 #   A variable present in one root and absent from the other would be a
 #   structural divergence between the environments, so the symmetry is
@@ -17,11 +16,12 @@
 #   the difference between production and development entirely in the default
 #   values and in the reasoning beside them.
 #
-#   Values are supplied by infra/envs/prod/terraform.tfvars. Every input is
-#   nonetheless defaulted, so this root can be initialised and validated with no
-#   variable file at all -- see the trade-off recorded below.
+#   Values are supplied by infra/envs/prod/terraform.tfvars and by the deployment
+#   workflow. image_tag, github_repository, github_oidc_provider_arn,
+#   spa_domain_name and spa_acm_certificate_arn are required because no safe
+#   account-independent default exists.
 #
-# Parameters -- twelve, none required:
+# Parameters -- twenty-nine, five required:
 #   aws_region                      string       Region this environment
 #                                                deploys into.
 #   tags                            map(string)  Common tag set applied through
@@ -453,4 +453,352 @@ variable "skip_final_snapshot" {
   # Assumptions: this pairs with the deletion-protection flag above rather than
   # duplicating it. Protection decides whether a destroy is permitted at all;
   # this decides what is preserved once it is.
+}
+
+# -----------------------------------------------------------------------------
+# Shared topology inputs. These match development; production differs only in
+# the sizing, retention and protection variables declared above.
+# -----------------------------------------------------------------------------
+
+variable "name_prefix" {
+  description = "Common lower-case prefix used by every module in this environment."
+  type        = string
+  default     = "carddemo"
+}
+
+variable "environment" {
+  description = "Environment identity passed to every module; fixed to prod for this root."
+  type        = string
+  default     = "prod"
+
+  validation {
+    condition     = var.environment == "prod"
+    error_message = "The production root environment must be prod."
+  }
+}
+
+variable "vpc_cidr" {
+  description = "IPv4 CIDR allocated to the production VPC."
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "aurora_engine_version" {
+  description = "Aurora PostgreSQL engine version used by the production cluster."
+  type        = string
+  default     = "16.6"
+}
+
+variable "aurora_parameter_group_family" {
+  description = "Aurora PostgreSQL cluster parameter-group family matching aurora_engine_version."
+  type        = string
+  default     = "aurora-postgresql16"
+}
+
+variable "aurora_backup_retention_period" {
+  description = "Days of automated Aurora backups retained in production."
+  type        = number
+  default     = 35
+}
+
+variable "aurora_preferred_backup_window" {
+  description = "Daily UTC backup window kept outside the nightly batch schedule."
+  type        = string
+  default     = "07:00-08:00"
+}
+
+variable "aurora_preferred_maintenance_window" {
+  description = "Weekly UTC maintenance window kept outside batch and backup windows."
+  type        = string
+  default     = "sun:09:00-sun:10:00"
+}
+
+variable "batch_schedule_expression" {
+  description = "EventBridge Scheduler cron expression that starts the nightly batch chain."
+  type        = string
+  default     = "cron(0 2 * * ? *)"
+}
+
+variable "image_tag" {
+  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{6,127}$", var.image_tag)) && lower(var.image_tag) != "latest"
+    error_message = "image_tag must be a 7-128 character explicit tag and must not be latest; the deployment workflow supplies the commit SHA."
+  }
+}
+
+variable "github_repository" {
+  description = "GitHub repository in owner/name form whose protected prod environment may assume the SPA publication role."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository must be an owner/name pair such as example/carddemo."
+  }
+}
+
+variable "github_oidc_provider_arn" {
+  description = "ARN of the account-scoped GitHub Actions OIDC provider created by infra/bootstrap."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$", var.github_oidc_provider_arn))
+    error_message = "github_oidc_provider_arn must identify the token.actions.githubusercontent.com IAM OIDC provider."
+  }
+}
+
+variable "secret_recovery_window_in_days" {
+  description = "Secrets Manager recovery window for generated database, TLS and Cognito credentials."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.secret_recovery_window_in_days >= 7 && var.secret_recovery_window_in_days <= 30
+    error_message = "Production secret_recovery_window_in_days must be 7-30 days."
+  }
+}
+
+variable "rotation_automatically_after_days" {
+  description = "Days between scheduled rotations of each service database credential after its immediate bootstrap rotation."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.rotation_automatically_after_days >= 1 && var.rotation_automatically_after_days <= 1000
+    error_message = "rotation_automatically_after_days must be between 1 and 1000."
+  }
+}
+
+variable "alarm_email_endpoints" {
+  description = "Email addresses subscribed to the production observability topic."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for address in var.alarm_email_endpoints : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", address))])
+    error_message = "Every alarm_email_endpoints entry must be a syntactically valid email address."
+  }
+}
+
+# WHY : Assumptions: CloudFront reads viewer certificates only from us-east-1,
+#       even when the rest of the environment is deployed elsewhere. Keeping a
+#       separate required ARN makes that global-service prerequisite explicit
+#       rather than encouraging reuse of the regional ALB certificate.
+variable "cloudfront_acm_certificate_arn" {
+  description = "ACM certificate ARN issued in us-east-1 for the SPA distribution. Forwarded to cloudfront-spa and required to cover every entry in cloudfront_aliases."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$", var.cloudfront_acm_certificate_arn))
+    error_message = "cloudfront_acm_certificate_arn must be an ACM certificate ARN issued in us-east-1, shaped arn:<partition>:acm:us-east-1:<account-id>:certificate/<id>."
+  }
+}
+
+variable "cloudfront_aliases" {
+  description = "Non-empty list of bare DNS names the SPA distribution serves. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa."
+  type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = length(var.cloudfront_aliases) > 0 && alltrue([
+      for alias in var.cloudfront_aliases :
+      can(regex("^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(alias)))
+    ]) && length(distinct([for alias in var.cloudfront_aliases : lower(alias)])) == length(var.cloudfront_aliases)
+    error_message = "cloudfront_aliases must contain at least one unique bare DNS name, optionally with a leading wildcard label; schemes, ports, paths and duplicate names are not accepted."
+  }
+}
+
+# WHY : Assumptions: this is a security control with no safe default, so it is
+#       required rather than defaulted. The distribution's content-security
+#       policy names the origins the SPA may reach with fetch or XHR, and the
+#       API Gateway endpoint is on a different origin from the bundle, so the
+#       policy has to name it or the browser blocks every call. The value is
+#       supplied per deployment rather than read from module.api_gateway,
+#       because the SPA build learns the same address out of band -- the deploy
+#       workflow passes it as VITE_API_BASE_URL -- and the two have to agree.
+#       Deriving one from Terraform while the other comes from the workflow is
+#       how they silently diverge; a single operator-supplied value cannot.
+#       Alternatives Considered: wiring api_connect_src_origins directly from
+#       module.api_gateway.api_endpoint_url. Rejected because it closes a
+#       dependency ring: the response-header policy would depend on the API
+#       stage, the stage's access log group depends on the S3 CMK, and that key's
+#       policy narrows the CloudFront decrypt grant to this distribution's ARN --
+#       which depends on the response-header policy. Terraform reports that as a
+#       cycle at plan time, and the fix would be to weaken the key-policy
+#       narrowing, which is a real control traded for a convenience.
+#       Trade-offs: an operator must supply one more value per environment, and
+#       an empty list is accepted -- it yields `connect-src 'self'`, which fails
+#       closed by blocking the cross-origin call visibly rather than permitting
+#       any origin.
+variable "cloudfront_api_connect_src_origins" {
+  description = "Origins the SPA is permitted to reach with fetch or XHR, forwarded unchanged to cloudfront-spa as api_connect_src_origins. Scheme and host only, no path and no trailing slash; normally the single API Gateway origin the SPA was built against. Supply it as TF_VAR_cloudfront_api_connect_src_origins, never in terraform.tfvars, so it tracks the deployed endpoint."
+  type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for origin in var.cloudfront_api_connect_src_origins :
+      can(regex("^https://[a-z0-9][a-z0-9.-]*[a-z0-9](:[0-9]{1,5})?$", lower(origin)))
+    ])
+    error_message = "Each entry in cloudfront_api_connect_src_origins must be an https:// scheme and host, optionally with a port, and must not contain a path, a trailing slash or a wildcard."
+  }
+}
+
+# WHY : Alternatives Considered: generating a self-signed key pair in Terraform.
+#       Rejected because the service clients would not trust a new authority and
+#       the AAP provider set does not include a TLS provider. The imported pair
+#       must come from the environment's existing trust authority.
+#       Assumptions: `sensitive` redacts these values from ordinary CLI output but
+#       does not remove them from state. They must be supplied through an
+#       operator secret channel, and the encrypted remote-state backend remains
+#       part of the security boundary.
+variable "service_tls_certificate" {
+  description = "PEM certificate or certificate chain presented by the CardDemo services' internal HTTPS listeners. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
+  type        = string
+  sensitive   = true
+  nullable    = false
+
+  validation {
+    condition = (
+      strcontains(var.service_tls_certificate, "-----BEGIN CERTIFICATE-----") &&
+      strcontains(var.service_tls_certificate, "-----END CERTIFICATE-----") &&
+      !strcontains(var.service_tls_certificate, "PRIVATE KEY")
+    )
+    error_message = "service_tls_certificate must contain PEM BEGIN/END CERTIFICATE markers and must not contain private-key material."
+  }
+}
+
+variable "service_tls_private_key" {
+  description = "PEM private key paired with service_tls_certificate. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
+  type        = string
+  sensitive   = true
+  nullable    = false
+
+  validation {
+    condition = anytrue([
+      strcontains(var.service_tls_private_key, "-----BEGIN PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN RSA PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END RSA PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN EC PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END EC PRIVATE KEY-----"),
+    ])
+    error_message = "service_tls_private_key must contain matching PEM private-key markers such as BEGIN/END PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The account's deployment permissions boundary
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the boundary is owned by the account, NOT by this deployment.
+#       A boundary that a deployment can rewrite bounds nothing, so it is supplied
+#       rather than created here and has no default: a guessed ARN would either fail
+#       the apply or, worse, attach a boundary that permits everything.
+#       Trade-offs: an operator must create the boundary policy before the first
+#       apply, which is one more prerequisite. Accepted because the alternative is
+#       roles whose maximum permissions are whatever the inline documents in this
+#       root happen to say, with nothing above them.
+variable "permissions_boundary_arn" {
+  description = "ARN of the same-account customer-managed IAM policy used as the permissions boundary on every role this deployment creates. Supplied by the operator or the deploy workflow; never created here."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN, for example arn:aws:iam::111122223333:policy/CardDemoDeploymentBoundary."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The protected-field fingerprint key
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the key is SUPPLIED, not generated here, and it has no default.
+#       A tag is only useful if the same input yields the same tag across runs and
+#       across tasks, so a key generated per apply would silently invalidate every
+#       tag produced by the previous apply. Keeping it outside this configuration
+#       also keeps it outside this state file.
+#       Trade-offs: one more prerequisite before the first apply. Accepted for the
+#       same reason as the permissions boundary: a value this deployment could
+#       rewrite would not be a key it can be held to.
+variable "mask_hmac_secret_arn" {
+  description = "Secrets Manager ARN of the environment-separated HMAC key the data-migration image uses for protected-field fingerprints. Supplied by the operator; never created or rotated by this configuration."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.mask_hmac_secret_arn))
+    error_message = "mask_hmac_secret_arn must be an anchored Secrets Manager secret ARN including its six-character suffix, for example arn:aws:secretsmanager:eu-west-1:111122223333:secret:carddemo/dev/mask-hmac-AbCdEf."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Immutable image references
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the deploy workflow already knows each digest -- it is what the
+#       push returned -- so supplying it costs nothing and removes the one way a
+#       registered task definition can silently change what it runs. In production
+#       infra/modules/ecs-service refuses anything else, so an incomplete map fails
+#       the plan with a message naming the artifact rather than deploying a tag.
+#       Trade-offs: the map is OPTIONAL and defaults to empty, which is what keeps a
+#       development apply able to run straight from a tag. The enforcement therefore
+#       lives in the module, per environment, rather than in this variable.
+variable "image_digests" {
+  description = "Immutable sha256 digests keyed by ECR artifact name, for example { \"auth-service\" = \"sha256:<64 hex>\" }. Any artifact named here is deployed by digest instead of by image_tag. Required in production, where the ECS service module refuses a mutable tag."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for digest in values(var.image_digests) : can(regex("^sha256:[a-f0-9]{64}$", digest))
+    ])
+    error_message = "Every image_digests value must be sha256: followed by exactly 64 lowercase hexadecimal characters, as returned by an ECR push."
+  }
+
+  validation {
+    condition = alltrue([
+      for artifact in keys(var.image_digests) : contains([
+        "auth-service",
+        "account-service",
+        "card-service",
+        "transaction-service",
+        "reference-service",
+        "batch-service",
+        "authorization-service",
+        "reporting-service",
+        "data-migration",
+      ], artifact)
+    ])
+    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment builds: the eight services plus data-migration. A key that names no repository would be silently ignored."
+  }
+}
+
+# WHY : Assumptions: an ACM certificate ARN identifies the listener credential
+#       but does not encode the DNS name API Gateway verifies. Both values are
+#       required independently so the root can pass the same identity to the
+#       ALB listener and the VPC Link integration without trying to parse one
+#       from the other.
+variable "alb_certificate_arn" {
+  description = "Regional ACM certificate ARN presented by the internal ALB HTTPS listener. Forwarded to the alb module; the certificate must be issued in this environment's region and cover internal_service_domain_name."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$", var.alb_certificate_arn))
+    error_message = "alb_certificate_arn must be a complete regional ACM certificate ARN shaped arn:<partition>:acm:<region>:<account-id>:certificate/<id>."
+  }
+}
+
+variable "internal_service_domain_name" {
+  description = "Bare DNS name covered by alb_certificate_arn. Forwarded to the alb module as its certificate identity and to api-gateway-http as the private integration server name to verify."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$", var.internal_service_domain_name))
+    error_message = "internal_service_domain_name must be a bare DNS hostname covered by the ALB certificate, with no scheme, port, wildcard or path."
+  }
 }

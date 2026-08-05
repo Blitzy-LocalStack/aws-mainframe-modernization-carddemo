@@ -1,0 +1,301 @@
+# =============================================================================
+# authorization-service -- base configuration.
+#
+#
+# WHY : (1) Assumptions: this context is the migrated form of
+#       app/app-authorization-ims-db2-mq -- the queue-driven consumer COPAUA0C
+#       plus the three online programs COPAUS0C, COPAUS1C and COPAUS2C. It is
+#       therefore the ONLY context in this repository that is simultaneously a
+#       web service and a message consumer, which is why this document carries
+#       both a `server:` block and a `spring.cloud.aws:` block where its peers
+#       carry one or the other.
+#       (2) Assumptions: no value below is a secret and no value below is an
+#       endpoint. Credentials, queue locations and the issuer are all injected as
+#       environment variables by the ECS task definition, which resolves them
+#       from Parameter Store and Secrets Manager at task start. The framework's
+#       relaxed binding maps an injected SPRING_DATASOURCE_URL onto
+#       spring.datasource.url unaided, so no client library is needed to read
+#       them and nothing here has to be templated at build time.
+#       (3) Trade-offs: the placeholders below carry NO defaults. An absent
+#       datasource URL or issuer stops startup rather than falling back to
+#       something locally plausible, because a service that starts against the
+#       wrong database is far harder to notice than one that does not start.
+# =============================================================================
+
+server:
+  # WHY : Assumptions: 8080 is fixed by three other artifacts -- the Dockerfile's
+  #       EXPOSE, the ecs-service module's container_port, and the security group
+  #       rule that admits the load balancer -- so this restates a shared
+  #       contract rather than choosing a value. Changing it here alone would
+  #       leave every probe pointed at a closed port.
+  port: 8080
+
+  ssl:
+    # WHY : (1) Refactoring Rationale: without this block the
+    #       load-balancer-to-task hop would be cleartext while the hop in front of
+    #       it is encrypted, so the protected path would stop at the load balancer
+    #       and every request would then cross the private application subnets
+    #       readable. For this context that traffic carries primary account
+    #       numbers, authorization amounts and merchant identity, alongside the
+    #       bearer token that authorised each request.
+    #       (2) Assumptions: this is one half of a two-part change; the other half
+    #       is target_protocol = "HTTPS" in infra/modules/ecs-service. Either half
+    #       alone means every probe speaks the wrong protocol and no task turns
+    #       healthy, so the two move together.
+    enabled: true
+
+    # WHY : (1) Alternatives Considered: a keystore file baked into the image.
+    #       Rejected because a private key in an image layer is readable by anyone
+    #       who can pull the image, and one key in one image is one key shared by
+    #       dev and prod.
+    #       (2) Assumptions: both values arrive from Secrets Manager, injected by
+    #       the task definition through the ECS container secrets mechanism, so
+    #       neither is stored in the task definition, in Terraform state or in
+    #       plan output. They must be passed through the ecs-service module's
+    #       secret_arns input rather than environment_variables, whose validation
+    #       refuses a name ending in KEY for exactly this reason.
+    #       (3) Assumptions: these properties accept PEM CONTENT as well as a
+    #       path, which is what lets an environment-injected value work at all.
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
+
+    # WHY : (1) Assumptions: the two versions are named rather than left to the
+    #       JDK default, which still negotiates the withdrawn TLS 1.1. This holds
+    #       the same floor the alb module pins on its listener, so one floor
+    #       applies at every hop.
+    #       (2) Trade-offs: no `ciphers` list. A hand-written list ages into a
+    #       liability, silently permitting a suite the JDK has since deprecated;
+    #       the runtime's own default set for these two versions is maintained by
+    #       whoever ships it.
+    protocol: TLS
+    enabled-protocols: TLSv1.2,TLSv1.3
+
+  # WHY : Assumptions: for this context draining matters more than for its peers,
+  #       because a message being handled at shutdown is midway through a
+  #       transaction that has already locked an account's summary row. Draining
+  #       lets that transaction reach its commit and its outbox row, so the
+  #       requester still gets an answer; killing it mid-flight would roll the
+  #       decision back and rely on redelivery to redo it.
+  shutdown: graceful
+
+spring:
+  application:
+    # WHY : Assumptions: this name is the value MetricsConfig in
+    #       com.carddemo.common.observability puts on every metric as a common
+    #       tag, so it is how one context's error rate is told from another's on a
+    #       shared dashboard. It matches the ECR repository and the ECS service
+    #       name so that a metric, an image and a task all say the same word.
+    name: authorization-service
+
+  config:
+    # WHY : Assumptions: it carries the single console log pattern that emits the
+    #       correlation identifier and the platform request identifier from the
+    #       logging context, which CorrelationIdFilter and the message consumer
+    #       both populate. Restating the pattern per service is what let the two
+    #       drift apart before this import existed.
+    import: "classpath:/carddemo-common-defaults.yml"
+
+  lifecycle:
+    # WHY : Trade-offs: twenty seconds against the platform's thirty-second
+    #       SIGTERM-to-SIGKILL window. Giving up the last ten seconds buys the
+    #       certainty that the JVM finishes and flushes its log buffers inside the
+    #       window rather than being terminated mid-transaction.
+    timeout-per-shutdown-phase: 20s
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+    hikari:
+      pool-name: authorization-pool
+
+      # WHY : (1) Assumptions: the schema name is QUOTED, and it has to be.
+      #       `authorization` is a reserved word in this database, so an unquoted
+      #       occurrence is a syntax error rather than a wrong lookup -- a failure
+      #       mode data-migration/sql/V0__schemas_and_roles.sql documents at lines
+      #       471 to 493 after hitting it. Because this one setting resolves every
+      #       unqualified name, the quoting concern lives here and nowhere else:
+      #       no entity annotation and no repository query has to repeat it.
+      #       (2) Alternatives Considered: currentSchema on the JDBC URL. Rejected
+      #       because the URL arrives from Parameter Store, so the schema would
+      #       become an infrastructure value that a reader of this file could not
+      #       see. Trade-offs: this runs one extra statement per new connection,
+      #       which the pool amortises across the connection's whole lifetime.
+      connection-init-sql: SET search_path TO "authorization"
+
+      # WHY : Trade-offs: ten connections against a task count of two or more.
+      #       This context holds a PESSIMISTIC row lock on a summary while it
+      #       decides, and the outbox drain holds locks on its claimed rows, so
+      #       connections here are held for longer than in a purely
+      #       request-response context. Ten leaves headroom for the consumer's
+      #       concurrency plus the drain plus the web endpoints without letting one
+      #       task monopolise a serverless cluster's connection budget.
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+      idle-timeout: 300000
+      max-lifetime: 900000
+
+      data-source-properties:
+        # WHY : Assumptions: verify-full, not require. `require` encrypts without
+        #       authenticating the server, so it stops an eavesdropper and not an
+        #       impostor; verify-full checks the certificate chain and the
+        #       hostname, which is what makes the encryption worth having.
+        sslmode: verify-full
+        sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
+
+  flyway:
+    # WHY : Assumptions: flyway-core alone is not enough and the way it fails is
+    #       why this needs saying here. Flyway 10 moved database-specific support
+    #       out of core, so the sibling POM declares flyway-database-postgresql
+    #       beside it; without that artifact the application starts and then aborts
+    #       when Flyway cannot resolve a PostgreSQL URL to a database type it
+    #       knows, and nothing in the failure names the missing dependency.
+    enabled: true
+    locations: classpath:db/migration
+
+    # WHY : (1) Assumptions: the schema name is quoted here for the same reason it
+    #       is quoted on the init statement above.
+    #       (2) Assumptions: create-schemas is false and baseline-on-migrate is
+    #       false because the schema and its role grants are created by
+    #       data-migration/sql/V0__schemas_and_roles.sql, which runs first and is
+    #       owned elsewhere. Letting Flyway create the schema would give it an
+    #       owner and a grant set that V0 did not choose.
+    schemas: '"authorization"'
+    default-schema: '"authorization"'
+    baseline-on-migrate: false
+    create-schemas: false
+
+    # WHY : Trade-offs: clean is disabled unconditionally, in every profile. It
+    #       drops every object in the schema, and the one environment where that
+    #       is survivable is the one where an operator is most likely to run it by
+    #       accident. Nothing in this repository needs it.
+    clean-disabled: true
+
+  jpa:
+    hibernate:
+      # WHY : Assumptions: the provider never emits schema changes. Flyway owns
+      #       every object, so an inferred change would silently diverge the
+      #       running schema from the migration history that describes it.
+      ddl-auto: none
+
+    # WHY : Trade-offs: no default_schema property is set, deliberately, which is
+    #       a difference from the peer contexts. Setting it would qualify every
+    #       generated statement with the schema name, and the provider does not
+    #       quote a qualifier it was handed unquoted -- so with a reserved word for
+    #       a schema name, that property turns every generated statement into a
+    #       syntax error. Resolution through the pinned search_path avoids the
+    #       problem rather than working around it.
+    open-in-view: false
+    show-sql: false
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # WHY : Assumptions: the issuer is a user-pool URI resolved at run time
+          #       from a Terraform output, never a literal here. Naming it makes
+          #       the filter chain verify the signature and the issuer of every
+          #       bearer token before SecurityConfig's path rules are consulted.
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+
+  cloud:
+    aws:
+      sqs:
+        # WHY : Assumptions: this block is present here and absent from most peer
+        #       contexts because this one owns the two authorization queues. The
+        #       region and credentials are NOT set: the starter resolves both from
+        #       the task role and the task's own region, which is what keeps a
+        #       long-lived key out of this file and out of the image.
+        enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # WHY : Trade-offs: two endpoints, not the wildcard. Health is required by
+        #       the target group and the container probe; prometheus is required by
+        #       the metric scrape. Every other endpoint -- including the
+        #       write-capable ones -- stays unreachable, because an exposure list is
+        #       the only thing standing between a reachable actuator and a runtime
+        #       reconfiguration by anyone who can reach the port.
+        include: health,prometheus
+  endpoint:
+    health:
+      # WHY : Trade-offs: never show details. The detail payload names the
+      #       database and the queues this context depends on, and the health path
+      #       is deliberately unauthenticated so the load balancer can poll it, so
+      #       details here would be an unauthenticated topology disclosure.
+      show-details: never
+
+logging:
+  level:
+    # WHY : Trade-offs: WARN at the root, with this context's own packages at INFO.
+    #       The consumer's per-message decisions are the audit trail this context
+    #       exists to produce, so they are logged; third-party chatter is not.
+    root: WARN
+    com.carddemo: INFO
+
+    # WHY : Assumptions: the SQL parameter-binding logger is pinned to WARN
+    #       explicitly rather than left to inherit. At TRACE it writes every bound
+    #       parameter, and the parameters here are primary account numbers and
+    #       authorization amounts. Pinning it means no profile can turn it up by
+    #       raising a broader level.
+    org.hibernate.orm.jdbc.bind: WARN
+    org.hibernate.SQL: WARN
+
+carddemo:
+  security:
+    cognito:
+      # WHY : Assumptions: these exist to be COMPARED, not to be chosen.
+      #       common-lib's JwtRoleConverter holds the authority vocabulary as
+      #       compiled constants and refuses to start when a configured name differs
+      #       from its constant, so declaring them here is what turns a pool whose
+      #       groups were renamed into a startup failure rather than a service that
+      #       authenticates every request and authorizes none of them.
+      #       Assumptions: the defaults are the same two names
+      #       infra/modules/cognito fixes as non-overridable, and it emits them as
+      #       admin_group_name and user_group_name outputs -- so a deployment that
+      #       wires those outputs into the two environment variables below cannot
+      #       disagree with this file, and one that wires nothing still starts.
+      #       Alternatives Considered: hard-coding the constants at the call site,
+      #       which is what an earlier revision of this service did by using the
+      #       converter's no-argument constructor. Rejected because it removes the
+      #       comparison entirely: the service would keep authorizing against names
+      #       the deployed pool no longer issues, and every protected request would
+      #       return 403 with nothing in the logs naming the cause.
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
+
+  messaging:
+    # WHY : (1) Assumptions: the queue is named by an injected value rather than
+    #       a literal, because the same image runs against the dev and prod
+    #       queues. It is a FIFO queue whose message group is the card number, so
+    #       requests for one card arrive in order and requests for different cards
+    #       arrive in parallel -- which is what lets the consumer take a row lock
+    #       on one account's summary without serialising the whole service.
+    #       (2) Assumptions: the three polling values below are the migrated form
+    #       of the baseline's own discipline, not new tuning.
+    #       COPAUA0C reads with a five-second wait, so poll-timeout-seconds is 5;
+    #       it stops after five hundred messages, and the two bounds below are the
+    #       continuous equivalent of that batch limit. Expressing them as
+    #       properties rather than in the annotation is what lets an operator lower
+    #       concurrency during a batch window without a rebuild.
+    pauth-request-queue: ${CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE}
+    poll-timeout-seconds: 5
+    max-messages-per-poll: 10
+    max-concurrent-messages: 10
+
+    # WHY : (1) Trade-offs: a one-second poll rather than a commit-time trigger.
+    #       A trigger would publish sooner in the ordinary case and would publish
+    #       NOTHING after a crash between commit and trigger -- which is the exact
+    #       window the outbox exists to close -- so the poll covers both cases with
+    #       one mechanism and bounds the added latency at this interval.
+    #       (2) Trade-offs: twenty-five rows per pass. The whole pass runs in one
+    #       transaction holding row locks, so a larger batch holds more locks for
+    #       longer while a smaller one wastes a round trip per row; twenty-five
+    #       drains a normal backlog in one pass without holding locks across a
+    #       noticeable interval.
+    outbox-poll-interval-ms: 1000
+    outbox-batch-size: 25

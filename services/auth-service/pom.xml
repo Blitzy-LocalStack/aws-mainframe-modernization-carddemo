@@ -174,9 +174,6 @@
     </dependency>
 
     <!--
-      WHAT: the identity provider client this context calls OUTBOUND, as
-            distinct from the resource server above, which only validates
-            tokens arriving inbound.
       WHY : Assumptions: the two are not substitutes and the difference is the
             reason this coordinate exists. The resource server verifies a
             signature and reads the group claim off a token somebody else
@@ -210,7 +207,6 @@
     </dependency>
 
     <!--
-      WHAT: the health surface this module publishes.
       WHY : Assumptions: two independent consumers poll it, the load balancer
             target group and the container image's own health check, so it is a
             deployment contract rather than a convenience and cannot be dropped
@@ -227,8 +223,6 @@
     </dependency>
 
     <!--
-      WHAT: the module that ACTIVATES Flyway inside this Spring Boot
-            application, as distinct from the two engine artifacts below.
       WHY : Assumptions: Spring Boot 4 broke the single spring-boot-autoconfigure
             artifact up into one autoconfiguration module per technology, so
             FlywayAutoConfiguration no longer ships with the framework core. It
@@ -256,7 +250,6 @@
     </dependency>
 
     <!--
-      WHAT: schema migration for the auth schema, as a matched pair.
       WHY : Assumptions: the STARTER is what activates migration, and naming it
             rather than flyway-core is the load bearing half of this pair. Spring
             Boot 4 split its autoconfiguration into one module per technology, and
@@ -345,9 +338,6 @@
     </dependency>
 
     <!--
-      WHAT: the two artifacts that bring the shared architecture rules to bear
-            on THIS module: the assertion engine, and the shared kernel's test
-            artifact that carries the one rule class.
       WHY : (1) Refactoring Rationale: this POM previously named neither, on the
             stated grounds that layering has exactly one owner and that the
             single rule class in common-lib therefore covered this module too.
@@ -383,10 +373,6 @@
     </dependency>
 
     <!--
-      WHAT: the dependencies this module is required NOT to have. Each absence
-            below is a decision with a reasonable alternative, so each is
-            recorded here rather than left for a reader to infer from silence.
-
       Assumptions: the Boot test starter is not named above. The aggregator
         declares it once, at test scope, in its own dependencies element, so it
         already applies to all nine modules. Repeating it would add a second

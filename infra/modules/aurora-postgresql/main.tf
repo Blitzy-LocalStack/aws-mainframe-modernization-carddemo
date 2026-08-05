@@ -20,8 +20,13 @@
 #   Db2 tables. Every baseline path named anywhere in this file is
 #   REFERENCE-ONLY: it is cited to ground a decision, and never edited.
 #
-#   Four resources are declared, in dependency order:
+#   One data source and four resources are declared, in dependency order:
 #
+#     aws_secretsmanager_secret_version (data)
+#                                       reads the master credential that
+#                                       infra/modules/secrets generated, which
+#                                       is the single authority for that
+#                                       credential in the whole stack.
 #     aws_db_subnet_group ............. pins the cluster into the isolated
 #                                       data-tier subnets.
 #     aws_rds_cluster_parameter_group . carries the two transport-security
@@ -41,6 +46,18 @@
 #       default_tags, while versions.tf owns the toolchain and provider
 #       constraints. A module cannot carry a backend at all.
 #     - No `variable` and no `output` block; see Parameters and Returns below.
+#     - No `data` source resolving another module's RESOURCES by name, and no
+#       `module` block. The single data source below resolves a Secrets Manager
+#       entry by the ARN its caller passed in, so it depends on a value it was
+#       handed rather than on a sibling module's naming scheme; that is the
+#       distinction the first WHY below draws, and it is why one data source is
+#       present while the coupling it warns about still is not.
+#     - No second master credential. This module does NOT set
+#       manage_master_user_password, and the argument's absence is now
+#       load-bearing: setting it would make RDS generate a credential of its own
+#       beside the one infra/modules/secrets already generated, leaving the
+#       cluster with two and every consumer pointed at the wrong one. The
+#       why-comment on master_password records what that cost in full.
 #     - No schema, role, grant, table, index or extension -- and therefore no
 #       `postgresql` provider, no `null_resource`, no provisioner and no SQL
 #       string anywhere. This module's boundary ends at the DATABASE. The eight
@@ -75,17 +92,19 @@
 # Parameters:
 #   None, and the absence is deliberate rather than a section omitted. A main.tf
 #   declares no `variable`, so this file accepts no input directly: it consumes
-#   the twenty-six inputs declared in
-#   infra/modules/aurora-postgresql/variables.tf, each of which carries its own
-#   `type`, `description` and `validation` there. All twenty-six are consumed
-#   here or in outputs.tf, which is what keeps
-#   terraform_unused_declarations in infra/.tflint.hcl quiet.
+#   the inputs declared in infra/modules/aurora-postgresql/variables.tf, each of
+#   which carries its own `type`, `description` and `validation` there. Every one
+#   of them is consumed here or in outputs.tf, which is what keeps
+#   terraform_unused_declarations in infra/.tflint.hcl quiet -- and is why the
+#   input that named a separately-created master-credential secret was removed
+#   rather than left declared: it had no consumer once RDS became the sole owner
+#   of that credential.
 #
 # Returns:
 #   None, for the same reason and recorded for the same purpose. A main.tf
 #   declares no `output`, so nothing here is readable by a calling root. The
 #   module's return values -- the cluster endpoint, port, identifier, the
-#   RDS-managed master-credential secret reference and the resource names
+#   master-credential secret reference and the resource names
 #   composed below -- are `output` blocks in
 #   infra/modules/aurora-postgresql/outputs.tf, which is where
 #   terraform_standard_module_structure requires them to live.
@@ -97,13 +116,13 @@
 #   it.
 #
 #   Raised before anything is created, by the `precondition` on the cluster:
-#     - The KMS key and the master-credential secret do not sit in the same AWS
-#       partition, region and account. That is a wiring defect in the calling
-#       root rather than a bad value in either input, so neither input's own
-#       `validation` in variables.tf can see it -- a `validation` reads one
-#       variable, and this rule compares two. The message names both ARNs'
-#       differing fields so the mis-wired module call is identifiable without
-#       reading the plan.
+#     - The cluster's data key and the key encrypting the RDS-managed master
+#       credential do not sit in the same AWS partition, region and account. That
+#       is a wiring defect in the calling root rather than a bad value in either
+#       input, so neither input's own `validation` in variables.tf can see it -- a
+#       `validation` reads one variable, and this rule compares two. The message
+#       names both ARNs' differing fields so the mis-wired module call is
+#       identifiable without reading the plan.
 #
 #   Raised by AWS during apply, and expected rather than defended against,
 #   because nothing in HCL can evaluate any of them:
@@ -120,10 +139,12 @@
 #     - `deletion_protection` still true when a destroy is attempted. RDS
 #       refuses the deletion; this is the intended behaviour in prod and the
 #       reason dev sets the flag to false.
-#     - A `final_snapshot_identifier` collision, when a previous teardown of the
-#       same `name_prefix` left a snapshot of that name behind and it has not
-#       been removed. The identifier is composed rather than accepted as an
-#       input specifically to bound this failure to one predictable name.
+#       (A `final_snapshot_identifier` collision used to be listed here, when the
+#       identifier was one fixed name per `name_prefix`. It no longer is: the
+#       identifier now carries a generated suffix that differs per cluster
+#       incarnation, so a repeated create-destroy cycle cannot claim a name a
+#       previous teardown left behind. The reasoning is at
+#       `local.final_snapshot_identifier`.)
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: a relational engine at all. Decision D3, recorded
@@ -195,20 +216,34 @@ locals {
   cluster_parameter_group_name = "${var.name_prefix}-aurora-cluster-params"
   writer_instance_identifier   = "${var.name_prefix}-aurora-writer"
 
-  # WHAT: the identifier RDS gives the snapshot it takes when the cluster is
-  #       deleted with skip_final_snapshot set to false.
-  # WHY : Assumptions: RDS requires this identifier whenever a final snapshot is
-  #       taken, and variables.tf deliberately declares no input for it. An
-  #       operator-supplied identifier has to be unique per deletion, so it
-  #       would have to be edited before every destroy, and a stale one collides
-  #       with the snapshot the previous teardown left behind -- failing the
-  #       destroy for a reason unconnected to whatever was being changed.
-  #       Composing it bounds that failure to one predictable name, which the
-  #       header's Errors section records as an expected apply-time error.
-  final_snapshot_identifier = "${var.name_prefix}-aurora-final"
+  # WHY : Refactoring Rationale: this was `"${var.name_prefix}-aurora-final"`,
+  #       one fixed name, and a fixed name cannot survive the very lifecycle it
+  #       exists for. A snapshot OUTLIVES the cluster it was taken from -- that is
+  #       its purpose -- and a snapshot identifier is unique per account and
+  #       region, so the second teardown of a stack that was destroyed and stood
+  #       up again is rejected by RDS for a name the previous teardown already
+  #       claimed. The destroy then fails at the last resource, leaving the
+  #       cluster in place, with an error naming a collision rather than the
+  #       lifecycle that caused it. `terraform destroy` tearing the stack down
+  #       cleanly is an acceptance criterion of this infrastructure, and a
+  #       repeatable one, so the name has to differ per incarnation.
+  # WHY : Alternatives Considered: (a) an operator-supplied identifier as an
+  #       input, rejected because it has to be edited before every destroy and a
+  #       forgotten edit reproduces exactly this collision; (b) `timestamp()`,
+  #       rejected because it is evaluated on every plan, so the argument would
+  #       differ from the stored value on each run and the cluster would show a
+  #       perpetual in-place update for a name that only matters at deletion;
+  #       (c) deleting the previous snapshot as part of the next apply, rejected
+  #       outright because it destroys the last recoverable copy of a financial
+  #       ledger to make a name available. A `random_id` keeps the value in state,
+  #       so it is stable across every apply of one cluster and different for the
+  #       next one -- which is precisely the uniqueness scope the collision needs.
+  # WHY : Assumptions: the composed name stays inside the RDS 255-character
+  #       identifier limit with room to spare: the prefix is capped by
+  #       var.name_prefix's own length validation, and the suffix adds sixteen
+  #       hexadecimal characters plus one separator.
+  final_snapshot_identifier = "${var.name_prefix}-aurora-final-${random_id.final_snapshot_suffix.hex}"
 
-  # WHAT: the cluster parameter set actually sent to AWS: the caller's map with
-  #       the two transport-security parameters merged OVER it, so they win.
   # WHY : Refactoring Rationale: these two parameters are re-asserted here even
   #       though variables.tf already refuses a var.cluster_parameters map that
   #       omits or weakens either one, because the two checks act on different
@@ -244,7 +279,6 @@ locals {
     }
   )
 
-  # WHAT: the tag set applied to all four resources this module owns.
   # WHY : Assumptions: tagging responsibility is split and this merge covers only
   #       this module's half. The calling root configures `default_tags` on its
   #       provider, which the AWS provider applies to every taggable resource
@@ -265,7 +299,38 @@ locals {
       Environment = var.environment
     }
   )
+
+  parameter_name_root = "${var.parameter_prefix}/${var.environment}/aurora"
 }
+
+
+# -----------------------------------------------------------------------------
+# The final-snapshot name suffix.
+# -----------------------------------------------------------------------------
+
+# WHY : Assumptions: this resource exists ONLY so that the snapshot name differs
+#       between one incarnation of the cluster and the next; the reasoning, and
+#       the three rejected alternatives, are recorded at
+#       `local.final_snapshot_identifier` above. It creates nothing in AWS.
+# WHY : Assumptions: `keepers` names the cluster identifier, so the suffix is
+#       regenerated exactly when that identifier changes -- and an identifier
+#       change on an RDS cluster is a REPLACEMENT, which means the outgoing
+#       cluster may leave a final snapshot behind under the old name while the
+#       incoming one needs a name of its own. Without the keeper the suffix would
+#       survive the replacement and the second teardown would collide again,
+#       which is the failure this resource was added to remove. A destroy and a
+#       fresh apply are covered without any keeper, because the value goes with
+#       the state.
+resource "random_id" "final_snapshot_suffix" {
+  byte_length = 8
+
+  keepers = {
+    cluster_identifier = local.cluster_identifier
+  }
+}
+
+
+
 
 
 
@@ -276,7 +341,6 @@ locals {
 resource "aws_db_subnet_group" "this" {
   name = local.db_subnet_group_name
 
-  # WHAT: the subnets the cluster's network interfaces are placed in.
   # WHY : Assumptions: these are the ISOLATED data-tier subnets -- the ones with
   #       no route to the internet in either direction, neither to an internet
   #       gateway nor to a NAT gateway -- and not the private application subnets
@@ -315,8 +379,6 @@ resource "aws_db_subnet_group" "this" {
 resource "aws_rds_cluster_parameter_group" "this" {
   name = local.cluster_parameter_group_name
 
-  # WHAT: the engine family this parameter group's parameters are validated
-  #       against.
   # WHY : Assumptions: the family must match the MAJOR version of
   #       var.engine_version -- aurora-postgresql16 for a 16.x engine,
   #       aurora-postgresql17 for a 17.x engine -- and the coupling is not
@@ -389,8 +451,6 @@ resource "aws_rds_cluster_parameter_group" "this" {
 resource "aws_rds_cluster" "this" {
   cluster_identifier = local.cluster_identifier
 
-  # WHAT: a relational engine, which fixes the transaction and referential
-  #       semantics every service in the migration is written against.
   # WHY : Alternatives Considered: recorded on the file header, because the
   #       choice is decision D3 rather than an argument-local one -- a key-value
   #       store cannot express the baseline's RESTRICT delete behaviour, and the
@@ -399,7 +459,6 @@ resource "aws_rds_cluster" "this" {
   #       docs/adr/ADR-003-datastore-targets.md.
   engine = "aurora-postgresql"
 
-  # WHAT: provisioned mode, which is the mode Serverless v2 runs in.
   # WHY : Assumptions: this is the single easiest thing in the file to get wrong,
   #       so it is stated explicitly rather than left to the provider default.
   #       Serverless v2 capacity is expressed as a
@@ -413,7 +472,6 @@ resource "aws_rds_cluster" "this" {
   #       about this one.
   engine_mode = "provisioned"
 
-  # WHAT: the Aurora PostgreSQL version.
   # WHY : Assumptions: no version is defaulted anywhere in this module, so the
   #       value is always a reviewed choice made in an environment root. The
   #       pairing that matters is with var.min_capacity: scaling to zero requires
@@ -423,8 +481,6 @@ resource "aws_rds_cluster" "this" {
   #       than against this one.
   engine_version = var.engine_version
 
-  # WHAT: the Serverless v2 capacity range and the idle delay before the cluster
-  #       pauses.
   # WHY : Assumptions: the three values are governed by four API properties that
   #       are easy to violate and are enforced as `validation` blocks in
   #       variables.tf rather than restated here -- capacity runs from 0 to 256
@@ -463,8 +519,6 @@ resource "aws_rds_cluster" "this" {
     seconds_until_auto_pause = var.seconds_until_auto_pause
   }
 
-  # WHAT: encryption of the cluster volume, its automated backups and its
-  #       snapshots.
   # WHY : Refactoring Rationale: this is a literal and not an input, because the
   #       baseline it corrects had no encryption at rest for this data at all --
   #       all eight DEFINE FILE stanzas in app/csd/CARDDEMO.CSD declare
@@ -477,7 +531,6 @@ resource "aws_rds_cluster" "this" {
   #       which is the test for whether something should be configurable.
   storage_encrypted = true
 
-  # WHAT: the key that performs that encryption.
   # WHY : Alternatives Considered: the AWS-managed aws/rds key, which is what
   #       RDS uses when no key is named. Rejected, and the input is required with
   #       no default so the fallback is unreachable: the managed key still
@@ -490,7 +543,6 @@ resource "aws_rds_cluster" "this" {
   #       which this module consumes and does not create.
   kms_key_id = var.kms_key_arn
 
-  # WHAT: placement into the isolated data tier.
   # WHY : Assumptions: referencing the group this module created, rather than
   #       taking a group name as an input, is what guarantees the cluster and the
   #       subnet group cannot disagree about which subnets the cluster sits in.
@@ -498,7 +550,6 @@ resource "aws_rds_cluster" "this" {
   #       is recorded on the subnet group above.
   db_subnet_group_name = aws_db_subnet_group.this.name
 
-  # WHAT: the security groups controlling network access to the cluster.
   # WHY : Alternatives Considered: creating the security group in this module,
   #       which is the more self-contained shape and is what many database
   #       modules do. Rejected because an Aurora security group is one half of a
@@ -512,8 +563,6 @@ resource "aws_rds_cluster" "this" {
   #       application tier on the database port and nothing else.
   vpc_security_group_ids = var.security_group_ids
 
-  # WHAT: the one value that every service's datasource URL and the data-tier
-  #       ingress rule must both name for a connection to be possible.
   # WHY : Assumptions: this value is coupled to an ingress rule this module does
   #       not own. infra/modules/network admits application-tier traffic to the
   #       data tier on 5432, so the default is the value that matches the rule
@@ -523,7 +572,6 @@ resource "aws_rds_cluster" "this" {
   #       symptom.
   port = var.port
 
-  # WHAT: the initial database created inside the cluster.
   # WHY : Assumptions: this module creates the DATABASE and stops. It creates
   #       none of the schemas, roles, tables, indexes or grants inside it, and
   #       this is the single most likely misunderstanding about the module's
@@ -537,10 +585,22 @@ resource "aws_rds_cluster" "this" {
   #       could no longer version what it did not create.
   database_name = var.database_name
 
+  # WHY : Assumptions: only the login NAME is set here. The password is not an
+  #       argument of this resource at all -- manage_master_user_password below
+  #       makes RDS generate and own it -- so this is the one half of the
+  #       credential that is not a secret and does not belong in one. The name
+  #       carries validation this module needs, in variables.tf: the lower-case
+  #       identifier rule and the refusal of the RDS-reserved "rdsadmin".
+  # WHY : Alternatives Considered: taking the password from a Secrets Manager
+  #       entry generated by infra/modules/secrets and setting it here as
+  #       master_password. Rejected because Terraform records every resource
+  #       argument in state, so that shape relocates the credential into the
+  #       state file instead of removing it, and it reintroduces the two-author
+  #       problem this module's next paragraph records as already fixed. The
+  #       break-glass path an operator needs is the RDS-managed secret published
+  #       by this module as master_user_secret_arn.
   master_username = var.master_username
 
-  # WHAT: RDS generates the master credential and manages it in Secrets Manager,
-  #       encrypted with the same customer-managed key as the cluster.
   # WHY : Refactoring Rationale: there is deliberately NO password argument in
   #       this file, of any spelling. The alternative -- reading the generated
   #       value out of Secrets Manager and passing it as a password argument --
@@ -555,17 +615,48 @@ resource "aws_rds_cluster" "this" {
   #       materialised in a plan, in state, or in this repository -- which is what
   #       makes the no-secrets-in-source constraint structurally true rather than
   #       dependent on every reviewer catching it.
-  # WHY : Assumptions: the secret RDS creates is encrypted with
-  #       var.kms_key_arn rather than a separate key, because a master credential
-  #       is exactly as sensitive as the data it unlocks, and one key means one
-  #       key policy and one rotation schedule to audit rather than two.
+  # WHY : Refactoring Rationale: RDS is the SOLE owner of this credential, and
+  #       that is now expressed once rather than twice. The module previously
+  #       also required a `master_credential_secret_arn` naming a secret the
+  #       sibling secrets module generated -- and never consumed it for anything
+  #       except a cross-ARN precondition, because `manage_master_user_password`
+  #       makes RDS create and populate a secret of its own. Two authorities
+  #       existed for one credential: the cluster authenticated against the
+  #       RDS-managed value while an operator following the input contract would
+  #       have read the other one, which is a break-glass path that silently does
+  #       not open. The unused input is therefore removed here and the duplicate
+  #       secret is removed from infra/modules/secrets, leaving one credential
+  #       with one owner, published by this module as `master_user_secret_arn`.
+  # WHY : Refactoring Rationale: the secret RDS creates is encrypted with the
+  #       SECRETS key, not the cluster's data key. The earlier reasoning -- that a
+  #       master credential is as sensitive as the data it unlocks, so one key
+  #       means one policy and one rotation schedule to audit -- had the domain
+  #       boundary backwards. infra/modules/kms provisions four keys precisely so
+  #       that a data class and its credentials are separable: the Aurora key's
+  #       trust list names the principals that read and write ENCRYPTED DATA,
+  #       while the secrets key's names the principals that read STORED
+  #       CREDENTIALS, and those two sets are deliberately different. Encrypting
+  #       the credential with the data key means every principal granted decrypt
+  #       for cluster storage can also decrypt the master credential, which
+  #       collapses the boundary the four keys exist to draw -- and it does so
+  #       invisibly, because both configurations report the cluster and its
+  #       secret as encrypted with a customer-managed key.
+  # WHY : Assumptions: this is the only argument in the module that names a key
+  #       other than var.kms_key_arn, so the two inputs are shape-checked
+  #       independently in variables.tf and compared for partition, region and
+  #       account by the precondition below.
   manage_master_user_password   = true
-  master_user_secret_kms_key_id = var.kms_key_arn
+  master_user_secret_kms_key_id = var.secrets_kms_key_arn
+
+  # WHY : Refactoring Rationale: schema bootstrap, service-credential rotation
+  #       and the nightly AnalyzeTables state use the RDS Data API so their
+  #       Lambda packages remain boto3-only and need no VPC-attached PostgreSQL
+  #       driver. variables.tf fixes this true to prevent a deployable but
+  #       administratively unreachable cluster.
+  enable_http_endpoint = var.enable_http_endpoint
 
   db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.this.name
 
-  # WHAT: how many days of automated backups are retained, which is also the
-  #       window in which point-in-time recovery is possible.
   # WHY : Refactoring Rationale: this is a recovery capability the baseline did
   #       not have, not a storage setting. Every one of the eight CSD file
   #       stanzas declares RECOVERY(NONE), FWDRECOVLOG(NO) and
@@ -577,7 +668,6 @@ resource "aws_rds_cluster" "this" {
   #       mistake.
   backup_retention_period = var.backup_retention_period
 
-  # WHAT: the daily window in which those backups are taken.
   # WHY : Assumptions: this window must not overlap the nightly batch window, and
   #       that window is defined outside this module -- a scheduler cron
   #       expression driving a state machine whose first and last states quiesce
@@ -591,7 +681,6 @@ resource "aws_rds_cluster" "this" {
   #       decision.
   preferred_backup_window = var.preferred_backup_window
 
-  # WHAT: the weekly window in which RDS applies maintenance.
   # WHY : Assumptions: the same non-overlap requirement as the backup window, for
   #       a stronger reason. Maintenance can restart the cluster, so a window
   #       intersecting the batch chain risks interrupting a run between its
@@ -603,7 +692,6 @@ resource "aws_rds_cluster" "this" {
   #       not, so variables.tf checks each against its own pattern.
   preferred_maintenance_window = var.preferred_maintenance_window
 
-  # WHAT: whether the cluster's tags are copied onto its snapshots.
   # WHY : Assumptions: a snapshot outlives the cluster it came from, and that is
   #       what makes this worth setting. An untagged snapshot appears in cost
   #       allocation attributed to nothing and in an inventory owned by nobody,
@@ -612,7 +700,6 @@ resource "aws_rds_cluster" "this" {
   #       reconstructed later, only lost at the moment the snapshot is taken.
   copy_tags_to_snapshot = var.copy_tags_to_snapshot
 
-  # WHAT: which engine log types the cluster publishes to CloudWatch Logs.
   # WHY : Refactoring Rationale: exporting the engine log restores an audit trail
   #       the baseline never had for its data tier. The only operational record
   #       the mainframe produced was print output routed to the job spool --
@@ -631,7 +718,6 @@ resource "aws_rds_cluster" "this" {
   #       in this module at all.
   enabled_cloudwatch_logs_exports = var.enabled_cloudwatch_logs_exports
 
-  # WHAT: whether RDS refuses to delete the cluster.
   # WHY : Trade-offs: the two environments need opposite values here, and the
   #       consequence of each is specific rather than a matter of taste. In prod,
   #       protection guards a financial ledger against a mistyped destroy that is
@@ -647,8 +733,6 @@ resource "aws_rds_cluster" "this" {
   #       default into.
   deletion_protection = var.deletion_protection
 
-  # WHAT: whether deleting the cluster skips taking a final snapshot, and the
-  #       identifier for that snapshot when it is taken.
   # WHY : Trade-offs: the same dev-versus-prod asymmetry as deletion protection,
   #       but a DIFFERENT failure mode, which is why the two are separate inputs
   #       rather than one flag. Deletion protection blocks the destroy entirely;
@@ -665,8 +749,6 @@ resource "aws_rds_cluster" "this" {
   skip_final_snapshot       = var.skip_final_snapshot
   final_snapshot_identifier = var.skip_final_snapshot ? null : local.final_snapshot_identifier
 
-  # WHAT: whether a modification is applied at once or deferred to the
-  #       maintenance window.
   # WHY : Trade-offs: deferring is the default and its cost is real, so it is
   #       named rather than glossed. While a change is pending, the running
   #       cluster does not match the plan a reviewer approved, so a subsequent
@@ -683,21 +765,19 @@ resource "aws_rds_cluster" "this" {
   tags = local.tags
 
   lifecycle {
-    # WHAT: refuses the plan when the customer-managed key and the
-    #       master-credential secret are not in the same AWS partition, region
-    #       and account.
     # WHY : Assumptions: this is the one invariant in the module that no
     #       `validation` block in variables.tf can express, which is why it is a
     #       precondition here rather than there. A `validation` sees a single
-    #       variable; this rule compares two, and both arrive from DIFFERENT
-    #       sibling modules -- the key from infra/modules/kms and the secret from
-    #       infra/modules/secrets -- wired together by an environment root. A
-    #       mis-wire across regions or accounts therefore produces two
-    #       individually valid ARNs that cannot both belong to this cluster, and
-    #       it is the calling root's `module` block that is wrong rather than
-    #       either input's value. Both ARNs are already shape-checked in
-    #       variables.tf, which guarantees enough colon-separated fields for the
-    #       index reads below to be safe.
+    #       variable; this rule compares two. Both keys are produced by
+    #       infra/modules/kms and wired in by an environment root, so a root that
+    #       passed one of them from another account, another region or a
+    #       pre-existing key elsewhere would produce two individually valid ARNs
+    #       that cannot both serve this cluster -- and the defect would be in the
+    #       root's `module` block rather than in either value. RDS rejects a key
+    #       outside the cluster's own region, so the check is real rather than
+    #       decorative even though the common wiring makes it hold trivially.
+    #       Both ARNs are already shape-checked in variables.tf, which guarantees
+    #       enough colon-separated fields for the index reads below to be safe.
     # WHY : Alternatives Considered: leaving this to apply time. Rejected because
     #       the two failures are not equivalent: RDS would reject the key when
     #       the cluster is created, after the subnet group and the parameter
@@ -708,13 +788,31 @@ resource "aws_rds_cluster" "this" {
     #       variables.tf owns and which are enforced exactly once, there.
     precondition {
       condition = (
-        split(":", var.kms_key_arn)[1] == split(":", var.master_credential_secret_arn)[1] &&
-        split(":", var.kms_key_arn)[3] == split(":", var.master_credential_secret_arn)[3] &&
-        split(":", var.kms_key_arn)[4] == split(":", var.master_credential_secret_arn)[4]
+        split(":", var.kms_key_arn)[1] == split(":", var.secrets_kms_key_arn)[1] &&
+        split(":", var.kms_key_arn)[3] == split(":", var.secrets_kms_key_arn)[3] &&
+        split(":", var.kms_key_arn)[4] == split(":", var.secrets_kms_key_arn)[4]
       )
-      error_message = "The kms_key_arn and master_credential_secret_arn must name the same AWS partition, region and account, because both belong to this one cluster. Compare fields 2, 4 and 5 of each ARN: the key is partition \"${split(":", var.kms_key_arn)[1]}\", region \"${split(":", var.kms_key_arn)[3]}\", account \"${split(":", var.kms_key_arn)[4]}\", while the secret is partition \"${split(":", var.master_credential_secret_arn)[1]}\", region \"${split(":", var.master_credential_secret_arn)[3]}\", account \"${split(":", var.master_credential_secret_arn)[4]}\". Both values come from sibling modules, so the defect is in the module wiring in the calling environment root rather than in either ARN on its own."
+      error_message = "The kms_key_arn and secrets_kms_key_arn must name the same AWS partition, region and account, because both keys serve this one cluster -- the first encrypts its storage and backups, the second the master credential RDS manages for it. Compare fields 2, 4 and 5 of each ARN: the data key is partition \"${split(":", var.kms_key_arn)[1]}\", region \"${split(":", var.kms_key_arn)[3]}\", account \"${split(":", var.kms_key_arn)[4]}\", while the secrets key is partition \"${split(":", var.secrets_kms_key_arn)[1]}\", region \"${split(":", var.secrets_kms_key_arn)[3]}\", account \"${split(":", var.secrets_kms_key_arn)[4]}\". Both values come from infra/modules/kms, so the defect is in the module wiring in the calling environment root rather than in either ARN on its own."
     }
   }
+}
+
+resource "aws_ssm_parameter" "connection" {
+  for_each = {
+    host     = aws_rds_cluster.this.endpoint
+    port     = tostring(aws_rds_cluster.this.port)
+    database = aws_rds_cluster.this.database_name
+  }
+
+  name        = "${local.parameter_name_root}/${each.key}"
+  description = "CardDemo ${var.environment} Aurora ${each.key}; generated from the live cluster resource."
+  type        = "String"
+  value       = each.value
+
+  # WHY : Assumptions: connection coordinates are identifiers, not credentials,
+  #       so String is deliberate. Passwords remain in Secrets Manager and no
+  #       SecureString value is duplicated into Parameter Store.
+  tags = local.tags
 }
 
 
@@ -756,8 +854,6 @@ resource "aws_rds_cluster_instance" "this" {
   identifier         = local.writer_instance_identifier
   cluster_identifier = aws_rds_cluster.this.id
 
-  # WHAT: the only class that pairs with a Serverless v2 capacity configuration,
-  #       making this the second half of the shape begun on the cluster.
   # WHY : Assumptions: this specific class is what makes the instance draw its
   #       capacity from the cluster's serverlessv2_scaling_configuration. A
   #       fixed-size class such as db.r6g.large would be accepted by both the
@@ -769,8 +865,6 @@ resource "aws_rds_cluster_instance" "this" {
   #       in which that combination is wanted.
   instance_class = "db.serverless"
 
-  # WHAT: the engine and version, read from the cluster rather than from the
-  #       input.
   # WHY : Assumptions: referencing the cluster's own attributes makes the two
   #       provably consistent and removes a class of perpetual diff. Passing
   #       var.engine_version here independently would let the instance and the
@@ -781,7 +875,6 @@ resource "aws_rds_cluster_instance" "this" {
 
   db_subnet_group_name = aws_db_subnet_group.this.name
 
-  # WHAT: no public IP address and no resolvable public endpoint.
   # WHY : Refactoring Rationale: a literal rather than an input, for the same
   #       reason as storage_encrypted. The instance sits in subnets with no route
   #       to the internet in either direction, so public accessibility would
@@ -793,8 +886,6 @@ resource "aws_rds_cluster_instance" "this" {
   #       suppression. There is no environment in which true is the right value.
   publicly_accessible = false
 
-  # WHAT: query-level telemetry, encrypted with the cluster's own key and
-  #       retained for the configured period.
   # WHY : Refactoring Rationale: this replaces a capability the baseline had no
   #       equivalent of. A mainframe batch job's cost was visible only as the
   #       spool output cited on the cluster's log-export argument, produced after
@@ -827,4 +918,3 @@ resource "aws_rds_cluster_instance" "this" {
 
   tags = local.tags
 }
-

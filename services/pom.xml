@@ -70,26 +70,31 @@
     no tolerated warning level. See the note beside `failOnViolation` for why
     that is stated explicitly rather than left implied.
 
-  TEST SUITE STATE, and how to read every test comment in this reactor:
+  HOW TO READ EVERY TEST COMMENT IN THIS REACTOR:
     Assumptions: the migration lands its artifacts in plan order, and the build
-    descriptors are authored ahead of the code they build so that the code can
-    be written against them. At this checkpoint NO `*Test` and NO `*IT` class
-    exists anywhere in this reactor, and neither does the ArchUnit rule class
-    named in the `archunit.version` note below. Every comment in this POM and in
-    the nine module POMs that names a test class, describes what Surefire or
-    Failsafe runs, or reasons about what a suite proves is therefore describing
-    the TARGET test suite and the configuration prepared for it, NOT a suite
-    that runs today. A test tree lands at a later index of the same plan, at
-    which point that configuration is what makes it execute correctly on the
-    first run.
-    Alternatives Considered: configuring the test plugins only once the tests
-    exist. Rejected because the plugin split, the include patterns and the
-    report locations are exactly the decisions a test author needs to have
-    settled BEFORE writing the first class - an integration test named for the
-    wrong suffix runs in the wrong phase, and a suite whose reports land
-    outside the collected directory passes locally while the pipeline reports
-    nothing. Stating the state here, once, is what keeps that configuration from
-    reading as a claim that it is currently exercising anything.
+      descriptors are authored ahead of the code they build so that the code can
+      be written against them. The test tree is now PARTIAL rather than empty:
+      common-lib holds six test classes: TimestampFormatterTest,
+      CsvAuthCodecTest, CursorTokenTest, JwtRoleConverterTest,
+      CognitoAccessTokenValidatorTest and MoneyModuleTest, and Surefire executes
+      their ninety-five test methods, all of them in that one module. No `*IT`
+      class and no LayeringRulesTest class exists anywhere in this reactor yet, so
+      the `architecture-rules` execution below and the Failsafe configuration
+      beside it currently select nothing and pass trivially. Comments that describe
+      those six suites therefore describe classes that run today; comments that
+      name the absent integration or architecture suites still describe the TARGET
+      test tree and the configuration prepared for it.
+      Refactoring Rationale: the former blanket statement that every named class
+      was PLANNED rather than present became false as those six landed. Splitting
+      the inventory by test type preserves the useful staged-delivery warning
+      without hiding the executable coverage the current build actually runs, and
+      `mvn -f services/pom.xml test` remains the authority that cannot go stale.
+      Alternatives Considered: configuring the test plugins only once the tests
+      exist. Rejected because the plugin split, the include patterns and the report
+      locations are exactly the decisions a test author needs settled BEFORE the
+      first class - an integration test named for the wrong suffix runs in the
+      wrong phase, and a suite whose reports land outside the collected directory
+      passes locally while the pipeline reports nothing.
 
   WHY (non-obvious design decisions):
     Each decision is justified in a comment adjacent to the element it
@@ -334,13 +339,12 @@
 
     <!--
       WHY :
-        Assumptions: the architectural prohibitions of this migration are
-          enforced as TESTS, not as review conventions, in
-          common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java:
-          no AWS SDK or web type inside a domain package, no service importing
-          another service's domain package, and no float or double anywhere in
-          the money path. Expressing them as a test is what stops them rotting,
-          because a violation fails the build instead of surviving a review.
+        Assumptions: the architectural prohibitions of this migration belong to
+          the `architecture-rules` Surefire execution below. It scans the shared
+          kernel's test artifact into every module and selects rules by the
+          reserved simple name `LayeringRulesTest`; that configuration defines
+          the enforcement site without claiming that configuration alone proves
+          a rules class is already present.
         Assumptions: this property pins the ENGINE and delivers nothing. Maven
           resolution carries a module's MAIN classes to its consumers and never
           its test classes, so a rule class authored in one module's test tree is
@@ -385,6 +389,48 @@
           still reports success.
     -->
     <carddemo.checkstyle.config.dir>${project.basedir}/../config/checkstyle</carddemo.checkstyle.config.dir>
+
+    <!--
+      WHY :
+        Assumptions: these three properties exist ONLY to clear published
+          security advisories in transitive dependencies, and each is pinned to
+          the lowest version that does so. They are grouped and labelled here,
+          apart from the functional pins above, because their justification
+          expires: once a future Boot release manages a version at or above each
+          floor, the corresponding line becomes a restatement and should be
+          deleted rather than carried forward as though it were a requirement of
+          this migration. Nothing in CardDemo depends on a feature of any of
+          these versions.
+        Assumptions: the overrides MUST be expressed as these exact property
+          names, because Boot imports each family as a BOM whose version is
+          the property: io.netty:netty-bom through netty.version,
+          com.fasterxml.jackson:jackson-bom through jackson-2-bom.version and
+          tools.jackson:jackson-bom through jackson-bom.version. Pinning
+          individual artifacts in dependencyManagement instead was rejected for
+          the reason recorded against the Flyway override above: Netty resolves
+          as fourteen separate artifacts here and Jackson as six across two
+          group lines, so an artifact-by-artifact pin leaves every module nobody
+          listed at the advisory version while the build reports success. It
+          also silently breaks whenever a new transitive artifact from the same
+          family reaches the classpath.
+        Trade-offs: the two Jackson floors deliberately stay on the patch line
+          Boot selected, 2.21.x and 3.1.x, rather than advancing to the newest
+          2.22.x and 3.2.x available. Advancing the minor line would pull
+          in behaviour Boot 4.1.0 was not tested against, and the money contract
+          of this migration rides on Jackson: money is serialised as a JSON
+          STRING by MoneyModule precisely so no client parses it as an IEEE-754
+          double. A serialization regression there is a correctness defect in
+          the ledger, not a cosmetic one, so the smallest step that clears the
+          advisory is the correct trade even though it must be revisited sooner.
+        Alternatives Considered: excluding the vulnerable Netty artifacts
+          outright. Rejected because they arrive under the AWS SDK's HTTP
+          clients, which the SQS, S3, Step Functions, Secrets Manager and KMS
+          integrations all use; removing them would break the messaging and
+          object-storage paths instead of patching them.
+    -->
+    <netty.version>4.2.16.Final</netty.version>
+    <jackson-2-bom.version>2.21.5</jackson-2-bom.version>
+    <jackson-bom.version>3.1.5</jackson-bom.version>
 
   </properties>
 
@@ -436,9 +482,6 @@
       </dependency>
 
       <!--
-        WHAT: the same shared kernel a second time, now as its TEST artifact, so
-              the eight service modules can name it without a version and
-              receive the one architecture rule class it publishes for them.
         WHY :
           Assumptions: a managed dependency is keyed by group id, artifact id,
             TYPE and classifier, so the entry above does not cover this one. That
@@ -470,8 +513,6 @@
       </dependency>
 
       <!--
-        WHAT: one version for the S3, SQS, Step Functions, Secrets Manager and
-              KMS clients.
         WHY :
           Assumptions: THE POSITION OF THIS IMPORT IS SIGNIFICANT AND MUST STAY
             FIRST, ahead of the Spring Cloud AWS import below. Within one
@@ -948,8 +989,6 @@
       </plugin>
 
       <!--
-        WHAT: the execution that carries the ONE shared architecture rule class
-              into every module's own test run.
         WHY :
           Refactoring Rationale: this build previously described those rules as
             inherited by every module, and Maven cannot do that. Dependency
@@ -1013,7 +1052,6 @@
       </plugin>
 
       <!--
-        WHAT: activates the integration test half of the test split.
         WHY :
           Assumptions: neither a version nor an executions block is declared.
             The Boot parent's plugin management already binds this plugin's

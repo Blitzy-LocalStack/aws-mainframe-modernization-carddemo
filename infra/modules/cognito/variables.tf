@@ -44,7 +44,7 @@
 #     app/cbl/COSGN00C.cbl L223) whose seed values are committed as in-stream
 #     JCL data at app/jcl/DUSRSECJ.jcl L35-L44 -- ten users sharing one
 #     literal, legible to anyone holding the repository. main.tf instead
-#     generates each initial password with random_password during apply and
+#     generates each initial password inside a bootstrap process during apply and
 #     hands it straight to Secrets Manager, so no credential is ever authored
 #     into this tree.
 #     Alternatives Considered: a seed-user password input, or a password member
@@ -85,8 +85,6 @@
 # Naming and identity
 # -----------------------------------------------------------------------------
 
-# WHAT: the short token main.tf composes every resource name from -- the user
-#       pool, the two group names, and each seed user's Secrets Manager entry.
 # WHY : Assumptions: the bound is not cosmetic. main.tf builds names by
 #       concatenating this value, the environment and a per-resource suffix, so
 #       the widest composed name is a Secrets Manager path carrying an
@@ -101,7 +99,7 @@
 #       part of the module has already been created, leaving a half-built pool
 #       to clean up by hand, whereas a validation block fails during plan.
 variable "name_prefix" {
-  description = "Lowercase token prefixed to every resource name this module creates (user pool, carddemo-admin and carddemo-user groups, and the per-seed-user Secrets Manager entries). Combined with var.environment to keep dev and prod names distinct within one account."
+  description = "Lowercase token prefixed to environment-specific resource names such as the user pool, app client and Secrets Manager entries. The authorization groups are invariant carddemo-admin and carddemo-user values and deliberately do not inherit this prefix."
   type        = string
   default     = "carddemo"
 
@@ -111,7 +109,6 @@ variable "name_prefix" {
   }
 }
 
-# WHAT: which of the two parameterized environments this instance belongs to.
 # WHY : Assumptions: deliberately has no default, unlike name_prefix. The value
 #       selects the sizing and retention posture below, and a default would let
 #       a root that forgot to set it apply the other environment's posture
@@ -138,9 +135,6 @@ variable "environment" {
 # Encryption input, supplied by the calling root from infra/modules/kms
 # -----------------------------------------------------------------------------
 
-# WHAT: the customer-managed KMS key that encrypts each seed user's generated
-#       initial password in Secrets Manager. Lands on
-#       aws_secretsmanager_secret.kms_key_id.
 # WHY : Assumptions: the key is created by infra/modules/kms and passed in by
 #       infra/envs/dev or infra/envs/prod. This module calls no sibling module
 #       and resolves no data source for it, so the ARN can only arrive as an
@@ -179,7 +173,7 @@ variable "secrets_kms_key_arn" {
 #       would preserve the number while discarding the reason it was ever
 #       adequate, which was nothing.
 #       Trade-offs: a longer minimum normally trades usability for strength, but
-#       not here -- main.tf generates these passwords with random_password, and
+#       not here -- the bootstrap script generates these passwords, and
 #       the only human contact with one is a single change at first sign-in. The
 #       usual objection therefore does not apply, which is why the default sits
 #       above the common enterprise floor rather than at it.
@@ -197,8 +191,6 @@ variable "password_minimum_length" {
   }
 }
 
-# WHAT: the four character-class requirements, each landing on the matching
-#       aws_cognito_user_pool.password_policy.require_* argument.
 # WHY : Assumptions: one comment covers all four because they are one decision,
 #       not four -- the baseline enforced no complexity rule whatsoever, so
 #       there is no per-class baseline behaviour to preserve or diverge from
@@ -207,7 +199,7 @@ variable "password_minimum_length" {
 #       Trade-offs: requiring every class narrows the space of acceptable
 #       passwords, which is a genuine cost when a human chooses one. Accepted
 #       for the same reason as the length above: these values are generated, so
-#       the constraint is absorbed by random_password rather than by a person.
+#       the constraint is absorbed by the bootstrap generator rather than by a person.
 #       They are variables rather than hard-coded true so that the security
 #       posture stays visible to the operator reading the environment root,
 #       instead of being buried where only a module edit could reveal it.
@@ -235,9 +227,6 @@ variable "password_require_symbols" {
   default     = true
 }
 
-# WHAT: how long a generated initial password stays usable before the seed user
-#       must be reset. Lands on
-#       aws_cognito_user_pool.password_policy.temporary_password_validity_days.
 # WHY : Trade-offs: each seed user's initial password is generated during apply,
 #       which means it exists in Terraform state as well as in Secrets Manager.
 #       A short window bounds how long that copy is worth anything, and it is
@@ -266,8 +255,6 @@ variable "temporary_password_validity_days" {
 # Threat protection
 # -----------------------------------------------------------------------------
 
-# WHAT: whether a second authentication factor is off, available, or compulsory.
-#       Lands on aws_cognito_user_pool.mfa_configuration.
 # WHY : Trade-offs: OPTIONAL rather than ON. ON compels every user to enrol a
 #       factor before they can complete a sign-in, which would block all ten
 #       seed users on their first authentication -- the one sign-in that has to
@@ -327,8 +314,6 @@ variable "mfa_configuration" {
   }
 }
 
-# WHAT: the threat-protection posture. Lands on
-#       aws_cognito_user_pool.user_pool_add_ons.advanced_security_mode.
 # WHY : Assumptions: the attribute name was verified rather than assumed, and
 #       this is worth recording because it is a moving target elsewhere. In the
 #       pinned provider the setting still lives inside the user_pool_add_ons
@@ -397,9 +382,6 @@ variable "advanced_security_mode" {
 # -----------------------------------------------------------------------------
 # App client used by the auth service on the browser's behalf
 #
-# WHAT: this is a CONFIDENTIAL, server-side app client, not a public browser
-#       client. main.tf sets generate_secret on it, and the secret is read only
-#       by services/auth-service out of Secrets Manager.
 # WHY : Assumptions: the distinction decides every input in this group, so it is
 #       stated once at the top of it. The browser never speaks to this pool. It
 #       posts the credential its sign-on screen collects to the auth service,
@@ -413,16 +395,16 @@ variable "advanced_security_mode" {
 #       secret may ever reach the browser bundle.
 # -----------------------------------------------------------------------------
 
-# WHAT: which authentication flows the app client may initiate. Lands on
-#       aws_cognito_user_pool_client.explicit_auth_flows.
 # WHY : Assumptions: an app client permits only the flows named here, so this
 #       input is the allow-list that decides whether the sign-on mechanism works
 #       at all. USER_PASSWORD_AUTH is what lets the auth service submit a user id
 #       and a password in one call and receive tokens or a challenge; without it
 #       the pool refuses the request and sign-on is impossible regardless of what
-#       any other setting says. REFRESH_TOKEN_AUTH is what lets a session outlive
-#       the short access-token lifetime configured below without re-prompting.
-# WHY : Trade-offs: the default names exactly those two and nothing else. The
+#       any other setting says. Refresh is deliberately absent from this list:
+#       main.tf enables refresh-token rotation, and Cognito requires the auth
+#       service to call GetTokensFromRefreshToken instead of initiating the
+#       incompatible REFRESH_TOKEN_AUTH flow.
+# WHY : Trade-offs: the default names exactly one flow and nothing else. The
 #       flows deliberately excluded are worth listing, because each is a
 #       plausible addition. ADMIN_USER_PASSWORD_AUTH performs the same
 #       authentication through the ADMIN API, which additionally requires the
@@ -433,7 +415,9 @@ variable "advanced_security_mode" {
 #       right choice for an untrusted client and buys nothing for a server-side
 #       caller already reaching the pool over TLS, while costing a multi-round
 #       exchange. CUSTOM_AUTH would introduce trigger Lambdas this migration does
-#       not define. Any of them can be added by a root that needs it; none is
+#       not define. ALLOW_REFRESH_TOKEN_AUTH is also excluded and cannot be added
+#       while refresh-token rotation is enabled, because Cognito rejects that
+#       combination. Any other flow can be added by a root that needs it; none is
 #       enabled speculatively, because an enabled flow is an available
 #       authentication path whether or not anything uses it.
 # WHY : Assumptions: the ALLOW_ prefix is required by the provider, which rejects
@@ -441,9 +425,9 @@ variable "advanced_security_mode" {
 #       The validation below enforces it so the mistake is caught at plan time
 #       rather than mid-apply.
 variable "explicit_auth_flows" {
-  description = "Authentication flows the confidential app client may initiate, as the provider's ALLOW_-prefixed names. Defaults to USER_PASSWORD_AUTH, which the auth service uses to submit the sign-on credential server-side, plus REFRESH_TOKEN_AUTH so a session can be renewed without re-prompting."
+  description = "Authentication flows the confidential app client may initiate, as ALLOW_-prefixed names. Defaults to USER_PASSWORD_AUTH for server-side sign-on. REFRESH_TOKEN_AUTH is forbidden because refresh-token rotation requires the auth service to use GetTokensFromRefreshToken instead."
   type        = list(string)
-  default     = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+  default     = ["ALLOW_USER_PASSWORD_AUTH"]
   nullable    = false
 
   validation {
@@ -462,11 +446,13 @@ variable "explicit_auth_flows" {
     condition     = contains(var.explicit_auth_flows, "ALLOW_USER_PASSWORD_AUTH")
     error_message = "explicit_auth_flows must include \"ALLOW_USER_PASSWORD_AUTH\". It is the flow services/auth-service uses to authenticate the credential submitted by the sign-on screen transcribed from app/bms/COSGN00.bms; without it the pool refuses that call and no user can sign in."
   }
+
+  validation {
+    condition     = !contains(var.explicit_auth_flows, "ALLOW_REFRESH_TOKEN_AUTH")
+    error_message = "explicit_auth_flows must not include \"ALLOW_REFRESH_TOKEN_AUTH\" while refresh-token rotation is enabled. The auth service renews sessions with GetTokensFromRefreshToken, which is the rotation-compatible API."
+  }
 }
 
-# WHAT: the identifier of the resource server this pool declares for the migrated
-#       API, and the custom scopes registered under it. Land on
-#       aws_cognito_resource_server.identifier and .scope.
 # WHY : Assumptions: a resource server is what makes an API's own scope names
 #       exist inside the pool at all. Without one, the only scope a token from
 #       this pool can carry is the pool's own built-in
@@ -476,7 +462,8 @@ variable "explicit_auth_flows" {
 #       expressed in. Declaring the identifier and the scopes here creates that
 #       vocabulary once, at the pool, rather than leaving each consumer to invent
 #       one.
-# WHY : Trade-off, and it is the important one: these custom scopes are NOT what
+# Trade-offs: this is the important one on this input. These custom scopes are NOT
+#       what
 #       the browser sign-on path presents. A token obtained through the pool's
 #       authentication API carries aws.cognito.signin.user.admin and no custom
 #       scope, because custom scopes are granted only through the OAuth flows
@@ -552,9 +539,6 @@ variable "resource_server_scopes" {
   }
 }
 
-# WHAT: the redirect targets Cognito will return a user to after sign-in and
-#       after sign-out. Land on aws_cognito_user_pool_client.callback_urls and
-#       .logout_urls.
 # WHY : Assumptions: these are inputs rather than values this module derives,
 #       because the address they name is the SPA's CloudFront domain and that is
 #       produced by infra/modules/cloudfront-spa. This module calls no sibling
@@ -627,9 +611,6 @@ variable "logout_urls" {
   }
 }
 
-# WHAT: how long an access token and an id token stay valid, in minutes, and how
-#       long a refresh token stays valid, in days. Land on the matching
-#       aws_cognito_user_pool_client validity arguments.
 # WHY : Assumptions: the unit is in each variable's NAME because the provider
 #       reads a bare number against a companion token_validity_units block, and
 #       defaults that block to hours when it is absent. A value of 60 with no
@@ -667,8 +648,6 @@ variable "id_token_validity_minutes" {
   }
 }
 
-# WHAT: how long a refresh token stays valid, in days -- the one token of the
-#       three measured in days rather than minutes.
 # WHY : Trade-offs: this is deliberately the longest-lived credential of the
 #       three, which is the opposite of the intuitive arrangement and so is
 #       recorded here rather than left to be inferred from the numbers. It is
@@ -694,39 +673,35 @@ variable "refresh_token_validity_days" {
   }
 }
 
-# WHAT: whether the identity provider distinguishes "no such user" from "wrong
-#       password" in what it returns. Lands on
-#       aws_cognito_user_pool_client.prevent_user_existence_errors.
-# WHY : Trade-offs: this is the one place where a security correction and the
-#       migration's verbatim-message requirement genuinely pull against each
-#       other, so both halves are stated. The baseline answers the two failure
-#       modes differently on purpose: app/cbl/COSGN00C.cbl L242-L243 returns
-#       'Wrong Password. Try again ...' when the keyed read succeeded but the
-#       comparison failed, and L249 returns 'User not found. Try again ...' when
-#       the read came back RESP 13. The difference between those two replies
-#       tells an unauthenticated caller which user ids exist, which is user
-#       enumeration.
-#       ENABLED makes the identity provider answer both cases the same way. The
-#       message TEXT is still preserved verbatim where the migration requires it
-#       -- in services/auth-service and in ui/src/messages/messages.ts, which is
-#       where user-visible strings live -- but the provider no longer reveals
-#       which of the two applies. The resulting loss of discrimination between
-#       the two failure modes is a behavioural divergence, and it belongs in the
-#       register at docs/architecture/cobol-to-service-traceability.md rather
-#       than being passed off as parity.
-#       Alternatives Considered: LEGACY, which reproduces the baseline's
-#       distinguishable responses exactly. Rejected as a default because it
-#       ports the defect rather than the behaviour, but left reachable as a
-#       value so that the posture is a decision the environment root states
-#       explicitly rather than one buried in this module.
-variable "prevent_user_existence_errors" {
-  description = "Whether Cognito returns a uniform error for both an unknown user and a bad password (ENABLED) or distinguishes them as the baseline did (LEGACY). ENABLED closes the user-enumeration channel that app/cbl/COSGN00C.cbl L242-L249 opens."
-  type        = string
-  default     = "ENABLED"
+# WHY : Assumptions: incrementing this integer is the explicit operator trigger
+#       for the custom app-client-secret rotation resource in main.tf. A date or
+#       free-form string was rejected because it can change accidentally through
+#       formatting; a monotonic integer makes every rotation a reviewable,
+#       one-line plan change and never carries credential material.
+variable "app_client_secret_rotation_revision" {
+  description = "Monotonic, non-secret revision that triggers the Cognito app-client-secret rotation bridge. Incrementing it adds a new active client secret, updates the Secrets Manager value, and retains the previously current secret for a zero-downtime consumer rollout."
+  type        = number
+  default     = 1
+  nullable    = false
 
   validation {
-    condition     = contains(["ENABLED", "LEGACY"], var.prevent_user_existence_errors)
-    error_message = "prevent_user_existence_errors must be either ENABLED or LEGACY -- the exact set the pinned provider accepts, observed by submitting an out-of-domain value and reading the rejection."
+    condition = (
+      var.app_client_secret_rotation_revision >= 1 &&
+      floor(var.app_client_secret_rotation_revision) == var.app_client_secret_rotation_revision
+    )
+    error_message = "app_client_secret_rotation_revision must be an integer greater than or equal to 1. Increment it by one for each reviewed app-client-secret rotation."
+  }
+}
+
+variable "seed_user_credential_revision" {
+  description = "Monotonic operator-controlled revision for deliberate seed-user temporary-password regeneration. Ordinary applies keep it stable, so users are not reset."
+  type        = number
+  nullable    = false
+  default     = 1
+
+  validation {
+    condition     = var.seed_user_credential_revision >= 1 && floor(var.seed_user_credential_revision) == var.seed_user_credential_revision
+    error_message = "seed_user_credential_revision must be an integer greater than or equal to 1."
   }
 }
 
@@ -734,8 +709,6 @@ variable "prevent_user_existence_errors" {
 # Optional hosted-UI domain
 # -----------------------------------------------------------------------------
 
-# WHAT: the prefix of a Cognito-hosted sign-in domain. When null, main.tf
-#       creates no aws_cognito_user_pool_domain at all.
 # WHY : Alternatives Considered: always provisioning the hosted UI, which is what
 #       the authorization-code-with-PKCE flow would require. Rejected because
 #       nothing authenticates through it -- AAP 0.4.1.9 specifies a user pool
@@ -787,8 +760,6 @@ variable "domain_prefix" {
 # this module: the topology they produce is identical.
 # -----------------------------------------------------------------------------
 
-# WHAT: whether the user pool refuses to be deleted. Lands on
-#       aws_cognito_user_pool.deletion_protection.
 # WHY : Assumptions: this input is a STRING, not a bool, because the pinned
 #       provider's attribute is a string accepting ACTIVE or INACTIVE -- read
 #       from the provider schema and confirmed by submitting an out-of-domain
@@ -812,8 +783,6 @@ variable "deletion_protection" {
   }
 }
 
-# WHAT: how long a deleted seed-user secret stays recoverable. Lands on
-#       aws_secretsmanager_secret.recovery_window_in_days.
 # WHY : Trade-offs: 0 by default, meaning a destroyed secret is removed
 #       immediately with no recovery period. Any non-zero window leaves the
 #       secret NAME reserved for the duration, so a destroy followed by a
@@ -852,7 +821,7 @@ variable "secret_recovery_window_in_days" {
 #       eight-character literal -- one shared password, identical across all ten
 #       users, committed to source control. That literal is deliberately not
 #       transcribed anywhere in this file, not even as an illustration. main.tf
-#       generates a distinct password per user with random_password during apply
+#       generates a distinct password per user inside the apply-time bootstrap
 #       and writes each to Secrets Manager under the customer-managed key from
 #       secrets_kms_key_arn, so the credential exists only where it can be
 #       rotated and audited.
@@ -962,7 +931,6 @@ variable "seed_users" {
 # Tags
 # -----------------------------------------------------------------------------
 
-# WHAT: extra tags merged onto the taggable resources this module creates.
 # WHY : Assumptions: additive, never a substitute. The calling root's provider
 #       already applies default_tags to every resource in the graph, so this
 #       input exists for tags that are specific to the identity provider rather

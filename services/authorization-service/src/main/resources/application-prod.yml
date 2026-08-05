@@ -1,0 +1,77 @@
+# =============================================================================
+# authorization-service -- production profile.
+#
+#
+# WHY : (1) Assumptions: this profile differs from dev in SIZING, RETENTION and
+#       DIAGNOSTIC VERBOSITY only. The topology, the TLS floor, the actuator
+#       exposure list and the schema resolution are all inherited unchanged from
+#       the base document, so there is exactly one place each of them is decided.
+#       (2) Assumptions: nothing here re-enables a diagnostic the base document
+#       suppresses. The values that would be tempting to raise during an incident
+#       -- statement echo and parameter binding -- are the two that would write
+#       cardholder data into log storage, which is the one destination the masking
+#       applied at the API edge does not reach.
+# =============================================================================
+
+spring:
+  config:
+    # WHY : (1) Assumptions: same three-part prefix as every other context, with
+    #       the environment label supplied by the task definition. The default is
+    #       `prod` here rather than `dev` so that a task started with this profile
+    #       and no label still reads the right subtree.
+    #       (2) Trade-offs: this list REPLACES the base document's import, so the
+    #       shared defaults document is named again. Omitting it would drop the
+    #       shared log pattern in production only, which is the worst place to
+    #       discover it missing.
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:prod}/authorization/"
+
+  datasource:
+    hikari:
+      # WHY : Trade-offs: twenty connections per task rather than the base
+      #       document's ten. This context holds a row lock while it decides and
+      #       further locks while it drains the outbox, so its connections are held
+      #       longer than a purely request-response context's; twenty gives the
+      #       consumer's concurrency, the drain and the endpoints headroom without
+      #       one task claiming a disproportionate share of the cluster's budget.
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+      # WHY : Assumptions: production capacity has a non-zero minimum, so the
+      #       cluster never pauses and the base document's ten-second timeout is
+      #       right. It is restated here so that raising the dev value cannot be
+      #       mistaken for a change that applies everywhere.
+      connection-timeout: 10000
+
+      # WHY : Trade-offs: a fifteen-minute maximum lifetime, shorter than the
+      #       cluster's own idle timeout. Recycling before the server closes a
+      #       connection means the pool retires it on its own terms rather than
+      #       discovering it closed midway through a transaction that had already
+      #       taken a lock.
+      max-lifetime: 900000
+
+  jpa:
+    # WHY : Assumptions: statements are NOT echoed. The text alone is a
+    #       performance cost at production message rates and offers nothing the
+    #       database's own statement statistics do not, since the questions worth
+    #       asking in production are about plans and waits rather than syntax.
+    show-sql: false
+
+logging:
+  level:
+    # WHY : Trade-offs: INFO for this context's own packages, not DEBUG. The
+    #       per-message decision lines are the audit trail this context exists to
+    #       produce and they are emitted at INFO; DEBUG would add polling detail at
+    #       message rate, which costs log storage and buries the lines that matter.
+    com.carddemo.authorization: INFO
+
+    # WHY : Assumptions: the consumer's own container stays at WARN, so a genuine
+    #       visibility or acknowledgement fault is reported and routine polling is
+    #       not.
+    io.awspring.cloud.sqs: WARN
+
+    # WHY : Assumptions: pinned at WARN rather than inherited, so no broader level
+    #       change can raise it. At TRACE this logger writes every bound primary
+    #       account number into log storage.
+    org.hibernate.orm.jdbc.bind: WARN

@@ -1,0 +1,117 @@
+# SQS module
+
+This module creates two FIFO and three standard application queues, one DLQ per
+queue, CMK encryption, transport-deny policies and exact redrive-allow policies.
+
+## Design decisions
+
+**Refactoring Rationale:** authorization FIFO ordering uses a purpose-scoped
+opaque HMAC token rather than PAN metadata. Per-card order is preserved without
+exposing the card number outside the encrypted message body.
+
+**Trade-offs:** authorization poison messages remain quarantined until reviewed
+per-message replay. Native bulk redrive is denied because it can release a later
+message ahead of the reconciled failed one.
+
+## Validation
+
+```bash
+terraform -chdir=infra/modules/sqs init -backend=false
+terraform -chdir=infra/modules/sqs validate
+tflint --chdir=infra/modules/sqs --config="$(pwd)/infra/.tflint.hcl"
+```
+
+<!-- BEGIN_TF_DOCS -->
+### Requirements
+
+| Name | Version |
+|------|---------|
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.15.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.56 |
+
+### Providers
+
+| Name | Version |
+|------|---------|
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.57.1 |
+
+### Resources
+
+| Name | Type |
+|------|------|
+| [aws_sqs_queue.account_inquiry_request](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.account_inquiry_request_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.date_inquiry_request](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.date_inquiry_request_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.error](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.error_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.inquiry_reply](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.inquiry_reply_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.pauth_reply](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.pauth_reply_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.pauth_request](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue.pauth_request_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
+| [aws_sqs_queue_policy.tls_only](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue_policy) | resource |
+| [aws_sqs_queue_redrive_allow_policy.exact_source](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue_redrive_allow_policy) | resource |
+
+### Inputs
+
+| Name | Description | Type | Default | Required |
+|------|-------------|------|---------|:--------:|
+| <a name="input_environment"></a> [environment](#input\_environment) | Environment token appended to every queue name, keeping the dev and prod queue sets distinct within a single account and region. Consumed by the naming locals in main.tf that compose each aws\_sqs\_queue name. | `string` | n/a | yes |
+| <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of the customer-managed KMS key used for server-side encryption of every queue and dead-letter queue, of the form arn:aws:kms:<region>:<aws-account-id>:key/<key-id>. Passed in by the calling root from the kms module's SQS key output and applied as kms\_master\_key\_id on each aws\_sqs\_queue. | `string` | n/a | yes |
+| <a name="input_dlq_message_retention_seconds"></a> [dlq\_message\_retention\_seconds](#input\_dlq\_message\_retention\_seconds) | Seconds a message is retained on each of the six dead-letter queues, applied as message\_retention\_seconds to those queues. Defaults longer than either source retention, and is validated never to be shorter than the request retention, because a message only arrives here already aged. | `number` | `1209600` | no |
+| <a name="input_kms_data_key_reuse_period_seconds"></a> [kms\_data\_key\_reuse\_period\_seconds](#input\_kms\_data\_key\_reuse\_period\_seconds) | Seconds SQS may reuse a KMS data key before calling KMS again, applied as kms\_data\_key\_reuse\_period\_seconds on every queue and dead-letter queue. | `number` | `300` | no |
+| <a name="input_max_receive_count"></a> [max\_receive\_count](#input\_max\_receive\_count) | Receives a message may accumulate on a source queue before SQS moves it to that queue's dead-letter queue. Applied as maxReceiveCount in the redrive\_policy of all six source queues. | `number` | `5` | no |
+| <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading token of every composed queue name; "carddemo" yields names such as carddemo-pauth-request-<environment>.fifo. Consumed by the naming locals in main.tf. | `string` | `"carddemo"` | no |
+| <a name="input_receive_wait_time_seconds"></a> [receive\_wait\_time\_seconds](#input\_receive\_wait\_time\_seconds) | Seconds a receive call waits for a message before returning empty, applied as receive\_wait\_time\_seconds on every queue and dead-letter queue. Any non-zero value enables long polling. | `number` | `5` | no |
+| <a name="input_reply_message_retention_seconds"></a> [reply\_message\_retention\_seconds](#input\_reply\_message\_retention\_seconds) | Seconds a message is retained on the two reply queues, applied as message\_retention\_seconds to those queues. Must exceed the complete visibility and receive-wait retry budget; consumer-side expiresAt remains the business-staleness authority. | `number` | `900` | no |
+| <a name="input_request_message_retention_seconds"></a> [request\_message\_retention\_seconds](#input\_request\_message\_retention\_seconds) | Seconds a message is retained on the two request queues and on the error queue, applied as message\_retention\_seconds to those three queues. Sized to outlast an interruption and still permit a redrive from the dead-letter queue. | `number` | `345600` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every queue and dead-letter queue created by this module. Supplied as an input because the module declares no provider and so inherits no provider-level default\_tags. | `map(string)` | `{}` | no |
+| <a name="input_visibility_timeout_seconds"></a> [visibility\_timeout\_seconds](#input\_visibility\_timeout\_seconds) | Seconds a received message stays invisible to other consumers before becoming available again, applied as visibility\_timeout\_seconds on every queue and dead-letter queue. Must exceed the consumer's processing time. | `number` | `60` | no |
+
+### Outputs
+
+| Name | Description |
+|------|-------------|
+| <a name="output_account_inquiry_request_dlq_arn"></a> [account\_inquiry\_request\_dlq\_arn](#output\_account\_inquiry\_request\_dlq\_arn) | ARN of the dead-letter queue serving the account-details inquiry request queue, for exact operator receive and StartMessageMoveTask permissions. |
+| <a name="output_account_inquiry_request_dlq_name"></a> [account\_inquiry\_request\_dlq\_name](#output\_account\_inquiry\_request\_dlq\_name) | Bare name of the dead-letter queue serving account-details inquiry requests, used as the QueueName dimension of its flow-specific dead-letter alarm. |
+| <a name="output_account_inquiry_request_dlq_url"></a> [account\_inquiry\_request\_dlq\_url](#output\_account\_inquiry\_request\_dlq\_url) | Queue URL of the dead-letter queue receiving account-details inquiries after max\_receive\_count failed receives. Its flow-specific destination prevents an operator redriving the message to the date queue. |
+| <a name="output_account_inquiry_request_queue_arn"></a> [account\_inquiry\_request\_queue\_arn](#output\_account\_inquiry\_request\_queue\_arn) | ARN of the account-details inquiry request queue. The account-service task role receives and deletes only on this ARN, while the producer receives SendMessage on this exact ARN; reference-service receives no permission to it. |
+| <a name="output_account_inquiry_request_queue_name"></a> [account\_inquiry\_request\_queue\_name](#output\_account\_inquiry\_request\_queue\_name) | Bare name of the account-details inquiry request queue, used as the CloudWatch QueueName dimension for account-flow depth and age without date-flow traffic obscuring either metric. |
+| <a name="output_account_inquiry_request_queue_url"></a> [account\_inquiry\_request\_queue\_url](#output\_account\_inquiry\_request\_queue\_url) | Queue URL of the standard account-details inquiry request queue consumed only by account-service. It is one of two target queues refining the baseline's shared CARDDEMO.REQUEST.QUEUE; producer-side routing prevents account-service and reference-service competing for a message only the other can process. |
+| <a name="output_date_inquiry_request_dlq_arn"></a> [date\_inquiry\_request\_dlq\_arn](#output\_date\_inquiry\_request\_dlq\_arn) | ARN of the dead-letter queue serving date-conversion inquiry requests, for exact operator receive and StartMessageMoveTask permissions. |
+| <a name="output_date_inquiry_request_dlq_name"></a> [date\_inquiry\_request\_dlq\_name](#output\_date\_inquiry\_request\_dlq\_name) | Bare name of the dead-letter queue serving date-conversion inquiry requests, used as the QueueName dimension of its flow-specific dead-letter alarm. |
+| <a name="output_date_inquiry_request_dlq_url"></a> [date\_inquiry\_request\_dlq\_url](#output\_date\_inquiry\_request\_dlq\_url) | Queue URL of the dead-letter queue receiving date-conversion inquiries after max\_receive\_count failed receives. Its flow-specific destination keeps redrive on the reference-service path. |
+| <a name="output_date_inquiry_request_queue_arn"></a> [date\_inquiry\_request\_queue\_arn](#output\_date\_inquiry\_request\_queue\_arn) | ARN of the date-conversion inquiry request queue. The reference-service task role receives and deletes only on this ARN, while account-service receives no permission to it. |
+| <a name="output_date_inquiry_request_queue_name"></a> [date\_inquiry\_request\_queue\_name](#output\_date\_inquiry\_request\_queue\_name) | Bare name of the date-conversion inquiry request queue, used as the CloudWatch QueueName dimension for date-flow depth and age independently of account inquiries. |
+| <a name="output_date_inquiry_request_queue_url"></a> [date\_inquiry\_request\_queue\_url](#output\_date\_inquiry\_request\_queue\_url) | Queue URL of the standard date-conversion inquiry request queue consumed only by reference-service. Producer-side routing to this URL prevents an account-service consumer from stealing and hiding a CODATE01-equivalent request. |
+| <a name="output_error_dlq_arn"></a> [error\_dlq\_arn](#output\_error\_dlq\_arn) | ARN of the dead-letter queue serving the terminal error queue. Named as the Resource of the IAM statement that lets an operator drain it or issue the sqs:StartMessageMoveTask call that returns its messages to the error queue. |
+| <a name="output_error_dlq_name"></a> [error\_dlq\_name](#output\_error\_dlq\_name) | Bare name of the dead-letter queue serving the terminal error queue. Consumed by the observability module as the QueueName dimension of its dead-letter depth alarm; a non-zero depth here means a failure report itself failed to be processed, which is the deepest failure this module can surface. |
+| <a name="output_error_dlq_url"></a> [error\_dlq\_url](#output\_error\_dlq\_url) | Queue URL of the dead-letter queue serving the terminal error queue. An error sink with a dead-letter queue of its own reads oddly and is deliberate: the error queue is consumed like any other, so a message that defeats even the error handler would otherwise be redelivered indefinitely or lost, and this URL is where an operator can still read it. |
+| <a name="output_error_queue_arn"></a> [error\_queue\_arn](#output\_error\_queue\_arn) | ARN of the standard terminal error queue (baseline CARD.DEMO.ERROR). This is the Resource a calling root names in the send-permission statement of every producing service's task-role policy, and in the receive-permission statement of whatever drains the sink to raise an alert or record the failure. |
+| <a name="output_error_queue_name"></a> [error\_queue\_name](#output\_error\_queue\_name) | Bare name of the standard terminal error queue. Consumed by the observability module as the QueueName metric dimension. This queue's depth is the one queue metric that is a direct failure signal rather than a throughput signal, because nothing writes to it in normal operation. |
+| <a name="output_error_queue_url"></a> [error\_queue\_url](#output\_error\_queue\_url) | Queue URL of the standard terminal error queue, which replaces the baseline's CARD.DEMO.ERROR -- the single error sink both inquiry programs write to, at MOVE 'CARD.DEMO.ERROR' TO ERROR-QUEUE-NAME in app/app-vsam-mq/cbl/CODATE01.cbl:243 and app/app-vsam-mq/cbl/COACCT01.cbl:294. Written to Parameter Store for every producer in the messaging design, so any service that cannot complete a message exchange reports it to one place rather than to a sink of its own. |
+| <a name="output_inquiry_reply_dlq_arn"></a> [inquiry\_reply\_dlq\_arn](#output\_inquiry\_reply\_dlq\_arn) | ARN of the dead-letter queue serving the standard account-inquiry reply queue. Named as the Resource of the IAM statement that lets an operator drain it or issue the sqs:StartMessageMoveTask call that returns its messages to the inquiry reply queue. |
+| <a name="output_inquiry_reply_dlq_name"></a> [inquiry\_reply\_dlq\_name](#output\_inquiry\_reply\_dlq\_name) | Bare name of the dead-letter queue serving the standard account-inquiry reply queue. Consumed by the observability module as the QueueName dimension of its dead-letter depth alarm. |
+| <a name="output_inquiry_reply_dlq_url"></a> [inquiry\_reply\_dlq\_url](#output\_inquiry\_reply\_dlq\_url) | Queue URL of the dead-letter queue that receives an account-inquiry reply after max\_receive\_count failed receives. The reply source retention is validated to survive the complete retry budget, and an operator reads the quarantined message here using its opaque correlation identifier to tie it back to the request. |
+| <a name="output_inquiry_reply_queue_arn"></a> [inquiry\_reply\_queue\_arn](#output\_inquiry\_reply\_queue\_arn) | ARN of the standard account-inquiry reply queue (baseline CARDDEMO.RESPONSE.QUEUE, plus the two per-flow reply names at CODATE01.cbl:147 and COACCT01.cbl:198 that this single queue absorbs). This is the Resource a calling root names to let account-service and reference-service send replies, and to let the requester receive them. |
+| <a name="output_inquiry_reply_queue_name"></a> [inquiry\_reply\_queue\_name](#output\_inquiry\_reply\_queue\_name) | Bare name of the standard account-inquiry reply queue. Consumed by the observability module as the QueueName metric dimension. Because one queue carries both flows' replies, its metrics are shared: a backlog here is not attributable to the date flow or the account flow from queue metrics alone, and attribution comes from the correlation identifier on each message and from consumer-side metrics instead. |
+| <a name="output_inquiry_reply_queue_url"></a> [inquiry\_reply\_queue\_url](#output\_inquiry\_reply\_queue\_url) | Queue URL of the standard account-inquiry reply queue, which replaces the baseline's CARDDEMO.RESPONSE.QUEUE, defined as DEFINE QLOCAL('CARDDEMO.RESPONSE.QUEUE') at app/app-vsam-mq/README.md:54. This ONE queue serves both inquiry flows even though the baseline hard-codes a reply-queue name per flow -- MOVE 'CARD.DEMO.REPLY.DATE' TO REPLY-QUEUE-NAME at app/app-vsam-mq/cbl/CODATE01.cbl:147 and MOVE 'CARD.DEMO.REPLY.ACCT' TO REPLY-QUEUE-NAME at app/app-vsam-mq/cbl/COACCT01.cbl:198 -- because the target routes a reply by the replyToQueueUrl message attribute the request carries rather than by a per-flow queue. No second reply queue is missing. Written to Parameter Store for account-service and reference-service to publish replies to. |
+| <a name="output_pauth_reply_dlq_arn"></a> [pauth\_reply\_dlq\_arn](#output\_pauth\_reply\_dlq\_arn) | ARN of the dead-letter queue serving the FIFO pending-authorization reply queue. Named by reviewed receive/delete permissions for reconciliation. Native sqs:StartMessageMoveTask is denied because unfiltered bulk redrive cannot preserve the per-card ordering boundary across quarantine. |
+| <a name="output_pauth_reply_dlq_name"></a> [pauth\_reply\_dlq\_name](#output\_pauth\_reply\_dlq\_name) | Bare name of the dead-letter queue serving the FIFO pending-authorization reply queue. Consumed by the observability module as the QueueName dimension of its dead-letter depth alarm. |
+| <a name="output_pauth_reply_dlq_url"></a> [pauth\_reply\_dlq\_url](#output\_pauth\_reply\_dlq\_url) | Queue URL of the dead-letter queue that receives a pending-authorization reply after max\_receive\_count failed receives. An operator investigating an authorization whose reply never arrived reads it here; the source retention is validated to survive every receive cycle, and this fourteen-day quarantine keeps the failed delivery available for reconciliation. |
+| <a name="output_pauth_reply_queue_arn"></a> [pauth\_reply\_queue\_arn](#output\_pauth\_reply\_queue\_arn) | ARN of the FIFO pending-authorization reply queue (baseline AWS.M2.CARDDEMO.PAUTH.REPLY). This is the Resource a calling root names in the task-role policy statement granting authorization-service permission to send replies, and the form a consumer of those replies is granted receive permission against. |
+| <a name="output_pauth_reply_queue_name"></a> [pauth\_reply\_queue\_name](#output\_pauth\_reply\_queue\_name) | Bare name of the FIFO pending-authorization reply queue. Consumed by the observability module as the QueueName metric dimension; its retention exceeds the complete configured retry budget, while consumer-side expiresAt remains the authority that decides whether a reply is still actionable. |
+| <a name="output_pauth_reply_queue_url"></a> [pauth\_reply\_queue\_url](#output\_pauth\_reply\_queue\_url) | Queue URL of the FIFO pending-authorization reply queue, which replaces the baseline's AWS.M2.CARDDEMO.PAUTH.REPLY, listed as the "Output queue for authorization responses" at app/app-authorization-ims-db2-mq/README.md:279. Written to Parameter Store for authorization-service, whose transactional outbox publishes a reply here with a send call once the decision it reports has committed. |
+| <a name="output_pauth_request_dlq_arn"></a> [pauth\_request\_dlq\_arn](#output\_pauth\_request\_dlq\_arn) | ARN of the dead-letter queue serving the FIFO pending-authorization request queue. It is the Resource form an IAM statement names for reviewed receive/delete access during reconciliation. Native sqs:StartMessageMoveTask is explicitly denied because it cannot filter one message group and can interleave quarantined messages with new traffic; replay is controlled per message after the failed group is reconciled. |
+| <a name="output_pauth_request_dlq_name"></a> [pauth\_request\_dlq\_name](#output\_pauth\_request\_dlq\_name) | Bare name of the dead-letter queue serving the FIFO pending-authorization request queue. This is the QueueName dimension the observability module's dead-letter depth alarm is built on -- the alarm whose threshold defaults to the smallest breachable value, because this queue is empty in normal operation and any depth above zero is a real failure. |
+| <a name="output_pauth_request_dlq_url"></a> [pauth\_request\_dlq\_url](#output\_pauth\_request\_dlq\_url) | Queue URL of the dead-letter queue that receives a pending-authorization request after max\_receive\_count failed receives. An operator establishing what defeated the consumer reads the message body with a receive call against this URL, which is the only way to see a payload SQS has moved off the request queue. |
+| <a name="output_pauth_request_queue_arn"></a> [pauth\_request\_queue\_arn](#output\_pauth\_request\_queue\_arn) | ARN of the FIFO pending-authorization request queue (baseline AWS.M2.CARDDEMO.PAUTH.REQUEST). An ARN is the form an IAM policy Resource list and a redrive target accept, so a calling root places this value in the task-role policy statement -- owned by the ecs-service module -- that permits authorization-service to receive and delete from this queue. A queue URL is not accepted there. |
+| <a name="output_pauth_request_queue_name"></a> [pauth\_request\_queue\_name](#output\_pauth\_request\_queue\_name) | Bare name of the FIFO pending-authorization request queue, carrying neither the account and region parts of an ARN nor the endpoint host of a URL. CloudWatch dimensions every SQS metric on QueueName, so this is the value the observability module needs to alarm on this queue's depth or age or to place it on a dashboard. |
+| <a name="output_pauth_request_queue_url"></a> [pauth\_request\_queue\_url](#output\_pauth\_request\_queue\_url) | Queue URL of the FIFO pending-authorization request queue, which replaces the baseline's AWS.M2.CARDDEMO.PAUTH.REQUEST, listed as the "Input queue for authorization requests" at app/app-authorization-ims-db2-mq/README.md:278. A URL is the address the SQS send, receive and delete calls take, so a calling root writes this value to Parameter Store for authorization-service to resolve at startup and receive authorization requests from. |
+| <a name="output_queue_arns"></a> [queue\_arns](#output\_queue\_arns) | Map of logical queue name to queue ARN for all twelve queues, keyed identically to queue\_urls. Callers pass only the exact per-service subset into ecs-service's sqs\_send\_queue\_arns and sqs\_receive\_queue\_arns; using values(...) for all queues would defeat the confused-deputy boundary. |
+| <a name="output_queue_names"></a> [queue\_names](#output\_queue\_names) | Map of logical queue name to bare queue name for all twelve queues, keyed identically to queue\_urls. CloudWatch dimensions SQS metrics on QueueName, so the split account/date request keys also split their depth, age and dead-letter signals. |
+| <a name="output_queue_urls"></a> [queue\_urls](#output\_queue\_urls) | Map of logical queue name to queue URL for all twelve queues, keyed by the resource labels main.tf uses. The account\_inquiry\_request and date\_inquiry\_request keys are intentionally separate so each consumer resolves only its own work queue. |
+| <a name="output_service_queue_permissions"></a> [service\_queue\_permissions](#output\_service\_queue\_permissions) | Exact per-service SQS IAM boundaries. authorization-service receives pauth\_request and sends only pauth\_reply; account-service receives only account\_inquiry\_request and sends only inquiry\_reply/error; reference-service receives only date\_inquiry\_request and sends only inquiry\_reply/error. Pass these lists to ecs-service rather than granting values(queue\_arns). |
+<!-- END_TF_DOCS -->

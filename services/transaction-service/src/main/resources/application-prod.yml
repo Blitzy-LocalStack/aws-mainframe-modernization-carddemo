@@ -8,7 +8,7 @@
 #   already settles, restated with the value this environment has a specific
 #   reason to hold. Ten of the eleven keys appear verbatim in the base. The
 #   eleventh, springdoc.swagger-ui.enabled, is a single deliberate asymmetry
-#   that application-dev.yml records at L72 to L85 as belonging on this side of
+#   that application-dev.yml records at L76 to L89 as belonging on this side of
 #   the pair, and it is argued at the key itself rather than here.
 #
 #   Activation is external. SPRING_PROFILES_ACTIVE=prod is set by the ECS task
@@ -47,46 +47,12 @@
 # -----------------------------------------------------------------------------
 # WHY (non-obvious design decisions):
 #
-#   Assumptions: the connection pool is made LARGER here and is given a warm
-#     floor, and one property of this environment is what permits that at all:
-#     infra/envs/prod/variables.tf L201 to L213 defaults aurora_min_capacity to
-#     two capacity units rather than zero, so this cluster never pauses. There
-#     is therefore no resume delay for a pool to absorb and no pause condition
-#     for an idle floor to defeat, which is exactly the pair of constraints that
-#     obliged `dev` to empty its pool completely. Detail at
-#     spring.datasource.hikari.minimum-idle.
-#   Trade-offs: the widening is nonetheless modest, because two multipliers act
-#     on it that do not act in `dev`. Detail at
-#     spring.datasource.hikari.maximum-pool-size.
-#   Assumptions: the acquisition timeout is CUT, not raised, and it is the one
-#     value that moves in the opposite direction from `dev`. With a warm floor
-#     and no pause, a wait that outlasts a handshake means the pool is
-#     saturated, and waiting longer converts a capacity problem into latency.
-#     Detail at spring.datasource.hikari.connection-timeout.
-#   Assumptions: max-lifetime is deliberately not touched, on the same ground
-#     application-dev.yml gives at L54 to L57 -- it is sized against Aurora
-#     failover rather than against traffic, and a failover is not an
-#     environment-specific event. Detail at
-#     spring.datasource.hikari.idle-timeout.
-#   Trade-offs: BOTH statement and bind-parameter logging are held down here,
-#     where `dev` raises the first of the two. A bound parameter can be a
-#     primary account number, and the surrendered diagnosis is named alongside
-#     what replaces it. Detail at logging.level.
-#   Assumptions: com.carddemo stays at INFO rather than dropping to WARN, which
-#     is the tightening a production profile is most tempted to make. A
-#     correlation identifier is only useful if there are lines for it to travel
-#     on, and the cost of those lines is governed by a retention input in the
-#     infrastructure, not by silencing them here. Detail at logging.level.
-#   Trade-offs: the health body returns to a bare status, withdrawing the
-#     contributor detail `dev` widens it to. Detail at
-#     management.endpoint.health.show-details.
-#   Assumptions: the health ENDPOINT itself stays exposed and unchanged, because
-#     it is a deployment contract with two consumers outside this module's Java
-#     and removing it breaks target registration rather than hiding a route.
-#     Detail at management.endpoints.web.exposure.include.
-#   Trade-offs: the interactive API view is switched off, and the hand-authored
-#     contract document stays served. The two halves of that are separate
-#     decisions with separate reasons. Detail at springdoc.swagger-ui.enabled.
+#   Every key below carries its own labelled rationale at the key itself, so
+#   the sizing, logging, health-detail and API-view decisions are argued there
+#   rather than summarised twice. What follows is the set of decisions that have
+#   no key to sit on, because each one is an ABSENCE a reader would plausibly
+#   expect to find filled.
+#
 #   Alternatives Considered: a second datasource pointed at a read replica, for
 #     the two of this context's four screens that only read. Rejected, and not
 #     merely deferred: the base fixes at application.yml L260 to L264 that there
@@ -117,8 +83,8 @@
 #   Assumptions: nothing in the security chain is relaxed and nothing is
 #     loosened for operability. The resource server stays enabled, the listener
 #     stays on TLS with the base's two protocol versions, the pooled connections
-#     keep verify-full, and the three token checks at application.yml L665 to
-#     L707 stay in force. Identity comes from signed JWT claims mapped by
+#     keep verify-full, and the three token checks at application.yml L684 to
+#     L728 stay in force. Identity comes from signed JWT claims mapped by
 #     JwtRoleConverter, which is what replaced a client-echoed CDEMO-USER-TYPE
 #     field a caller could assert for itself, and two of the four endpoints in
 #     this context move money.
@@ -134,16 +100,22 @@
 #     per-environment secret in the repository. The Purpose section above states
 #     the same chain once; it is repeated here because it is the assumption
 #     every absent key in this file rests on.
-#   Trade-offs: this file uses the twin `# WHAT:` / `# WHY :` comment form on
-#     its keys. docs/CODE_DOCUMENTATION_STANDARD.md scopes that form to fenced
-#     command blocks in prose at L814 to L823 and asks for a bare labelled
-#     rationale line above a single configuration key instead. The form here
-#     follows the matched pair rather than that clause, because these two files
-#     exist to be read as a diff of each other and application-dev.yml uses the
-#     twin form on all six of its blocks; a profile that changed comment shape
-#     as well as values would make the interesting difference harder to see. The
-#     labelled category still carries the rationale, so what the clause protects
-#     -- a reason rather than a restatement -- is unaffected.
+#   Refactoring Rationale: this file and its `dev` counterpart previously carried
+#     a narration line above each overridden key, and both have been reduced to
+#     the labelled rationale alone. The earlier shape was defended on the ground
+#     that the two profiles are read as a diff of each other, so a matched comment
+#     form mattered more than the clause it broke. That reasoning inverted the
+#     precedence it appealed to: docs/CODE_DOCUMENTATION_STANDARD.md scopes the
+#     twin form to fenced command blocks in prose and forbids a statement-level
+#     narration line in a configuration file outright, because such a line
+#     restates the key beside it -- the first pattern Rule 1 forbids. Matching the
+#     pair was also available WITHOUT the breach, and that is what is done here:
+#     both profiles were changed together, so they still read as a diff, and the
+#     only thing that disappeared from either was prose that repeated its own key.
+#   Assumptions: every rationale that survived the reduction is the one that was
+#     already there. No reason was rewritten, shortened or merged, so the
+#     justification for each overridden value is unchanged and only its narration
+#     is gone.
 # =============================================================================
 
 spring:
@@ -151,10 +123,8 @@ spring:
   datasource:
 
     hikari:
-      # WHAT: a wider pool than the ten the base sizes, and one that holds a
-      #       warm floor instead of being allowed to empty.
       # WHY : (1) Assumptions: the base leaves this open deliberately. Its note
-      #       at application.yml L293 to L299 sizes ten against a connection
+      #       at application.yml L319 to L326 sizes ten against a connection
       #       budget Aurora enforces for the whole cluster, shared with seven
       #       peer services and the batch role, and leaves widening to "a
       #       profile that knows its environment's instance size". This profile
@@ -193,8 +163,6 @@ spring:
       maximum-pool-size: 16
       minimum-idle: 8
 
-      # WHAT: less time to acquire a connection, longer to keep an unused one.
-      #       Both move in the opposite direction from `dev`.
       # WHY : (1) Assumptions: cutting the acquisition timeout is safe here for
       #       one reason only -- there is no paused cluster to wait for. `dev`
       #       raises this key to thirty seconds because a resume takes on the
@@ -228,27 +196,25 @@ spring:
       #       has gone.
       #       (4) Assumptions: max-lifetime is deliberately NOT overridden, and
       #       `dev` leaves it alone for the same reason. The base sets fifteen
-      #       minutes at application.yml L307 to L312 to bound how long a pooled
+      #       minutes at application.yml L333 to L341 to bound how long a pooled
       #       socket can outlive an Aurora failover, after which the endpoint it
       #       was opened against is no longer the writer. That is a property of
       #       the cluster shape, which both environments share, so moving it for
       #       sizing would change a failover bound on a sizing argument.
       #       (5) Assumptions: all three keys bind as millisecond integers and
-      #       not as durations, as the base records at application.yml L303 to
-      #       L306, so the values below are five seconds and two minutes. The
+      #       not as durations, as the base records at application.yml L329 to
+      #       L332, so the values below are five seconds and two minutes. The
       #       `20s` duration form the base uses for the shutdown phase would
       #       silently fail to bind here.
       connection-timeout: 5000
       idle-timeout: 120000
 
   jpa:
-    # WHAT: held at the base value, and held at it in both profiles. No SQL
-    #       reaches standard output under this profile by any route.
     # WHY : (1) Assumptions: this key is restated with its value unchanged for
     #       the reason `dev` restates it -- it is the first key a reader looking
     #       for SQL reaches for, and inheriting it silently would read as an
     #       oversight rather than as a decision. Here it is also the stronger of
-    #       the two controls: the base explains at application.yml L461 to L467
+    #       the two controls: the base explains at application.yml L480 to L486
     #       that this key echoes statements through the provider straight to
     #       standard output, so no logger level can filter what it emits and the
     #       floors set under `logging` below do not reach it.
@@ -261,13 +227,10 @@ spring:
     #       print bind values into the container's stdout stream.
     show-sql: false
 
-# WHAT: the interactive browser view of the API is withdrawn. The only key in
-#       this file that the base document does not itself carry, and the whole of
-#       the pair's key asymmetry.
 # WHY : (1) Trade-offs: the interactive API view is switched off here and left
 #       on in `dev`, which is the single key asymmetry between the two
-#       overlays; application-dev.yml records the other half of it at L72 to
-#       L85, having declined to add an `enabled` key on the side where the
+#       overlays; application-dev.yml records the other half of it at L76 to
+#       L89, having declined to add an `enabled` key on the side where the
 #       framework default is already what that environment wants. What is given
 #       up is real -- the view is how the four screen flows of this context are
 #       exercised against the contract by hand, and losing it here means an
@@ -282,20 +245,20 @@ spring:
 #       (2) Assumptions: the hand-authored contract document itself STAYS
 #       served, and that is a separate decision rather than an oversight. It is
 #       published as a static resource by the static-locations list at
-#       application.yml L571 to L578, which this overlay does not touch because
+#       application.yml L592 to L597, which this overlay does not touch because
 #       that list settles WHERE the contract is published and is therefore
 #       topology. Keeping it served is deliberate on its own merits: the base
-#       fixes at L553 to L570 that openapi/transaction-api.yaml is the
+#       fixes at L599 to L615 that openapi/transaction-api.yaml is the
 #       published interface ui/src/api/transactions.ts is written against, so
 #       withdrawing it in production would leave the client's contract
 #       unreachable in the only environment the client actually calls. The
 #       document declares field shapes and no data, and every endpoint it
 #       names sits behind the resource-server filter chain and the three token
-#       checks at application.yml L665 to L707, so reading a shape grants no
+#       checks at application.yml L684 to L728, so reading a shape grants no
 #       access to anything.
 #       (3) Assumptions: the generated endpoint is likewise left at its
-#       default rather than switched off. The base gives its reason at L592 to
-#       L595 -- it earns its keep as the thing to compare against when an
+#       default rather than switched off. The base gives its reason at L612 to
+#       L615 -- it earns its keep as the thing to compare against when an
 #       implementation and the contract are suspected of having diverged -- and
 #       this profile has no environment-specific ground to overturn that,
 #       because the harm argued above is a live write client and not shape
@@ -325,14 +288,12 @@ management:
   endpoints:
     web:
       exposure:
-        # WHAT: back to the base pair, withdrawing the two diagnostic
-        #       endpoints `dev` adds.
         # WHY : (1) Assumptions: this key REPLACES the list rather than
         #       extending it, so a name omitted here is an endpoint withdrawn
         #       and both names present are load-bearing. `health` is first and
         #       is not optional in any environment: it is a deployment contract
         #       with two consumers defined outside this module's Java, recorded
-        #       at application.yml L602 to L607 -- the load balancer target
+        #       at application.yml L621 to L626 -- the load balancer target
         #       group that decides whether to route to this task, and the
         #       HEALTHCHECK instruction in this module's Dockerfile. Withdrawing
         #       it would not merely hide a route; both consumers would receive a
@@ -347,14 +308,14 @@ management:
         #       environment where dropping it would leave the dashboards and
         #       alarms blind.
         #       (2) Trade-offs: `flyway` is withdrawn, and the failure mode
-        #       `dev` added it for does not disappear here -- the base records
-        #       at application.yml L367 to L378 that Flyway does not fail on a
-        #       migration location resolving to nothing, so a task that applied
-        #       its migration and one that applied none report the same health.
+        #       `dev` added it for does not disappear here -- the health endpoint
+        #       reports the same status whether Flyway applied a migration or found
+        #       nothing to apply, so a task that migrated and one that did not are
+        #       indistinguishable from outside.
         #       What changes is where that question is answered and what the
         #       answer costs. Per deployment it is answered once, from the
         #       container's own startup log in the log group that
-        #       infra/modules/ecs-service/main.tf L398 to L407 creates, and from
+        #       infra/modules/ecs-service/main.tf L811 to L831 creates, and from
         #       the schema history table inside `ledger`. Leaving the endpoint
         #       exposed instead makes a per-deployment fact permanently
         #       queryable, and what it returns is every migration's version,
@@ -387,13 +348,11 @@ management:
         include: health,prometheus
   endpoint:
     health:
-      # WHAT: back to the base's bare status, withdrawing the contributor
-      #       detail `dev` widens the body to.
       # WHY : (1) Trade-offs: what this suppresses is the datasource and Flyway
       #       contributors -- whether the pool can reach the cluster, and what
       #       migration state the schema is in -- and the audience is the
       #       decisive half. Both pollers of this endpoint are unauthenticated,
-      #       as the base records at application.yml L626 to L637, so the body
+      #       as the base records at application.yml L645 to L655, so the body
       #       is readable by anything able to reach the task inside the private
       #       application subnets. In `dev` that names a database holding no
       #       customer data, whose credentials are distinct from every other
@@ -418,70 +377,67 @@ management:
 
 logging:
   level:
-    # WHAT: this project's own package returns to INFO, and both SQL loggers
-    #       are held at WARN. root, org.springframework and org.hibernate are
-    #       left at the base WARN and do not appear here at all.
-    # WHY : (1) Assumptions: com.carddemo stays at INFO rather than dropping to
-    #       WARN, and resisting that tightening is the decision. Two mechanisms
-    #       depend on there being lines at all. CorrelationIdFilter in
-    #       com.carddemo.common.web copies the inbound correlation identifier
-    #       into the diagnostic context so every line of a request carries it;
-    #       an identifier attached to no lines cannot reconstruct what a request
-    #       did, and reconstructing that is the whole reason a stateless service
-    #       carries one, since there is no CICS task or terminal session to
-    #       inspect afterwards. And this is the context whose endpoints add
-    #       transactions and take bill payments, so "which request moved this
-    #       money" has to be answerable from the log rather than inferred from
-    #       the ledger. The cost of keeping those lines is a retention question,
-    #       and it is answered in the infrastructure: log_retention_days at
-    #       infra/envs/prod/variables.tf L363 to L374 holds them for 365 days
-    #       here against 7 in `dev`, and the observability module's own input at
-    #       infra/modules/observability/variables.tf L185 to L199 names
-    #       retention as a value the two roots may differ on without changing
-    #       the stack's shape. Suppressing output here to control that cost
-    #       would trade the record for a saving that belongs to a different
-    #       control.
-    #       (2) Trade-offs: BOTH SQL loggers are held at WARN, where `dev`
-    #       raises the statement logger and holds only the bind logger down. The
-    #       bind decision is the one the base already argues at application.yml
-    #       L646 to L655: a parameter bound into a statement can be a primary
-    #       account number -- TRAN-CARD-NUM is PIC X(16) at
-    #       app/cpy/CVTRA05Y.cpy L15 and lands in this schema as
-    #       ledger.transactions.card_num -- and every response in this context
-    #       masks that number to its last four digits precisely so it is not
-    #       disclosed, while card verification values are returned by no
-    #       endpoint in this system at all. One bind line would hand over the
-    #       value the API is built to withhold, and it would persist for the 365
-    #       days the retention above keeps it. Holding the STATEMENT logger down
-    #       as well goes further than the base requires and is the part that
-    #       needs a reason of its own: statement text carries predicates and no
-    #       values, so it is not a disclosure risk, but at production request
-    #       rates it is the highest-volume logger available and it would bury
-    #       the correlated application lines that argument (1) exists to keep.
-    #       What is given up by both is statement-level diagnosis in the
-    #       environment where it would be most wanted, and two mechanisms have
-    #       to carry that instead: the correlated INFO lines from this project's
-    #       own loggers, and the pool and query metrics published on
-    #       `prometheus` and scraped by the observability stack. When a specific
-    #       query is genuinely in question, raising one of these two loggers is
-    #       a deliberate, reviewable edit here -- which is the property the base
-    #       chose these two specific logger names to preserve, since a profile
-    #       raising org.hibernate as a whole still cannot move either of them.
-    #       (3) Trade-offs: org.hibernate.orm.jdbc.bind is restated at WARN
-    #       although the base and `dev` both already set it there, and it is not
-    #       redundant in either place. It keeps the floor visible beside the
-    #       sibling logger it is most likely to be confused with, so the next
-    #       reader raising the shared org.hibernate parent during an
-    #       investigation cannot take bind logging up with it -- the more
-    #       specific level wins, and the floor survives that edit.
-    #       (4) Trade-offs: root, org.springframework and org.hibernate are
-    #       absent from this file deliberately, and absent from `dev` too. All
-    #       three already sit at WARN in the base, so restating them would
-    #       change nothing and would put a key in one overlay that the other
-    #       does not carry, which is what makes the pair stop diffing cleanly.
-    #       What is given up is framework-internal narration; when a specific
-    #       framework question arises, the narrow logger for it is the thing to
-    #       add rather than its parent.
+    # Assumptions: com.carddemo stays at INFO rather than dropping to
+    #   WARN, and resisting that tightening is the decision. Two mechanisms
+    #   depend on there being lines at all. CorrelationIdFilter in
+    #   com.carddemo.common.web copies the inbound correlation identifier
+    #   into the diagnostic context so every line of a request carries it;
+    #   an identifier attached to no lines cannot reconstruct what a request
+    #   did, and reconstructing that is the whole reason a stateless service
+    #   carries one, since there is no CICS task or terminal session to
+    #   inspect afterwards. And this is the context whose endpoints add
+    #   transactions and take bill payments, so "which request moved this
+    #   money" has to be answerable from the log rather than inferred from
+    #   the ledger. The cost of keeping those lines is a retention question,
+    #   and it is answered in the infrastructure: log_retention_days at
+    #   infra/envs/prod/variables.tf L363 to L374 holds them for 365 days
+    #   here against 7 in `dev`, and the observability module's own input at
+    #   infra/modules/observability/variables.tf L333 to L347 names
+    #   retention as a value the two roots may differ on without changing
+    #   the stack's shape. Suppressing output here to control that cost
+    #   would trade the record for a saving that belongs to a different
+    #   control.
+    # Trade-offs: BOTH SQL loggers are held at WARN, where `dev`
+    #   raises the statement logger and holds only the bind logger down. The
+    #   bind decision is the one the base already argues at application.yml
+    #   L665 to L674: a parameter bound into a statement can be a primary
+    #   account number -- TRAN-CARD-NUM is PIC X(16) at
+    #   app/cpy/CVTRA05Y.cpy L15 and lands in this schema as
+    #   ledger.transactions.card_num -- and every response in this context
+    #   masks that number to its last four digits precisely so it is not
+    #   disclosed, while card verification values are returned by no
+    #   endpoint in this system at all. One bind line would hand over the
+    #   value the API is built to withhold, and it would persist for the 365
+    #   days the retention above keeps it. Holding the STATEMENT logger down
+    #   as well goes further than the base requires and is the part that
+    #   needs a reason of its own: statement text carries predicates and no
+    #   values, so it is not a disclosure risk, but at production request
+    #   rates it is the highest-volume logger available and it would bury
+    #   the correlated application lines that argument (1) exists to keep.
+    #   What is given up by both is statement-level diagnosis in the
+    #   environment where it would be most wanted, and two mechanisms have
+    #   to carry that instead: the correlated INFO lines from this project's
+    #   own loggers, and the pool and query metrics published on
+    #   `prometheus` and scraped by the observability stack. When a specific
+    #   query is genuinely in question, raising one of these two loggers is
+    #   a deliberate, reviewable edit here -- which is the property the base
+    #   chose these two specific logger names to preserve, since a profile
+    #   raising org.hibernate as a whole still cannot move either of them.
+    # Trade-offs: org.hibernate.orm.jdbc.bind is restated at WARN
+    #   although the base and `dev` both already set it there, and it is not
+    #   redundant in either place. It keeps the floor visible beside the
+    #   sibling logger it is most likely to be confused with, so the next
+    #   reader raising the shared org.hibernate parent during an
+    #   investigation cannot take bind logging up with it -- the more
+    #   specific level wins, and the floor survives that edit.
+    # Trade-offs: root, org.springframework and org.hibernate are
+    #   absent from this file deliberately, and absent from `dev` too. All
+    #   three already sit at WARN in the base, so restating them would
+    #   change nothing and would put a key in one overlay that the other
+    #   does not carry, which is what makes the pair stop diffing cleanly.
+    #   What is given up is framework-internal narration; when a specific
+    #   framework question arises, the narrow logger for it is the thing to
+    #   add rather than its parent.
     com.carddemo: INFO
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN

@@ -15,7 +15,7 @@
 #   contract is in versions.tf.
 #
 # Parameters:
-#   Twenty-one inputs, grouped below in the order a reader needs them --
+#   Twenty-seven inputs, grouped below in the order a reader needs them --
 #   naming and tagging, identity, private integration and VPC Link, routing,
 #   CORS, observability and rate limiting, then integration tuning and stage.
 #   Each carries an explicit `type` and a `description` stating what the value
@@ -46,16 +46,26 @@
 #   - `alb_listener_arn` not shaped like a listener ARN, meaning an `arn:`
 #     prefix and an `:listener/` segment;
 #   - `private_app_subnet_ids` with fewer than two entries;
-#   - `vpc_link_security_group_ids` empty;
-#   - `route_keys` empty, or an entry that is not a method or `ANY`, a single
-#     space, then a path beginning `/`;
+#   - `vpc_id` not shaped like a VPC id;
+#   - `alb_security_group_id` not shaped like a security-group id;
+#   - `route_keys` empty, an entry that is not a method or `ANY`, a single
+#     space, then a path beginning `/`, a `/batch` prefix, or a duplicate;
+#   - `route_authorization_scopes` empty, or holding a blank entry;
+#   - `public_route_keys` differing from the exact three pre-token POST
+#     operations, or overlapping a protected route key. An EMPTY list is
+#     accepted here, unlike `route_keys`, because publishing no unauthenticated
+#     route at all is a coherent choice while publishing no route at all is not;
+#   - `public_route_throttling_burst_limit` below 1, fractional, or above the
+#     stage default it may only tighten;
+#   - `public_route_throttling_rate_limit` at or below 0, or above the stage
+#     default it may only tighten;
 #   - `spa_cors_allow_origins` empty, or holding `*`;
 #   - `cors_allow_methods` or `cors_allow_headers` empty;
 #   - `cors_max_age_seconds` outside 0-86400;
 #   - `log_retention_days` not one of the values CloudWatch Logs accepts;
 #   - `throttling_burst_limit` or `throttling_rate_limit` not positive;
 #   - `integration_timeout_milliseconds` outside 50-30000;
-#   - `stage_name` blank.
+#   - `stage_name` not exactly `$default`.
 #   A `null` reaches none of those conditions -- see the nullable policy below.
 #
 # WHY (non-obvious design decisions):
@@ -70,13 +80,13 @@
 #     the values in keeps this module a pure function of its inputs, and keeps
 #     the wiring visible in the environment root -- the one file where a reader
 #     can see the whole graph at once.
-#   - Trade-offs: the cost of that choice is exactly this file's size. Six of
-#     the twenty-one inputs exist only to carry a value another module already
+#   - Trade-offs: the cost of that choice is exactly this file's size. Seven of
+#     the twenty-seven inputs exist only to carry a value another module already
 #     computed, and the environment root must wire each one. Accepted in
 #     exchange for zero cross-module coupling: the wiring is longer to write
 #     once, and it cannot break from a distance.
 #   - Assumptions: `nullable = false` is the policy on every input here except
-#     the two documented as nullable at their own declarations. It is
+#     the one documented as nullable at its own declaration. It is
 #     load-bearing twice over. On a REQUIRED input, leaving `nullable` at its
 #     default of true lets a caller pass `null`, which then reaches the
 #     validation expression -- so `startswith(null, "https://")` fails with a
@@ -107,14 +117,23 @@
 #     module's described scope, and adding one would widen it.
 #
 # Baseline lineage:
-#   One enumerated, authenticated front door is inherited here rather than
-#   invented. The CICS resource definition published the application's entire
-#   public surface as eighteen `DEFINE TRANSACTION(<id>) ... PROGRAM(<name>)`
-#   pairs spanning app/csd/CARDDEMO.CSD:L306-L480, the sign-on entry point
-#   among them -- `DEFINE TRANSACTION(CC00)` at L378 resolving to
-#   `PROGRAM(COSGN00C)` at L379. `route_keys` is that enumeration restated for
-#   HTTP, and the JWT authorizer stands where CC00 stood. That file is
-#   REFERENCE-ONLY: it is cited by line here and never modified.
+#   One enumerated front door is inherited here rather than invented, and so is
+#   the split between its authenticated and unauthenticated halves. The CICS
+#   resource definition published the application's entire public surface as
+#   eighteen `DEFINE TRANSACTION(<id>) ... PROGRAM(<name>)` pairs spanning
+#   app/csd/CARDDEMO.CSD:L306-L480. `route_keys` is that enumeration restated
+#   for HTTP. Exactly ONE of those eighteen was reachable by an operator who had
+#   not yet identified themselves -- `DEFINE TRANSACTION(CC00)` at L378
+#   resolving to `PROGRAM(COSGN00C)` at L379, the sign-on program, which read
+#   the user's credentials and only then transferred control onward. Every other
+#   transaction was entered from a menu the operator could not reach until that
+#   program had run. `public_route_keys` carries that single pre-identification
+#   entry point forward and nothing else, which is why its default holds one key
+#   and its validations refuse any prefix but `/auth`: the baseline had exactly
+#   one unauthenticated door too, and the migration neither adds a second nor
+#   closes the one that must stay open. The JWT authorizer stands where the menu
+#   gate stood, not where CC00 stood. That file is REFERENCE-ONLY: it is cited
+#   by line here and never modified.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -127,7 +146,6 @@ variable "name_prefix" {
   default     = "carddemo"
   nullable    = false
 
-  # WHAT: lowercase letters and digits, optional interior hyphens, 1-20 chars.
   # WHY : (1) Assumptions: the prefix is composed into a CloudWatch Logs group
   #       name, where `/` is the hierarchy separator -- a prefix containing one
   #       would silently relocate the group in the console tree rather than
@@ -175,7 +193,6 @@ variable "tags" {
   default     = {}
   nullable    = false
 
-  # WHAT: tags threaded in as data rather than attached by a provider setting.
   # WHY : (1) Assumptions: this does not duplicate provider-level tagging, which
   #       is the reasonable first reading. A root can set `default_tags` on its
   #       `provider "aws"` block and have every resource pick them up, and
@@ -238,8 +255,6 @@ variable "cognito_app_client_ids" {
   #       token came from the right pool, so a token minted for a different
   #       application in that same pool would be honoured here.
   #
-  # WHAT: what this authorizer actually enforces, recorded at the input that
-  #       configures it because it is the module's whole reason for existing.
   # WHY : Assumptions: authorization rides on a SIGNED claim and never on a
   #       field the client supplies. The baseline carried its user-type
   #       discriminator in the record field `SEC-USR-TYPE PIC X(01)` at
@@ -318,26 +333,32 @@ variable "private_app_subnet_ids" {
   }
 }
 
-variable "vpc_link_security_group_ids" {
-  description = "Security groups attached to the VPC Link's network interfaces, produced by the `network` module. They are the source side of the edge-to-application flow, so they govern what the VPC Link may reach on the internal ALB."
-  type        = list(string)
+variable "vpc_id" {
+  description = "VPC in which this module creates the dedicated API Gateway VPC Link security group, supplied by the network module."
+  type        = string
   nullable    = false
 
-  # WHY : (1) Assumptions: supplied by the `network` module rather than created
-  #       here. The VPC's permitted flows are enumerated in one place -- load
-  #       balancer to application on 8080, application to Aurora on 5432,
-  #       application to interface endpoint on 443 -- and the group on this
-  #       side is one half of a matched pair whose other half is a rule on the
-  #       ALB's own group. A group invented inside this module is one those
-  #       rules were never written against, so the integration would be
-  #       reachable only if the ALB's group happened to admit it.
-  #       (2) Assumptions: an empty list is refused. A VPC Link with no group of
-  #       its own falls back to the VPC's default security group, whose rules
-  #       this tree neither writes nor reviews, so the edge's reach would be
-  #       whatever that group happens to allow.
+  # WHY : Refactoring Rationale: the earlier interface accepted a list of
+  #       pre-created security groups, but no module owned the matching
+  #       VPC-Link-to-ALB 443 rule pair. Supplying the VPC lets main.tf own the
+  #       dedicated source group together with both exact rules.
   validation {
-    condition     = length(var.vpc_link_security_group_ids) > 0
-    error_message = "The vpc_link_security_group_ids list must hold at least one security group id, otherwise the VPC Link falls back to the VPC's default group."
+    condition     = can(regex("^vpc-", var.vpc_id))
+    error_message = "The vpc_id value must begin with \"vpc-\"; a subnet or security-group id from the network module is a crossed wire."
+  }
+}
+
+variable "alb_security_group_id" {
+  description = "Security group attached to the internal ALB. This module adds only the ingress rule from its dedicated VPC Link group on TCP 443."
+  type        = string
+  nullable    = false
+
+  # WHY : Assumptions: this is the destination half of one matched SG-to-SG
+  #       path. A CIDR rule would admit every interface in a subnet; referencing
+  #       the ALB group admits only load-balancer interfaces carrying that group.
+  validation {
+    condition     = can(regex("^sg-", var.alb_security_group_id))
+    error_message = "The alb_security_group_id value must begin with \"sg-\"; a subnet or VPC id from the network module is a crossed wire."
   }
 }
 
@@ -345,31 +366,59 @@ variable "vpc_link_security_group_ids" {
 # Group D -- routing
 # -----------------------------------------------------------------------------
 
+
 variable "route_keys" {
-  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. The default exposes the SEVEN online bounded contexts as a matched pair of keys apiece -- the bare collection prefix and the greedy subtree beneath it -- under path prefixes matching the SPA's API client modules. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module."
+  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts as a matched pair of keys apiece -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module."
   type        = list(string)
   nullable    = false
   default = [
-    "ANY /auth",
-    "ANY /auth/{proxy+}",
-    "ANY /accounts",
-    "ANY /accounts/{proxy+}",
-    "ANY /cards",
-    "ANY /cards/{proxy+}",
-    "ANY /transactions",
-    "ANY /transactions/{proxy+}",
-    "ANY /reference",
-    "ANY /reference/{proxy+}",
-    "ANY /authorizations",
-    "ANY /authorizations/{proxy+}",
-    "ANY /reports",
-    "ANY /reports/{proxy+}",
+    "ANY /api/v1/auth",
+    "ANY /api/v1/auth/{proxy+}",
+    "ANY /api/v1/accounts",
+    "ANY /api/v1/accounts/{proxy+}",
+    "ANY /api/v1/cards",
+    "ANY /api/v1/cards/{opaqueCardId}",
+    "ANY /api/v1/cards/{opaqueCardId}/{proxy+}",
+    "ANY /api/v1/transactions",
+    "ANY /api/v1/transactions/{proxy+}",
+    "ANY /api/v1/reference",
+    "ANY /api/v1/reference/{proxy+}",
+    "ANY /api/v1/authorizations",
+    "ANY /api/v1/authorizations/{proxy+}",
+    "ANY /api/v1/reports",
+    "ANY /api/v1/reports/{proxy+}",
   ]
 
-  # WHAT: two `ANY` keys per online bounded context -- `/<prefix>` and
-  #       `/<prefix>/{proxy+}` -- for auth, account, card, transaction,
-  #       reference, authorization and reporting. Fourteen keys, seven services,
-  #       and no batch key.
+  # WHY : (1) Assumptions: the version travels in the PATH, and every key carries
+  #       the same `/api/v1` prefix. The route table is the published contract at
+  #       the edge -- it is what the SPA's base URL resolves against, what the
+  #       load balancer's path patterns must match, and what an external
+  #       integration reads -- so the version has to be visible in it. Without a
+  #       version segment a second, incompatible shape of any one of these seven
+  #       surfaces has nowhere to live except by breaking the first, and the break
+  #       lands on every caller at once.
+  #       (2) Alternatives Considered: carrying the version in the STAGE name, so
+  #       that the invoke URL gains a `/v1` segment without any key naming it.
+  #       Rejected because var.stage_name is `$default` precisely so the URL has
+  #       NO stage segment and the SPA's base URL lines up with each service's own
+  #       OpenAPI paths; moving the version there would put it in deployment
+  #       configuration rather than in the contract, where no client and no plan
+  #       diff can see it, and it would reintroduce the segment every client path
+  #       would then have to compensate for.
+  #       (3) Alternatives Considered: versioning by media type or by a custom
+  #       request header. Rejected because a header-borne version is invisible in
+  #       this list, invisible in the access log's routeKey field and unusable
+  #       from a browser address bar, so a route miss could not be told apart from
+  #       a version mismatch -- both would present as one 404 with no clue which
+  #       it was.
+  #       (4) Trade-offs: eight characters on every path and one more segment for
+  #       the load balancer rule to match, in exchange for a breaking change being
+  #       ADDITIVE at the edge -- a `/api/v2` prefix is new keys beside these,
+  #       not a rewrite of them. The prefix is enforced by a validation below
+  #       rather than only demonstrated by this default, because a root that
+  #       overrode the list with unversioned keys would publish a contract the
+  #       load balancer's own path patterns no longer match, and that presents as
+  #       a 404 from the load balancer for a service that is running.
   # WHY : Refactoring Rationale: an eighth context, `/batch`, was published here
   #       and has been REMOVED, and the removal is the point rather than a
   #       tidy-up. It described "operator-facing job endpoints", but batch-service
@@ -414,12 +463,25 @@ variable "route_keys" {
   #       route-level authorizer or throttle override to later. The accepted
   #       cost of the per-service form is one line of this list per service.
   #       (3) Assumptions: this list is the set of routes the authorizer is
-  #       attached to, and no unauthenticated route is contemplated. main.tf
-  #       attaches the authorizer to every key built from this list AND applies
-  #       var.route_authorization_scopes to each one; the policy scan in
-  #       .github/workflows/infra-ci.yml fails at HIGH and CRITICAL on a route
-  #       with no authorizer, and that gate is met by construction here rather
-  #       than by a suppression.
+  #       attached to, and it is NOT the whole route table -- var.public_route_keys
+  #       below carries the separately-enumerated keys that deliberately carry no
+  #       authorizer, and the two lists are validated to be disjoint. main.tf
+  #       creates one route per key from THIS list with the authorizer AND
+  #       var.route_authorization_scopes applied to each; the policy scan in
+  #       .github/workflows/infra-ci.yml fails at HIGH and CRITICAL on a route with
+  #       no authorizer, and that gate is met by construction here rather than by a
+  #       suppression. A key may appear in one list or the other but never in both,
+  #       so no route can end up authorized-and-public or silently lose its
+  #       authorizer by being added twice.
+  #       Refactoring Rationale: this paragraph previously asserted that "no
+  #       unauthenticated route is contemplated", which was untrue of the system it
+  #       describes rather than merely incomplete: sign-on is the call that MINTS
+  #       the token the authorizer demands, so requiring a token on it makes the
+  #       token unobtainable and every route behind the authorizer permanently
+  #       unreachable. The exposure is now enumerated in one input, validated down
+  #       to the exact three pre-token methods and paths, and published as an
+  #       output, rather than being denied here and discovered at the first sign-on
+  #       attempt.
   #       (4) Refactoring Rationale: `/batch` was previously published here and
   #       has been REMOVED, because there was nothing behind it. Batch is the one
   #       ECS instantiation created with attach_load_balancer and create_service
@@ -455,7 +517,30 @@ variable "route_keys" {
       for key in var.route_keys :
       can(regex("^(ANY|GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /", key))
     ])
-    error_message = "Each entry in route_keys must be an HTTP method or ANY, then a single space, then a path beginning with \"/\" -- for example \"ANY /accounts/{proxy+}\"."
+    error_message = "Each entry in route_keys must be an HTTP method or ANY, then a single space, then a path beginning with \"/\" -- for example \"ANY /api/v1/accounts/{proxy+}\"."
+  }
+
+  # WHY : Assumptions: the version prefix is an invariant of the published
+  #       contract rather than a property of this default, so it is checked on
+  #       every entry including one an environment root adds. Three artifacts have
+  #       to agree on it and none of them can see the other two: this route table,
+  #       the path patterns var.service_routes carries into infra/modules/alb, and
+  #       the base URL the SPA resolves every call against. A key published without
+  #       the prefix is accepted by the API and then matches no load balancer rule,
+  #       so the request reaches the edge, authenticates, integrates, and is
+  #       answered by the load balancer's own 404 -- a failure that reads as a
+  #       broken service rather than as a path that was never routed.
+  #       Trade-offs: this closes an input the module otherwise leaves open. What
+  #       is given up is a root's freedom to publish an unversioned or
+  #       differently-versioned key; what is kept is that the three artifacts
+  #       cannot silently diverge. A future major version is added by widening this
+  #       condition deliberately, which is a visible edit rather than an accident.
+  validation {
+    condition = alltrue([
+      for key in var.route_keys :
+      can(regex("^(ANY|GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /api/v1/[a-z]", key))
+    ])
+    error_message = "Each entry in route_keys must publish its path under the versioned \"/api/v1/\" prefix -- for example \"ANY /api/v1/accounts\". An unversioned key matches none of the load balancer path patterns the same contract configures, so the request would authenticate at the edge and then be answered 404 by the load balancer."
   }
 
   # WHY : Assumptions: batch-service cannot be reached through this API at all,
@@ -470,12 +555,17 @@ variable "route_keys" {
   #       Accepted, because the openness exists so a root can add a route to a
   #       service that EXISTS behind the load balancer, and batch is the one
   #       context for which no such target can exist.
+  #       Assumptions: the pattern admits an optional version prefix so the
+  #       prohibition cannot be sidestepped by writing the prefix in. Both
+  #       "ANY /batch" and "ANY /api/v1/batch" are refused, and so is any other
+  #       major version, because the reason has nothing to do with which version
+  #       published it.
   validation {
     condition = alltrue([
       for key in var.route_keys :
-      !can(regex("^[A-Z]+ /batch(/|$)", key))
+      !can(regex("^[A-Z]+ (/api/v[0-9]+)?/batch(/|$)", key))
     ])
-    error_message = "route_keys must not publish a /batch route: batch-service runs as one-shot Step Functions tasks with no ECS service and no ALB target group, so an edge route for it has nothing to integrate with."
+    error_message = "route_keys must not publish a /batch route at any version: batch-service runs as one-shot Step Functions tasks with no ECS service and no ALB target group, so an edge route for it has nothing to integrate with."
   }
 
   # WHY : Assumptions: a greedy key without its bare sibling is the defect this
@@ -507,10 +597,113 @@ variable "route_keys" {
     condition     = length(distinct(var.route_keys)) == length(var.route_keys)
     error_message = "route_keys must not contain duplicate entries: each route key may be created only once on an HTTP API."
   }
+
+  # WHY : Refactoring Rationale: the earlier card-detail contract named the
+  #       path value as a card number, and access logs consequently retained a
+  #       full PAN. The edge now names the selector `opaqueCardId`; the later UI
+  #       and service contracts must carry the same token. Prohibiting the old
+  #       parameter spellings catches a regression in the route inventory even
+  #       though the default uses a greedy service proxy for most contexts.
+  validation {
+    condition = alltrue([
+      for key in var.route_keys :
+      !can(regex("(?i)\\{(pan|card_?num|card_?number|num)\\}", key))
+    ])
+    error_message = "route_keys must not name a card path parameter as a PAN, card number or generic num. Card-detail selectors use the opaqueCardId contract so route templates and durable logs never describe a raw PAN-bearing path."
+  }
 }
 
-# WHAT: the authorization scopes every route created from var.route_keys requires,
-#       applied by main.tf to each route's authorization_scopes.
+# WHY : (1) Assumptions: sign-on cannot require the token sign-on issues, and
+#       every other route on this API can. The authorizer above rejects a request
+#       carrying no bearer token before any integration runs, so with it attached
+#       to the sign-on path the only way to obtain a token is to already hold one.
+#       That is a deadlock rather than a hardening: no user could ever
+#       authenticate, and the failure is total rather than partial.
+#       (2) Assumptions: the browser never speaks to the user pool, which is what
+#       makes the exception unavoidable rather than a shortcut. The app client
+#       infra/modules/cognito provisions is CONFIDENTIAL -- it is created with a
+#       generated secret -- so the authentication call has to be made by something
+#       that can hold that secret and compute the request signature from it. That
+#       is auth-service, reached through this API, which is why the path has to be
+#       reachable before a token exists. The alternative shape, a public app client
+#       the SPA calls directly, was rejected where the client is defined: it would
+#       put an identity endpoint in the browser's origin and give up the
+#       server-side control of the three verbatim sign-on replies the baseline
+#       program at app/cbl/COSGN00C.cbl produces at its L242, L243, L249 and L254.
+#       (3) Trade-offs: the exception is one METHOD on one PATH, not a prefix and
+#       not a subtree. `POST /api/v1/auth/signon` is unauthenticated; every other
+#       path under `/api/v1/auth`, including the user administration endpoints,
+#       stays on the JWT route because the greedy key in var.route_keys covers
+#       them. An HTTP API selects the MOST SPECIFIC matching route, and a greedy
+#       `{proxy+}` key is the least specific of all, so a concrete method with a
+#       literal final segment always wins over `ANY /api/v1/auth/{proxy+}` without
+#       the two contending. What is given up is one internet-reachable path with no
+#       credential check at the edge; what is bought is a system that can be signed
+#       in to at all. The residual is bounded three ways: the validation below
+#       refuses any key that is not that exact sign-on path, the route is given its
+#       own tighter throttle rather than inheriting the account-level allowance,
+#       and auth-service itself is what decides whether the credentials are good.
+#       (4) Alternatives Considered: putting the sign-on route on the same
+#       for_each as the authorized routes and switching the authorizer per key with
+#       a conditional. Rejected because it makes the presence or absence of
+#       authentication a property of an expression rather than of a resource, so a
+#       plan diff no longer shows an unauthenticated route as its own object and a
+#       reviewer has to evaluate the condition to know what was created. Two
+#       resources means the policy scan, the plan and this file all name the
+#       exception in the same place.
+#       (5) Assumptions: an empty list is accepted and produces no public route at
+#       all. A root with a different sign-on arrangement should be able to publish
+#       none, and an empty list is the honest way to say so -- unlike a sentinel
+#       value, it creates nothing.
+variable "public_route_keys" {
+  description = "Route keys created WITHOUT the JWT authorizer, for paths that must be reachable before a token exists. Defaults to the single sign-on route POST /api/v1/auth/signon, which auth-service answers by calling the Cognito user pool with the confidential app client's secret. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route_keys and carries the authorizer."
+  type        = list(string)
+  nullable    = false
+  default = [
+    "POST /api/v1/auth/signon",
+    "POST /api/v1/auth/challenge",
+    "POST /api/v1/auth/refresh",
+  ]
+
+  # WHY : Assumptions: the condition names the ONE acceptable value rather than a
+  #       shape, and the asymmetry with var.route_keys is deliberate. There is no
+  #       general category of "routes that may be public" in this architecture --
+  #       there is one path that has to be, for the reason stated above -- so a
+  #       shape check such as "any POST under /auth" would license a set of routes
+  #       nothing asked for. Pinning the exact method and path means adding a
+  #       second public route requires editing this condition, which is a visible,
+  #       reviewable act rather than a value change in a tfvars file.
+  #       Trade-offs: a root cannot publish a different unauthenticated path
+  #       without editing the module. Accepted, and it is the point: the module's
+  #       other inputs are open because widening them costs nothing, whereas
+  #       widening this one removes the only credential check standing in front of
+  #       a path.
+  validation {
+    condition = alltrue([
+      for key in var.public_route_keys :
+      contains([
+        "POST /api/v1/auth/signon",
+        "POST /api/v1/auth/challenge",
+        "POST /api/v1/auth/refresh",
+      ], key)
+    ])
+    error_message = "public_route_keys may hold only the exact keys \"POST /api/v1/auth/signon\", \"POST /api/v1/auth/challenge\" and \"POST /api/v1/auth/refresh\": those three are the operations that must answer before a usable access token exists, and every other route on this API carries the JWT authorizer through var.route_keys."
+  }
+
+  # WHY : Assumptions: the two lists must be disjoint, because a key present in
+  #       both would produce two aws_apigatewayv2_route resources for one route key
+  #       -- one with the authorizer and one without -- and the API accepts a route
+  #       key only once. The apply would fail on a conflict whose message names the
+  #       key rather than the overlap, so the overlap is named here instead.
+  validation {
+    condition = length([
+      for key in var.public_route_keys : key
+      if contains(var.route_keys, key)
+    ]) == 0
+    error_message = "public_route_keys and route_keys must be disjoint: a key in both would create the same route twice, once with the JWT authorizer and once without, and an HTTP API accepts each route key only once."
+  }
+}
+
 # WHY : (1) Assumptions: attaching the JWT authorizer is NOT the same as
 #       authorizing, and the gap it leaves is the reason this input exists. The
 #       authorizer validates the token's signature, its issuer and its time
@@ -572,6 +765,66 @@ variable "route_authorization_scopes" {
   }
 }
 
+# WHY : Assumptions: these exist as a SEPARATE pair rather than reusing
+#       throttling_burst_limit and throttling_rate_limit, because the two
+#       workloads are not comparable. The authenticated limits size a signed-in
+#       user's normal traffic across seven services; an anonymous sign-on route
+#       serves one call per human sign-on and is the one route reachable without
+#       obtaining anything first, so its ceiling should be low enough that a
+#       credential-stuffing run is rate-bound long before the pool's lockout
+#       policy is exercised. The defaults are deliberately an order of magnitude
+#       below the stage defaults for that reason.
+#       Trade-offs: a low ceiling can reject legitimate sign-ons during a
+#       thundering-herd start-of-day, which is a real cost and is why both are
+#       inputs a root can raise per environment rather than literals. The
+#       failure is also the benign direction: a rejected sign-on is retried by
+#       the user, where an unbounded anonymous route is retried by an attacker.
+variable "public_route_throttling_burst_limit" {
+  description = "Token-bucket depth for the unauthenticated routes in public_route_keys, applied as a per-route override on the stage. Deliberately far below throttling_burst_limit because an anonymous route is reachable without any credential."
+  type        = number
+  default     = 20
+  nullable    = false
+
+  # WHY : Assumptions: the floor is 1 rather than 0. A burst of 0 rejects every
+  #       request including the first, which would close the sign-on route as
+  #       completely as having no route at all -- the very defect this input's
+  #       neighbour was added to fix -- while looking like a tuning value.
+  validation {
+    condition     = var.public_route_throttling_burst_limit >= 1 && floor(var.public_route_throttling_burst_limit) == var.public_route_throttling_burst_limit
+    error_message = "public_route_throttling_burst_limit must be a whole number of at least 1. A burst of 0 rejects every request to the sign-on route, which closes interactive sign-on exactly as an absent route would."
+  }
+
+  validation {
+    # WHY : Assumptions: a per-route override may only TIGHTEN the stage default.
+    #       Giving the one route an anonymous caller can reach more headroom than
+    #       the authenticated ones inverts the reason this override exists, and it
+    #       is the kind of inversion a plan diff does not make obvious.
+    condition     = var.public_route_throttling_burst_limit <= var.throttling_burst_limit
+    error_message = "public_route_throttling_burst_limit must not exceed throttling_burst_limit: a per-route override on an unauthenticated route may only tighten the stage default, never grant the one route reached without a validated token more headroom than the authenticated ones."
+  }
+}
+
+variable "public_route_throttling_rate_limit" {
+  description = "Steady-state requests per second sustained on the unauthenticated routes in public_route_keys, applied as a per-route override on the stage. Deliberately far below throttling_rate_limit for the same reason as its burst counterpart."
+  type        = number
+  default     = 10
+  nullable    = false
+
+  # WHY : Assumptions: refused at or below zero for the same reason as the burst
+  #       floor above. A fractional rate IS permitted, unlike the burst, because
+  #       API Gateway accepts a fractional steady-state rate and a rate below one
+  #       request per second is a coherent thing to want on an anonymous route.
+  validation {
+    condition     = var.public_route_throttling_rate_limit > 0
+    error_message = "public_route_throttling_rate_limit must be greater than zero. A rate of 0 refills the bucket never, so the route serves only its initial burst and then rejects every request."
+  }
+
+  validation {
+    # WHY : Assumptions: the same tightening-only rule as the burst limit above.
+    condition     = var.public_route_throttling_rate_limit <= var.throttling_rate_limit
+    error_message = "public_route_throttling_rate_limit must not exceed throttling_rate_limit: a per-route override on an unauthenticated route may only tighten the stage default."
+  }
+}
 
 # -----------------------------------------------------------------------------
 # Group E -- CORS for the CloudFront-hosted SPA
@@ -773,12 +1026,35 @@ variable "cors_allow_headers" {
   #       carrying spaces or separators that are not valid in a token. It rejects
   #       a typo at plan time rather than letting the browser drop the header and
   #       leave a request failing for a reason nothing reports.
+  #       Refactoring Rationale: the wildcard refusal was asserted only in the shape
+  #       check's message and has been given its own condition below, because the
+  #       shape check never performed it. The asterisk is a legal HTTP token
+  #       character and appears in the token class that check uses, so `["*"]`
+  #       satisfied it and reached the API while the message said the opposite --
+  #       measured, not assumed. The message here now speaks only to shape.
   validation {
     condition = alltrue([
       for header in var.cors_allow_headers :
       can(regex("^[a-z0-9!#$%&'*+.^_`|~-]+$", lower(header)))
     ])
-    error_message = "Each cors_allow_headers entry must be a single HTTP header name made of token characters. \"*\" is refused: browsers ignore a wildcard on credentialed requests, so it would silently withhold the authorization header instead of permitting every header."
+    error_message = "Each cors_allow_headers entry must be a single HTTP header name made of token characters, with no spaces, colons or separators that are not valid in a token."
+  }
+
+  # WHY : Assumptions: a wildcard here is not permissive, it is silently
+  #       SUBTRACTIVE. Every authenticated request from the SPA carries a bearer
+  #       token, and a browser ignores a wildcard in Access-Control-Allow-Headers
+  #       on a credentialed request, so `["*"]` withholds the authorization header
+  #       rather than permitting every header -- and the symptom is that every
+  #       authenticated call fails preflight while the configuration reads as
+  #       though it allowed everything.
+  #       Trade-offs: this duplicates the reasoning recorded on
+  #       var.cors_expose_headers, accepted because the two lists are separate
+  #       inputs a caller can set independently and each has to refuse the wildcard
+  #       on its own; a reader looking at one must not have to find the other to
+  #       learn that the value is refused.
+  validation {
+    condition     = !contains([for header in var.cors_allow_headers : trimspace(lower(header))], "*")
+    error_message = "The cors_allow_headers list must not contain \"*\". Every request from the SPA is credentialed, and browsers ignore a wildcard in Access-Control-Allow-Headers on a credentialed request, so it would withhold the authorization header rather than permitting every header; name each header explicitly."
   }
 
   validation {
@@ -817,6 +1093,91 @@ variable "cors_max_age_seconds" {
     error_message = "The cors_max_age_seconds value must be between 0 and 86400 inclusive, the range the CORS max-age field accepts."
   }
 }
+
+variable "cors_expose_headers" {
+  description = "Response headers a browser is permitted to READ cross-origin. Becomes `cors_configuration.expose_headers`. Defaults to the correlation identifier common-lib's CorrelationIdFilter writes on every response and the location header a report submission returns; without an entry here a header is present on the wire and unreadable from script."
+  type        = list(string)
+  default     = ["x-correlation-id", "location"]
+  nullable    = false
+
+  # WHY : (1) Assumptions: a cross-origin response exposes only the CORS-safelisted
+  #       response headers to script, and neither header below is on that list.
+  #       Both are present on the wire either way, which is what makes the omission
+  #       hard to see: the network panel shows the header, `response.headers.get`
+  #       returns null, and the request itself succeeded. Naming them here is the
+  #       only thing that makes them readable.
+  #       (2) Assumptions: `x-correlation-id` is the identifier
+  #       common-lib's CorrelationIdFilter writes onto every response under the
+  #       same name it reads on the way in. It is already listed in
+  #       var.cors_allow_headers so the SPA may SEND one, and the two directions are
+  #       independent: permission to send is not permission to read. Without this
+  #       entry the SPA cannot quote the identifier of a failed request back to an
+  #       operator, so the one value that ties a client-visible failure to the
+  #       service log line for it is the value the client cannot obtain.
+  #       (3) Assumptions: `location` is what a report submission answers with, and
+  #       it is the only way the SPA learns which execution its request created.
+  #       Unreadable, the submission appears to succeed and the client has no handle
+  #       on the thing it started -- so the screen would have to poll a collection
+  #       and guess.
+  #       (4) Alternatives Considered: moving both values into the response BODY so
+  #       no header exposure is needed. Rejected because the correlation identifier
+  #       has to be available on a response whose body is not the service's to shape
+  #       -- an edge 401 from the authorizer, or the load balancer's own 404 -- and a
+  #       body-only convention would leave exactly the failing responses without it.
+  #       (5) Trade-offs: the list is closed rather than `"*"`. A wildcard is
+  #       ignored by browsers on a credentialed response, and every response here is
+  #       credentialed, so it would expose nothing while reading as permissive --
+  #       the same trap var.cors_allow_headers refuses a wildcard for. The accepted
+  #       cost is one line per header a client legitimately needs to read.
+  validation {
+    condition     = length(var.cors_expose_headers) > 0
+    error_message = "The cors_expose_headers list must hold at least one header name; with an empty list a browser can read none of this API's non-safelisted response headers, including the correlation identifier."
+  }
+
+  # WHY : Assumptions: the wildcard needs its OWN condition and cannot be left to
+  #       the shape check below, which was measured and does not catch it. The
+  #       asterisk is a legal HTTP token character -- it appears in the token class
+  #       that check uses -- so `["*"]` satisfies the shape check and reaches the
+  #       API, while the check's own message claims the wildcard is refused. A
+  #       validation whose message asserts a refusal it does not perform is worse
+  #       than no validation, because it invites a reader to trust it, so the
+  #       refusal is made explicit here and the shape check below now speaks only
+  #       to shape.
+  #       Assumptions: refusing it matters rather than being merely tidy. Every
+  #       response from this API is credentialed, and a browser IGNORES a wildcard
+  #       in Access-Control-Expose-Headers on a credentialed response. A wildcard
+  #       therefore exposes NOTHING while reading as maximally permissive -- the
+  #       SPA silently loses the correlation identifier it needs to quote a failed
+  #       request back to an operator, and the configuration gives no hint why.
+  #       Trade-offs: the comparison is lowercased and rejects a wildcard mixed in
+  #       with real names as well as one standing alone, because API Gateway
+  #       resolves the list as a whole -- a wildcard alongside two named headers is
+  #       the same trap wearing a disguise.
+  validation {
+    condition     = !contains([for header in var.cors_expose_headers : trimspace(lower(header))], "*")
+    error_message = "The cors_expose_headers list must not contain \"*\". Every response from this API is credentialed, and browsers ignore a wildcard in Access-Control-Expose-Headers on a credentialed response, so it would expose nothing rather than everything; name each header explicitly."
+  }
+
+  # WHY : Assumptions: the same shape check as var.cors_allow_headers, and for the
+  #       same reason -- it rejects a typo such as a stray space or a colon at plan
+  #       time rather than letting the browser silently drop the header and leave
+  #       the SPA unable to read a value that is present on the wire. Header names
+  #       are compared lowercased because HTTP header names are case-insensitive
+  #       and API Gateway echoes this list verbatim.
+  validation {
+    condition = alltrue([
+      for header in var.cors_expose_headers :
+      can(regex("^[a-z0-9!#$%&'*+.^_`|~-]+$", lower(header)))
+    ])
+    error_message = "Each cors_expose_headers entry must be a single HTTP header name made of token characters, with no spaces, colons or separators that are not valid in a token."
+  }
+
+  validation {
+    condition     = length(distinct([for header in var.cors_expose_headers : lower(header)])) == length(var.cors_expose_headers)
+    error_message = "The cors_expose_headers list must not repeat a header name, including two entries differing only in letter case: HTTP header names are case-insensitive."
+  }
+}
+
 
 # WHY : Alternatives Considered: exposing it as a variable. Rejected because
 #       the SPA authenticates with a bearer token in the `Authorization` header
@@ -861,8 +1222,6 @@ variable "access_log_kms_key_arn" {
   default     = null
   nullable    = true
 
-  # WHAT: nullable, defaulting to null -- the single deliberate exception to
-  #       this file's `nullable = false` policy.
   # WHY : (1) Alternatives Considered: making the key ARN required. Rejected
   #       because it would make a provisioned customer-managed key a
   #       precondition for standing up the edge at all, so the module could not
@@ -870,12 +1229,32 @@ variable "access_log_kms_key_arn" {
   #       Null is a meaningful value here rather than a missing one: main.tf
   #       resolves it conditionally and the group falls back to the
   #       service-managed key, which still encrypts the log data at rest.
-  #       (2) Trade-offs: the cost is that omitting the key succeeds quietly, so
-  #       an environment intended to use a customer-managed key can be applied
-  #       without one and nothing fails. Accepted because the environment roots
-  #       pass the key explicitly, and the alternative blocks every use of the
-  #       module without one. This is the same nullable-with-null-default shape
-  #       infra/bootstrap/variables.tf uses for its state-encryption key.
+  #       (2) Refactoring Rationale: the cost of a null default used to be
+  #       accepted here "because the environment roots pass the key explicitly".
+  #       That justification has been REMOVED because it was false, and its
+  #       falseness mattered: it was the only reason given for tolerating a
+  #       silent fallback. infra/envs/dev and infra/envs/prod contain nothing but
+  #       variables.tf and versions.tf -- no root passes this value, or any
+  #       value, because no root instantiates this module yet -- so nothing
+  #       anywhere required a customer-managed key for this group, and an
+  #       environment could be applied without one with no signal at all.
+  #       (3) Trade-offs: the gap is now closed where it matters instead of being
+  #       restated in prose. main.tf carries a `precondition` on
+  #       aws_cloudwatch_log_group.access requiring this input to be non-null
+  #       whenever `var.environment` is "prod", so prod cannot be applied without
+  #       a customer-managed key while dev remains usable without one. The
+  #       remaining cost is bounded and stated exactly: in DEV, omitting the key
+  #       still succeeds quietly and the group falls back to the CloudWatch Logs
+  #       service-managed key, which encrypts the data but leaves reading it an
+  #       ambient consequence of CloudWatch Logs read access rather than a
+  #       separately-revocable kms:Decrypt grant. That is the documented
+  #       exception, and it is scoped to the one environment where the data is
+  #       seed data rather than a production request history.
+  #       (4) Assumptions: this is the same nullable-with-null-default shape
+  #       infra/bootstrap/variables.tf uses for its state-encryption key, but it
+  #       is NOT the same posture -- bootstrap has no environment to key a
+  #       precondition on, whereas this module does, which is why the exception
+  #       is narrowed here and not there.
 }
 
 variable "throttling_burst_limit" {
@@ -924,6 +1303,7 @@ variable "throttling_rate_limit" {
     error_message = "The throttling_rate_limit value must be greater than zero; a zero steady rate never refills the burst bucket."
   }
 }
+
 
 variable "detailed_metrics_enabled" {
   description = "Whether the stage emits per-route CloudWatch metrics -- count, latency and 4XX/5XX broken out by route key -- in addition to the API-wide aggregates it emits regardless."
@@ -984,9 +1364,6 @@ variable "integration_tls_server_name" {
   type        = string
   nullable    = false
 
-  # WHAT: required and non-null. This variable is no longer an exception to this
-  #       file's `nullable = false` policy; `access_log_kms_key_arn` is now the
-  #       only one.
   # WHY : Refactoring Rationale: this input previously defaulted to null, and
   #       main.tf read null as "emit no `tls_config` block at all". The reasoning
   #       recorded for that -- that this module cannot see whether the listener's
@@ -1059,7 +1436,7 @@ variable "stage_name" {
   #       updates rather than blue-green or canary -- so the capability a named
   #       stage would add is one nothing here uses.
   validation {
-    condition     = length(trimspace(var.stage_name)) > 0
-    error_message = "The stage_name value must not be blank; use \"$default\" for a stage serving requests with no stage path segment."
+    condition     = var.stage_name == "$default"
+    error_message = "The stage_name value must be \"$default\" so published routes have no environment- or version-specific stage path segment."
   }
 }

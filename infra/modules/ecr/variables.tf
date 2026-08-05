@@ -321,27 +321,24 @@ variable "environment" {
 #       written as a literal here, because module outputs are the only
 #       sanctioned source of runtime identifiers in this package and a
 #       hard-coded key identifier would bind the module to one account.
-#       Trade-offs: null is a meaningful value rather than an error, so the
-#       module stays usable before any customer-managed key exists -- which
-#       matters because key creation and this module sit in the same apply. The
-#       accepted cost is that a caller who forgets to wire the key silently
-#       receives registry-managed `AES256` instead of failing; the mitigation
-#       is the infrastructure pipeline's policy scan, which asserts that
-#       encryption is configured at all.
+#       Alternatives Considered: retaining a null fallback to registry-managed
+#       AES256. Rejected because every complete root already creates the shared
+#       data key in the same graph, so the fallback converted a missing
+#       dependency into a successful but architecture-divergent repository.
 variable "kms_key_arn" {
-  description = "Customer-managed KMS key encrypting image layers at rest, supplied by the `kms` module's output through the calling root. Leave null to fall back to the registry's own `AES256` server-side encryption instead of failing."
+  description = "Exact customer-managed KMS key ARN encrypting image layers at rest, supplied by the `kms` module through the calling root. Registry-managed AES256 is deliberately not an accepted fallback."
   type        = string
 
-  # WHY : Assumptions: this is the one input in the file where null is a CHOICE
-  #       rather than an absence, which is why it is the one place `nullable`
-  #       is true. main.tf branches on exactly this value: non-null selects
-  #       `KMS` with the supplied key, null selects `AES256` and passes no key
-  #       at all, because the registry refuses a key handed to it alongside
-  #       `AES256`. Both settings are written out even though true is already
-  #       the language default, so that a reader cannot mistake a meaningful
-  #       null for an input somebody forgot to give a value.
-  default  = null
-  nullable = true
+  # Refactoring Rationale: the nullable AES256 path made CMK use depend on a
+  # caller remembering one optional argument. The complete environment roots
+  # always create the shared data key before these repositories, so the
+  # bootstrap-order rationale for that fallback no longer applies.
+  nullable = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-fA-F-]{36}$", var.kms_key_arn))
+    error_message = "kms_key_arn must be an exact customer-managed KMS key ARN. ECR encryption may not fall back to registry-managed AES256."
+  }
 }
 
 # WHY : Alternatives Considered: `MUTABLE`, rejected on two independent
@@ -376,7 +373,7 @@ variable "kms_key_arn" {
 #       this module cannot configure, and the resulting behaviour would be
 #       neither of the two documented here.
 variable "image_tag_mutability" {
-  description = "Whether an existing image tag may be repointed by a later push. `IMMUTABLE` binds each tag to one image digest permanently; `MUTABLE` lets a tag be moved."
+  description = "Repository tag-mutability mode. The module accepts only `IMMUTABLE`, binding every deployment tag permanently to one image digest in every environment."
   type        = string
 
   # WHY : Assumptions: the default is the decision, because neither environment
@@ -394,14 +391,14 @@ variable "image_tag_mutability" {
   #       anywhere to record that it happened.
   nullable = false
 
-  # WHY : Assumptions: the registry takes this value uppercase and rejects any
-  #       other spelling at `apply` time. The check is narrower than the
-  #       registry's own accepted set on purpose: it admits only the two modes
-  #       main.tf implements, excluding the exclusion-filter modes for the
-  #       reason given above the block.
+  # WHY : Assumptions: the registry takes this value uppercase and accepts
+  #       several mutability modes, but this module intentionally accepts only
+  #       `IMMUTABLE`. Conditional exclusion-filter modes are rejected for the
+  #       reason given above the block, and plain `MUTABLE` would defeat the
+  #       commit-addressed deployment contract.
   validation {
-    condition     = contains(["IMMUTABLE", "MUTABLE"], var.image_tag_mutability)
-    error_message = "image_tag_mutability must be exactly `IMMUTABLE` or `MUTABLE`, uppercase; those are the only two modes this module configures."
+    condition     = var.image_tag_mutability == "IMMUTABLE"
+    error_message = "image_tag_mutability must remain `IMMUTABLE`. Commit-addressed deployment tags cannot be repointed in either environment."
   }
 }
 
@@ -413,11 +410,11 @@ variable "image_tag_mutability" {
 #       workflow or the deployment workflow -- their absence is a consequence
 #       of this setting, not an omission, and a future reader who does not know
 #       that will add a redundant scanning step to CI.
-#       Trade-offs: the variable exists only so a caller can switch scanning
-#       off deliberately, which is why the default is the enabled state rather
-#       than the neutral one. Leaving it out entirely was the alternative and
-#       would have been simpler, but it would also have removed the caller's
-#       ability to record such a decision anywhere reviewable.
+#       Refactoring Rationale: the input is retained to make the registry-side
+#       control visible at every call site and in generated module docs, not to
+#       make the control optional. Hard-coding `true` in main.tf was the simpler
+#       alternative, but it would hide the invariant from the public contract;
+#       the validation below keeps that visibility while refusing `false`.
 variable "scan_on_push" {
   description = "Whether the registry scans each image for vulnerabilities server-side as it is pushed, with findings read from the registry rather than gated in the pushing pipeline."
   type        = bool
@@ -436,6 +433,14 @@ variable "scan_on_push" {
   #       nested block, in an error naming that block rather than the input
   #       that produced it.
   nullable = false
+
+  # Assumptions: scan-on-push is an architecture invariant, not a caller
+  # preference. Keeping the variable documents the registry-side control while
+  # this validation prevents a root from turning the control off.
+  validation {
+    condition     = var.scan_on_push
+    error_message = "scan_on_push must be true. Every repository is scanned by ECR when an image is pushed."
+  }
 }
 
 # WHY : Assumptions: the deployment workflow tags every image with its commit
@@ -494,12 +499,12 @@ variable "max_image_count" {
 #       that is what justifies expiring it on age while tagged images are
 #       bounded on count instead. One arises when a push uploads a manifest
 #       that never receives a tag -- an interrupted push, a build-cache
-#       manifest, or a child manifest of a multi-platform index -- or, where a
-#       caller has overridden `image_tag_mutability` to `MUTABLE`, when a tag
-#       is moved off the image it used to name. No container task definition
-#       can reference any of those, so the two rules in main.tf answer two
-#       different questions: how many deployable artifacts to keep, and how
-#       long to leave unreferenceable ones lying in the repository.
+#       manifest, or a child manifest of a multi-platform index. Immutable tags
+#       mean moving a tag off an image is deliberately not another source. No
+#       container task definition can reference those untagged manifests, so
+#       the two rules in main.tf answer two different questions: how many
+#       deployable artifacts to keep, and how long to leave unreferenceable
+#       ones lying in the repository.
 #       Trade-offs: a nonzero window rather than immediate deletion. Expiring
 #       at once would reclaim slightly sooner but would also erase the
 #       evidence of an aborted push before anyone could look at it, and would

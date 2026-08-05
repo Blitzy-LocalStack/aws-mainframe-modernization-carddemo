@@ -22,28 +22,21 @@
 #   docker build -t carddemo-migration:local .
 #   docker run --rm carddemo-migration:local --help
 #
-# State at this checkpoint:
-#   This file is authored ahead of most of the package it packages, and the
-#   migration lands its artifacts in plan order. `src/carddemo_migration/`
-#   currently holds exactly two modules, `__init__.py` and `config.py`; the
-#   `cli.py` module this image's ENTRYPOINT names, together with the `copybook/`,
-#   `readers/`, `loaders/` and `verify/` subpackages and this package's README,
-#   are authored at later indexes of the same plan. Measured consequences, so the
-#   two commands above are not read as a promise:
-#     - The BUILD succeeds. Both stages complete, the pinned closure installs,
-#       and the distribution installs into /opt/venv from the two modules present
-#       -- verified by building the wheel those instructions build and installing
-#       it, which produced an importable `carddemo_migration`.
-#     - The SMOKE TEST does not. `docker run ... --help` resolves ENTRYPOINT plus
-#       CMD to `python -m carddemo_migration.cli --help`, which exits 1 with
-#       `ModuleNotFoundError: No module named 'carddemo_migration.cli'`. That is
-#       the correct, loud failure for a missing module, not a defect in this file,
-#       and it turns green the moment `cli.py` lands.
-#   No instruction below is to be read as a claim that the CLI it names exists
-#   today. Every one of them is written now on purpose: ENTRYPOINT in exec form
-#   carrying only the invariant argv is an orchestration contract the batch state
-#   machine is written against, and changing that contract after the state machine
-#   exists is a breaking change rather than a completion.
+# Source boundary:
+#   pyproject.toml and the complete src/carddemo_migration tree are the wheel's
+#   build input. A whole-directory COPY ensures readers, loaders, verification
+#   code, and the CLI are discovered by the same package build rather than being
+#   inventoried here, so no count written into this file can fall out of date.
+#   ENTRYPOINT remains the stable orchestration contract: Step Functions appends
+#   per-run arguments to the invariant `python -m carddemo_migration.cli` prefix.
+# Trade-offs: that contract is written before the module it names. Until
+#   `cli.py` lands, `docker run ... --help` resolves ENTRYPOINT plus CMD to
+#   `python -m carddemo_migration.cli --help` and exits 1 with
+#   `ModuleNotFoundError`, which is the correct loud failure for a missing module
+#   rather than a defect in this file; the BUILD itself succeeds, because the
+#   wheel installs from whatever the src tree holds. Writing ENTRYPOINT now is
+#   deliberate: changing an orchestration contract after the batch state machine
+#   has been written against it is a breaking change rather than a completion.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: the base image is pinned by DIGEST as well as tag, for
@@ -179,9 +172,8 @@ RUN python -m venv /opt/venv
 #   instead of stating it once.
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# WHAT: the two build-time manifests on their own, ahead of any application
-#   source.
-# WHY : Trade-offs: this is the deliberate layer ordering, and an extra COPY
+# Trade-offs: copying build manifests ahead of application source preserves the
+#   dependency layer across ordinary source edits. An extra COPY
 #   instruction is what it costs. A build invalidates every layer from the
 #   first one whose inputs changed onwards, so copying the source first would
 #   re-run the entire dependency install on every edit to a reader or a codec
@@ -241,18 +233,15 @@ RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r requireme
 #   `where = ["src"]` -- so the directory below is the whole importable tree
 #   and there is nothing further to bring in for the build. pyproject.toml
 #   declares neither a `readme` nor a `license` file, which is what allows
-#   these two paths alone to constitute a buildable source distribution --
-#   verified by building the wheel rather than assumed. "Complete" here means
-#   complete as BUILD INPUT: pyproject.toml plus the src tree are everything the
-#   backend needs, with no third path to remember. It says nothing about how many
-#   modules that src tree currently holds, which at this checkpoint is two; see
-#   State at this checkpoint in the header.
+#   these two paths alone to constitute a buildable source distribution.
+#   "Complete" means complete as build input: pyproject.toml plus the entire src
+#   tree, including copybook/layouts.py, are everything the backend needs.
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-# WHAT: build the wheel with a hash-verified backend that never enters the
-#   shipped environment, then install that wheel offline.
-# WHY : Refactoring Rationale: this was one instruction, `pip install --no-deps .`,
+# Refactoring Rationale: the wheel is built with a hash-verified backend that
+#   never enters the shipped environment, then installed offline. The prior
+#   `pip install --no-deps .`
 #   and it left the build's own supply chain unverified. An ordinary PEP 517
 #   install resolves the build backend named in pyproject.toml into an isolated
 #   environment by fetching it from the network -- previously at an unbounded
@@ -295,9 +284,8 @@ RUN python -m venv /opt/build \
  && pip install --no-cache-dir --no-deps --no-index \
       --find-links /tmp/wheel carddemo-migration
 
-# WHAT: the AWS-published Aurora certificate bundle, verified against a pinned
-#   digest, staged for the runtime stage to adopt.
-# WHY : Assumptions: this file is REQUIRED, not optional. The ETL connects with
+# Assumptions: the AWS-published Aurora certificate bundle is required and is
+#   verified against a pinned digest before the runtime stage adopts it. The ETL connects with
 #   `sslmode=verify-full` and an explicit `sslrootcert`, and
 #   src/carddemo_migration/config.py resolves that path from
 #   DEFAULT_SSL_ROOT_CERT -- the literal target below -- and REFUSES to produce
@@ -467,8 +455,8 @@ WORKDIR /opt/carddemo
 #   quietly break.
 # -----------------------------------------------------------------------------
 
-# WHAT: adopt the builder's RUNTIME virtual environment, left owned by root.
-# WHY : Trade-offs: no `--chown` is applied, so the account that runs the ETL
+# Trade-offs: the builder's runtime environment remains root-owned; no `--chown`
+#   is applied, so the account that runs the ETL
 #   can read and execute the installed code but cannot modify it. Handing
 #   ownership to that account is the more common idiom and buys nothing here,
 #   because nothing in a single-shot run writes to its own installation; what
@@ -483,8 +471,8 @@ WORKDIR /opt/carddemo
 #   actually imports rather than on tooling it never runs.
 COPY --from=builder /opt/venv /opt/venv
 
-# WHAT: the verified Aurora certificate bundle, at the exact path the ETL resolves.
-# WHY : Assumptions: the destination is the literal value of DEFAULT_SSL_ROOT_CERT
+# Assumptions: the verified Aurora certificate bundle is copied to the literal
+#   DEFAULT_SSL_ROOT_CERT path
 #   in src/carddemo_migration/config.py. The two must agree, and the coupling is
 #   one-directional and fails closed: resolve_ssl_root_cert() confirms the file
 #   exists and is readable and raises a named configuration error otherwise, so a
@@ -500,8 +488,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /tmp/aws-rds-global-bundle.pem \
                     /etc/ssl/certs/aws-rds-global-bundle.pem
 
-# WHAT: the schema-and-role bootstrap and the verification queries.
-# WHY : Assumptions: these are data files sitting outside the src layout, so
+# Assumptions: the schema bootstrap and verification queries sit outside the src layout, so
 #   the package install cannot carry them and they have to be copied in their
 #   own right. They belong in the image because it is the only component in the
 #   migrated stack holding both a database connection and that bootstrap, so
@@ -510,29 +497,7 @@ COPY --from=builder /tmp/aws-rds-global-bundle.pem \
 #   the cutover reproducible from the infrastructure definition alone.
 COPY sql/ ./sql/
 
-# -----------------------------------------------------------------------------
-# HEALTHCHECK is deliberately ABSENT.
-# -----------------------------------------------------------------------------
-# WHY : Alternatives Considered: a lightweight probe -- importing the package,
-#   or running the CLI's --help -- was considered and rejected, for two reasons
-#   of which the second is the stronger. A container health check describes a
-#   long-running process, whereas this one runs to completion and the batch
-#   orchestrator observes the task's terminal state and exit code through its
-#   synchronous run-task integration, a signal no periodic probe contributes
-#   to. More decisively, the only question such a probe could answer is whether
-#   the interpreter still imports the package, so it would report healthy for
-#   the whole run -- including while a load was failing -- and would advertise
-#   a liveness guarantee this image does not provide, which is worse than
-#   advertising none. That structural check IS worth having, and it belongs in
-#   continuous integration as a one-shot assertion that `--help` exits zero,
-#   where a failure blocks the image from being published rather than being
-#   sampled and discarded at run time. That assertion has no home yet: the
-#   workflow that would carry it is authored at a later index of the same plan,
-#   and until `cli.py` lands the assertion would fail by design, for the reason
-#   recorded in State at this checkpoint in the header.
-# -----------------------------------------------------------------------------
-
-# WHY : Assumptions: dropping privilege BEFORE the entry point is what makes
+# Assumptions: dropping privilege before the entry point makes
 #   the unprivileged account the one the process actually runs as; a USER
 #   placed after ENTRYPOINT would be parsed but would not change the running
 #   identity. The numeric form is used rather than the account name so that a
@@ -541,51 +506,19 @@ COPY sql/ ./sql/
 # -----------------------------------------------------------------------------
 # HEALTHCHECK: a structural import probe, not a liveness claim.
 # -----------------------------------------------------------------------------
-# WHAT: import the installed package in a subprocess and exit non-zero if the
-#   import fails. No network, no database, no object store, no CLI parsing.
-# WHY : Refactoring Rationale: this instruction was previously OMITTED, with the
-#   argument that a health check describes a long-running process while this
-#   image runs to completion, and that a probe answering only "does the package
-#   still import" would advertise a liveness guarantee the image cannot provide.
-#   Both halves of that are true and neither one supports omission, because the
-#   premise it rests on is wrong: an image-level HEALTHCHECK is NOT what the
-#   batch orchestrator reads. Amazon ECS takes its container health check from
-#   the task definition's own `healthCheck` field and ignores the one baked into
-#   the image, and the batch task definition declares none -- the state machine
-#   observes the task's terminal state and exit code through the synchronous
-#   run-task integration, exactly as the earlier note said. So this instruction
-#   cannot keep a one-shot task alive, cannot delay its completion, and cannot
-#   displace exit-status monitoring: on the deployed path it is inert.
-#   Where it is NOT inert is every other runtime that reads image metadata --
-#   `docker run`, Compose, a local smoke test, a registry scan -- and there its
-#   presence is what the frozen Dockerfile requirement asks for: a multi-stage
-#   build, a non-root user, and a health check. The requirement is not satisfied
-#   by an argument for why one is unnecessary.
-#   Assumptions: the probe is deliberately the WEAKEST useful one. Importing
-#   `carddemo_migration` exercises the interpreter, the virtual environment on
-#   PATH, and the installed distribution's own import graph -- which is precisely
-#   the class of failure a broken image has (a wheel that did not install, a
-#   stage-copy that missed the environment, a Python that cannot find it) and
-#   which no amount of correct configuration can mask. It answers nothing about
-#   whether a load is succeeding, and it is not intended to: `--interval` and
-#   `--retries` are set so a run-to-completion container reports its status once
-#   and quickly rather than being sampled repeatedly.
-#   Alternatives Considered: probing the CLI's `--help`, which exercises argument
-#   parsing as well. Rejected because `--help` writes to standard output and
-#   exits through argparse's own SystemExit path, so a probe would either pollute
-#   the container's log stream on every interval or need a shell redirect, and
-#   the exec form is preferred here for the same reason it is on ENTRYPOINT.
-#   Alternatives Considered: a probe that opens a database connection or reads a
-#   parameter. Rejected outright: it would make container health depend on
-#   another service's availability, so a transient Aurora failover would mark a
-#   healthy image unhealthy, and it would need credentials at probe time.
+# Refactoring Rationale: this structural probe imports the installed package
+#   without network, database, object-store, or CLI dependencies. ECS batch
+#   orchestration still judges the one-shot task by terminal state and exit code.
+# Alternatives Considered: probing CLI help would write on every interval;
+#   probing Aurora or Parameter Store would confuse dependency availability with
+#   image integrity and require credentials.
 # -----------------------------------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=2 \
     CMD ["python", "-c", "import carddemo_migration"]
 
 USER 10001:10001
 
-# WHY : Assumptions: this is an orchestration contract with the batch state
+# Assumptions: this is an orchestration contract with the batch state
 #   machine. The `StageSeedDatasets` Map state starts one synchronous container
 #   task per dataset via `ecs:runTask.sync` and supplies that task's arguments
 #   as a container override, which REPLACES CMD and is APPENDED to ENTRYPOINT.
@@ -595,30 +528,16 @@ USER 10001:10001
 #   `/bin/sh -c`, which both leaves the interpreter a child that never receives
 #   the stop signal directly and turns an appended override into text handed to
 #   a shell rather than discrete argv elements.
-# WHY : Alternatives Considered: pyproject.toml also declares a console script,
+# Alternatives Considered: pyproject.toml also declares a console script,
 #   and naming it here was rejected. The module form is the one that file
 #   documents for exactly this case, because a `python -m` argv is valid
 #   whether or not the installed distribution's generated script wrappers are
 #   present on PATH, whereas a bare script name silently depends on them.
-# WHY : Assumptions: the module this names is authored at a later index of the
-#   same plan, so today this ENTRYPOINT resolves to an import that fails with
-#   ModuleNotFoundError and exit 1. It is written now, unchanged, because the
-#   argv split between ENTRYPOINT and a container override is the contract the
-#   batch state machine is authored against; both spellings fail identically
-#   while the module is absent, so there is nothing to be gained by deferring the
-#   choice and a contract to lose.
+# Assumptions: carddemo_migration.cli is the required module entry point and must
+#   preserve the argv split expected by Step Functions container overrides.
 ENTRYPOINT ["python", "-m", "carddemo_migration.cli"]
 
-# WHAT: a default argument list, so a bare `docker run` is informative.
-# WHY : Assumptions: `--help` is chosen because it is the one argument the CLI is
-#   to be guaranteed to accept, which also makes it the argument this default can
-#   keep across every later change to the subcommand set. The catalogue of
-#   subcommands belongs to this package's README, and naming one here would create
-#   a second place for that contract to be stated and to drift out of step.
-#   Neither the CLI nor that README exists at this checkpoint, so a bare
-#   `docker run` today is informative about the missing module rather than
-#   about the subcommands; see State at this checkpoint in the header. This
-#   default is never what the batch orchestrator runs, since its container
-#   override replaces CMD outright, so it documents the image for a human rather
-#   than configuring it for production.
+# Assumptions: `--help` is the stable, non-mutating default for a human-run
+#   container. Step Functions replaces CMD with per-dataset arguments, so this
+#   default does not configure production execution.
 CMD ["--help"]

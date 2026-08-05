@@ -34,14 +34,14 @@
 # Parameters:
 #   None, and the absence is deliberate rather than a section omitted. An
 #   outputs.tf declares no `variable`, so this file accepts no input of its
-#   own. The module's twenty-six inputs are declared in
+#   own. The module's twenty-eight inputs are declared in
 #   infra/modules/aurora-postgresql/variables.tf, each with its own `type`,
-#   `description` and `validation` there. Exactly one of them --
+#   `description` and `validation` there. Exactly ONE of them --
 #   var.security_group_ids -- is read below in preference to a resource
-#   attribute, and the reasoning for that one exception sits on its block.
+#   attribute, and the reasoning for that exception sits on its own block.
 #
 # Returns:
-#   Ten values, in four groups, in the order they appear below:
+#   Twelve values, in five groups, in the order they appear below:
 #
 #     Connection ......... writer_endpoint, reader_endpoint, port,
 #                          database_name
@@ -49,8 +49,10 @@
 #                          cluster_resource_id
 #     Network placement .. db_subnet_group_name, security_group_ids
 #     Credential ......... master_user_secret_arn
+#     Parameter Store .... connection_parameter_arns,
+#                          connection_parameter_names
 #
-#   Every one of the ten is a host name, a port, a name, an identifier or an
+#   Every one of the twelve is a host name, a port, a name, an identifier or an
 #   ARN. Not one of them is a credential, and that distinction is the entire
 #   design of the fourth group rather than a happy accident.
 #
@@ -82,19 +84,19 @@
 #   two surprises a consumer can walk into, recorded here because neither is
 #   visible from an output's name:
 #
-#     1. Five of the ten are unknown until apply, and which five was measured
+#     1. Four of the ten are unknown until apply, and which four was measured
 #        against a plan of this module rather than assumed. The values AWS
-#        assigns -- writer_endpoint, reader_endpoint, cluster_arn,
-#        cluster_resource_id and master_user_secret_arn -- cannot exist before
-#        the cluster does, so a plan renders each as "known after apply". A
-#        caller may pass them into another resource's arguments freely, but
-#        may not use them in a `count`, a `for_each` or a provider
-#        configuration, each of which Terraform requires to resolve during
-#        plan. The other five -- port, database_name, cluster_identifier,
-#        db_subnet_group_name and security_group_ids -- do resolve during
+#        assigns -- writer_endpoint, reader_endpoint, cluster_arn and
+#        cluster_resource_id -- cannot exist before the cluster does, so a plan
+#        renders each as "known after apply". A caller may pass them into
+#        another resource's arguments freely, but may not use them in a
+#        `count`, a `for_each` or a provider configuration, each of which
+#        Terraform requires to resolve during plan. The other six -- port,
+#        database_name, cluster_identifier, db_subnet_group_name,
+#        security_group_ids and master_user_secret_arn -- do resolve during
 #        plan, because each is an input or is composed from one, and
-#        security_group_ids is read from the input precisely to keep it in
-#        that group.
+#        security_group_ids and master_user_secret_arn are both read from the
+#        input precisely to keep them in that group.
 #     2. reader_endpoint resolves to the writer. Aurora publishes a reader
 #        endpoint whether or not a reader instance exists, and this module
 #        provisions exactly one instance. A consumer treating that address as
@@ -130,7 +132,10 @@
 #     IAM policy this module does not grant. Redacting it would hide WHICH
 #     secret is being wired to WHICH task role -- exactly the fact a reviewer
 #     of a least-privilege grant has to check -- while protecting nothing,
-#     because the ARN is in state either way.
+#     because the ARN is in state either way. Note that the credential VALUE is
+#     a different matter and is treated differently: main.tf reads it through a
+#     data source and hands it to the cluster's master_password, so it is in
+#     state, and no output below exposes it.
 #   - Alternatives Considered: composing the connection details into a single
 #     ready-made JDBC or libpq URL and publishing that instead of the four
 #     separate connection values. Rejected on two grounds. A useful URL is one
@@ -433,16 +438,15 @@ output "security_group_ids" {
 output "master_user_secret_arn" {
   description = <<-EOT
     ARN of the Secrets Manager secret that RDS created and manages for the
-    cluster's master credential. This is a REFERENCE to where the credential
-    lives -- never the credential, which appears in no output, no variable,
-    no plan and no state entry of this module. The environment root uses it
-    to grant a task role secretsmanager:GetSecretValue on this one secret,
-    together with kms:Decrypt on the same customer-managed key that encrypts
-    the cluster; both grants are required, because the secret is encrypted
-    with that key. This is the secret that unlocks the cluster -- NOT the
-    pre-created secret supplied as var.master_credential_secret_arn, which
-    this module reads only to check that the key and the secret share one
-    partition, region and account. Consumers resolve the value at runtime
+    cluster's master credential. This is the ONLY master credential in the
+    stack: RDS owns it, and no sibling module creates a second one. It is a
+    REFERENCE to where the credential lives -- never the credential, which
+    appears in no output, no variable, no plan and no state entry of this
+    module. The environment root uses it to grant a task role
+    secretsmanager:GetSecretValue on this one secret, together with
+    kms:Decrypt on var.secrets_kms_key_arn, the key that encrypts it -- both
+    grants are required, and the second key is deliberately the secrets key
+    rather than the cluster's data key. Consumers resolve the value at runtime
     from Secrets Manager, never from Terraform state. Unknown until apply.
   EOT
 
@@ -457,17 +461,16 @@ output "master_user_secret_arn" {
   #       inside AWS, rotates it there, and this module never sees it, which
   #       is what makes the no-secrets-in-source constraint structurally true
   #       instead of dependent on a reviewer noticing.
-  # WHY : Alternatives Considered: publishing var.master_credential_secret_arn
-  #       instead, or in addition. Rejected because only one of the two
-  #       secrets actually opens the cluster and publishing both would invite
-  #       a grant on the wrong one -- a task role holding
-  #       GetSecretValue on the pre-created secret would read a value the
-  #       cluster does not accept, and the failure would look like a wrong
-  #       password rather than a wrong secret. main.tf sets
-  #       manage_master_user_password, so RDS owns the live credential and
-  #       this attribute is the only reference to it; the input ARN is used
-  #       solely by the cluster's precondition and is left unexported for
-  #       that reason.
+  # WHY : Refactoring Rationale: there used to be a SECOND candidate for this
+  #       output -- an input named `master_credential_secret_arn`, naming a secret
+  #       the sibling secrets module generated -- and publishing either one was a
+  #       trap, because only the RDS-managed value actually opens the cluster. A
+  #       task role granted GetSecretValue on the other secret would read a
+  #       credential the cluster does not accept, and the failure would present as
+  #       a wrong password rather than as a wrong secret. That input and that
+  #       duplicate secret are both gone: `manage_master_user_password` makes RDS
+  #       the sole owner, so this attribute is the only reference there is, and
+  #       there is no longer a second one for a grant to be pointed at by mistake.
   # WHY : Assumptions: the index read is safe because main.tf sets
   #       manage_master_user_password to a literal true rather than to a
   #       variable, so the provider always populates exactly one element of
@@ -477,4 +480,14 @@ output "master_user_secret_arn" {
   #       is the failure mode to prefer for a value that gates access to the
   #       data tier.
   value = aws_rds_cluster.this.master_user_secret[0].secret_arn
+}
+
+output "connection_parameter_arns" {
+  description = "Map keyed by host, port and database containing the exact SSM parameter ARNs published under <parameter_prefix>/<environment>/aurora/."
+  value       = { for name, parameter in aws_ssm_parameter.connection : name => parameter.arn }
+}
+
+output "connection_parameter_names" {
+  description = "Map keyed by host, port and database containing the canonical SSM parameter names consumed by the ETL configuration resolver."
+  value       = { for name, parameter in aws_ssm_parameter.connection : name => parameter.name }
 }

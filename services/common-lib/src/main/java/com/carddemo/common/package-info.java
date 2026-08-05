@@ -9,8 +9,8 @@
  * not the set of files present beside this one today. The migration lands its
  * artifacts in plan order and this charter is authored first, so at the checkpoint
  * that authored it this directory holds this charter and the eight subpackages
- * named below, and exactly one production class exists across all of them:
- * {@code TimestampFormatter} in {@code time}. A type or test named below that has
+ * named below, and twenty of the twenty-one production classes now exist across
+ * them; the one outstanding is {@code FixedWidthCodec} in {@code codec}. A type or test named below that has
  * no file yet is therefore <b>planned</b>, not missing, and a count below is a
  * target total rather than a measurement of the directory.</p>
  *
@@ -86,7 +86,22 @@
  * domain, transfer-object or mapper package, and no configuration package
  * either. {@code MetricsConfig} consequently sits under {@code observability},
  * beside the concern it configures, rather than in a configuration package of
- * its own. The cost is that a reader hunting for configuration by name has to
+ * its own.
+ *
+ * <p>Refactoring Rationale: this root holds exactly ONE production class,
+ * {@code CardDemoCommonAutoConfiguration}, and an earlier revision held none. It
+ * is here rather than in any of the eight because it registers components from
+ * FOUR of them -- the correlation filter from {@code web}, the meter filter from
+ * {@code observability}, the codec module from {@code money} and the error advice
+ * from {@code error} -- so placing it in one of the four would put that package
+ * in charge of three it does not own. It exists at all because those components
+ * were being written and then instantiated by nothing: a service scans its own
+ * bounded context's root, never this module's, so each shared component was
+ * compiled, tested and left out of every running context. The symptom was silent
+ * rather than loud -- log lines with no correlation identity, meters with no
+ * service dimension, failed requests rendered in the framework's own shape -- and
+ * an alternative that required each of the eight services to import them
+ * explicitly would have left the same omission possible eight times over. The cost is that a reader hunting for configuration by name has to
  * know the concern first. The gain is that all eight subpackage names are
  * contracts rather than seven contracts and one bucket, so the question "which
  * subpackage does this belong in" keeps a definite answer as the tree grows.
@@ -96,47 +111,46 @@
  * <h2>The count canon</h2>
  *
  * <p><b>These are target totals, not a measurement of the tree.</b> The plan assigns
- * this module <b>17 production classes</b> and <b>9</b> package charter files, for
- * <b>26</b> compilation units when it is complete. At the checkpoint that authored
- * this charter the module holds the 9 charters and exactly <b>1</b> production class,
- * {@code TimestampFormatter} under {@code time}, for 10 compilation units; the other
- * 16 production classes are authored at later indexes of the same plan. The breakdown
+ * this module <b>21 production classes</b> and <b>9</b> package charter files, for
+ * <b>30</b> compilation units when it is complete. The module now holds the 9 charters
+ * and <b>20</b> of those production classes, for 29 compilation units; the one
+ * outstanding class is {@code FixedWidthCodec} under {@code codec}, authored at a
+ * later index of the same plan. The breakdown
  * is arithmetic rather than opinion, and it is recorded here so that a later reader
  * can tell a class that has not landed yet from a class that was never planned:
  *
  * <pre>
  * package             production classes   charter   compilation units   landed
- * common (this root)                   0         1                   1      1/1
- * common.money                         2         1                   3      1/3
- * common.codec                         5         1                   6      1/6
- * common.error                         3         1                   4      1/4
- * common.web                           2         1                   3      1/3
- * common.security                      1         1                   2      1/2
- * common.observability                 1         1                   2      1/2
+ * common (this root)                   1         1                   2      2/2
+ * common.money                         2         1                   3      3/3
+ * common.codec                         5         1                   6      5/6
+ * common.error                         3         1                   4      4/4
+ * common.web                           3         1                   4      4/4
+ * common.security                      3         1                   4      4/4
+ * common.observability                 1         1                   2      2/2
  * common.time                          1         1                   2      2/2
- * common.validation                    2         1                   3      1/3
+ * common.validation                    2         1                   3      3/3
  * </pre>
  *
  * <p>The first three numeric columns are the target. The fourth is what exists at
  * this checkpoint over that target, so a reader can see at a glance that
- * {@code time} is complete and the other eight packages hold their charter alone.
- * Its column total is 10 of 26.
+ * {@code codec} is the only package short of its target. Its column total is 29 of 30.
  *
  * <p>Read down the table. Cross-check by production class:
- * 2 + 5 + 3 + 2 + 1 + 1 + 1 + 2 = 17, the root contributing none. Cross-check by
- * compilation unit: 1 + 3 + 6 + 4 + 3 + 2 + 2 + 2 + 3 = 26. Both totals agree,
+ * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30. Both totals agree,
  * and this file is one of the nine charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>17 production classes
- * across 8 subpackages, in 26 compilation units, of which 9 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>21 production classes
+ * across 8 subpackages and the root, in 30 compilation units, of which 9 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage from the
  * enumerated target tree, and both cross-checks above re-derive them
  * independently, by class and by compilation unit. The total and the breakdown
  * are stated together for that reason: a bare total invites a reader to trust
  * it, whereas a breakdown lets a reader re-derive it and reject any figure that
- * does not add up. Any class count for this package other than 17 fails both
+ * does not add up. Any class count for this package other than 18 fails both
  * sums and is wrong.
  *
  * <h2>The dependency arrow points inward only</h2>
@@ -499,7 +513,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 17 target production classes. Neither substitutes for
+ * the architecture rules for the 21 target production classes. Neither substitutes for
  * the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

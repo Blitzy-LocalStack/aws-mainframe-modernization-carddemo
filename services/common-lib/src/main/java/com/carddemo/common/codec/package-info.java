@@ -2,24 +2,6 @@
  * Owns the copybook anti-corruption layer: the one place in the migrated Java
  * that is allowed to know how a COBOL record is physically laid out.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> This package owns the five contracts that translate
  * between the reference baseline's fixed-width record bytes and the clean
  * domain types every service downstream consumes. It is the only place in the
@@ -262,22 +244,36 @@
  * themselves bytes:
  *
  * <pre>
- * payload   fields   declared   delimiters   on the wire   source
- * request       18   153        17 commas    170           CCPAURQY.cpy lines 19 to 36
- * reply          6    57         6 commas     63           CCPAURLY.cpy lines 19 to 24
+ * payload   fields   emitted   delimiters   on the wire   source
+ * request       18   152       17 commas    169           CCPAURQY.cpy lines 19 to 36, and
+ *                                                         COPAUA0C.cbl line 63 for field 9
+ * reply          6    57        6 commas     63           CCPAURLY.cpy lines 19 to 24
  * </pre>
+ *
+ * <p>Assumptions: the request's emitted sum is 152 and not the 153 its copybook
+ * declares, because its ordinal-nine money token is emitted at THIRTEEN
+ * characters -- the width of the receiving field
+ * {@code WS-TRANSACTION-AMT-AN PIC X(13)} at line 63 of {@code COPAUA0C.cbl},
+ * into which the {@code UNSTRING} at line 364 places that token before line 376
+ * converts it with {@code FUNCTION NUMVAL}. Emitting the copybook's fourteen
+ * loses the final character to an alphanumeric move and divides the cents by
+ * ten, silently. The 169 is this codec's own emission rather than an observed
+ * producer contract: the reference intake is delimiter-driven and imposes no
+ * total length, and no request producer exists in the repository.
  *
  * <p>Assumptions: the reply carries six commas for six fields, one of them
  * trailing, which is why its wire length is 63 and not 62. A decoder that splits
  * on the delimiter and then rejects a trailing empty element would reject every
  * well-formed reply the baseline produces.
  *
- * <p>The correlation key across the pair is the card number of sixteen
+ * <p>The business tuple across the pair is the card number of sixteen
  * characters followed by the transaction identifier of fifteen, thirty-one
- * characters in total, and it is what matches a reply to its request. Both
- * fields lead each payload -- lines 21 and 36 of the request copybook, lines 19
- * and 20 of the reply copybook -- so the key is readable without decoding the
- * remainder of either message.
+ * characters in total. Before it becomes transport metadata,
+ * {@code CsvAuthCodec} converts that tuple to a purpose-scoped opaque HMAC
+ * token; the raw tuple remains inside the encrypted payload. Both fields lead
+ * each payload -- lines 21 and 36 of the request copybook, lines 19 and 20 of
+ * the reply copybook -- so the codec can derive the same token without decoding
+ * the remainder of either message.
  *
  * <p>Alternatives Considered: a JSON envelope for these two payloads was
  * evaluated and is offered additively for new consumers, never as a replacement.
@@ -545,39 +541,39 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's target inventory is <b>17 production classes</b> and <b>9</b> package
- * charter files, for <b>26</b> compilation units in total:
+ * <p>The shared kernel's target inventory is <b>21 production classes</b> and <b>9</b> package
+ * charter files, for <b>30</b> compilation units in total:
  *
  * <pre>
  * package             production classes   charter   compilation units
- * common (root)                        0         1                   1
+ * common (root)                        1         1                   2
  * common.money                         2         1                   3
  * common.codec                         5         1                   6
  * common.error                         3         1                   4
- * common.web                           2         1                   3
- * common.security                      1         1                   2
+ * common.web                           3         1                   4
+ * common.security                      3         1                   4
  * common.observability                 1         1                   2
  * common.time                          1         1                   2
  * common.validation                    2         1                   3
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 2 + 5 + 3 + 2 + 1 + 1 + 1 + 2 = 17, the root contributing none. Cross-check by
- * compilation unit: 1 + 3 + 6 + 4 + 3 + 2 + 2 + 2 + 3 = 26. Both sums agree, and
+ * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30. Both sums agree, and
  * this file is one of the nine charters. Each sum is kept whole on one line so
  * that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>17 production classes
- * across 8 subpackages, in 26 compilation units, of which 9 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>21 production classes
+ * across 8 subpackages and the root, in 30 compilation units, of which 9 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *
  * <p>This package's own share of that canon is <b>five production classes plus
  * this charter, so exactly six compilation units in {@code codec}, no more and
  * no fewer</b>. There are no subpackages beneath it. Stating the closed figure
- * here is what lets a later reader tell a class that is missing from a class
- * that was never planned.
+ * here is what lets a reader tell a class absent from the module from one the
+ * contract never admitted.
  *
  * <h2>Boundaries: the dependency arrow points inward only</h2>
  *
@@ -596,9 +592,13 @@
  * service's types would not be a shared contract, it would be that service's
  * code living in the wrong module.
  *
- * <p>Assumptions: layering has exactly one owner, the architecture test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
- * and it is a test precisely so that it cannot rot into a comment nobody runs.
+ * <p>Assumptions: layering has one configured enforcement site: the
+ * {@code architecture-rules} Surefire execution declared in
+ * {@code services/pom.xml}, which scans the shared kernel's test artifact into
+ * every module and selects the layering rules by the simple name
+ * {@code LayeringRulesTest}. This charter states the boundary that execution
+ * must enforce without claiming that configuration alone proves a rules class
+ * is present.
  *
  * <p>Alternatives Considered: the documentation ruleset's own import-restriction
  * check was evaluated for the same job and rejected, so that a second owner
@@ -621,10 +621,15 @@
  * shapes {@code CopybookLayout} directly. Layout descriptors are declared in
  * Java code and are never loaded from a resource file. A resource-driven
  * descriptor would be the more configurable design and was rejected for two
- * reasons: this module has no resources directory to put one in, and a layout
- * read at run time cannot be checked at compile time, so a typo in an offset
- * would surface as a decoding failure in a running service instead of as a build
- * failure on a developer's machine. Configurability is the wrong goal here in
+ * reasons. The first is that a layout read at run time cannot be checked at
+ * compile time, so a typo in an offset would surface as a decoding failure in a
+ * running service instead of as a build failure on a developer's machine. The
+ * second is that the module's resources directory holds exactly two entries --
+ * the auto-configuration registration file the framework requires by name, and
+ * the shared configuration defaults a service imports deliberately -- and
+ * neither is a place a data contract belongs: a layout there would be
+ * overridable by a consumer's own classpath, which is precisely the property a
+ * record contract must not have. Configurability is the wrong goal here in
  * any case -- the layouts are pinned by a baseline that does not change.
  *
  * <h2>The documentation contract this package is held to</h2>

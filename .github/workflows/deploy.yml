@@ -1,0 +1,297 @@
+# =============================================================================
+# .github/workflows/deploy.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Uses short-lived OIDC credentials to provision the selected environment's
+#   ECR repositories, build and push ten immutable images, apply the reviewed
+#   complete Terraform plan, and publish the SPA bundle. It never tears down an
+#   environment, never applies infra/bootstrap, and never performs blue-green or
+#   canary traffic shifting.
+#
+# Parameters:
+#   workflow_dispatch.environment selects dev or prod; image_tag optionally
+#   overrides the default commit-SHA artifact identity.
+# Return values:
+#   Registry bootstrap, every build/push, Terraform init/plan/apply, SPA publish,
+#   and audit-artifact presence are GATING. Version displays alone are advisory.
+# Exceptions or errors:
+#   A partial infrastructure operation remains protected by the remote state lock
+#   and is never cancelled in progress. Production additionally waits on its
+#   GitHub environment approval policy.
+#
+# WHY (non-obvious design decisions):
+#   - Refactoring Rationale: CBADMCDJ.jcl required a manual destructive delete
+#     before rerun; saved Terraform plans converge idempotently under one state lock.
+#   - Trade-offs: deployments queue per environment rather than cancelling,
+#     preventing an interrupted state mutation from becoming a second incident.
+#   - Alternatives Considered: stored cloud access keys. Rejected because OIDC
+#     sessions are short-lived and bound to this repository and run.
+# =============================================================================
+
+name: CardDemo Deploy
+
+# Assumptions: deployment is an explicit operator action. pull_request is absent
+# so untrusted fork code can never request the account-mutating OIDC role.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy; the prod GitHub environment must require approval."
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+      image_tag:
+        description: "Immutable image tag override; blank uses the reviewed commit SHA."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Refactoring Rationale: the mainframe deployment utility took exclusive
+# CSD(READWRITE) access. The DynamoDB state lock is the cloud equivalent, so a
+# running deployment is allowed to finish and later requests queue by environment.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build artifacts and deploy ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      # Assumptions: id-token is the sole mechanism that lets the official AWS
+      # action exchange a signed per-run token for temporary role credentials.
+      id-token: write
+
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assumptions: Node is required to produce ui/dist for S3 publication.
+      # npm's cache is scoped by the reviewed lock rather than by a mutable branch.
+      - name: Configure the reviewed Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Assumptions: this full-SHA official action receives the OIDC token and
+      # no stored access key. Account-id masking prevents identity metadata from
+      # being copied from logs into unrelated diagnostics.
+      - name: Configure short-lived AWS deployment credentials
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.CARDDEMO_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.CARDDEMO_AWS_REGION }}
+          role-session-name: carddemo-deploy-${{ inputs.environment }}
+          mask-aws-account-id: true
+
+      # Assumptions: Terraform 1.15.8 is the reviewed CLI, and a literal digest
+      # protects the direct download without an action wrapper that rewrites exits.
+      - name: Install checksum-pinned Terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.15.8"
+          archive="terraform_${version}_linux_amd64.zip"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://releases.hashicorp.com/terraform/${version}/${archive}"
+          printf '%s  %s\n' "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d" "$RUNNER_TEMP/$archive" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/$archive" -d "$RUNNER_TEMP/terraform-bin"
+          echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+          terraform version
+          aws --version
+          docker --version
+
+      # Assumptions: the tracked tfvars carries sizing and retention only.
+      # Account-specific identifiers are injected from the protected GitHub
+      # environment into an untracked auto-tfvars file that is deleted at the end.
+      - name: Materialize non-secret deployment inputs
+        shell: bash
+        env:
+          PERMISSIONS_BOUNDARY_ARN: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
+          ROUTE53_ZONE_ID: ${{ vars.CARDDEMO_ROUTE53_ZONE_ID }}
+          SPA_DOMAIN_NAME: ${{ vars.CARDDEMO_SPA_DOMAIN_NAME }}
+          ALB_TLS_SERVER_NAME: ${{ vars.CARDDEMO_ALB_TLS_SERVER_NAME }}
+          SERVICE_TLS_DOMAIN_NAME: ${{ vars.CARDDEMO_SERVICE_TLS_DOMAIN_NAME }}
+          MASK_HMAC_SECRET_ARN: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
+          BATCH_GLUE_FUNCTION_ARNS: ${{ vars.CARDDEMO_BATCH_GLUE_FUNCTION_ARNS_JSON }}
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          mkdir -p deploy-reports
+          tag="${{ inputs.image_tag }}"
+          if [ -z "$tag" ]; then tag="$GITHUB_SHA"; fi
+          printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          echo "CARDDEMO_IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+
+          placeholder="$(printf '0%.0s' {1..64})"
+          digests='{}'
+          for name in auth-service account-service card-service transaction-service reference-service batch-service authorization-service reporting-service data-migration; do
+            digests="$(jq --arg name "$name" --arg digest "sha256:$placeholder" '. + {($name): $digest}' <<<"$digests")"
+          done
+          jq -n \
+            --arg boundary "$PERMISSIONS_BOUNDARY_ARN" \
+            --arg zone "$ROUTE53_ZONE_ID" \
+            --arg spa "$SPA_DOMAIN_NAME" \
+            --arg alb "$ALB_TLS_SERVER_NAME" \
+            --arg service "$SERVICE_TLS_DOMAIN_NAME" \
+            --arg mask "$MASK_HMAC_SECRET_ARN" \
+            --arg release "$tag" \
+            --argjson glue "$BATCH_GLUE_FUNCTION_ARNS" \
+            --argjson digests "$digests" \
+            '{
+              permissions_boundary_arn: $boundary,
+              route53_zone_id: $zone,
+              spa_domain_name: $spa,
+              alb_tls_server_name: $alb,
+              service_tls_domain_name: $service,
+              mask_hmac_secret_arn: $mask,
+              batch_glue_function_arns: $glue,
+              release_version: $release,
+              image_digests: $digests
+            }' > "$root/deployment.auto.tfvars.json"
+          printf 'environment=%s\nimage_tag=%s\n' "${{ inputs.environment }}" "$tag" > deploy-reports/deployment.txt
+
+      # Assumptions: infra/bootstrap already exists once per account and is
+      # deliberately excluded. The selected root uses that real backend so the
+      # registry bootstrap and full deployment share one locked state.
+      - name: Initialize the selected environment
+        shell: bash
+        env:
+          TF_STATE_BUCKET: ${{ vars.CARDDEMO_TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.CARDDEMO_TF_STATE_REGION }}
+          TF_STATE_LOCK_TABLE: ${{ vars.CARDDEMO_TF_STATE_LOCK_TABLE }}
+          TF_STATE_KMS_KEY_ID: ${{ vars.CARDDEMO_TF_STATE_KMS_KEY_ID }}
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          terraform -chdir="$root" init -input=false -lockfile=readonly \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="region=$TF_STATE_REGION" \
+            -backend-config="dynamodb_table=$TF_STATE_LOCK_TABLE" \
+            -backend-config="kms_key_id=$TF_STATE_KMS_KEY_ID"
+
+      # Alternatives Considered: creating repositories with ad-hoc CLI calls.
+      # Rejected because Terraform would then discover unmanaged resources on the
+      # full plan. A saved targeted plan establishes the artifact registry under
+      # the same state before any image is pushed.
+      - name: Provision the Terraform-managed artifact registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars \
+            -target=module.ecr -out=ecr.tfplan
+          terraform -chdir="$root" apply -input=false ecr.tfplan
+          terraform -chdir="$root" output -json ecr_repository_urls > deploy-reports/ecr-repositories.json
+
+      # Alternatives Considered: npm install. npm ci is bound to the reviewed
+      # lock and cannot silently rewrite the dependency graph.
+      - name: Build the SPA bundle for S3 publication
+        working-directory: ui
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      # Trade-offs: CI repeats image builds already validated by services-ci and
+      # ui-ci. The deployment rebuild is the artifact that actually ships, while
+      # the review-time build proves Dockerfiles before account credentials exist.
+      - name: Build and push ten immutable images
+        shell: bash
+        run: |
+          set -euo pipefail
+          repos="$(cat deploy-reports/ecr-repositories.json)"
+          registry="$(jq -r 'to_entries[0].value | split("/")[0]' <<<"$repos")"
+          aws ecr get-login-password --region "${{ vars.CARDDEMO_AWS_REGION }}" |
+            docker login --username AWS --password-stdin "$registry"
+
+          cat > "$RUNNER_TEMP/carddemo-images.tsv" <<'IMAGES'
+          auth-service	services/auth-service/Dockerfile	services
+          account-service	services/account-service/Dockerfile	services
+          card-service	services/card-service/Dockerfile	services
+          transaction-service	services/transaction-service/Dockerfile	services
+          reference-service	services/reference-service/Dockerfile	services
+          batch-service	services/batch-service/Dockerfile	services
+          authorization-service	services/authorization-service/Dockerfile	services
+          reporting-service	services/reporting-service/Dockerfile	services
+          ui	ui/Dockerfile	ui
+          data-migration	data-migration/Dockerfile	data-migration
+          IMAGES
+
+          digests='{}'
+          while IFS=$'\t' read -r name dockerfile context; do
+            repository="$(jq -er --arg name "$name" '.[$name]' <<<"$repos")"
+            image="${repository}:${CARDDEMO_IMAGE_TAG}"
+            docker build --file "$dockerfile" --tag "$image" "$context"
+            docker push "$image"
+            repository_name="${repository#*/}"
+            digest="$(aws ecr describe-images \
+              --repository-name "$repository_name" \
+              --image-ids "imageTag=${CARDDEMO_IMAGE_TAG}" \
+              --query 'imageDetails[0].imageDigest' --output text)"
+            if [ "$name" != "ui" ]; then
+              digests="$(jq --arg name "$name" --arg digest "$digest" '. + {($name): $digest}' <<<"$digests")"
+            fi
+          done < "$RUNNER_TEMP/carddemo-images.tsv"
+
+          jq -c . <<<"$digests" > deploy-reports/image-digests.json
+          root="infra/envs/${{ inputs.environment }}"
+          jq --argjson digests "$digests" '.image_digests = $digests' \
+            "$root/deployment.auto.tfvars.json" > "$root/deployment.auto.tfvars.json.tmp"
+          mv "$root/deployment.auto.tfvars.json.tmp" "$root/deployment.auto.tfvars.json"
+
+      # Alternatives Considered: a bare auto-approved apply. Rejected because it
+      # re-plans at execution time; applying the saved plan guarantees the
+      # reviewed change set is the one sent to AWS.
+      - name: Plan and apply the complete environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars -out=tfplan
+          terraform -chdir="$root" show -no-color tfplan > deploy-reports/terraform-plan.txt
+          terraform -chdir="$root" apply -input=false tfplan
+
+      # Assumptions: CloudFront serves the S3 origin, not the UI container image.
+      # The invalidation is limited to the entry document and route fallback so
+      # content-hashed assets remain cacheable.
+      - name: Publish the SPA and invalidate its entry document
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          bucket="$(terraform -chdir="$root" output -raw spa_bucket_name)"
+          distribution="$(terraform -chdir="$root" output -raw cloudfront_distribution_id)"
+          aws s3 sync ui/dist "s3://${bucket}/" --delete
+          aws cloudfront create-invalidation \
+            --distribution-id "$distribution" \
+            --paths "/" "/index.html" "/*" >/dev/null
+
+      # Assumptions: audit evidence is more valuable after a failed deployment,
+      # so upload runs unconditionally and missing evidence fails loudly.
+      - name: Upload the deployment audit record
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-deploy-audit-${{ inputs.environment }}
+          path: deploy-reports/**
+          if-no-files-found: error
+
+      # Assumptions: generated tfvars and saved binary plans can contain account
+      # identifiers or sensitive planned values. They remain runner-local and are
+      # removed even when a prior gate fails; state and .terraform are never uploaded.
+      - name: Remove runner-local deployment material
+        if: always()
+        shell: bash
+        run: |
+          root="infra/envs/${{ inputs.environment }}"
+          rm -f "$root/deployment.auto.tfvars.json" "$root/ecr.tfplan" "$root/tfplan"

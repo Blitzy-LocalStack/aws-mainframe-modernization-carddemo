@@ -222,14 +222,18 @@ import com.carddemo.common.money.Money;
  *
  * <h2>What this class does not own</h2>
  *
- * <p>Money reaches the codec package in six renderings and this class owns exactly one of them. The
- * boundary is stated so that nobody extends this class into territory that belongs elsewhere:</p>
+ * <p>Money reaches the codec package in seven renderings and this class owns exactly one of them. The
+ * boundary is stated so that nobody extends this class into territory that belongs elsewhere.
+ * Rendering 3 is listed as a pair because the authorization wire uses two forms, not one: the reply
+ * mask the reference program emits, and the narrower request token its receiver holds. That split is
+ * argued in full on {@code CsvAuthCodec} itself:</p>
  *
  * <pre>
  * #  rendering                    width      owner
  * 1  zoned overpunch              11 or 12 bytes   THIS CLASS
  * 2  packed COMP-3                7, 5 or 3 bytes  PackedDecimalCodec
- * 3  edited display PIC +9(10).99 14 characters    CsvAuthCodec
+ * 3a reply mask PIC -zzzzzzzzz9.99 14 characters   CsvAuthCodec
+ * 3b request token, receiver-width 13 characters   CsvAuthCodec
  * 4  DFSORT mask EDIT(TTTTTTTTT.TT)  12 characters not this package
  * 5  report mask -ZZZ,ZZZ,ZZZ.ZZ  15 characters    not this class
  * 6  report mask +ZZZ,ZZZ,ZZZ.ZZ  15 characters    not this class
@@ -260,7 +264,6 @@ import com.carddemo.common.money.Money;
  */
 public final class ZonedDecimalCodec {
 
-    // WHAT: the two trailing-sign overpunch tables, indexed by the digit they carry.
     // WHY : Alternatives Considered: the sign-and-digit pair could be resolved with a map literal
     //       keyed on the character, or with a cascade of twenty comparisons. Two index strings are
     //       used instead because the POSITION in the string IS the digit value, which makes encoding
@@ -277,7 +280,6 @@ public final class ZonedDecimalCodec {
 
     private static final String NEGATIVE_OVERPUNCH = "}JKLMNOPQR";
 
-    // WHAT: the character the encoder writes for an unrecognised-magnitude guard message.
     // WHY : Assumptions: '0' is the pad character because a display field's unused high-order
     //       positions hold ASCII zeros in every record of the corpus, which is visible directly in
     //       the fixture span quoted in this class's charter: ACCT-CREDIT-LIMIT is stored as
@@ -430,12 +432,20 @@ public final class ZonedDecimalCodec {
      * Decodes one fixed-width zoned-decimal span into an exact value at the field's declared scale.
      *
      * <p>This is the geometry-only form, for a caller that has no field identity to report. Its
-     * diagnostics quote the offending span, exactly as the reference implementation does at
-     * tests/helpers/record_codec.py lines 262, 268, 274 and 290. A field whose descriptor marks it
-     * sensitive must be decoded through
-     * {@link #decode(CharSequence, int, int, boolean, FieldContext)} instead, which suppresses the
-     * quotation; the national identifier at line 17 of {@code app/cpy/CVCUS01Y.cpy} is the concrete
-     * instance, since it is an unsigned display field and therefore does reach this class.</p>
+     * diagnostics name the geometry and never the span, which is a deliberate divergence from the
+     * reference implementation: that one quotes the offending characters at
+     * tests/helpers/record_codec.py lines 262, 268, 274 and 290, and it runs inside a test harness
+     * over fixture data, whereas this one runs in a service over cardholder records and its messages
+     * reach a log aggregator.</p>
+     *
+     * <p>Refactoring Rationale: this form withholds content BECAUSE it has no field identity, which is
+     * the opposite of what it did when first authored. Sensitivity is a property of the field, so a
+     * caller that names no field has told this class nothing about whether the span may be read, and
+     * treating silence as permission meant every default call site quoted whatever it decoded -- the
+     * national identifier at line 17 of {@code app/cpy/CVCUS01Y.cpy} among them, since it is an
+     * unsigned display field and therefore does reach this class. To have a span quoted, pass
+     * {@link #decode(CharSequence, int, int, boolean, FieldContext)} a descriptor that declares the
+     * field not sensitive, which is an explicit statement rather than an omission.</p>
      *
      * @param raw the exact field characters, already sliced from the record so that this call decodes
      *     one field and never a whole record; its length must equal {@code intDigits + decDigits},
@@ -496,8 +506,6 @@ public final class ZonedDecimalCodec {
                     + ", decDigits=" + decDigits + ") but the span holds " + raw.length(), field, raw);
         }
 
-        // WHAT: the plain-digit body is every character except the overpunched one, and an unsigned
-        //       field has no overpunched character at all.
         // WHY : Assumptions: a signed field's sign is carried BY its low-order digit rather than
         //       beside it, so the body stops one character short and that last character contributes
         //       both a sign and a digit. Treating the final character as a sign marker alone is the
@@ -614,8 +622,10 @@ public final class ZonedDecimalCodec {
      * Encodes an exact value into one fixed-width zoned-decimal span, naming the field on failure.
      *
      * <p>Behaviour is identical to {@link #encode(BigDecimal, int, int, boolean)} except that a
-     * diagnostic names the field, and omits the value itself when that field is declared
-     * sensitive.</p>
+     * diagnostic names the field, and quotes the value only when that field is present and declares
+     * itself not sensitive. Passing null, which is what the four-argument form does, withholds the
+     * value: sensitivity is a property of the field, so a caller naming no field has stated nothing
+     * about whether the value may be read.</p>
      *
      * @param value the amount or quantity to encode, interpreted at its own scale
      * @param intDigits the number of digit positions before the implied decimal point
@@ -636,7 +646,6 @@ public final class ZonedDecimalCodec {
             throw failure("zoned field value is absent", field, null);
         }
 
-        // WHAT: restate the value at exactly the field's fractional width, refusing to round.
         // WHY : Trade-offs: silent truncation and silent rounding were both available and both
         //       rejected. This call pads a value that carries fewer decimal places and raises on one
         //       that carries more non-zero places, so 2065 becomes 2065.00 while 2065.001 is refused
@@ -676,7 +685,6 @@ public final class ZonedDecimalCodec {
                     + " display field has no sign carrier", field, canonical.toPlainString());
         }
 
-        // WHAT: the magnitude as a bare digit string, with the implied decimal point scaled away.
         // WHY : Assumptions: shifting the point right by the fractional width leaves a value of scale
         //       zero, whose plain string is therefore pure digits with no point and no exponent. The
         //       shift is an exact rescaling rather than a division, so no rounding mode is involved
@@ -741,7 +749,6 @@ public final class ZonedDecimalCodec {
      */
     private static BigDecimal assemble(CharSequence raw, int width, int decDigits, boolean signed,
             int lowOrderDigit, boolean negative) {
-        // WHAT: the digit string with the overpunched character replaced by the digit it carries.
         // WHY : Assumptions: the replacement is what separates the sign from the digit, and it has to
         //       happen before the value is assembled because the overpunched character is not a digit
         //       the numeric parser would accept. An unsigned field needs no replacement at all, since
@@ -761,7 +768,6 @@ public final class ZonedDecimalCodec {
             integerDigits = "0";
         }
 
-        // WHAT: build the value from an explicitly assembled decimal string.
         // WHY : Trade-offs: assembling a string costs one allocation and is marginally slower than
         //       accumulating the digits into an integer and applying the scale afterwards. The
         //       exchange is worth it twice over. The string form is context-independent and exact --
@@ -836,9 +842,10 @@ public final class ZonedDecimalCodec {
      *
      * @param problem the constraint that was breached, stated in terms of geometry and of this
      *     class's own constants, and never containing field content
-     * @param field the field to name, or null when the caller has no field identity
+     * @param field the field to name, or null when the caller supplied no field identity, in which
+     *     case nothing is known about the span's sensitivity and content is withheld
      * @param content the span or value that breached the constraint, or null when there is none to
-     *     quote; it is omitted from the message when the field is declared sensitive
+     *     quote; it is omitted unless {@code field} is present and declares the field not sensitive
      * @return the exception to raise, which the caller throws so that the raise site stays visible
      */
     private static ZonedDecimalException failure(String problem, FieldContext field,
@@ -847,7 +854,21 @@ public final class ZonedDecimalCodec {
         if (field != null) {
             message.append(" [field ").append(describe(field)).append(']');
         }
-        if (content != null && (field == null || !field.sensitive())) {
+
+        // WHY : Refactoring Rationale: an absent field context now WITHHOLDS the content, where it
+        //       previously quoted it. The earlier reading was that a caller who supplied no context
+        //       had declared nothing sensitive; the actual meaning of an absent context is that
+        //       nothing is known about the span, and the four convenience overloads above all pass
+        //       null. So every call that did not opt in to a context -- which is every call a caller
+        //       writes by default -- quoted whatever it was decoding, including a national identifier
+        //       or a primary account number sliced out of a reference record. The default is now
+        //       fail-closed: content is quoted only where a context is present AND declares the field
+        //       not sensitive, which is an explicit statement by the caller that the span may be read.
+        //       Trade-offs: a caller debugging a malformed span through a convenience overload sees the
+        //       geometry and not the characters, and must pass a FieldContext declaring the field
+        //       insensitive to see them. That is one argument against silently exporting protected data
+        //       from every codec path in the system, and the exchange is not close.
+        if (content != null && field != null && !field.sensitive()) {
             message.append(": '").append(content).append('\'');
         }
         return new ZonedDecimalException(message.toString());

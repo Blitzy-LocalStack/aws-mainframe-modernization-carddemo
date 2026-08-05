@@ -1,24 +1,6 @@
 /**
  * Owns exact fixed-point money and its JSON wire form for every migrated CardDemo service.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> Two production classes live here and nothing else. {@code Money} is the value
  * type that carries a monetary amount in memory and performs arithmetic on it; {@code MoneyModule}
  * is the Jackson module that decides how such an amount crosses an API boundary. Every monetary
@@ -226,25 +208,37 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Target contract: this package is to hold exactly two production classes,
- * {@code Money} and {@code MoneyModule}, and with this descriptor beside them the directory is to
- * hold exactly three {@code .java} files. There is no fourth file here and none is to be added.
- * Both production classes are authored at later indexes of the same plan, so at this checkpoint the
- * directory holds this descriptor alone. Across {@code com.carddemo.common} as a whole the target
- * distribution is two production classes in {@code money}, five in {@code codec}, three in
- * {@code error}, two in {@code web}, one in {@code security}, one in {@code observability}, one in
- * {@code time} and two in {@code validation}, the package root contributing none. The two totals
+ * <p>This package holds exactly two production classes, {@code Money} and {@code MoneyModule}, and
+ * with this descriptor beside them the directory holds exactly three {@code .java} files. There is
+ * no fourth file here and none is to be added: the arithmetic contract and its wire-format
+ * companion are the whole of the concern, and a third type would be either a second money
+ * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
+ * whole the contract admits two production classes in {@code money}, five in {@code codec}, three in
+ * {@code error}, three in {@code web}, three in {@code security}, one in {@code observability}, one in
+ * {@code time} and two in {@code validation}, the package root contributing one -- the
+ * auto-configuration class that registers this package's codec module, and the correlation filter,
+ * the meter filter and the error advice, in every service. The two totals
  * that follow are each kept whole on one line so that either can be checked by eye and matched by
  * a search without a line break splitting it:</p>
  *
  * <pre>
- * production classes:  2 + 5 + 3 + 2 + 1 + 1 + 1 + 2 = 17
- * compilation units:   17 production + 9 package descriptors = 26  (target)
+ * production classes:  1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21
+ * compilation units:   21 production + 9 package descriptors = 30  (target)
  * </pre>
  *
  * <p>The nine descriptors are one for the package root and one for each of its eight subpackages.
- * The figures are recorded so that a later reader can tell a class that is missing from a class
- * that was never planned.</p>
+ * The figures are recorded so that a class absent from the module stays distinguishable from one
+ * the contract never admitted.</p>
+ *
+ * <p>Assumptions: every figure above is a TARGET total and none of them is a measurement of what the
+ * tree holds. This library is landed in plan order, so a class named here that has no file yet is
+ * planned rather than absent, and phrasing the inventory as a target is what keeps this paragraph true
+ * at every point in that sequence. Alternatives Considered: recording alongside it which of the named
+ * classes had been authored when this descriptor was written was evaluated and rejected. Such a
+ * sentence is accurate for exactly one commit and is then a false statement sitting inside the comment
+ * a reader consults to learn what belongs here, which is worse than no sentence at all; the directory
+ * listing and the reactor build already report the present state precisely, and neither of them can
+ * fall out of date.</p>
  *
  * <h2>Why this descriptor exists</h2>
  *

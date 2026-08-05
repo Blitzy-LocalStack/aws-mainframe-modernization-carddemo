@@ -442,9 +442,10 @@
  * charter cited above and stated in full at
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}. They are cited rather than
  * restated, because a second copy of a convention is a second thing to keep in
- * step. Where that written standard and the linter configuration disagree, the
- * linter configuration is authoritative, since it is the one that fails the
- * build.
+ * step. Where that written standard and the linter configuration disagree,
+ * Rule 1 and the AAP remain authoritative and both implementations are
+ * corrected upward to match them. A green linter result cannot narrow the
+ * governing requirement.
  *
  * <p>Assumptions: the labels are TYPED in this subtree and never copied out of
  * {@code tests/README.md}. That file carries a non-breaking hyphen 106 times

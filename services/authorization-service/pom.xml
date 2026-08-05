@@ -3,14 +3,6 @@
   ===========================================================================
   CardDemo :: authorization-service
   ===========================================================================
-  WHAT: Maven build definition for the pending-authorization bounded context
-        of the CardDemo mainframe to AWS migration. The module builds one
-        executable Spring Boot jar that serves the pending-authorization
-        summary and detail read endpoints, the fraud-marking write endpoint,
-        the authorization request consumer together with its
-        transactional-outbox reply publisher, the pending-authorization expiry
-        purge, and the segment load and unload maintenance operations.
-
   SOURCE OF TRUTH: the eight COBOL programs of the decoupled authorization
         extension. They are REFERENCE-ONLY and are never modified; this file
         cites them by path only.
@@ -248,9 +240,13 @@
       counterpart is one. COPAUA0C.cbl reads authorization requests from the
       IBM MQ queue named AWS.M2.CARDDEMO.PAUTH.REQUEST and puts replies to
       AWS.M2.CARDDEMO.PAUTH.REPLY, and the migration targets that pair with a
-      FIFO queue pair so that per-card ordering survives the transport change:
-      the message group is the card number and the deduplication identifier is
-      the transaction identifier. Two baseline disciplines are carried by the
+      FIFO queue pair so that per-card ordering survives on the source queue:
+      the message group and correlation identifiers are purpose-scoped opaque
+      HMAC tokens, so the card number never becomes SQS metadata, and the
+      correlation token doubles as the deduplication identifier without placing
+      the raw card/transaction tuple in metadata.
+      Dead-letter transfer is an explicit quarantine boundary rather than a
+      claim of uninterrupted order through poison handling. Two baseline disciplines are carried by the
       listener rather than by configuration alone, so that throughput
       characteristics do not shift silently: the 500-message processing limit
       (COPAUA0C.cbl:L40) becomes a bounded long-poll loop, and the five-second
@@ -307,9 +303,6 @@
     </dependency>
 
     <!--
-      WHAT: the Spring Boot module that ACTIVATES Flyway, as distinct from the
-      two engine artifacts declared after it.
-
       Assumptions: Spring Boot 4 split the single spring-boot-autoconfigure
       artifact into one autoconfiguration module per technology, so
       FlywayAutoConfiguration now ships in
@@ -495,15 +488,15 @@
       here with nothing to run. That mattered most for the third rule, since this
       context's money arrives as packed decimal and has to stay exact fixed point
       through every hop, and an IEEE-754 binary field would have entered a green
-      build. The shared kernel now publishes the class as a test artifact narrowed
-      to the architecture package, this declaration consumes it, and the
-      architecture-rules Surefire execution in services/pom.xml runs it here with
-      this module's own compiled classes in front of it.
+      build. This declaration consumes the shared kernel's test artifact,
+      narrowed to the architecture package. The architecture-rules Surefire
+      execution in services/pom.xml scans that artifact and selects rules by the
+      reserved simple name LayeringRulesTest.
 
-      Assumptions: the rules stay authored exactly once, at
-      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java,
-      so this is delivery rather than duplication. Version and scope are managed
-      by the aggregator and are therefore not restated here.
+      Assumptions: the rules must be authored once in the shared architecture
+      package, so this dependency is delivery rather than duplication. The
+      configuration does not itself claim that a rules class is already present.
+      Version and scope are managed by the aggregator and are not restated here.
     -->
     <dependency>
       <groupId>com.carddemo</groupId>

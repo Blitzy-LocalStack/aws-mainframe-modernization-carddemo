@@ -46,6 +46,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * neighbouring one. That refusal is asserted here as part of the contract rather than assumed, because
  * it is the behaviour a later change to the pattern or the resolver would silently remove.</p>
  *
+ * <p>Assumptions: the contract has two halves and both are exercised here. Rendering and reading turn
+ * the value into and out of its twenty-six character text, and REDUCING turns it into the microsecond
+ * resolution that text can carry, which is what a caller persists. The reducing half is not observable
+ * through the rendered string -- the fraction field discards a seventh digit whether or not the value
+ * was reduced first -- so it is asserted directly against
+ * {@link TimestampFormatter#normalize(LocalDateTime)} and
+ * {@link TimestampFormatter#normalizeNow(Clock)}, and the two published year bounds that make the
+ * width a contract at all are asserted against the entry points they constrain. Expectations phrased
+ * only against rendered text cannot see either property, which is why neither is left to them.</p>
+ *
  * <p>Trade-offs: the expectations are split across many small methods rather than gathered into a few
  * broad ones. The width, the date-to-time separator, the time punctuation, the count of fractional
  * digits, the calendar validity and the three exception families all fail independently of one
@@ -58,7 +68,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class TimestampFormatterTest {
 
-    // WHAT: the one populated timestamp vector every positive expectation in this file is pinned to.
     // WHY : Assumptions: this is an observed value and not a value invented for the test. The first
     //       record of tests/fixtures/posting/happy_path/dailytran.txt carries exactly these bytes at
     //       one-based columns 279 to 304, which is the twenty-six character processing-timestamp field
@@ -67,7 +76,6 @@ class TimestampFormatterTest {
     //       suite's opinion of it.
     private static final String FIXTURE_TIMESTAMP = "2022-06-10 19:27:53.000000";
 
-    // WHAT: the same instant as FIXTURE_TIMESTAMP, expressed in the target Java type.
     // WHY : Assumptions: the nanosecond argument is an explicit zero rather than omitted, because the
     //       fractional second is contractual. The fixture's six fractional positions are all zero, so
     //       a value built without stating the zero would still render '.000000' and would leave a
@@ -75,14 +83,12 @@ class TimestampFormatterTest {
     private static final LocalDateTime FIXTURE_LOCAL_DATE_TIME =
             LocalDateTime.of(2022, 6, 10, 19, 27, 53, 0);
 
-    // WHAT: the length of the ISO date prefix the contract exposes, ten.
     // WHY : Assumptions: ten is stated twice in the reference baseline and is not derivable from
     //       TIMESTAMP_LENGTH, so it is declared here beside its citations rather than computed. It is
     //       the EXPORT-DATE field of app/cpy/CVEXPORT.cpy line 13, and the field length of the sort
     //       symbol TRAN-PROC-DT,305,10,CH at app/jcl/TRANREPT.jcl line 42.
     private static final int DATE_PREFIX_LENGTH = 10;
 
-    // WHAT: the ISO date prefix of FIXTURE_TIMESTAMP, as a string and as a typed date.
     // WHY : Assumptions: both forms are declared because two entry points return the prefix in two
     //       types, and asserting the typed result against a re-sliced substring of the input would
     //       make the expectation depend on the same slicing the method under test performs.
@@ -90,7 +96,6 @@ class TimestampFormatterTest {
 
     private static final LocalDate FIXTURE_LOCAL_DATE = LocalDate.of(2022, 6, 10);
 
-    // WHAT: twenty-six spaces, the fixed-width record's way of saying 'not yet stamped'.
     // WHY : Assumptions: the width is taken from the production constant rather than written as a
     //       literal run of spaces, so this vector cannot fall out of step with the contract it is
     //       meant to probe. The evidence that blank is a real state and not a hypothetical one is
@@ -100,7 +105,6 @@ class TimestampFormatterTest {
     //       whatever about punctuation, because there is no punctuation in it to observe.
     private static final String BLANK_TIMESTAMP = " ".repeat(TimestampFormatter.TIMESTAMP_LENGTH);
 
-    // WHAT: the injected batch business date, exactly as the reference job supplies it.
     // WHY : Assumptions: app/jcl/INTCALC.jcl line 22 runs
     //       //STEP15 EXEC PGM=CBACT04C,PARM='2022071800', so this is a real production parameter and
     //       not a malformed timestamp someone might type. It is retained here precisely because it is
@@ -108,7 +112,6 @@ class TimestampFormatterTest {
     //       plausible wrong argument a caller could hand these methods.
     private static final String COMPACT_BUSINESS_DATE = "2022071800";
 
-    // WHAT: the reference baseline's native display mask for this field, copied verbatim.
     // WHY : Assumptions: app/cbl/CBTRN02C.cbl line 149 carries the comment
     //       '* T I M E S T A M P   D B 2  X(26)     EEEE-MM-DD-UU.MM.SS.HH0000'. That mask is an
     //       accurate description of the Db2 form the baseline emits, written in the baseline's own
@@ -118,7 +121,6 @@ class TimestampFormatterTest {
     //       working formatter.
     private static final String NATIVE_DISPLAY_MASK = "EEEE-MM-DD-UU.MM.SS.HH0000";
 
-    // WHAT: the same layout as the production pattern, but with the year-of-era field letter.
     // WHY : Alternatives Considered: this is the pattern the prose contract reads like, and it is the
     //       one a maintainer is most likely to reach for, so the reason it is not the production
     //       pattern is demonstrated rather than described. It is built here in the test and never
@@ -128,7 +130,6 @@ class TimestampFormatterTest {
             .ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS", Locale.ROOT)
             .withResolverStyle(ResolverStyle.STRICT);
 
-    // WHAT: the proleptic-year counterpart of the pattern above, which is what production resolves.
     // WHY : Assumptions: a second independently built formatter is declared rather than reusing the
     //       first with a different letter, so that the two can be applied to the SAME input in the
     //       same test and the difference attributed to the one letter that differs between them.
@@ -229,7 +230,12 @@ class TimestampFormatterTest {
         //       microseconds chosen so that this expectation isolates the WIDTH and ORDER of the
         //       fraction field. A value carrying sub-microsecond nanoseconds would additionally
         //       exercise the truncation boundary, which is a separate concern and would make a failure
-        //       here ambiguous between the two.
+        //       here ambiguous between the two. That concern is not left uncovered by the split: it is
+        //       asserted directly against the reducing entry point, in
+        //       normalizeTruncatesTheSeventhFractionalDigitRatherThanRounding below, on a vector this
+        //       method deliberately does not carry. Assumptions: the division of labour is what makes
+        //       each failure attributable, and it is stated here so that a whole-microsecond vector in
+        //       this method is read as a scope decision rather than as the only fraction ever tried.
         LocalDateTime withMicroseconds = LocalDateTime.of(2022, 6, 10, 19, 27, 53, 123_456_000);
 
         assertEquals("2022-06-10 19:27:53.123456",
@@ -244,6 +250,134 @@ class TimestampFormatterTest {
         //       actually contains.
         assertEquals(FIXTURE_TIMESTAMP, TimestampFormatter.format(FIXTURE_LOCAL_DATE_TIME),
                 "a zero fraction must still occupy all six positions as '.000000'");
+    }
+
+    /**
+     * Confirms that a seventh fractional digit is discarded by truncation and never by rounding, at
+     * both carry boundaries, and that reducing an already-reduced value changes nothing.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a rounded result, a moved second, a
+     * moved day or a non-idempotent reduction as a test failure showing the two values.</p>
+     *
+     * <p>Assumptions: this is the only method in this file whose vectors carry a fraction FINER than
+     * the contract resolution, and that is what makes it the only one able to observe the reduction at
+     * all. The rendering fraction field discards the remainder of its own accord, so a value carrying
+     * {@code 123_456_789} nanoseconds renders {@code .123456} whether or not it was reduced first --
+     * measured on JDK 21.0.11 -- which means no expectation phrased against a rendered string can
+     * distinguish a reducing implementation from a non-reducing one. Asserting the reduced VALUE is
+     * what draws that distinction, and it is the reason this method exercises
+     * {@code normalize} directly rather than reaching it through {@code format}.</p>
+     *
+     * <p>Trade-offs: the two carry vectors cost two extra assertions and they are kept because
+     * rounding and truncation differ only on them. Rounding {@code 19:27:53.999999500} advances the
+     * second to 54, and rounding {@code 23:59:59.999999500} advances the day to the eleventh -- the
+     * second case was measured to produce {@code 2022-06-11T00:00}, so it moves the ten-character
+     * date prefix that every reference consumer of this field reads,
+     * {@code app/cbl/CBTRN02C.cbl} line 414 comparing {@code DALYTRAN-ORIG-TS (1:10)} and
+     * {@code app/jcl/TRANREPT.jcl} line 42 sorting on {@code TRAN-PROC-DT,305,10,CH}. A test that
+     * omitted them would pass against the rounding the database driver performs, which is the one
+     * behaviour this contract exists to exclude.</p>
+     *
+     * <p>Alternatives Considered: asserting only that the reduced nanosecond field is a whole
+     * multiple of one thousand was evaluated and rejected. It holds for a rounded value too, so it
+     * would state the resolution without stating the DIRECTION, and the direction is the whole
+     * decision. The reduced values are therefore pinned exactly, and the whole-multiple property is
+     * asserted beside them as the weaker consequence rather than in place of them.</p>
+     */
+    @Test
+    void normalizeTruncatesTheSeventhFractionalDigitRatherThanRounding() {
+        // WHY : Assumptions: 123_456_789 is the vector the reduction is specified against, and its
+        //       expected result 123_456_000 is stated as a literal rather than computed from the
+        //       input. Deriving the expectation by the same division the implementation performs
+        //       would make the two agree by construction and assert nothing.
+        LocalDateTime subMicrosecond = LocalDateTime.of(2022, 6, 10, 19, 27, 53, 123_456_789);
+
+        assertEquals(LocalDateTime.of(2022, 6, 10, 19, 27, 53, 123_456_000),
+                TimestampFormatter.normalize(subMicrosecond),
+                "a fraction finer than one microsecond must be discarded, not rounded up");
+
+        assertEquals(123_456_000, TimestampFormatter.normalize(subMicrosecond).getNano(),
+                "the reduced nanosecond field must be a whole number of microseconds");
+
+        // WHY : Assumptions: the second boundary is asserted as a whole value rather than as a
+        //       component read, because rounding here would change the second AND leave every other
+        //       component untouched, and a component-level expectation on the fraction alone would
+        //       not see that.
+        assertEquals(LocalDateTime.of(2022, 6, 10, 19, 27, 53, 999_999_000),
+                TimestampFormatter.normalize(
+                        LocalDateTime.of(2022, 6, 10, 19, 27, 53, 999_999_500)),
+                "at the second boundary the discarded half-microsecond must not advance the second");
+
+        assertEquals(LocalDateTime.of(2022, 6, 10, 23, 59, 59, 999_999_000),
+                TimestampFormatter.normalize(
+                        LocalDateTime.of(2022, 6, 10, 23, 59, 59, 999_999_500)),
+                "at the day boundary the discarded half-microsecond must not advance the date prefix");
+
+        // WHY : Assumptions: idempotence is asserted because the class documents the reduction as
+        //       something a caller may apply at more than one layer, and a caller cannot rely on that
+        //       unless a second application is a no-op. Applying it twice in one expression is the
+        //       only form that states it.
+        LocalDateTime reducedOnce = TimestampFormatter.normalize(subMicrosecond);
+
+        assertEquals(reducedOnce, TimestampFormatter.normalize(reducedOnce),
+                "reducing an already-reduced value must change nothing");
+
+        // WHY : Trade-offs: these last two expectations duplicate no assertion above and they are the
+        //       reason the reduction is public at all. The class promises that a caller which persists
+        //       the reduced value is persisting exactly what the rendered string says, and the promise
+        //       is only kept while ONE truncation feeds both. Rendering the reduced value and reading
+        //       the rendered value back are the two halves of that promise, and asserting them here
+        //       means a future change deriving the two from separate truncations fails a test rather
+        //       than drifting apart at the seventh digit in production.
+        assertEquals(TimestampFormatter.format(subMicrosecond),
+                TimestampFormatter.format(reducedOnce),
+                "rendering the reduced value must produce the same string as rendering the raw one");
+
+        assertEquals(reducedOnce,
+                TimestampFormatter.parse(TimestampFormatter.format(subMicrosecond)),
+                "the rendered value must read back as exactly the value a caller should persist");
+    }
+
+    /**
+     * Confirms that reducing the reading of a caller-supplied fixed clock truncates it and agrees with
+     * reducing that reading by hand.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a differing value as a test failure
+     * showing both.</p>
+     *
+     * <p>Assumptions: the clock is pinned and carries a deliberate sub-microsecond component, because
+     * a clock whose reading were already a whole microsecond would make this expectation hold under
+     * an implementation that reduced nothing. The instant below carries {@code 123456789}
+     * nanoseconds, which was measured on JDK 21.0.11 to be preserved in full by
+     * {@link Clock#fixed(Instant, java.time.ZoneId)} rather than quantised by the clock itself, so the
+     * reduction under test is the only thing that can remove it.</p>
+     *
+     * <p>Trade-offs: the same value is also asserted against a hand-reduced reading of the same clock.
+     * That second expectation is weaker on its own, since both sides would move together if the
+     * reduction changed, and it is kept because it is what pins the ONE-READ obligation: an
+     * implementation reading the clock a second time for the reduced value would satisfy neither
+     * expectation on a moving clock, and pinning the clock is what makes the defect assertable at
+     * all.</p>
+     */
+    @Test
+    void normalizeNowReducesTheReadingOfAFixedClock() {
+        // WHY : Assumptions: the zone is UTC explicitly, for the reason stated on the rendering
+        //       counterpart of this method -- an absolute instant yields a different local value under
+        //       a different zone, so a clock built with the platform default would assert a different
+        //       expectation on a differently configured runner.
+        Clock pinned = Clock.fixed(
+                Instant.parse("2022-06-10T19:27:53.123456789Z"), ZoneOffset.UTC);
+
+        assertEquals(LocalDateTime.of(2022, 6, 10, 19, 27, 53, 123_456_000),
+                TimestampFormatter.normalizeNow(pinned),
+                "a clock reading carrying a seventh fractional digit must be reduced, not rounded");
+
+        assertEquals(TimestampFormatter.normalize(LocalDateTime.now(pinned)),
+                TimestampFormatter.normalizeNow(pinned),
+                "reading the clock and reducing must agree with the combined entry point");
+
+        assertEquals(0, TimestampFormatter.normalizeNow(pinned).getNano() % 1_000,
+                "the reduced reading must carry no fraction below one microsecond");
     }
 
     /**
@@ -625,9 +759,15 @@ class TimestampFormatterTest {
      * because a refusal suite on its own cannot distinguish a correctly strict parser from one that
      * refuses everything. This value is chosen to be maximally awkward while remaining entirely valid:
      * 2024 is a leap year so the twenty-ninth of February exists, the time is the last second of the
-     * day, and the fraction occupies all six positions at their highest value, which is the point at
-     * which a rounding rather than truncating fraction field would carry into the next second and
-     * change the rendered day.</p>
+     * day, and the fraction occupies all six positions at their highest value.</p>
+     *
+     * <p>Trade-offs: the fraction here is {@code 999999} microseconds exactly, so this method fixes
+     * that all six positions survive a round trip at their maximum and does NOT discriminate rounding
+     * from truncation -- a whole microsecond has nothing below it to dispose of either way. The vector
+     * that draws that distinction carries a seventh digit and is asserted in
+     * normalizeTruncatesTheSeventhFractionalDigitRatherThanRounding above, on this same day boundary.
+     * The two are kept apart so that a failure here means the round trip broke and a failure there
+     * means the reduction did.</p>
      */
     @Test
     void theValidLeapDayAndMaximalFractionRoundTrip() {
@@ -674,6 +814,121 @@ class TimestampFormatterTest {
                 TimestampFormatter.format(
                         LocalDateTime.of(2022, 12, 31, 23, 59, 59, 999_999_000)),
                 "the last microsecond of a year must render at the contract width");
+    }
+
+    /**
+     * Confirms that the two published year bounds are the years the contract width can carry, that
+     * both are accepted, and that the year immediately outside each is refused on both sides of the
+     * boundary.
+     *
+     * <p>Takes no parameters and returns no value. The refusals expected of the rendering entry point
+     * are {@link IllegalArgumentException}, raised by its year guard before anything is rendered, and
+     * the refusals expected of the reading entry points are {@link DateTimeParseException}, because
+     * there the offending year arrived inside the caller's data rather than as its argument. Every
+     * expected failure is raised inside an assertion lambda and captured there, so this method itself
+     * completes normally; JUnit reports a missing, differently typed or wrongly valued result as a test
+     * failure.</p>
+     *
+     * <p>Assumptions: the year range is a consequence of the twenty-six character width and not a
+     * policy ceiling, so the two constants are asserted as values and the four boundary years are
+     * exercised through the entry points rather than against the constants alone. The measurements
+     * that fix them were taken on JDK 21.0.11: year 999 renders {@code 0999-12-31 23:59:59.999999},
+     * which is exactly twenty-six characters, and year 10000 renders
+     * {@code +10000-01-01 00:00:00.000000}, which is twenty-eight and gains a sign.</p>
+     *
+     * <p>Trade-offs: the year case cannot be folded into the wrong-width case, and that is why it is
+     * asserted separately at the cost of a method of its own. Below the range the rendering is still
+     * twenty-six characters, so a width check sees nothing wrong with it; above the range a value
+     * assigned to a {@code PIC X(26)} field is truncated by the receiving layout rather than rejected,
+     * which turns a refusable value into a silently corrupted record. Only a year check separates the
+     * two, and only these vectors demonstrate that it exists.</p>
+     *
+     * <p>Alternatives Considered: asserting the year rule on the rendering entry point alone was
+     * evaluated and rejected. The class would then be able to READ a year it refuses to WRITE, and a
+     * record carrying {@code 0999} would pass through the reader into a database column that the
+     * writer could never have produced -- an inconsistency between two code paths of one contract,
+     * which is the hardest kind of defect to attribute to either. The slice-only entry point is
+     * deliberately excluded from the rule and is asserted here as such, because it returns ten
+     * characters without interpreting them and its own contract is documented as indifferent to
+     * content.</p>
+     */
+    @Test
+    void supportedYearBoundsAreTheYearsTheContractWidthCanCarry() {
+        assertEquals(1000, TimestampFormatter.MIN_SUPPORTED_YEAR,
+                "the earliest year the four-character year field can carry without padding "
+                        + "ambiguity is one thousand");
+
+        assertEquals(9999, TimestampFormatter.MAX_SUPPORTED_YEAR,
+                "the latest year the four-character year field can carry is nine thousand nine "
+                        + "hundred and ninety nine");
+
+        // WHY : Assumptions: both bounds are asserted as ACCEPTED before either neighbour is asserted
+        //       as refused. A refusal suite on its own cannot tell a correctly bounded implementation
+        //       from one that refuses everything near the edge, and an off-by-one that excluded the
+        //       bound itself would be invisible without these two.
+        assertEquals("1000-01-01 00:00:00.000000",
+                TimestampFormatter.format(LocalDateTime.of(1000, 1, 1, 0, 0, 0, 0)),
+                "the earliest supported year must render, and must render zero padded");
+
+        assertEquals(TimestampFormatter.TIMESTAMP_LENGTH,
+                TimestampFormatter.format(LocalDateTime.of(1000, 1, 1, 0, 0, 0, 0)).length(),
+                "the accepted lower bound must occupy exactly the contract width");
+
+        assertEquals("9999-12-31 23:59:59.999999",
+                TimestampFormatter.format(
+                        LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999_999_000)),
+                "the latest supported year must render at its own last microsecond");
+
+        assertEquals(TimestampFormatter.TIMESTAMP_LENGTH,
+                TimestampFormatter.format(
+                        LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999_999_000)).length(),
+                "the accepted upper bound must occupy exactly the contract width");
+
+        // WHY : Assumptions: year 999 is the vector that proves the check is on the YEAR and not on
+        //       the rendered length, because its rendering was measured to be exactly twenty-six
+        //       characters. Were the guard removed, this value would pass every width expectation in
+        //       this file and escape as a contract value the reader also has to accept.
+        assertThrows(IllegalArgumentException.class,
+                () -> TimestampFormatter.format(
+                        LocalDateTime.of(999, 12, 31, 23, 59, 59, 999_999_000)),
+                "one year below the lower bound must be refused even though it renders at the "
+                        + "contract width");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> TimestampFormatter.format(LocalDateTime.of(10000, 1, 1, 0, 0, 0, 0)),
+                "one year above the upper bound must be refused, because it widens the rendering "
+                        + "beyond the field it is assigned to");
+
+        // WHY : Assumptions: this value is exactly twenty-six characters and parses cleanly under the
+        //       production pattern -- measured to yield year 999 -- so the width guard and the pattern
+        //       both pass it and only the contract's own range check can refuse it. It is asserted
+        //       through the read side as a DIFFERENT exception family from the write side above,
+        //       because that is the distinction the class draws between a defect in a caller's data
+        //       and a defect in its arguments.
+        String yearBelowLowerBound = "0999-06-10 19:27:53.000000";
+
+        assertEquals(TimestampFormatter.TIMESTAMP_LENGTH, yearBelowLowerBound.length(),
+                "the read-side vector must be the contract width, or it would test the width guard "
+                        + "instead of the year guard");
+
+        assertThrows(DateTimeParseException.class,
+                () -> TimestampFormatter.parse(yearBelowLowerBound),
+                "the parser must refuse a year the renderer cannot write, so the class cannot read a "
+                        + "value it is unable to produce");
+
+        assertThrows(DateTimeParseException.class,
+                () -> TimestampFormatter.toLocalDate(yearBelowLowerBound),
+                "the typed prefix reader interprets the year and must apply the same range");
+
+        // WHY : Trade-offs: the slice is asserted to SUCCEED on the same value, which looks like an
+        //       inconsistency and is a documented one. That entry point returns ten characters and
+        //       interprets none of them, so applying the year range there would make a layout
+        //       operation fail on content; the range belongs on the two entry points that turn text
+        //       into a date. Asserting the asymmetry is what stops a later reader from closing it as
+        //       an apparent oversight.
+        assertEquals("0999-06-10", TimestampFormatter.datePrefix(yearBelowLowerBound),
+                "the width-only slice must remain indifferent to a year the interpreting readers "
+                        + "refuse");
     }
 
     /**
@@ -823,6 +1078,13 @@ class TimestampFormatterTest {
      * datum above and the wrong-width layout error. The clock entry point is included deliberately: a
      * null clock most often means a caller expected an ambient default, and this class provides none by
      * design, so the refusal is what points them at that absence instead of at a formatting fault.</p>
+     *
+     * <p>Trade-offs: all six public entry points are covered by this one method rather than by six.
+     * They fail for one reason and through one family, so six methods would report the same defect six
+     * ways, and the compromise accepted is that a failure names the method in its message instead of in
+     * the report heading. What the coverage buys is that adding a seventh entry point without a
+     * mandatory-argument guard fails here, which is exactly how the two reducing entry points came to
+     * be listed: neither could reach an assertion in this file before it named them.</p>
      */
     @Test
     void absentArgumentsAreRejectedAsCallerDefects() {
@@ -833,6 +1095,19 @@ class TimestampFormatterTest {
         assertThrows(NullPointerException.class,
                 () -> TimestampFormatter.formatNow(null),
                 "there is deliberately no ambient clock to fall back to");
+
+        assertThrows(NullPointerException.class,
+                () -> TimestampFormatter.normalize(null),
+                "there is no reduced form of an absent timestamp");
+
+        // WHY : Assumptions: the reducing clock reader is asserted separately from the rendering one
+        //       even though both take a clock, because each validates its own argument before
+        //       delegating. Were the guard removed from this one, the null would still be caught one
+        //       call depth below and the exception would name the delegate's parameter rather than the
+        //       entry point the caller wrote, which is the diagnosis this expectation protects.
+        assertThrows(NullPointerException.class,
+                () -> TimestampFormatter.normalizeNow(null),
+                "the reducing clock reader has deliberately no ambient clock to fall back to either");
 
         assertThrows(NullPointerException.class,
                 () -> TimestampFormatter.parse(null),

@@ -11,11 +11,13 @@
 #
 #   What it reproduces, and by what mechanism. The baseline expresses dataset
 #   generations through IDCAMS: `DEFINE GENERATIONDATAGROUP ... LIMIT(5)
-#   SCRATCH`, ten times over. Bucket versioning supplies the generation stack;
-#   a noncurrent-version expiry retaining exactly five supplies both the
-#   LIMIT(5) cap and the SCRATCH deletion. A `(+1)` relative reference becomes
-#   a new current object version under a new generation prefix, and a `(0)`
-#   reference becomes the current version.
+#   SCRATCH`, ten times over. Each `dt=.../gen=.../` prefix is one LOGICAL
+#   generation. The data-migration staging writer enumerates those prefixes and
+#   permanently deletes every object version and delete marker under the
+#   oldest prefixes once the configured count is exceeded. Bucket versioning
+#   separately protects a re-write of the SAME object key inside a generation;
+#   the noncurrent-version lifecycle rules bound that recovery history and do
+#   not count distinct `gen=` keys.
 #
 #   Object keys follow one convention, and it is the part consumers depend on:
 #
@@ -39,7 +41,7 @@
 #     kms_key_arn ...................... the SSE-KMS key
 #     dataset_families ................. the ten generation prefixes and rules
 #     non_generation_prefixes .......... the two statement prefixes and rules
-#     noncurrent_version_retention ..... the LIMIT(5) count
+#     noncurrent_version_retention ..... default logical/version-history count
 #     noncurrent_version_transition_days,
 #     noncurrent_version_transition_storage_class
 #                                      . the optional noncurrent transition
@@ -78,12 +80,12 @@
 #        marker must be removed before the bucket itself will delete.
 #
 # WHY (non-obvious design decisions):
-#   - Alternatives Considered: bucket versioning as the generation mechanism,
-#     rather than one distinct object key per generation with the batch tasks
-#     enumerating, sorting and deleting the sixth-oldest. Rejected because that
-#     reimplements SCRATCH by hand in every writer, and every writer would then
-#     have to get the same deletion logic right. Recorded in full on the
-#     versioning resource, which is where a reader will look for it.
+#   - Refactoring Rationale: the AAP fixes the distinct-key convention
+#     `<domain>/<dataset>/dt=.../gen=.../`, so object versions cannot themselves
+#     be the logical generation stack. Cleanup is single-sourced in
+#     data-migration/src/carddemo_migration/loaders/s3_stage.py and invoked by
+#     every staging path,
+#     rather than reimplemented independently by each batch writer.
 #   - Alternatives Considered: a days-based noncurrent expiry instead of a
 #     count-based one. Rejected -- LIMIT(5) counts generations, it does not age
 #     them. Recorded in full on the lifecycle configuration.
@@ -112,10 +114,10 @@
 # infra/bootstrap declares NO noncurrent-version expiration at all, because
 # every prior version of a state file is recovery material and pruning it
 # destroys the only record of what the infrastructure previously was. This
-# module is the opposite: a noncurrent-version expiry retaining exactly five
-# versions IS its entire purpose, because five is what the baseline's
-# GENERATIONDATAGROUP bases retain. Identical resource types, opposite
-# retention policies, both correct for what they hold.
+# module is the opposite: logical generation cleanup keeps the newest five
+# dt=/gen= prefixes and physically removes older prefixes, while lifecycle
+# bounds repeat-write versions within the retained prefixes. Identical resource
+# types, opposite retention policies, both correct for what they hold.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -219,6 +221,7 @@
 # Taking either as a variable would let a caller pass one value and apply into
 # another, producing a name that claims an account it does not occupy.
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
 # Assumptions: the `region` attribute is read, NOT the older `name`. Verified
 # against the pinned provider rather than assumed: on hashicorp/aws 6.57.1
@@ -259,7 +262,10 @@ locals {
   # The 63-character S3 limit is already guaranteed by the twelve-character
   # caps validated on name_prefix and environment in variables.tf; the budget
   # arithmetic lives there, on the inputs that have to satisfy it.
-  bucket_name = "${var.name_prefix}-datasets-${var.environment}-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
+  bucket_name       = "${var.name_prefix}-datasets-${var.environment}-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
+  audit_bucket_name = "${var.name_prefix}-dataset-audit-${var.environment}-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
+  audit_trail_name  = "${var.name_prefix}-${var.environment}-dataset-object-access"
+  audit_trail_arn   = "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.audit_trail_name}"
 
   # Trade-offs: the prefix is derived ONCE here rather than written as a
   # literal in the lifecycle filters and again in outputs.tf. Two copies of the
@@ -353,7 +359,7 @@ resource "aws_s3_bucket" "datasets" {
   # version and each delete marker must also be removed before the bucket
   # itself will delete, so the purge is a version-aware operation rather than a
   # recursive object delete.
-  # infra/bootstrap/variables.tf:L282 makes the same choice for the state bucket
+  # infra/bootstrap/variables.tf:L271-L272 makes the same choice for the state bucket
   # and documents the matching manual purge in docs/runbooks/teardown.md
   # (referenced at L272 of that file), so an operator learns one convention
   # rather than one per bucket.
@@ -398,26 +404,20 @@ resource "aws_s3_bucket" "datasets" {
 # preserve. There is also no target to notify: no topic, queue or function
 # appears in this module's input contract.
 
-# Alternatives Considered: BUCKET VERSIONING IS THE GENERATION MECHANISM, and
-# this is the single most consequential decision in the module.
+# Bucket versioning is RECOVERY INSIDE a logical generation, not the generation
+# mechanism itself. The AAP's distinct dt=/gen= key convention means two
+# generations are different object keys and can never become versions of one
+# another. data-migration/src/carddemo_migration/loaders/s3_stage.py therefore
+# centralises the one
+# unavoidable application-side rule: enumerate generation prefixes, sort by
+# business date and generation number, keep the newest configured count, and
+# delete every version/delete marker beneath the rest. Every writer calls that
+# one implementation, so SCRATCH semantics are not copied seven times.
 #
-# Enabling it makes "retain the five most recent generations" a SINGLE
-# DECLARATIVE LIFECYCLE RULE rather than application-side bookkeeping. The
-# reasonable alternative -- writing each generation to a distinct object key,
-# say a literal `gen=0007` directory per run, and having the batch tasks
-# enumerate, sort and delete the sixth-oldest -- was rejected because it would
-# have to REIMPLEMENT SCRATCH SEMANTICS BY HAND in every writer, and every
-# writer would then have to get the same deletion logic right. There are seven
-# distinct generation writers across the baseline, so that is seven chances to
-# get it wrong and seven places to fix when the retention count changes.
-#
-# The two IDCAMS keywords justify the mapping jointly, and both halves matter.
-# LIMIT(5) caps the group at five generations. SCRATCH means the generation that
-# rolls off is PHYSICALLY DELETED rather than merely uncatalogued -- without it
-# the rolled-off dataset would survive on disk unnamed, which is not what the
-# baseline does. A noncurrent-version expiry is that same pair expressed once,
-# by the storage layer: versioning supplies the generation stack, and the expiry
-# supplies both the cap and the deletion.
+# The two IDCAMS keywords justify the two layers jointly. LIMIT(5) is the
+# writer's prefix-count boundary. SCRATCH is its permanent version-aware delete
+# of prefixes that roll off. Versioning and the lifecycle below protect and
+# bound accidental repeat writes to an object key that is still retained.
 #
 # All TEN baseline bases are defined LIMIT(5) with SCRATCH, and the citation set
 # is given in full because the count is the most error-prone fact in this module
@@ -633,11 +633,13 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    it OVER-DELETES when the nightly chain pauses, because five perfectly good
 #    generations older than the threshold vanish even though they are still the
 #    five most recent; and it UNDER-DELETES when the chain runs hot, because
-#    more than five survive inside the window. Only a count-based rule
-#    reproduces LIMIT(5) under both. `noncurrent_days` is still supplied,
-#    because the provider requires it, but it is pinned to the one-day minimum
-#    in `local.noncurrent_expiration_min_age_days` purely as an eligibility
-#    gate; the rationale is recorded on that local.
+#    more than five survive inside the window. That logic applies to LOGICAL
+#    generation prefixes in the staging writer, not to this lifecycle action:
+#    `newer_noncurrent_versions` counts versions of ONE object key and cannot
+#    compare `gen=0001/...` with `gen=0002/...`. It remains useful as bounded
+#    recovery for repeat writes to the same key. `noncurrent_days` is still
+#    supplied because the provider requires it, pinned to the one-day minimum
+#    in `local.noncurrent_expiration_min_age_days` as an eligibility gate.
 #
 # 3. Trade-offs: one prefix-scoped rule per family rather than a single
 #    bucket-wide rule. The cost is twelve rules where one would have compiled,
@@ -683,8 +685,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   # would otherwise have to discover from a bill rather than from the code.
   transition_default_minimum_object_size = "all_storage_classes_128K"
 
-  # The ten generation families. `for_each` over the inventory is what keeps the
-  # rule count equal to the family count.
+  # The ten generation families. These rules govern noncurrent OBJECT VERSIONS
+  # inside each family; logical generation-prefix retention is enforced by the
+  # staging writer using the same configured counts.
   dynamic "rule" {
     for_each = var.dataset_families
 
@@ -705,10 +708,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
         # Assumptions: the per-family override wins when set and the
         # module-wide value applies otherwise, which is the precedence
         # variables.tf documents -- `noncurrent_versions` is left unset on all
-        # ten entries in the default, so every family inherits the retention of
-        # five that reproduces LIMIT(5). `coalesce` is the whole of that rule:
-        # an unset optional member arrives as null and falls through to the
-        # module-wide value.
+        # ten entries in the default, so every family inherits five. That number
+        # is shared with the logical-generation cleanup contract, but this block
+        # itself retains repeat writes of the SAME key only. `coalesce` is the
+        # whole precedence rule: an unset optional member arrives as null and
+        # falls through to the module-wide value.
         newer_noncurrent_versions = coalesce(rule.value.noncurrent_versions, var.noncurrent_version_retention)
         noncurrent_days           = local.noncurrent_expiration_min_age_days
       }
@@ -849,20 +853,51 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   depends_on = [aws_s3_bucket_versioning.datasets]
 }
 
+resource "aws_lambda_permission" "dataset_generation_retention" {
+  statement_id   = "AllowDatasetGenerationRetentionFromS3"
+  action         = "lambda:InvokeFunction"
+  function_name  = var.object_created_lambda_arn
+  principal      = "s3.amazonaws.com"
+  source_arn     = aws_s3_bucket.datasets.arn
+  source_account = data.aws_caller_identity.current.account_id
+
+  # WHY : Assumptions: both SourceArn and SourceAccount are required. The bucket
+  #       ARN binds invocation to this bucket, while the account condition blocks
+  #       a confused-deputy request from a same-named bucket in another account.
+}
+
+resource "aws_s3_bucket_notification" "datasets" {
+  bucket = aws_s3_bucket.datasets.id
+
+  lambda_function {
+    lambda_function_arn = var.object_created_lambda_arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+
+  # WHY : Refactoring Rationale: generation writers create distinct
+  #       `<family>/dt=.../gen=.../` keys, so S3's noncurrent-version count
+  #       cannot see generation six. Object-created notification covers nightly,
+  #       retry and ad-hoc writers through one retention path.
+  # WHY : Assumptions: the permission must exist before S3 validates and stores
+  #       the notification configuration; otherwise first apply fails even
+  #       though the function and bucket both exist.
+  depends_on = [aws_lambda_permission.dataset_generation_retention]
+}
+
 resource "aws_s3_bucket_logging" "datasets" {
   # Trade-offs: conditional rather than mandatory, so the module stays
   # instantiable without a pre-existing log bucket -- requiring one would make a
   # logging bucket a precondition of every consumer, including a throwaway test
   # root, and would invert the dependency between this module and whatever
   # provisions that bucket.
-  # The consequence is stated rather than glossed: the policy scan in
-  # .github/workflows/infra-ci.yml gates at HIGH and CRITICAL and expects access
-  # logging on a bucket holding financial extracts, so the environment roots are
-  # EXPECTED to supply a target and leaving this null in dev or prod is not the
-  # intended end state. If the scanner flags this bucket, THE FIX IS TO PASS A
-  # TARGET FROM THE ROOT -- never an inline suppression. The gates in this tree
-  # are satisfied by construction rather than by exemption, and a suppression
-  # comment here would convert a real finding into a permanent blind spot.
+  # The consequence is stated rather than glossed: the complete Checkov scan
+  # reports access logging on a bucket holding financial extracts, while the
+  # environment roots are expected to supply a target and leaving this null in
+  # dev or prod is not the intended end state. If the scanner flags this bucket,
+  # THE FIX IS TO PASS A TARGET FROM THE ROOT -- never an inline suppression.
+  # The gates in this tree are satisfied by construction rather than by
+  # exemption, and a suppression comment here would convert a real finding into
+  # a permanent blind spot.
   count = var.access_log_bucket_name == null ? 0 : 1
 
   bucket = aws_s3_bucket.datasets.id
@@ -880,4 +915,189 @@ resource "aws_s3_bucket_logging" "datasets" {
   # dataset buckets -- and from other buckets entirely -- without interleaving
   # them into one flat prefix that no query can separate afterwards.
   target_prefix = "s3-access-logs/${local.bucket_name}/"
+}
+
+resource "aws_s3_bucket" "audit" {
+  #checkov:skip=CKV_AWS_145:This dedicated CloudTrail delivery bucket uses SSE-S3 so audit delivery does not require a service-principal grant on the financial dataset CMK; validation, public-access blocking and the exact-source bucket policy provide the compensating controls.
+  bucket        = local.audit_bucket_name
+  force_destroy = false
+
+  tags = merge(var.tags, {
+    Name        = local.audit_bucket_name
+    Environment = var.environment
+  })
+}
+
+resource "aws_s3_bucket_versioning" "audit" {
+  bucket = aws_s3_bucket.audit.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      # WHY : Trade-offs: the financial dataset itself uses the project S3 CMK,
+      #       while this destination uses SSE-S3 so CloudTrail delivery does not
+      #       depend on broadening that data key's policy to a service principal.
+      #       Log integrity is supplied by CloudTrail validation; access remains
+      #       bounded by the dedicated bucket policy and public-access block.
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "audit" {
+  bucket                  = aws_s3_bucket.audit.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "audit" {
+  bucket = aws_s3_bucket.audit.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+
+  rule {
+    id     = "expire-after-compliance-retention"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = var.audit_log_retention_days + 1
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.audit_log_retention_days + 1
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = var.abort_incomplete_multipart_upload_days
+    }
+  }
+
+  depends_on = [
+    aws_s3_bucket_versioning.audit,
+  ]
+}
+
+data "aws_iam_policy_document" "audit_bucket" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.audit.arn,
+      "${aws_s3_bucket.audit.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudTrailAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.audit.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.audit_trail_arn]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudTrailWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.audit.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.audit_trail_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  policy = data.aws_iam_policy_document.audit_bucket.json
+
+  depends_on = [aws_s3_bucket_public_access_block.audit]
+}
+
+resource "aws_cloudtrail" "dataset_object_access" {
+  #checkov:skip=CKV_AWS_35:The trail writes only to the dedicated SSE-S3 audit bucket above; using the financial dataset CMK would widen that key to the CloudTrail service principal, while log-file validation and the exact-source bucket policy preserve integrity and admission.
+  name                          = local.audit_trail_name
+  s3_bucket_name                = aws_s3_bucket.audit.id
+  include_global_service_events = false
+  is_multi_region_trail         = false
+  enable_log_file_validation    = true
+  enable_logging                = true
+
+  advanced_event_selector {
+    name = "CardDemo dataset object reads and writes"
+
+    field_selector {
+      field  = "eventCategory"
+      equals = ["Data"]
+    }
+
+    field_selector {
+      field  = "resources.type"
+      equals = ["AWS::S3::Object"]
+    }
+
+    field_selector {
+      field       = "resources.ARN"
+      starts_with = ["${aws_s3_bucket.datasets.arn}/"]
+    }
+  }
+
+  depends_on = [aws_s3_bucket_policy.audit]
+
+  tags = merge(var.tags, {
+    Name        = local.audit_trail_name
+    Environment = var.environment
+  })
 }

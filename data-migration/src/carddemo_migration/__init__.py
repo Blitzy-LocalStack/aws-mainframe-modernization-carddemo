@@ -38,10 +38,15 @@ Package layout
     without the money-total pass is not evidence of anything, which is why verification is
     a first-class subpackage rather than an afterthought in a script.
 
-Two modules sit at the package root beside this one: ``cli``, which exposes the
-command-line entry points the batch staging step invokes, and ``config``, which resolves
+Three modules sit at the package root beside this one: ``cli``, which exposes the
+command-line entry points the batch staging step invokes; ``config``, which resolves
 runtime settings when a command runs rather than when a module is imported -- that timing
-is what keeps this package importable with nothing configured.
+is what keeps this package importable with nothing configured; and ``credentials``, the
+database bootstrap step that applies each generated service credential to the login role
+that authenticates with it. That last one runs immediately after
+``sql/V0__schemas_and_roles.sql`` creates the eight roles with no password, and it is the
+delivered mechanism that makes them able to authenticate at all -- so it precedes every
+loader in the batch chain rather than sitting beside them.
 
 Import and layering contract
 ----------------------------
@@ -127,7 +132,7 @@ Assumptions:
     this tree would change how the parity oracle resolves its own imports.
 """
 
-# WHY : Alternatives Considered: the plainer ``from importlib.metadata import version``
+# Alternatives Considered: the plainer ``from importlib.metadata import version``
 # was written first and then rejected, because it binds a name called ``version`` INTO
 # this package's root namespace. That is a re-export this package does not intend and a
 # specific trap: ``from carddemo_migration import version`` would then succeed and hand
@@ -137,7 +142,7 @@ Assumptions:
 # name at all, which is what the no-re-export contract in the docstring above claims.
 import importlib.metadata as _metadata
 
-# WHY : Assumptions: the metadata lookup below is keyed on the DISTRIBUTION name declared
+# Assumptions: the metadata lookup below is keyed on the DISTRIBUTION name declared
 # in the sibling pyproject.toml, which is hyphenated, whereas the import package this file
 # belongs to is underscored. The two spellings can never be unified -- a hyphen is not a
 # legal Python identifier -- so this constant is what ties them together, and mistaking one
@@ -147,7 +152,7 @@ import importlib.metadata as _metadata
 # characters instead of having to know that normalisation exists.
 _DISTRIBUTION_NAME = "carddemo-migration"
 
-# WHY : Trade-offs: a source tree that was never installed reports this sentinel instead
+# Trade-offs: a source tree that was never installed reports this sentinel instead
 # of raising. That is the whole point -- a copybook-only import must not fail merely
 # because nothing has been installed yet, which is the state a bare checkout and the
 # codec tests both run in. The accepted cost is that a caller which logs the version can
@@ -209,7 +214,7 @@ def _resolve_version() -> str:
     try:
         return _metadata.version(_DISTRIBUTION_NAME)
     except _metadata.PackageNotFoundError:
-        # WHY : Assumptions: absence of the distribution is an ordinary, expected state
+        # Assumptions: absence of the distribution is an ordinary, expected state
         # here rather than an error -- the package is imported directly from the src tree
         # during local iteration and in the codec tests, which the sibling pyproject.toml
         # supports by placing "src" on pytest's import path. Only this one exception is
@@ -221,7 +226,7 @@ __version__ = _resolve_version()
 
 # The module's public surface is complete at the line above, so this is the point a reader
 # looking for ``__all__`` reaches and finds none.
-# WHY : Trade-offs: no ``__all__`` is declared, and the omission is deliberate rather than
+# Trade-offs: no ``__all__`` is declared, and the omission is deliberate rather than
 # an oversight. A package-level ``__all__`` naming subpackages is not inert: measured
 # against this interpreter, a plain ``import`` of a package leaves a subpackage named in
 # ``__all__`` out of ``sys.modules``, but ``from <package> import *`` imports every name

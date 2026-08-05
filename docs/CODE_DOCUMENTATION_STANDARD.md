@@ -19,30 +19,22 @@
 > standard extends that established house convention to a polyglot tree; it does
 > not invent a new one.
 >
-> **Precedence.** `tests/README.md` opens by stating that where it and a runner
-> script disagree, *the script* is authoritative. The same principle governs here:
-> where this standard and a linter configuration disagree, **the linter
-> configuration is authoritative**, and this document is the thing that gets
-> fixed. Every gate named below that exists today was read from the configuration
-> that implements it, not assumed; every gate whose configuration has not yet been
-> authored is named in the future tense and marked *planned*, so that a reader can
-> tell a live check from a scheduled one.
+> **Precedence.** The AAP and Rule 1 are authoritative. This standard explains
+> that contract, while the language configurations encode only its
+> machine-checkable subset. Where prose and configuration disagree, both must be
+> corrected to match the AAP and Rule 1; a linter setting may never narrow or
+> override the governing requirement. A prose rule that claims more than the
+> checked gate delivers is not an enforcement mechanism, so the gap remains a
+> review failure until the configuration or review process enforces it.
 >
-> **Checkpoint state.** The migration lands its artifacts in plan order, and this
-> standard is authored early so that the files governed by it can be written
-> against it. Two consequences of that ordering are stated here rather than left for
-> a reader to discover — one about the gates, one about this document's own
-> cross-references. Of the gates below, exactly **one is live today** — the Checkstyle
-> Javadoc gate, bound to the Maven `validate` phase and running over every Java
-> file in `services/**`. The Python gate's configuration exists
-> (`[tool.ruff.lint]` in `data-migration/pyproject.toml`) and `ruff check` passes
-> over the authored Python, but the ETL modules it will govern are still landing.
-> The TypeScript gate's configuration (`ui/eslint.config.js`) and all three new CI
-> workflows are **planned and absent**. And of the three pre-existing repository
-> files this migration is permitted to modify — `README.md`, `CONTRIBUTING.md` and
-> `.gitignore` — only `.gitignore` has landed, so the cross-references described
-> under [Why this document exists](#why-this-document-exists) are contracts to be
-> honoured rather than links that resolve today.
+> **Current state.** The Java Checkstyle, TypeScript/JavaScript ESLint, Python
+> Ruff, Terraform lint/documentation, and workflow validation gates are present
+> and build-failing. The four migration workflows under `.github/workflows/`
+> run those checks with pinned actions. All sixteen Terraform module READMEs and
+> both environment-root READMEs are generated; the bootstrap README documents
+> the separately applied state backend. Machine success covers presence and
+> syntax only—semantic accuracy and rationale quality remain mandatory Rule 1
+> review obligations.
 
 
 ## Why this document exists
@@ -71,25 +63,21 @@ below therefore states its gate **and its gate's blind spot**, because a standar
 that advertises full mechanical enforcement teaches reviewers to stop reading —
 which removes the only check that covers three of the four forbidden patterns.
 
-Four other artifacts are contracted to depend on this document and to link to
-this exact path, so the filename is part of its contract. Three of the four are
-authored at later indexes of the same plan and do not link here yet; the fourth
-does its half today:
+Four other artifacts depend on this document and link to this exact path, so
+the filename is part of its contract:
 
-* `CONTRIBUTING.md` **will** carry a code-documentation section that points here
-  for the full convention. That update is one of the three permitted
-  modifications to a pre-existing file and has not landed.
-* `README.md` and `MIGRATION_README.md` **will** reference this path from their
-  migration sections. The README update is the second permitted modification and
-  has not landed; `MIGRATION_README.md` does not exist yet.
-* [`.gitignore`](../.gitignore) — the third permitted modification, and the only
-  one that **has** landed — is written so that this file can never be ignored: it
-  names generated output, Terraform state and local environment files only, so
-  nothing in it can match a tracked document.
+* [`CONTRIBUTING.md`](../CONTRIBUTING.md) points here for the complete
+  polyglot convention.
+* [`README.md`](../README.md) and
+  [`MIGRATION_README.md`](../MIGRATION_README.md) link here from their migration
+  guidance.
+* [`.gitignore`](../.gitignore) names generated output, Terraform state, local
+  environment files, private keys, and credential stores narrowly enough that
+  this tracked standard and public CA bundles remain trackable.
 
-Because those references are literal, the filename is `CODE_DOCUMENTATION_STANDARD.md`
-at the `docs/` root. A single character of drift breaks four links, three of which
-are written against it before they exist.
+Because those references are literal, the filename is
+`CODE_DOCUMENTATION_STANDARD.md` at the `docs/` root. A single character of
+drift breaks all four links.
 
 
 ## Scope
@@ -120,11 +108,10 @@ modified.** They are `README.md`, `CONTRIBUTING.md` and `.gitignore`, and no
 fourth exists — every other artifact of this migration is a new file in a new
 tree. That boundary is stated here because it is what makes the reference status
 above checkable rather than merely intended: a change to any file outside those
-three that is not a new file is out of scope by construction, not by judgement. Of
-the three, **only `.gitignore` has landed at this checkpoint**; the `README.md`
-and `CONTRIBUTING.md` updates are authored at later indexes of the same plan, which
-is why this document describes their cross-references as contracts rather than as
-links that resolve today.
+three that is not a new file is out of scope by construction, not by judgement.
+All three permitted updates are present: the root README links the migration
+guide, CONTRIBUTING links this standard, and `.gitignore` protects generated and
+credential-bearing local artifacts without hiding deliverable configuration.
 
 Where a migrated implementation deliberately behaves differently from the
 baseline, that divergence is registered in
@@ -361,21 +348,29 @@ scope exactly as a public one is. The Checkstyle configuration implements that s
 in two modules that divide the work, and the division is the difference between what
 the build rejects and what review must catch:
 
-* `MissingJavadocMethod` is configured `scope="package"`, so **presence** is
-  enforced on public, protected and package-private methods. A **private** method
-  with no Javadoc at all passes the build; the obligation still applies, and it is a
-  review check.
+* `MissingJavadocMethod` is configured `scope="private"` with
+  `allowedAnnotations=""`, so **presence** is enforced at every visibility. Because
+  Checkstyle's `scope` property is inclusive downwards, `private` admits public,
+  protected, package-private and private alike; a private method with no Javadoc at
+  all now **fails the build** rather than deferring to review. Clearing
+  `allowedAnnotations` matters independently: it defaults to `Override`, so leaving
+  it unset would exempt every overriding method — the population that most often
+  narrows or strengthens an inherited contract.
 * `JavadocMethod` is configured `accessModifiers="public, protected, package,
   private"` with `allowMissingParamTags` and `allowMissingReturnTag` both false and
   `validateThrows` true, so wherever a Javadoc block **does** exist — private
   methods included — its `@param`, `@return` and `@throws` coverage is enforced.
 
-An earlier wording of this paragraph named public and package-private methods only.
-It understated both halves and is corrected here, because a reader who trusted it
-would under-document private methods that the second module then rejects the moment
-a partial block is added. The ruleset is the authority under this document's
-precedence clause: where this prose and the configuration could be read differently,
-the configuration wins.
+Refactoring Rationale: two earlier wordings of this paragraph are corrected here
+rather than overwritten silently, because each would mislead a reader in the same
+direction. The first named public and package-private methods only. The second
+claimed presence stopped at package scope and left private methods to review, which
+is now false in the configuration and was the more damaging of the two: a reader who
+trusted it would leave private methods undocumented and be rejected at `validate`,
+with the failure pointing at a check the prose said did not apply to them. The
+ruleset is the authority under this document's precedence clause — where this prose
+and the configuration could be read differently, the configuration wins — so the
+prose is what moves.
 
 **Mechanical gate — live today.**
 [`config/checkstyle/checkstyle.xml`](../config/checkstyle/checkstyle.xml)
@@ -386,8 +381,9 @@ driven by `maven-checkstyle-plugin` and bound to the Maven **`validate`** phase 
 `checkstyle-documentation-gate`. Binding to `validate` rather than to a
 verification phase is deliberate: the gate runs on **every local build**, before
 compilation, so a missing Javadoc surfaces on the developer's machine rather than
-in CI. This is the one gate in this document that is live and enforcing at this
-checkpoint.
+only in CI. The TypeScript, Python, HCL, and workflow gates described below are
+also live; this one is distinguished by running at Maven's earliest validation
+phase.
 
 **What this gate cannot decide.** It decides presence and coverage: that a Javadoc
 block exists on each audited element, that `@param` names every parameter, that
@@ -460,6 +456,27 @@ and `@throws` as applicable. Trivial accessors may use the single-line form. An
 un-exported helper carries the same docstring obligation as an exported component;
 the inline-comment requirement applies **in addition**, never instead.
 
+**`@param` and `@returns` carry the TYPE as well as the name and the
+description** — `@param {string} accountId - ...`, `@returns {AccountView} ...`.
+Rule 1's Parameters element asks for "name, type and description for each
+parameter" and its Return values element for the "type and description of what is
+returned", and it draws no distinction between a language whose signature happens
+to carry the type and one whose signature does not. A docstring that omits the
+type does not satisfy that clause merely because the information is recoverable
+from the line below it.
+
+**Trade-offs — an earlier wording of this section left the type to the
+signature.** The argument was that a second copy of the type inside the docstring
+is unchecked prose which can drift from the signature, and that argument is sound
+as far as it goes; it was overruled because it answers a question the rule does
+not ask. Two things bound the drift it worried about. The signature remains the
+compiler's truth, so a stale type in a docstring can mislead a reader but cannot
+let a type error through. And `jsdoc/check-param-names` fails the build when a
+documented parameter no longer exists, which catches the commonest shape of drift
+mechanically. Set against that, leaving the clause to the signature meant the
+TypeScript gate enforced a narrower rule than the one it exists to enforce, and
+enforced it differently from the JavaScript in the same package.
+
 **Refactoring Rationale — an earlier wording of this paragraph limited the
 obligation to exported members, and that was a narrowing of the rule rather than a
 reading of it.** Rule 1's Docstring Requirements say "every new or modified
@@ -473,25 +490,27 @@ working backwards from what one lint rule is convenient to configure, which
 inverts this document's own precedence: the rule sets the obligation and the
 configuration implements as much of it as it can.
 
-**Mechanical gate — planned, absent at this checkpoint.**
-`eslint-plugin-jsdoc` rules configured in `ui/eslint.config.js`, to be run by the
-`lint` script already declared in [`ui/package.json`](../ui/package.json). Neither
-the ESLint configuration nor the `.github/workflows/ui-ci.yml` step that will
-invoke it exists yet — both are authored at later indexes of the same plan — so
-**no machine gate covers TypeScript today** and the whole obligation is a review
-obligation until they land. The plugin's dependency is pinned in
-`ui/package.json`, which is what fixes the version the gate will run at.
+**Mechanical gate — live today.** `eslint-plugin-jsdoc` rules configured in
+[`ui/eslint.config.js`](../ui/eslint.config.js), run by the `lint` script declared
+in [`ui/package.json`](../ui/package.json) as `eslint . --max-warnings=0`. That
+threshold is what makes the gate a gate: every configured JSDoc rule is set to
+`error`, and even a warning would fail the run. The plugin's dependency is pinned in
+`ui/package.json`, which fixes the version the gate runs at.
+`.github/workflows/ui-ci.yml` invokes that same script as a required step, so the
+gate runs both locally and on every push.
 
-**What that gate will and will not decide.** `eslint-plugin-jsdoc` decides
+**What that gate does and does not decide.** `eslint-plugin-jsdoc` decides
 presence and tag coverage on the declarations its rule configuration selects. Two
-limits are to be stated in that configuration when it is authored, and are stated
-here so the standard does not read as promising more than the tool delivers.
-First, its `require-jsdoc` contexts must be written to select **all** function and
-class declarations, not only exported ones, or the configuration will silently
-implement the narrowed scope this section has just rejected. Second, even so
-configured it decides nothing about docstring *accuracy* or `WHY`-comment quality —
-the same blind spot the Java gate has, and the reason the review half of Rule 1
-governs TypeScript exactly as it governs Java.
+limits are stated in that configuration, and are stated here so the standard does
+not read as promising more than the tool delivers. First, its `require-jsdoc`
+contexts must select **all** function and class declarations, not only exported
+ones — which is why they are written as relational selectors
+(`* > ArrowFunctionExpression`, `*:not(MethodDefinition) > FunctionExpression`)
+that match a function in every position, including a bare callback argument, rather
+than as positional selectors that silently implement the narrowed scope this section
+has just rejected. Second, even so configured it decides nothing about docstring
+*accuracy* or `WHY`-comment quality — the same blind spot the Java gate has, and the
+reason the review half of Rule 1 governs TypeScript exactly as it governs Java.
 
 The example below is an **excerpt**: the component body is elided as `...` because
 the subject of the example is the documentation. It is not compilable as written.
@@ -505,14 +524,22 @@ the subject of the example is the documentation. It is not compilable as written
  * fidelity requirement — rendering buttons alone would take the existing
  * workflow away from users who already have it.
  *
- * @param props.actions the enabled key actions for the current screen
- * @param props.onInvoke called with the action a user triggered, by key or click
- * @returns the key bar element
+   * @param {PfKeyBarProps} props the component's props, destructured below
+   * @param {readonly KeyAction[]} props.actions the enabled key actions for the
+   *   current screen
+   * @param {(action: KeyAction) => void} props.onInvoke called with the action a
+   *   user triggered, by key or click
+   * @returns {ReactElement} the key bar element
  */
-export function PfKeyBar({ actions, onInvoke }: PfKeyBarProps): JSX.Element {
+export function PfKeyBar({ actions, onInvoke }: PfKeyBarProps): ReactElement {
   ...
 }
 ```
+
+Note the destructured root. `props` is documented in its own right as well as each
+member, because the gate checks destructured roots: documenting only the members
+leaves the parameter itself undescribed, and documenting only the parameter says
+nothing about the values the component actually reads.
 
 Trade-offs: the compiler version is constrained by this gate. The TypeScript
 compiler is pinned below the newest major release, and the reason is not a
@@ -531,15 +558,15 @@ nobody upgrades it later without understanding what breaks.
 class and function, using the Args / Returns / Raises structure. Purpose first,
 then each parameter with its type, then the return value, then anything raised.
 
-**Mechanical gate — configured today, and narrower than the requirement above.**
+**Mechanical gate — configured, build-failing, and narrower than the requirement above.**
 The pydocstyle **`D`** rule family, selected under `[tool.ruff.lint]` in
 [`data-migration/pyproject.toml`](../data-migration/pyproject.toml). That single
 `select` entry is the entire mechanical enforcement of this standard for Python;
 narrowing it, or letting a convention setting switch off its presence checks,
 switches off most of a review gate for a whole language rather than tidying a lint
-configuration. The gate is wired into `.github/workflows/services-ci.yml`, which is
-**planned and absent**, so today it runs where an author or reviewer runs
-`ruff check` rather than on a push.
+configuration. `.github/workflows/services-ci.yml` installs the hash-locked
+development toolchain from `data-migration/requirements-dev.txt` and runs
+`ruff check`, so the same gate executes locally and on every covered push.
 
 **What this gate cannot decide, stated precisely because the gap is wide.** The
 `D` family checks that a docstring **exists** on a module, class or function, and
@@ -585,34 +612,26 @@ construct: *a file-header comment block in every `.tf` file, a `description` on
 every `variable` and `output`, and a why-comment on each non-obvious resource
 argument.*
 
-**Mechanical gate — configured today, gating once the tree completes.**
+**Mechanical gate — configured and build-failing.**
 [`infra/.tflint.hcl`](../infra/.tflint.hcl) for lint, and
 [`infra/.terraform-docs.yml`](../infra/.terraform-docs.yml) for generated module
 documentation whose freshness is drift-checked in CI — a module whose generated
 documentation no longer matches its variables fails the check. The prose half of
 the obligation is a `README.md` in **each `infra/modules/*` directory** and in
-**both `infra/envs/*` roots**: **sixteen** module READMEs and two root READMEs when
-the module catalogue is complete, of which **fifteen** module directories exist at
-this checkpoint — `step-functions-batch` is the sixteenth and is authored at a later
-index of the same plan. No `README.md` exists in any of them yet; they are a later
-deliverable of the same plan.
+**both `infra/envs/*` roots**. All sixteen module READMEs and both environment
+READMEs exist, and `infra/bootstrap/README.md` documents the separately applied
+remote-state backend. `.github/workflows/infra-ci.yml` checks all nineteen
+documented directories with terraform-docs 0.20.0.
 
-**What these two gates cannot decide, and what they cannot yet decide at all.**
+**What these two gates cannot decide.**
 TFLint decides that a `description` is **present** on every `variable` and
 `output`, and terraform-docs decides that the generated table **matches** the HCL
 beside it. Neither assesses whether a description is informative, and neither reads
 a `WHY` comment at all — TFLint's one comment-related rule checks comment *syntax*,
 not comment *content*. The file-header block and the per-argument why-comment are
 therefore **review obligations** with no machine backing, which is precisely why the
-per-directory README is required as the prose half. Separately, both gates are
-**not green at this checkpoint** and cannot be: a recursive TFLint run reports
-`terraform_unused_declarations` for every variable no `main.tf` consumes yet and
-`terraform_standard_module_structure` for every directory whose `main.tf` and
-`outputs.tf` have not landed, and terraform-docs `--output-check` has no README to
-compare against. Both clear as those files land; neither indicates a defect in the
-HCL authored so far. The measured current state is recorded in
-[`docs/architecture/service-catalog.md`](architecture/service-catalog.md) under the
-deployment boundary.
+per-directory README is required as the prose half. The gates are green for the
+authored tree; that result proves structural consistency, not rationale quality.
 
 The example below is an **excerpt** — a header block, one variable and one resource
 lifted out of a module — not a complete, applyable configuration.
@@ -733,10 +752,11 @@ plus justification on job ordering and caching.* Two further requirements apply 
 every new workflow: a least-privilege `permissions` block, and third-party actions
 pinned to immutable commit SHAs rather than to moving tags.
 
-**Mechanical gate — none for the documentation.** Review carries it. The workflows'
-own required steps gate the *code* they run, not the comments they carry, and the
-three new workflows this section governs are themselves **planned and absent** at
-this checkpoint. The header template is the one already established by
+**Mechanical gate — none for the documentation semantics.** Review carries it.
+The workflows' required steps gate the code they run, while YAML parsing,
+immutable-action checks, and least-privilege review protect their executable
+shape. The four migration workflows are present under `.github/workflows/`.
+Their header template follows the one already established by
 [`.github/workflows/tests.yml`](../.github/workflows/tests.yml) (L1–L51) and is
 reproduced below in shape.
 
@@ -958,13 +978,13 @@ decides whether prose is true.
 
 | Language | Required form | Machine-checkable subset | Human-review obligation | Status |
 |---|---|---|---|---|
-| Java | Javadoc on every class, every method at every visibility, every module entry point; `@param`, `@return`, `@throws` | presence at package visibility and wider; at-clause coverage and non-empty bodies at **all** visibilities — `config/checkstyle/checkstyle.xml` + `config/checkstyle/suppressions.xml`, bound to the Maven `validate` phase in `services/pom.xml` | presence on **private** methods; accuracy of the prose; `WHY` comments present, specific and on the non-obvious line | **live** on every local build; the CI step lives in the planned `.github/workflows/services-ci.yml` |
-| TypeScript | JSDoc/TSDoc on every function, class and module entry point, exported or not; `@param`, `@returns`, `@throws` | docstring presence and tag coverage on the selected declaration contexts — `eslint-plugin-jsdoc` rules in `ui/eslint.config.js` | the entire obligation until the configuration lands; thereafter accuracy and `WHY` quality, plus keeping the rule contexts un-narrowed | **planned** — `ui/eslint.config.js` and `.github/workflows/ui-ci.yml` are absent |
-| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature), accuracy, `WHY` quality | configuration **live**, runs where `ruff check` is run; the CI step lives in the planned `.github/workflows/services-ci.yml` |
-| HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the `README.md` prose half in each `infra/modules/*` directory (sixteen when the catalogue is complete, fifteen present) and both `infra/envs/*` roots | **configured, not yet green** — clears as each directory's `main.tf`, `outputs.tf` and `README.md` land; `.github/workflows/infra-ci.yml` is absent |
+| Java | Javadoc on every class, every method at every visibility, every module entry point; `@param`, `@return`, `@throws` | presence at **every** visibility including private, with the default `Override` exemption cleared; at-clause coverage and non-empty bodies at all visibilities — `config/checkstyle/checkstyle.xml` + `config/checkstyle/suppressions.xml`, bound to the Maven `validate` phase in `services/pom.xml` and covering test sources | accuracy of the prose; `WHY` comments present, specific and on the non-obvious line | **live** locally and in `.github/workflows/services-ci.yml` |
+| TypeScript | JSDoc/TSDoc on every function, class and module entry point, exported or not; `@param`, `@returns`, `@throws` | docstring presence and tag coverage on the selected declaration contexts, including function and arrow **expressions** in every position — `eslint-plugin-jsdoc` rules in `ui/eslint.config.js`, run at `--max-warnings=0` | accuracy and `WHY` quality; keeping the rule contexts un-narrowed and free of suppression comments | **live** through `npm run lint` and `.github/workflows/ui-ci.yml` |
+| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
+| HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the prose in all sixteen module READMEs, both environment READMEs, and the bootstrap README | **live** through TFLint and terraform-docs checks in `.github/workflows/infra-ci.yml` |
 | SQL | header block, why-comment per non-obvious constraint or index | **none** | the whole obligation | review only |
-| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves** — the image build | the header and every justification, including the pin's | review only, plus the image build in the planned `.github/workflows/services-ci.yml` |
-| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none** | the whole obligation | review only; the three workflows this governs are themselves planned |
+| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves** — the image build | the header and every justification, including the pin's | review plus image builds for authored Dockerfiles; service and UI Dockerfiles remain planned |
+| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | workflow syntax and pinned-action validation | rationale accuracy and least-privilege review | **live** for `services-ci.yml`, `ui-ci.yml`, `infra-ci.yml`, and `deploy.yml` |
 
 **What the gates in that table do NOT check.** Assumptions: every gate above is a
 presence-and-shape check, and none of them reads prose. Specifically:
@@ -994,21 +1014,17 @@ are wired into new workflows beside it.
 Two boundaries are worth stating plainly, because a table of gates can read as a
 claim about a running system.
 
-**The infrastructure boundary.** The infrastructure code is **authored to a
-foundation state** — provider constraints and input surfaces — and checked to the
-extent that state admits: every `.tf` file parses and
-`terraform fmt -check -recursive infra/` passes today. `terraform validate`,
-`terraform plan`, a clean recursive lint and the generated-documentation drift check
-each require artifacts that have not landed — `main.tf`, `outputs.tf`, a `README.md`
-per directory, and an initialised provider cache — so none of them is asserted to
-pass at this checkpoint, and the policy scan runs in a workflow that does not exist
-yet. Applying any of it to a live account is an operator action outside this scope,
-so nothing here asserts that a provisioned environment exists.
+**The infrastructure boundary.** All sixteen modules, both environment roots,
+and the state bootstrap are authored and statically validated. Formatting,
+initialisation without a backend, validation, recursive lint, generated-document
+drift, and policy checks are build gates. Applying the configuration to a live
+AWS account remains an operator action outside this scope, so static success is
+not represented as evidence that a provisioned environment exists.
 
-**The gate-coverage boundary.** Only the Java row is live and enforcing today. A
-reader must not read this table as a claim that a documentation defect in
-TypeScript, HCL, SQL, a Dockerfile or a workflow file is currently caught by a
-build; at this checkpoint it is caught by review or not at all.
+**The gate-coverage boundary.** Java, TypeScript/JavaScript, Python, HCL, and
+workflow syntax have build-failing machine checks. SQL rationale, Dockerfile
+rationale, and every language's semantic `WHY` quality still require review.
+No machine gate is represented as proving the parts of Rule 1 it cannot read.
 
 
 ## Conflicts

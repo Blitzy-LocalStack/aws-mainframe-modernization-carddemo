@@ -6,9 +6,10 @@
 #   that every other module in this tree is placed into, with its
 #   public, private-application and isolated-data subnet tiers, its NAT egress,
 #   its eight interface endpoints, its S3 gateway endpoint and its three
-#   security groups. Every value a calling root may configure is declared here
-#   and nothing else is: anything absent from the list below is a property of
-#   the network fixed in main.tf, not a per-environment choice.
+#   security groups. Every value a calling root may configure or share with a
+#   dependent module is declared here and nothing else is: anything absent
+#   from the list below is a property of the network fixed in main.tf, not a
+#   per-environment choice.
 #
 #   Every variable declared here is consumed by main.tf or outputs.tf. That is
 #   not a stylistic claim -- terraform_unused_declarations is enabled in
@@ -17,30 +18,26 @@
 #   cannot be added ahead of the code that reads it, and a derived value
 #   belongs in main.tf's `locals` rather than here.
 #
-#   Measured state at this checkpoint, kept distinct from the contract above
-#   because conflating the two is how a false claim spreads. main.tf and
-#   outputs.tf are authored at a later index of the same plan and are not yet
-#   on disk, so a lint run over this directory currently reports seven of the
-#   eight as unused -- az_count being the exception, since subnet_newbits
-#   validates against it. It also reports the two absent files and the
-#   consequently unused aws provider requirement. All ten findings are the
-#   documented consequence of an incomplete tree rather than a defect here,
-#   they are enumerated in infra/.tflint.hcl and in
-#   docs/CODE_DOCUMENTATION_STANDARD.md, and they clear as those two files
-#   land. What passes today is everything this file can be held to on its own:
-#   HCL parse, `terraform validate`, `terraform fmt -check`, a type and a
-#   description on all eight, and the six validations below.
+#   main.tf consumes all eleven variables and outputs.tf republishes the two
+#   shared ports so the environment root can pass the exact values enforced by
+#   the security groups into ecs-service and aurora-postgresql. That round trip
+#   is deliberate: a literal 8080 or 5432 repeated in three modules works only
+#   until one copy changes, whereas a value exposed once by this module cannot
+#   leave the listener and the rule that admits it disagreeing.
 #
 #   The distinction between a configurable value and a fixed property carries
 #   more weight in this module than in any other, because the two environment
 #   roots are required to be identical in TOPOLOGY and to differ only in sizing
 #   and retention. An input is therefore admissible here only if varying it
 #   cannot change the shape of the network. Exactly one input below is a
-#   genuine per-environment lever, flow_log_retention_days; the five candidates
-#   that failed the test are named at the foot of this file, under deliberately
-#   absent inputs, so a reader who expects one learns it was considered.
+#   genuine per-environment lever, flow_log_retention_days. The endpoint set and
+#   the two ports are shared contracts rather than environment levers: the
+#   endpoint validation requires the architecture's exact eight services, and
+#   both roots use the same port values. The five candidates that failed the
+#   topology test are named at the foot of this file, under deliberately absent
+#   inputs, so a reader who expects one learns it was considered.
 #
-# Parameters -- eight, of which one is required:
+# Parameters -- eleven, of which one is required:
 #
 #   Naming and identity
 #     name_prefix              string       Leading component of each Name tag.
@@ -55,6 +52,13 @@
 #     subnet_newbits           number       Prefix bits cidrsubnet adds when
 #                                           carving each subnet.
 #
+#   Private service connectivity
+#     interface_endpoint_services
+#                              set(string)  Exact eight AWS services reached by
+#                                           interface endpoint.
+#     app_container_port       number       Shared ALB-to-container port.
+#     database_port            number       Shared application-to-Aurora port.
+#
 #   Tagging
 #     tags                     map(string)  Merged onto each taggable resource.
 #
@@ -64,6 +68,15 @@
 #     flow_log_kms_key_arn     string       Customer-managed key encrypting the
 #                                           flow-log group; null selects the
 #                                           service default.
+#
+#   Security group ports -- each shared with a second module
+#     app_container_port       number       Port admitted from the load balancer
+#                                           to the application tier, and passed
+#                                           on as ecs-service's container_port.
+#     database_port            number       Port admitted from the application
+#                                           tier to the isolated data tier, and
+#                                           passed on as aurora-postgresql's
+#                                           port.
 #
 #   Each block below carries the full `type` and `description` that tflint's
 #   terraform_typed_variables and terraform_documented_variables rules require.
@@ -84,23 +97,25 @@
 #     tagging one environment's network with another environment's name.
 #   - A malformed `vpc_cidr`, a `name_prefix` or `environment` outside the
 #     permitted character set or length, an `az_count` or `subnet_newbits`
-#     outside its bounds, or a `flow_log_retention_days` outside the set
-#     CloudWatch Logs accepts each fails its `validation` block AT PLAN TIME.
-#     Failing there is the entire reason those validations are declared: the
-#     same mistakes otherwise surface as service errors partway through an
-#     apply, once subnets and gateways exist and the run has to be unwound.
+#     outside its bounds, an endpoint set that differs from the architecture's
+#     eight services, an invalid shared port, or a `flow_log_retention_days`
+#     outside the set CloudWatch Logs accepts each fails its `validation` block
+#     AT PLAN TIME. Failing there is the entire reason those validations are
+#     declared: the same mistakes otherwise surface as service errors partway
+#     through an apply, once subnets and gateways exist and the run has to be
+#     unwound.
 #   - No input here can fail at apply time for a reason this file could have
 #     caught, with one stated exception -- `flow_log_kms_key_arn` is not
 #     shape-checked, for the reason recorded on that block.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: no input accepts a credential, an account identifier or a
+#   - Assumptions: no input accepts a credential, an account identifier or a
 #     Region, and no `default` holds one. `flow_log_kms_key_arn` names an ARN
 #     as its CONTRACT and defaults to null, which is what keeps that true.
 #     Identifiers travel INWARD only as caller-supplied values and OUTWARD as
 #     outputs, so no literal ARN, account identifier, key id, Region, bucket or
 #     table name appears anywhere in this file.
-#   - Assumption: this module configures no aws provider, so the Region and the
+#   - Assumptions: this module configures no aws provider, so the Region and the
 #     stack-wide tag set both arrive from the calling root's provider block
 #     rather than from an input here; versions.tf records the same for the
 #     provider version constraint. That one fact is why `region` is absent from
@@ -122,9 +137,7 @@
 # Naming and identity
 # -----------------------------------------------------------------------------
 
-# WHAT: a prefix carrying a default, rather than a literal compiled into
-#       main.tf.
-# WHY : Trade-off: the default spares each root from restating the project name
+# WHY : Trade-offs: the default spares each root from restating the project name
 #       on a module it calls once, which is the common case; keeping it a
 #       variable rather than a literal is what lets this module be reused under
 #       a different naming scheme without editing it. The cost accepted is that
@@ -139,7 +152,7 @@ variable "name_prefix" {
   default     = "carddemo"
 
   validation {
-    # WHY : Assumption: this prefix is concatenated into names across roughly
+    # WHY : Assumptions: this prefix is concatenated into names across roughly
     #       thirty resources, several of which AWS bounds at 32 characters and
     #       restricts to this same character class -- so the bound is the
     #       tightest of the downstream limits rather than a preference, and the
@@ -147,7 +160,7 @@ variable "name_prefix" {
     #       that would otherwise reach a name the service refuses. Anchoring
     #       both ends on an alphanumeric additionally rejects a leading or
     #       trailing hyphen, which would double up against the separator placed
-    #       either side of it. Trade-off: a legitimately unusual prefix has to
+    #       either side of it. Trade-offs: a legitimately unusual prefix has to
     #       be brought inside these bounds first; catching it here costs one
     #       plan, catching it in the service costs a partial apply.
     condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.name_prefix)) && length(var.name_prefix) <= 32
@@ -155,7 +168,6 @@ variable "name_prefix" {
   }
 }
 
-# WHAT: the one input on this surface with no `default`.
 # WHY : Alternatives Considered: defaulting this to "dev". Rejected, because a
 #       defaulted environment name is the precise mechanism by which one
 #       environment's VPC ends up carrying another environment's name tag: the
@@ -181,7 +193,7 @@ variable "environment" {
   type        = string
 
   validation {
-    # WHY : Assumption: the bound is 16 rather than the 32 allowed for
+    # WHY : Assumptions: the bound is 16 rather than the 32 allowed for
     #       name_prefix because this component is appended AFTER the prefix and
     #       the tier, so it is the last contributor to a composed name and the
     #       one with the least room left within the same downstream limits. The
@@ -205,11 +217,10 @@ variable "environment" {
 # any of the three moves every subnet together.
 # -----------------------------------------------------------------------------
 
-# WHAT: a default sized so the derivation has room, not merely a valid block.
-# WHY : Assumption: a /16 divided by the default four additional bits yields
+# WHY : Assumptions: a /16 divided by the default four additional bits yields
 #       sixteen /20 blocks, of which nine are consumed at three availability
 #       zones -- one public, one private-application and one isolated-data
-#       subnet per zone -- leaving seven /20 blocks unallocated. Trade-off:
+#       subnet per zone -- leaving seven /20 blocks unallocated. Trade-offs:
 #       that headroom is claimed address space no resource occupies, accepted
 #       because a fourth tier or a peered range added later can be carved from
 #       the same block without renumbering the nine subnets that already
@@ -220,32 +231,29 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 
   validation {
-    # WHY : Assumption: cidrhost is the well-formedness test because it errors
-    #       on anything that is not a valid CIDR block, including values a
-    #       regex would accept and the address arithmetic would not, such as
-    #       10.0.0.0/33. Wrapping it in `can` turns that error into this
-    #       message at plan time; without the check the first failure appears
-    #       inside a cidrsubnet call in main.tf's locals, which reports the
-    #       arithmetic rather than the input that broke it.
-    #       Trade-off: this asserts well-formedness ONLY, and deliberately does
-    #       not also bound the prefix length. Whether the block is large enough
-    #       to be divided is a relationship between three inputs, not a
-    #       property of this one, so it is asserted once on subnet_newbits
-    #       below rather than approximated twice and left to disagree.
-    condition     = can(cidrhost(var.vpc_cidr, 0))
-    error_message = "vpc_cidr must be a well-formed IPv4 CIDR block, for example 10.0.0.0/16."
+    # WHY : Refactoring Rationale: cidrhost accepts IPv6, although every subnet
+    #       and VPC resource in this module uses the IPv4 `cidr_block` argument.
+    #       cidrnetmask rejects IPv6 and malformed prefixes, while the explicit
+    #       /16-/28 bound matches the range the VPC API accepts. `try` converts a
+    #       malformed split or prefix into this input-specific plan-time message.
+    condition = try(
+      cidrnetmask(var.vpc_cidr) != "" &&
+      tonumber(split("/", var.vpc_cidr)[1]) >= 16 &&
+      tonumber(split("/", var.vpc_cidr)[1]) <= 28,
+      false
+    )
+    error_message = "vpc_cidr must be a well-formed IPv4 CIDR block with a prefix from /16 through /28, for example 10.0.0.0/16. IPv6 blocks are not accepted by this IPv4-only network module."
   }
 }
 
-# WHAT: the zone count, expressed as an input yet fixed at 3 by both callers.
-# WHY : Assumption: three availability zones in one Region is the mandated
+# WHY : Assumptions: three availability zones in one Region is the mandated
 #       topology for this stack, recorded as decision D8 in
 #       docs/adr/ADR-008-security-and-identity.md; multi-Region and
 #       disaster-recovery topology are out of scope. It is an input so the
 #       arithmetic in main.tf reads the count from one place instead of
 #       repeating a literal 3 at every netnum, subnet and gateway.
 #
-# WHY : Assumption: this is NOT a per-environment lever, which is the reading a
+# WHY : Assumptions: this is NOT a per-environment lever, which is the reading a
 #       caller is most likely to arrive with. The two environment roots differ
 #       only in sizing and retention and never in topology, and the reason
 #       ADR-008 records is specific: a development environment with a different
@@ -256,31 +264,27 @@ variable "vpc_cidr" {
 #       the levers that exist are database capacity, task count, retention and
 #       price class.
 #
-# WHY : Alternatives Considered: for the bounds being exactly 2 and 3,
-#       leaving the count unbounded, or bounding it only below. Rejected
-#       both. The lower bound of 2 exists solely so the module stays
-#       exercisable in a Region offering two usable zones, since a
-#       single-zone VPC has no zone-failure behaviour left to preserve. The
-#       upper bound is 3 because raising it changes the subnet arithmetic
-#       and the NAT gateway count -- that is, it changes the topology, which
-#       is the one thing this input must not do.
+# WHY : Alternatives Considered: accepting two zones so the module could be
+#       exercised in a smaller Region. Rejected because the frozen topology is
+#       three zones in every environment; accepting two would let a valid plan
+#       omit one third of the subnets and NAT gateways, so development would no
+#       longer rehearse production. A Region without three usable zones cannot
+#       host this topology and must fail explicitly rather than receive a
+#       different one.
 variable "az_count" {
-  description = "Number of availability zones the network spans, and therefore the number of subnets created in each of the three tiers and the number of NAT gateways. Both environment roots pass 3, the mandated topology; the accepted range is 2 to 3 only so the module stays exercisable in a Region that offers two usable zones."
+  description = "Number of availability zones the network spans, and therefore the number of subnets created in each of the three tiers and the number of NAT gateways. The only supported value is 3, the topology shared by dev and prod."
   type        = number
   default     = 3
 
   validation {
-    # WHY : Assumption: the value is a count of zones, so a fraction is
-    #       meaningless -- the floor comparison rejects 2.5, which the range
-    #       test alone would admit and which would then reach a slice length
-    #       and a cidrsubnet netnum as a non-integer, where it fails with a
-    #       diagnostic about the function rather than about the input.
-    condition     = var.az_count == floor(var.az_count) && var.az_count >= 2 && var.az_count <= 3
-    error_message = "az_count must be the whole number 2 or 3; both environment roots pass 3, and a value above 3 would change the subnet arithmetic and the NAT gateway count, which is a topology change."
+    # WHY : Assumptions: equality to the integer 3 rejects fractions and every
+    #       alternate topology in one expression, so a caller cannot interpret
+    #       the variable as a sizing lever merely because it is exposed.
+    condition     = var.az_count == 3
+    error_message = "az_count must be exactly 3. CardDemo's dev and prod environments share one three-availability-zone topology; two or more than three zones are unsupported topology changes."
   }
 }
 
-# WHAT: one derivation parameter in place of explicit per-tier subnet lists.
 # WHY : Alternatives Considered: three `list(string)` inputs, one per tier,
 #       each holding an explicit CIDR per zone. Rejected. At three zones that
 #       is nine hand-maintained CIDRs which must be kept mutually
@@ -290,7 +294,7 @@ variable "az_count" {
 #       inconsistency surfaces as a subnet overlapping another or a tier
 #       missing a zone. One derivation from one block cannot drift out of step
 #       with itself.
-#       Trade-off: the caller loses control over exactly where each tier lands
+#       Trade-offs: the caller loses control over exactly where each tier lands
 #       inside the block, accepted in exchange for an arithmetic that cannot
 #       become internally inconsistent. The addressing the derivation produces
 #       is documented in this module's README.
@@ -300,33 +304,133 @@ variable "subnet_newbits" {
   default     = 4
 
   validation {
-    # WHY : Assumption: the lower bound is a RELATIONSHIP, not a number. Adding
-    #       n bits yields pow(2, n) subnets, and the three tiers need one each
-    #       per zone, so the block must admit at least 3 * az_count of them.
-    #       Writing that as a computed condition rather than as a literal
-    #       minimum is what keeps it correct when az_count changes: at three
-    #       zones nine subnets are needed and four bits supply sixteen, but a
-    #       hard-coded floor would go stale the moment the zone count moved.
-    #       The upper bound of 8 is a size floor stated as a mechanism: at the
-    #       default /16 it yields /24 tiers, holding 256 addresses each and 251
-    #       usable ones once the five addresses AWS reserves in every subnet
-    #       are deducted. That is the smallest tier still accommodating the
-    #       tasks, the per-zone interface-endpoint network interfaces for eight
-    #       endpoints, and the database instances placed in it. Past 8 the plan
-    #       still succeeds and the subnets exhaust at run time instead, which
-    #       is the failure this bound converts into a plan-time message.
-    condition     = var.subnet_newbits == floor(var.subnet_newbits) && pow(2, var.subnet_newbits) >= 3 * var.az_count && var.subnet_newbits <= 8
-    error_message = "subnet_newbits must be a whole number no greater than 8, and large enough that pow(2, subnet_newbits) is at least 3 * az_count, so one subnet per tier per availability zone can be carved from vpc_cidr."
+    # WHY : Assumptions: this is one combined addressing contract rather than
+    #       three unrelated bounds. Adding n bits must yield at least
+    #       `3 * az_count` netnums, the highest netnum actually used
+    #       (`3 * az_count - 1`) must be accepted by cidrsubnet, and the resulting
+    #       IPv4 prefix must be no narrower than /28. A /28 contains sixteen
+    #       addresses, eleven usable after the five VPC reservations; anything
+    #       narrower is rejected by the subnet API and cannot host a tier.
+    #       `try` converts malformed cross-variable arithmetic into the explicit
+    #       message below rather than exposing a cidrsubnet evaluation error.
+    condition = try(
+      var.subnet_newbits == floor(var.subnet_newbits) &&
+      var.subnet_newbits >= 0 &&
+      pow(2, var.subnet_newbits) >= 3 * var.az_count &&
+      tonumber(split("/", var.vpc_cidr)[1]) + var.subnet_newbits <= 28 &&
+      cidrsubnet(var.vpc_cidr, var.subnet_newbits, 3 * var.az_count - 1) != "",
+      false
+    )
+    error_message = "subnet_newbits must be a non-negative whole number that carves all 3 * az_count subnets from vpc_cidr, admits highest netnum 3 * az_count - 1, and leaves a resulting IPv4 prefix no narrower than /28."
   }
 }
 
+# -----------------------------------------------------------------------------
+# Private service connectivity
+#
+# These three values are contracts shared with sibling modules rather than
+# independent environment-tuning knobs. main.tf consumes them in endpoint and
+# security-group resources, while outputs.tf republishes the two ports so the
+# calling root can pass the same values into ecs-service and
+# aurora-postgresql.
+# -----------------------------------------------------------------------------
+
+# WHY : Refactoring Rationale: an earlier update removed this input and moved
+#       the eight names toward literals in main.tf. That shape can provision
+#       the endpoints, but it removes the contract a root and generated module
+#       documentation can inspect and makes an endpoint-set change look like an
+#       implementation edit rather than a topology change. Restoring the set
+#       keeps the architecture's exact private-service paths visible and
+#       testable at the module boundary.
+#
+# WHY : Assumptions: the validation requires equality with the eight services
+#       named by the target design -- not merely a syntactically valid list.
+#       A missing entry silently sends that service's traffic through NAT, and
+#       an extra entry adds another billed endpoint and another network path.
+#       Neither is an environment variation: dev and prod must have the same
+#       topology. S3 is absent because it uses the gateway endpoint created
+#       unconditionally in main.tf rather than an interface endpoint.
+variable "interface_endpoint_services" {
+  description = "Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls and ssm for configuration. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint."
+  type        = set(string)
+  default = [
+    "ecr.api",
+    "ecr.dkr",
+    "logs",
+    "secretsmanager",
+    "kms",
+    "sqs",
+    "states",
+    "ssm",
+  ]
+
+  validation {
+    # WHY : Assumptions: set equality checks both halves of the contract in one
+    #       expression -- no required service may be missing and no
+    #       unreviewed service may be added. A character-shape regex alone
+    #       would accept both errors and the plan would remain green.
+    condition = var.interface_endpoint_services == toset([
+      "ecr.api",
+      "ecr.dkr",
+      "logs",
+      "secretsmanager",
+      "kms",
+      "sqs",
+      "states",
+      "ssm",
+    ])
+    error_message = "interface_endpoint_services must contain exactly ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm; the endpoint set is identical in every environment."
+  }
+}
+
+# WHY : Refactoring Rationale: this input was removed even though 8080 appears
+#       in the network rule, the ecs-service target group and every service
+#       listener. Restoring it lets outputs.tf give the calling root one value
+#       to pass to ecs-service, so changing the listener can never leave the
+#       security group admitting a different port.
+variable "app_container_port" {
+  description = "TCP port admitted from the load-balancer security group to the application security group and republished for the calling root to pass into every ecs-service container and target group. The default 8080 matches the Spring Boot listeners; using the output rather than repeating the number keeps the rule and the listener aligned."
+  type        = number
+  nullable    = false
+  default     = 8080
+
+  validation {
+    # WHY : Assumptions: every service image runs as a non-root user, so a port
+    #       below 1024 cannot be bound by the process even though a security
+    #       group can admit it. The whole-number test prevents a fractional
+    #       value reaching the provider and failing with a less useful type
+    #       conversion diagnostic.
+    condition     = var.app_container_port == floor(var.app_container_port) && var.app_container_port >= 1024 && var.app_container_port <= 65535
+    error_message = "app_container_port must be a whole number from 1024 to 65535; every service container runs as a non-root user."
+  }
+}
+
+# WHY : Refactoring Rationale: this input was removed even though 5432 appears
+#       in both the network boundary and the aurora-postgresql module. Restoring
+#       it lets the root pass `module.network.database_port` into Aurora, so a
+#       custom database port cannot produce a cluster that applies cleanly and
+#       is then unreachable through a stale security-group rule.
+variable "database_port" {
+  description = "TCP port admitted from the application security group to the isolated-data security group and republished for the calling root to pass into aurora-postgresql. The default 5432 matches PostgreSQL; the accepted range is the range Aurora PostgreSQL supports."
+  type        = number
+  nullable    = false
+  default     = 5432
+
+  validation {
+    # WHY : Assumptions: Aurora PostgreSQL accepts ports 1150 through 65535.
+    #       Reusing that service bound here is what keeps the security rule and
+    #       the database module capable of accepting exactly the same values,
+    #       rather than allowing a port in one module that the other rejects.
+    condition     = var.database_port == floor(var.database_port) && var.database_port >= 1150 && var.database_port <= 65535
+    error_message = "database_port must be a whole number from 1150 to 65535, the range Aurora PostgreSQL accepts."
+  }
+}
 
 # -----------------------------------------------------------------------------
 # Tagging
 # -----------------------------------------------------------------------------
 
-# WHAT: a map that ADDS to the tag set rather than being the whole of it.
-# WHY : Assumption: the calling root's `provider "aws"` block sets
+# WHY : Assumptions: the calling root's `provider "aws"` block sets
 #       `default_tags`, which the provider applies to every resource it
 #       creates, and this module inherits that provider rather than
 #       configuring one of its own. Tags supplied here are therefore MERGED
@@ -355,8 +459,7 @@ variable "tags" {
 # deliberately absent inputs at the foot of this file.
 # -----------------------------------------------------------------------------
 
-# WHAT: the one genuine per-environment lever on this surface.
-# WHY : Assumption: log retention days is among the enumerated values the two
+# WHY : Assumptions: log retention days is among the enumerated values the two
 #       environment roots are permitted to set differently, because changing it
 #       alters how much history is kept and what that costs, and alters nothing
 #       about the shape of the network. Every addressing input above
@@ -369,7 +472,7 @@ variable "flow_log_retention_days" {
   default     = 30
 
   validation {
-    # WHY : Assumption: the set is closed because the service accepts these
+    # WHY : Assumptions: the set is closed because the service accepts these
     #       values and nothing else -- 45 is not a retention period, it is
     #       an InvalidParameterException raised during apply, after the VPC
     #       and every subnet already exist. Listing the accepted values here
@@ -393,11 +496,11 @@ variable "flow_log_retention_days" {
 #       module, and a required key ARN would create a hard dependency on the
 #       sibling kms module -- the network could then not be planned or applied
 #       on its own, which is how it is exercised in isolation.
-#       Trade-off: with null the log group falls back to the CloudWatch Logs
+#       Trade-offs: with null the log group falls back to the CloudWatch Logs
 #       service-default encryption, which is weaker than a customer-managed key
 #       because the key is not one this account controls, rotates or revokes.
 #
-# WHY : Assumption: that trade-off is acceptable because both environment roots
+# WHY : Assumptions: that trade-off is acceptable because both environment roots
 #       DO pass the customer-managed key ARN the kms module produces, so the
 #       encrypted path is the one that actually ships. The null default exists
 #       for module-level composability, not as the intended production
@@ -405,7 +508,7 @@ variable "flow_log_retention_days" {
 #       honest; the alternative is a suppression comment asserting the same
 #       thing where nothing can check it.
 #
-# WHY : Assumption: an ARN is named here as a CONTRACT, in a module that
+# WHY : Assumptions: an ARN is named here as a CONTRACT, in a module that
 #       hard-codes no identifier of any kind. This is configuration flowing IN
 #       as a caller-supplied value, which is categorically different from an
 #       identifier written into the tree. The default is null, and no literal
@@ -452,7 +555,7 @@ variable "flow_log_kms_key_arn" {
 #     three-gateway routing would first appear in production. The availability
 #     consequence is the concrete cost -- with one gateway, egress from two of
 #     the three zones becomes a cross-zone data path, and the loss of the zone
-#     holding that gateway takes egress from all three. Trade-off: three hourly
+#     holding that gateway takes egress from all three. Trade-offs: three hourly
 #     gateway charges are accepted instead. Cost is reduced in this stack where
 #     it can be -- database capacity, task count, retention and price class --
 #     and not by thinning the network.
@@ -467,6 +570,33 @@ variable "flow_log_kms_key_arn" {
 #     environment silently resolve a service to a public address while its plan
 #     stayed clean and its security groups stayed unchanged, which is the
 #     failure mode hardest to notice.
+#
+#   - No `interface_endpoint_services`. Refactoring Rationale: a list input of
+#     that name WAS declared in this module at commit dd9a535 and was removed at
+#     commit ab8fe1b, and unlike the two port inputs restored above it is
+#     recorded as absent rather than restored, because the two removals are not
+#     the same kind of thing. A port is a value a SECOND module must agree with,
+#     so it needs one settable source; the endpoint list is consumed by nothing
+#     outside this module, so an input buys no agreement and only widens what a
+#     root can change. Alternatives Considered: keeping it as a list so an
+#     environment could extend the set without editing the module. Rejected for
+#     the same reason as the per-endpoint booleans directly above -- a list is
+#     that switch with a different spelling, and it fails worse in one respect:
+#     a boolean can only turn a named endpoint off, whereas a list can also
+#     SHORTEN silently, so an environment that dropped `secretsmanager` from its
+#     tfvars would plan cleanly, apply cleanly, and then resolve that service
+#     over the public path with no diagnostic anywhere. Assumptions: the set is
+#     fixed rather than derived, and it is fixed by the target architecture
+#     rather than by this module's preference -- AAP §0.4.1.6 names the eight
+#     interface endpoints (ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs,
+#     states, ssm) and the S3 gateway endpoint as the network module's
+#     contents, so varying the set changes which resources exist and is
+#     topology by this file's own admissibility test. Trade-offs: a root needing
+#     a ninth interface endpoint must change main.tf rather than a tfvars value,
+#     which is accepted precisely because it forces the change to be reviewed
+#     against that requirement instead of landing as an unreviewed value.
+#     docs/architecture/security-and-identity.md is the document that cited this
+#     input, and it names the endpoint set directly now that no input carries it.
 #
 #   - No `create_*` or `enabled` module-level switch. Alternatives Considered:
 #     a boolean gating every resource, so a root could call the module and
@@ -486,7 +616,7 @@ variable "flow_log_kms_key_arn" {
 #     JOURNAL(NO) (L7) and RECOVERY(NONE) (L9), so no journalling scope exists
 #     there to carry across.
 #
-#   - No `region`. Assumption: the Region comes from the calling root's
+#   - No `region`. Assumptions: the Region comes from the calling root's
 #     `provider "aws"` block, which this module inherits rather than
 #     configuring, and main.tf reads it back through a `data "aws_region"`
 #     lookup where it is needed -- to compose the Region-qualified service
@@ -496,4 +626,15 @@ variable "flow_log_kms_key_arn" {
 #     service names were composed for the input's, which fails at apply with a
 #     diagnostic naming neither input. One source for the Region cannot
 #     disagree with itself.
+#
+#   - No application or database port input. Assumptions: the network contract is
+#     fixed at TCP 8080 from the load balancer to service tasks and TCP 5432 from
+#     service tasks to Aurora. infra/modules/ecs-service validates its container
+#     port as exactly 8080 and infra/modules/aurora-postgresql validates its port
+#     as exactly 5432, so exposing either value here would recreate independently
+#     configurable halves of one security-group rule. Alternatives Considered:
+#     a shared pair of root-level port variables passed through all three
+#     modules. Rejected because neither port is an environment difference or a
+#     supported deployment choice; fixed validation at each consuming boundary
+#     fails closer to the misconfiguration and leaves no value that can drift.
 # =============================================================================

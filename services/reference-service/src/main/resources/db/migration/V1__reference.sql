@@ -44,8 +44,9 @@
 -- Not declared here:
 --   No CREATE SCHEMA, CREATE ROLE, GRANT or ALTER DEFAULT PRIVILEGES, and no
 --   SET search_path. data-migration/sql/V0__schemas_and_roles.sql creates the
---   reference schema and its carddemo_reference owner at its L337-L338 and
---   states that boundary for every per-service migration at its L11-L16. The
+--   carddemo_reference owner role in the loop at its L361 and the reference
+--   schema itself at its L491-L492, and it states that boundary for every
+--   per-service migration at its L11-L16. The
 --   schema is pinned again by this service's Flyway default-schema and by its
 --   DataSourceConfig. The baseline's own privilege statements are retired
 --   rather than reproduced: app/app-transaction-type-db2/ctl/DB2CREAT.ctl

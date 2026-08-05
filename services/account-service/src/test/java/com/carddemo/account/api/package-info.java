@@ -12,36 +12,12 @@
  * "instead of booting the full context and a database for what are request and response
  * assertions".
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every class name, file name and count below describes this package's
- * <b>target contract</b> as the migration plan assigns it, not the set of files sitting beside this
- * one today. The reactor states that convention itself, at {@code services/pom.xml} lines 73 to 82:
- * the migration "lands its artifacts in plan order, and the build descriptors are authored ahead of
- * the code they build", so that at this checkpoint no test class exists anywhere in the reactor and
- * every comment naming one is "describing the TARGET test suite and the configuration prepared for
- * it, NOT a suite that runs today". This descriptor is authored under that same convention, so the
- * directory holds it and nothing else. {@code services/account-service/src/test} did not exist at
- * all until this file created it. A class named below that has no file yet is therefore
- * <b>planned</b>, not missing, and a count below is a target total rather than a measurement of the
- * directory.
- *
- * <p>The same declaration covers four artifacts named later in this block that the plan lands at a
- * later index than this file: {@code .github/workflows/services-ci.yml}, this module's
- * {@code Dockerfile}, {@code docs/architecture/cobol-to-service-traceability.md} and the ArchUnit
- * {@code LayeringRulesTest}. None of the four is cited here from itself. Each is cited from a
- * descriptor that does already exist and that states the contract, and each citation names which
- * descriptor it came from, so a reader can confirm every claim in this file against a file that is
- * present rather than against one that is promised.
- *
- * <p>Alternatives Considered: withholding this descriptor until the three test classes it governs
- * exist. Rejected, because the audit that governs this directory is not deferred in the same way.
- * The moment any {@code .java} file appears here, {@code JavadocPackage} at
- * {@code config/checkstyle/checkstyle.xml} line 245 requires a {@code package-info.java} beside it,
- * so authoring the tests first would fail the build on their very first execution and this
- * descriptor would then be written under that failure rather than as the contract its authors work
- * from. The accepted cost is that the inventory below reads as present tense unless the distinction
- * is declared, which is what the two paragraphs above are for.
+ * <p>Assumptions: every contract this charter states about an artifact outside this directory is
+ * cited from a descriptor that states it, and never from the artifact itself, so a reader can confirm
+ * each claim against the descriptor that owns it. {@code JavadocPackage} at
+ * {@code config/checkstyle/checkstyle.xml} line 245 is why this charter is required rather than
+ * optional: it demands a {@code package-info.java} in any directory holding an audited source file,
+ * so the charter and the classes it governs stand or fall together.
  *
  * <h2>The three classes, and the reference programs that specify them</h2>
  *
@@ -95,9 +71,9 @@
  *
  * <p>Where the target does not reproduce the reference, the framing in this package stays factual
  * and stays in one direction: the baseline does one thing, the Java encodes another, and the
- * divergence is registered in {@code docs/architecture/cobol-to-service-traceability.md}, which the
- * plan lands at a later index and which is named as that register by the already-present descriptor
- * at {@code services/account-service/src/main/java/com/carddemo/account/service/package-info.java}
+ * divergence is registered in {@code docs/architecture/cobol-to-service-traceability.md}, which is
+ * named as that register by the descriptor at
+ * {@code services/account-service/src/main/java/com/carddemo/account/service/package-info.java}
  * lines 27 to 28. The reference source is never described here as having been put right, because it
  * is not altered at all.
  *
@@ -154,60 +130,25 @@
  * {@code *RepositoryIT} at {@code services/account-service/pom.xml} lines 439 to 445.
  *
  * <p>Assumptions: the report directory is equally load-bearing and equally easy to break.
- * {@code services/pom.xml} lines 988 to 991 record that no {@code reportsDirectory} is configured,
- * so results land in {@code target/surefire-reports}, and that "Relocating either would make the
- * build green while the pipeline published nothing." {@code services/account-service/pom.xml} lines
- * 439 to 445 name the consumer: {@code target/surefire-reports} and {@code target/failsafe-reports}
- * "are collected by .github/workflows/services-ci.yml, itself authored at a later index of the same
- * plan, and must never be relocated." Nothing in this package may set a report directory, and the
- * reason is that the failure mode is invisible from inside the build.
+ * {@code services/pom.xml} leaves {@code reportsDirectory} at the Maven defaults, so unit-test
+ * results land in {@code target/surefire-reports}; the module descriptor preserves
+ * {@code target/failsafe-reports} for integration-test results. CI report consumers must use those
+ * stable locations. Nothing in this package may relocate them, because a test run can remain green
+ * while an external publisher silently collects no results.
  *
- * <h2>The label canon, and the twin-comment idiom</h2>
+ * <h2>The label canon</h2>
  *
- * <p>The three sibling classes follow the conventions recorded here, which is the whole reason those
- * conventions are stated in one place instead of three. The authority is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, whose section at line 216 fixes the four rationale
- * labels character for character at lines 221 to 226 and lists at lines 228 to 239 the four
- * properties of that written form which are load-bearing: plural where the rule writes it plural,
- * unparenthesised, colon retained, and no emphasis markup. The four labels, and no fifth, are
- * {@code Alternatives Considered:}, {@code Refactoring Rationale:}, {@code Assumptions:} and
- * {@code Trade-offs:}. This descriptor is the reader's pointer to that standard; it is not a
- * restatement of it, and where the two could be read differently the standard governs.
- *
- * <p>Assumptions: the hyphen in {@code Trade-offs:} is the ASCII hyphen-minus and the label is pure
- * ASCII throughout, as is every character in this file. That is a real hazard rather than a
- * pedantic one, and it has an exact location. {@code tests/README.md} states the identical
- * documentation obligation for test code at its lines 544 and 549, but it is written with
- * non-breaking hyphens in 106 places across 77 of its 590 lines, and three of those lines -- 530,
- * 542 and 548 -- contain no ASCII hyphen at all. Line 548 is the one that matters, because it is
- * where that file spells the word {@code Trade-offs} inside its own explainability note. A label
- * copied from there is byte-different from a label copied from the rules document, and
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} lines 241 to 247 explain exactly what that costs:
- * the label "is read by grep before it is read by a person", so a rationale a literal search cannot
- * find is a rationale a review cannot count. Label text is therefore taken from the rules document
- * and from nowhere else.
- *
- * <p>Trade-offs: the plural, unparenthesised form used in this tree diverges from the singular idiom
- * that predominates in the older reference material, and the divergence is deliberate rather than
- * accidental. {@code docs/CODE_DOCUMENTATION_STANDARD.md} lines 249 to 258 record the same decision
- * and the same cost: the two trees do read differently, and that is accepted because the plural is
- * the form the project Explainability rule itself uses at its lines 31 to 34, which is the wording
- * its validation gate at line 43 audits against. The singular spellings that appear in the
- * commentary of {@code config/checkstyle/checkstyle.xml} and
- * {@code config/checkstyle/suppressions.xml} are overridden for this Java tree and are not to be
- * imitated in it. That standard closes the point at line 258 with the constraint this package
- * honours without exception: the forms are never mixed inside one file.
- *
- * <p>Where a rationale sits beside executable code rather than inside a Javadoc block, the three
- * sibling classes use the twin line-comment idiom the house already applies. The marker is
- * {@code // WHAT:} with no space before its colon and {@code // WHY :} with exactly one space
- * before its colon, so that the two colons align in a fixed-width font, and a continuation line is
- * the marker followed by seven spaces. The form is adapted from {@code tests/README.md}, which
- * writes it with a shell comment character at its lines 267 and 270, and it is already in use in
- * this reactor's build descriptors: {@code services/pom.xml} carries the {@code WHAT:} marker 4
- * times and the {@code WHY :} marker 44 times. Inside a Javadoc block there is no line comment to
- * mark, so the equivalent is a prose sentence opened by one of the four canonical labels, which is
- * the form every rationale in this file uses.
+ * <p>Assumptions: {@code docs/CODE_DOCUMENTATION_STANDARD.md} is the authority for the rationale
+ * labels the three sibling classes use, and this charter is a pointer to it rather than a
+ * restatement of it. Its section at line 216 fixes the four labels -- {@code Alternatives
+ * Considered:}, {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:} -- in
+ * one written form: plural, unparenthesised, colon retained, no emphasis markup, and never mixed
+ * inside one file. Label text is taken from that document and from nowhere else, because the older
+ * reference material writes the same words with non-breaking hyphens in 106 places, and a label that
+ * is byte-different is a rationale a literal search cannot find -- which is a rationale a review
+ * cannot count. Inside a Javadoc block there is no line comment to mark, so the equivalent of an
+ * adjacent rationale is a prose sentence opened by one of the four labels, which is the form every
+ * rationale in this file uses.
  *
  * <h2>Decision record</h2>
  *
@@ -282,36 +223,32 @@
  * tests are audited. This package is inside the gate by design, and the only route to a green build
  * is to meet it.
  *
- * <h2>What the sibling classes owe, and where the machine is looser than the rule</h2>
+ * <h2>What the sibling classes owe</h2>
  *
- * <p>Assumptions: no annotation and no visibility earns an exemption in this package. The skipped
- * annotations list on {@code MissingJavadocType} is deliberately left at its default, which exempts
- * generated code and nothing else, and the note at {@code config/checkstyle/checkstyle.xml} lines
- * 299 to 306 records that the upstream example setting it was rejected precisely because copying it
- * would exempt the configuration types the rule names. So {@code @WebMvcTest}, {@code @Test},
- * {@code @Nested}, {@code @DisplayName} and a mocked-bean annotation confer nothing. Visibility
- * confers nothing either: {@code MissingJavadocMethod} is configured {@code scope} private on line
- * 364 with its allowed-annotations list cleared on line 366, so a private helper and an overriding
- * method each need a block of their own. Every class, every test method and every private helper in
- * the three classes here therefore carries Javadoc, with a parameter tag for each parameter and for
- * each component of any nested record, a return tag on each method that returns a value, and a
- * throws tag for each exception a signature declares.
+ * <p>Assumptions: no annotation and no visibility earns an exemption in this package.
+ * {@code MissingJavadocType}'s skipped-annotations list is left at its default, so
+ * {@code @WebMvcTest}, {@code @Test}, {@code @Nested}, {@code @DisplayName} and a mocked-bean
+ * annotation confer nothing; and {@code MissingJavadocMethod} is configured at private scope with its
+ * allowed-annotations list cleared, so a private helper and an overriding method each need a block of
+ * their own. Every class, every test method and every private helper here therefore carries Javadoc,
+ * with a parameter tag for each parameter and for each component of any nested record, a return tag
+ * on each method that returns a value, and a throws tag for each exception a signature declares.
  *
- * <p>The one place the machine asks for less than the rule is fields. {@code JavadocVariable} is
+ * <p>The one place the machine asks for less than the rule is fields: {@code JavadocVariable} is
  * deliberately absent, recorded at {@code config/checkstyle/checkstyle.xml} lines 563 to 567 on the
- * ground that the rule scopes its docstring requirement to functions, classes and module entry
- * points and a field is none of the three. A MockMvc field, an object mapper or a mocked
- * collaborator therefore needs no block, and a field that genuinely needs explaining takes an
- * adjacent line comment in the twin idiom instead. This is recorded so that nobody gold-plates it
- * and so that nobody mistakes the absence for an oversight.
+ * ground that the rule scopes its docstring requirement to functions, classes and module entry points
+ * and a field is none of the three. A MockMvc field, an object mapper or a mocked collaborator
+ * therefore needs no block, and a field that genuinely needs explaining takes an adjacent rationale
+ * comment instead. This is recorded so that nobody gold-plates it and nobody mistakes the absence for
+ * an oversight.
  *
  * <p>Layering is not this package's concern and must not be re-declared in it.
  * {@code config/checkstyle/checkstyle.xml} lines 605 to 619 record that {@code ImportControl} is
- * deliberately excluded because layering has exactly one owner, the ArchUnit
- * {@code LayeringRulesTest} that {@code services/pom.xml} lines 996 to 1012 scan into every module
- * through a Surefire execution named {@code architecture-rules}. A second engine enforcing an
- * overlapping half of one constraint would leave a reader unable to tell which of the two owned a
- * given boundary.
+ * deliberately excluded because layering has exactly one owner: the ArchUnit rules that
+ * {@code services/pom.xml} lines 996 to 1012 scan into every module through a Surefire execution
+ * named {@code architecture-rules}, selected there by the simple name {@code LayeringRulesTest}. A
+ * second engine enforcing an overlapping half of one constraint would leave a reader unable to tell
+ * which of the two owned a given boundary.
  *
  * <h2>This gate is binary</h2>
  *

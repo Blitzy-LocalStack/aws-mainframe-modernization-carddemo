@@ -38,7 +38,8 @@
 #
 # Provides:
 #   One configured, unaliased default AWS provider plus a resolved provider set
-#   for `hashicorp/aws` and `hashicorp/random`. Nothing in this file is
+#   for `hashicorp/aws`, `hashicorp/random`, `hashicorp/archive` and
+#   `hashicorp/tls`. Nothing in this file is
 #   referenced by name -- `main.tf` and the modules it calls pick the provider
 #   up implicitly as the default for their resource types, which is why adding
 #   a provider argument here silently changes behaviour everywhere at once.
@@ -55,8 +56,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the Terraform CLI series this root accepts -- the 1.15 minor series,
-  #       any patch release within it.
   # WHY : Assumptions: both CI (`.github/workflows/infra-ci.yml` and
   #       `deploy.yml`) and the operator run 1.15.8, so 1.15.8 is the release a
   #       reviewed plan for this root was actually produced under.
@@ -81,7 +80,6 @@ terraform {
   required_version = "~> 1.15.0"
 
   required_providers {
-    # WHAT: the AWS provider, held inside the 6.x major line.
     # WHY : `dev` is the environment allowed to run Aurora Serverless at a
     #       minimum capacity of 0, and the provider only accepts a zero minimum
     #       from 5.81.0 onward; 6.56 clears that floor with room to spare. The
@@ -93,13 +91,15 @@ terraform {
     #       land unreviewed across every module simultaneously. The `~>`
     #       operator accepts patch and minor releases within 6.x and stops
     #       short of 7.0, which is the behaviour wanted here.
+    # WHY : Assumptions: the adjacent lock file currently selects 6.57.1 and
+    #       records its checksums. CI initializes with `-lockfile=readonly`, so
+    #       moving to another allowed 6.x release requires a reviewed lock-file
+    #       diff rather than happening implicitly during validation.
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.56"
     }
 
-    # WHAT: the random provider, declared for this root's MODULE GRAPH rather
-    #       than for any resource in this root's own configuration.
     # WHY : Assumptions: the `secrets` and `cognito` child modules are the two
     #       consumers. Each generates a value at apply time and writes it
     #       straight into Secrets Manager, which is the mechanism that keeps
@@ -130,11 +130,26 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.9"
     }
+
+    # WHY : Refactoring Rationale: Lambda deployment packages are assembled
+    #       deterministically from repository sources during plan. An external
+    #       zip command would add an untracked build step whose bytes Terraform
+    #       could not hash into each function's source_code_hash.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
+
+    # WHY : Refactoring Rationale: the internal API→ALB→task TLS chain needs a
+    #       certificate and PEM producer with no committed private key. The TLS
+    #       provider generates both into encrypted state during apply.
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.1"
+    }
   }
 }
 
-# WHAT: the single, unaliased AWS provider configuration inherited by this root
-#       and by every module it calls.
 # WHY : credentials are conspicuously absent. Deployment authenticates by
 #       short-lived OIDC federated role assumption in
 #       `.github/workflows/deploy.yml`, and an operator running this root by
@@ -151,7 +166,6 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # WHAT: the sole tagging mechanism for this root.
   # WHY : Trade-offs: every resource created here and inside every called module
   #       inherits these tags without carrying a `tags` argument of its own, so
   #       a reader of `main.tf` sees no tags anywhere and has to know to look in

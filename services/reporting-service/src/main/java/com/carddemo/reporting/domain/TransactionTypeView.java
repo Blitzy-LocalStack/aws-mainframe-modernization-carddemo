@@ -15,9 +15,20 @@ import org.hibernate.annotations.Immutable;
  * {@code app/cbl/CBTRN03C.cbl} declares it at L39 as
  * {@code SELECT TRANTYPE-FILE ASSIGN TO TRANTYPE}, indexed at L40, keyed at L42 by the single
  * elementary item {@code FD-TRAN-TYPE}, and copies its record layout at L103 from
- * {@code app/cpy/CVTRA03Y.cpy}. The migrated equivalent is {@code transaction_types} in the
- * {@code reference} schema, read through a database role holding {@code SELECT} and nothing
- * else, and this type is the row shape a query over that relation returns. </p>
+ * {@code app/cpy/CVTRA03Y.cpy}. The migrated equivalent is the base relation
+ * {@code reference.transaction_types}, which reference-service owns -- and THIS TYPE DOES NOT MAP
+ * IT. It maps {@code reporting.v_transaction_types}, the read-only view over that relation declared
+ * by {@code data-migration/sql/V1__reporting_views.sql}, read through a database role holding
+ * {@code SELECT} on the view and nothing else. Refactoring Rationale: an earlier revision mapped
+ * {@code reference.transaction_types} directly, and it was wrong twice over. It could not work --
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} gives the reporting login no privilege of any
+ * kind in the {@code reference} schema, so the read fails with a permission error rather than
+ * returning a wrong answer -- and it should not work even if it could, because the whole point of
+ * routing this context through views is that its login cannot reach a base relation, so one
+ * projection reaching across would make the boundary advisory. Verified against a live PostgreSQL
+ * 17 instance provisioned from those two scripts: as {@code carddemo_reporting}, a select through
+ * the view returns the row, and {@code SELECT count(*) FROM reference.transaction_types} is refused
+ * with "permission denied". </p>
  *
  * <h2>Record geometry</h2>
  *
@@ -91,7 +102,7 @@ import org.hibernate.annotations.Immutable;
  * interval is a support case rather than a feature. What remains is read-only access, which is
  * why this type owns nothing. </p>
  *
- * <p>Assumptions: agreement with reference-service runs through the physical relation and the
+ * <p>Assumptions: agreement with reference-service runs through the physical view and the
  * narrowly-scoped read-only privilege behind it, never through code, and this type therefore
  * declares no relationship annotation to any sibling projection in either direction. The report
  * join is composed in the repository layer, by query. Two independent mechanisms hold that line.
@@ -104,10 +115,11 @@ import org.hibernate.annotations.Immutable;
  * {@code app/jcl/TRANREPT.jcl} handed its four data inputs to the program through job control at
  * L65-L72 and never through a compile-time bond. The database half is authored elsewhere and is
  * cited by path: {@code data-migration/sql/V0__schemas_and_roles.sql} establishes the schemas,
- * the roles and the {@code SELECT}-only privileges, and the relations this context reads through
- * belong to a data-migration step ordered after the per-service migrations. A relation absent at
- * run time is a defect to report against those artifacts and never one to work around from
- * inside this type. </p>
+ * the roles and the {@code SELECT}-only privileges, and
+ * {@code data-migration/sql/V1__reporting_views.sql} declares the views this context reads
+ * through, in a data-migration step ordered after the per-service migrations that populate the
+ * relations behind them. A view absent at run time is a defect to report against those artifacts
+ * and never one to work around from inside this type. </p>
  *
  * <p>Assumptions: every layout is scoped to its owning copybook and every citation names that
  * copybook, because a single repository-wide field-name map cannot be built. The same two-byte
@@ -289,7 +301,7 @@ import org.hibernate.annotations.Immutable;
  */
 @Entity
 @Immutable
-@Table(name = "transaction_types", schema = "reference")
+@Table(name = "v_transaction_types", schema = "reporting")
 public class TransactionTypeView {
 
     // Assumptions: the reference baseline names this field TRAN-TYPE at app/cpy/CVTRA03Y.cpy L5,

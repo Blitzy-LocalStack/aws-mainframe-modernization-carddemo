@@ -1183,7 +1183,6 @@ public final class PackedDecimalCodec {
         }
         text.append(" of length ").append(width);
         if (sensitive) {
-            // WHAT: the marker states that content was withheld rather than that none existed.
             // WHY : Assumptions: a reader who sees a diagnostic with no content cannot otherwise tell
             //       whether the codec had nothing to report or withheld it on purpose, and would
             //       reasonably suspect the message itself was defective. Naming the suppression makes

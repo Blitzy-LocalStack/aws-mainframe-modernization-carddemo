@@ -99,10 +99,13 @@ Assumptions:
     represent ten cents exactly; there is no ``float`` anywhere in this package's
     money path and none may be introduced.
 Assumptions:
-    **Nothing here performs input or output.** No dataset path is opened, no
+    **Nothing here opens, names or closes a resource.** No dataset path is opened, no
     environment variable is read, no logging is configured and no work happens at
     import time beyond building and proving the constant tables. The record-boundary
-    functions take the bytes or the text a caller already holds.
+    iterators do read, but only from a source the caller has already opened and handed
+    over, strictly forward and one bounded piece at a time; they never seek it and
+    never close it. Choosing the dataset, opening it and closing it stay with the
+    loader, which is what keeps this module runnable with no storage of any kind.
 
 Sensitive data
 --------------
@@ -127,13 +130,16 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import hmac
+import os
 import re
-from collections.abc import Iterator, Mapping, Sequence
+import secrets
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Protocol
 
-# WHY (Assumptions): the public surface is declared explicitly and in sorted order so a
+# Assumptions: the public surface is declared explicitly and in sorted order so a
 #   consumer's import list can be checked against it mechanically. Sorting matters because
 #   this list is long enough that an omission is invisible in an unsorted one, and an
 #   omitted name is a symbol a star-import silently stops providing while every other
@@ -208,6 +214,7 @@ __all__ = [
     "packed_width",
     "provenance_of",
     "reclen_of",
+    "sensitive_binary",
     "sensitive_text",
     "sensitive_uint",
     "signed_zoned",
@@ -336,12 +343,12 @@ class Kind(enum.Enum):
     None
     """
 
-    # WHY (Assumptions): character data, the regime in force when no USAGE clause is
+    # Assumptions: character data, the regime in force when no USAGE clause is
     #   present, exemplified by 05  CARD-NUM  PIC X(16). at app/cpy/CVACT02Y.cpy line 5.
     #   It is the most common regime in the corpus by a wide margin.
     TEXT = "TEXT"
 
-    # WHY (Assumptions): an UNSIGNED display integer, PIC 9(n) with no S and no USAGE,
+    # Assumptions: an UNSIGNED display integer, PIC 9(n) with no S and no USAGE,
     #   one printable digit per byte. It is kept distinct from ZONED because it carries
     #   no sign overpunch at all, so its low-order byte is an ordinary digit character
     #   rather than one that has to be folded; folding it would turn the digit into a
@@ -349,7 +356,7 @@ class Kind(enum.Enum):
     #   ACCT-ID this way, and the reference codec draws the same distinction.
     UINT = "UINT"
 
-    # WHY (Assumptions): a SIGNED display decimal, PIC S9(n)V99 with no USAGE clause,
+    # Assumptions: a SIGNED display decimal, PIC S9(n)V99 with no USAGE clause,
     #   one printable digit per byte with the sign folded into the low-order digit as an
     #   overpunch. This is the money regime of all eleven base masters, exemplified by
     #   05  ACCT-CURR-BAL  PIC S9(10)V99. at app/cpy/CVACT01Y.cpy line 7. The overpunch
@@ -357,7 +364,7 @@ class Kind(enum.Enum):
     #   exactly rather than the digit count plus one.
     ZONED = "ZONED"
 
-    # WHY (Assumptions): packed decimal, USAGE COMP-3, two digits per byte with the sign
+    # Assumptions: packed decimal, USAGE COMP-3, two digits per byte with the sign
     #   in the low-order nibble of the last byte. It reaches this module through three
     #   record families and no others: app/cpy/CVEXPORT.cpy declares four such fields at
     #   its lines 41, 50, 52 and 71, CIPAUSMY.cpy declares seven, and CIPAUDTY.cpy uses
@@ -365,7 +372,7 @@ class Kind(enum.Enum):
     #   is consequently the only place packed decimal reaches persisted target data.
     PACKED = "PACKED"
 
-    # WHY (Assumptions): binary, USAGE COMP, whose synonym spelling in the language is
+    # Assumptions: binary, USAGE COMP, whose synonym spelling in the language is
     #   the word this member is named for. Its width is a whole machine unit selected by
     #   the digit count rather than one byte per digit, which is why it needs a rule of
     #   its own rather than sharing the packed rule. app/cpy/CVEXPORT.cpy declares seven
@@ -406,7 +413,7 @@ class Provenance(enum.Enum):
     None
     """
 
-    # WHY (Assumptions): a record transcribed directly from a copybook that defines a
+    # Assumptions: a record transcribed directly from a copybook that defines a
     #   persistent dataset. There are exactly eleven, one per base master, and they are
     #   the population the copybook-is-normative rule speaks about. The provenance is
     #   carried as data rather than inferred from a name, because a base master's geometry
@@ -415,7 +422,7 @@ class Provenance(enum.Enum):
     #   cannot tell which records a change still obliges it to re-verify.
     BASE_MASTER = "BASE_MASTER"
 
-    # WHY (Assumptions): a record whose geometry is built from a base master rather than
+    # Assumptions: a record whose geometry is built from a base master rather than
     #   transcribed independently, either by appending fields to it or by altering one
     #   field's flags. There are exactly three. Deriving them is what keeps the shared
     #   prefix single-sourced, so a correction to a base master reaches the derived
@@ -423,7 +430,7 @@ class Provenance(enum.Enum):
     DERIVED = "DERIVED"
 
 
-# WHY (Assumptions): a COBOL data name in this corpus is upper case with hyphens and
+# Assumptions: a COBOL data name in this corpus is upper case with hyphens and
 #   digits and nothing else, so the shape is checkable. The guard is worth its cost
 #   because the failure it catches is invisible: a name transcribed with a stray
 #   trailing space or in lower case still constructs a valid-looking descriptor, and
@@ -433,18 +440,18 @@ class Provenance(enum.Enum):
 #   CUST-DOB-YYYY-MM-DD at CVCUS01Y.cpy line 19.
 RECORD_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*")
 
-# WHY (Assumptions): eighteen is the largest number of digit positions the reference
+# Assumptions: eighteen is the largest number of digit positions the reference
 #   dialect admits in a picture clause, so a declaration beyond it is a transcription
 #   error rather than an unusually wide field. The widest declaration actually present in
 #   the corpus is twelve, PIC S9(10)V99, which appears zoned, packed AND binary inside
 #   app/cpy/CVEXPORT.cpy at its lines 51, 50 and 57 respectively.
 MAX_DIGITS: Final[int] = 18
 
-# WHY (Assumptions): the binary width tiers are a step function of the digit count, not
+# Assumptions: the binary width tiers are a step function of the digit count, not
 #   an arithmetic expression of it, so the two boundaries are named rather than computed.
 #   Four digits or fewer occupy two bytes and five through nine occupy four;
 #   app/cpy/CVEXPORT.cpy exercises both at its lines 96 and 25.
-# WHY (Assumptions): a binary field's WIDTH is all these two constants govern, and there
+# Assumptions: a binary field's WIDTH is all these two constants govern, and there
 #   is deliberately no third constant for its ALIGNMENT, because there is NO SYNCHRONIZED
 #   clause anywhere in the reference tree. No alignment padding therefore applies to any
 #   binary or packed field, and a field always starts exactly where the previous one
@@ -632,7 +639,7 @@ def packed_width(int_digits: int, dec_digits: int) -> int:
     """
     digits = _require_digits(int_digits, dec_digits, Kind.PACKED)
 
-    # WHY (Alternatives Considered): adding two before an integer halving is the ceiling
+    # Alternatives Considered: adding two before an integer halving is the ceiling
     #   of one more than the digit count halved, and it is written this way rather than
     #   with math.ceil because that function returns through a binary floating-point
     #   division, which this package bars from its numeric path entirely. Adding one and
@@ -873,7 +880,7 @@ class FieldSpec:
                 f"{self.int_digits} and dec_digits={self.dec_digits}"
             )
 
-        # WHY (Assumptions): a character or unsigned-display field takes its width from
+        # Assumptions: a character or unsigned-display field takes its width from
         #   its declared character count and has no implied decimal point, so digit counts
         #   on one would be a second, competing statement of the same width. The unsigned
         #   kind is included in this restriction deliberately: PIC 9(11) does have eleven
@@ -888,7 +895,7 @@ class FieldSpec:
                 f"{self.int_digits} and dec_digits={self.dec_digits}"
             )
 
-        # WHY (Assumptions): neither non-numeric kind can carry a sign, and rejecting the
+        # Assumptions: neither non-numeric kind can carry a sign, and rejecting the
         #   combination is the mechanical expression of the distinction Kind.UINT exists
         #   to draw. An unsigned display field's low-order byte is an ordinary digit
         #   character; marking it signed would tell the zoned decoder to fold that byte as
@@ -900,7 +907,7 @@ class FieldSpec:
                 " no sign representation at all"
             )
 
-        # WHY (Assumptions): for the three numeric kinds the declared length and the digit
+        # Assumptions: for the three numeric kinds the declared length and the digit
         #   counts are two statements of the same fact, and this is the check that makes
         #   them agree. It is what refuses a PIC S9(10)V99 COMP-3 declared six bytes wide
         #   at the declaration site rather than letting the 460-byte export branches fail
@@ -1341,6 +1348,67 @@ def binary(name: str, start: int, int_digits: int, dec_digits: int, *, signed: b
     )
 
 
+def sensitive_binary(
+    name: str, start: int, int_digits: int, dec_digits: int, *, signed: bool
+) -> FieldSpec:
+    """Declare a binary field whose raw bytes must stay out of diagnostics.
+
+    Purpose
+    -------
+    Build the descriptor for a ``USAGE COMP`` field carrying identity or payment data, so
+    that :func:`mask_field` and :func:`mask_record` redact it exactly as they redact the
+    display-form fields marked by :func:`sensitive_text` and :func:`sensitive_uint`.
+
+    Refactoring Rationale: this factory exists because the corpus holds a sensitive field in
+    every one of the three storage regimes, and only two of the three had a sensitive
+    constructor. The export record declares the card verification value as ``9(03) COMP`` at
+    ``app/cpy/CVEXPORT.cpy`` line 96 -- two bytes of binary rather than the three display
+    digits the card master uses at ``app/cpy/CVACT02Y.cpy`` line 6 -- so declaring it through
+    :func:`binary` left it unmarked and :func:`mask_record` copied it through verbatim. The
+    storage regime a field happens to use is not a property of the data it carries, so
+    classification cannot be a privilege of two regimes out of three.
+
+    Assumptions: no width is passed. The width comes from :func:`binary_width` exactly as it
+    does for :func:`binary`, so marking a field sensitive cannot change its geometry -- which
+    is what keeps a sensitive declaration from becoming a second, competing statement of a
+    field's width.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook declares it.
+    start : int
+        The ZERO-based byte offset of the field from the start of the record.
+    int_digits : int
+        Number of digit positions before the implied decimal point.
+    dec_digits : int
+        Number of digit positions after the implied decimal point.
+    signed : bool
+        Whether the picture clause carries a leading ``S``.
+
+    Returns
+    -------
+    FieldSpec
+        A binary field descriptor of 2, 4 or 8 bytes, marked sensitive.
+
+    Raises
+    ------
+    LayoutError
+        If the name is blank or malformed, the offset is negative, either digit count is
+        negative, both are zero, or their sum exceeds :data:`MAX_DIGITS`.
+    """
+    return FieldSpec(
+        name,
+        start,
+        binary_width(int_digits, dec_digits),
+        Kind.BINARY,
+        int_digits,
+        dec_digits,
+        signed=signed,
+        sensitive=True,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AlternateKeySpec:
     """Descriptor for one alternate index declared over a record layout.
@@ -1579,7 +1647,7 @@ class RecordSpec:
                 f"{self.key_offset}"
             )
 
-        # WHY (Assumptions): a key that runs past the end of the record cannot be extracted
+        # Assumptions: a key that runs past the end of the record cannot be extracted
         #   at all, so it is refused here rather than at the first read. The reference codec
         #   performs the identical containment check on the primary and on every alternate
         #   key at tests/helpers/record_codec.py line 1738, for the same reason: a malformed
@@ -1856,7 +1924,7 @@ class RecordSpec:
             If this record declares no field of that name, or if the derived name is blank
             or malformed.
         """
-        # WHY (Assumptions): resolving the name BEFORE rebuilding is what turns a
+        # Assumptions: resolving the name BEFORE rebuilding is what turns a
         #   misspelled field name into an immediate, named failure. Without it a name that
         #   matched nothing would produce a derived record identical to the base, which is a
         #   silently wrong layout rather than an error -- and the one flag the derivation
@@ -1882,7 +1950,7 @@ class RecordSpec:
 # ---------------------------------------------------------------------------
 # The eleven base masters, transcribed field for field from their copybooks.
 # ---------------------------------------------------------------------------
-# WHY (Trade-offs): FILLER is declared as a real field in every layout below rather than
+# Trade-offs: FILLER is declared as a real field in every layout below rather than
 #   omitted, at the cost of one descriptor per record that no domain object will ever
 #   carry. It is what makes both invariants in RecordSpec.validate_geometry expressible at
 #   all: fields cannot be proven contiguous, and their lengths cannot be proven to sum to
@@ -1896,7 +1964,7 @@ class RecordSpec:
 #   where that record lives: the trailing pad of every base master is named below and is
 #   present in the field list, so a reader can see exactly which bytes the domain object
 #   does not carry.
-# WHY (Assumptions): two constructs spelled FILLER are NOT padding, and treating them as
+# Assumptions: two constructs spelled FILLER are NOT padding, and treating them as
 #   padding is how a layout silently gains bytes it does not have. A FILLER REDEFINES is an
 #   overlay alias and must not advance the offset -- app/cbl/CBTRN02C.cbl line 160 and
 #   app/cbl/CBACT04C.cbl line 151 both declare 01 FILLER REDEFINES DB2-FORMAT-TS. And a
@@ -1904,19 +1972,19 @@ class RecordSpec:
 #   data: app/cpy/CVTRA07Y.cpy declares 22 FILLER items and ALL 22 carry a VALUE clause, so
 #   there the proportion is not most of them but every one, and those literals are the
 #   column headings and rule lines of the 133-column report.
-# WHY (Assumptions): the converse case occurs too, which is why padding is judged by role
+# Assumptions: the converse case occurs too, which is why padding is judged by role
 #   and never by name. app/cpy/CSUSR01Y.cpy line 23 declares SEC-USR-FILLER PIC X(23),
 #   which IS the trailing pad despite not being spelled FILLER; a rule that matched the
 #   literal token would miss it and the user record would appear to be 57 bytes long.
 
-# WHY (Assumptions): the eight-byte password at app/cpy/CSUSR01Y.cpy line 21 is described
+# Assumptions: the eight-byte password at app/cpy/CSUSR01Y.cpy line 21 is described
 #   here because a descriptor's job is to describe the bytes the reference dataset actually
 #   contains, and the loader has to read those eight bytes in order to skip them. The
 #   target does NOT carry the field forward at all -- identity moves to a managed user pool
 #   and the target user table keeps only a subject reference. That is a documented
 #   behavioural change made one layer out, not a transcription choice, and no value of that
 #   field appears anywhere in this module.
-# WHY (Assumptions): this copybook's 01 group sits at line 17 rather than line 4 like every
+# Assumptions: this copybook's 01 group sits at line 17 rather than line 4 like every
 #   other base master, because its first sixteen lines are an Apache 2.0 licence header. It
 #   is also the one base master with NO record-length banner, which is why its geometry
 #   rests on summing alone: six fields summing to 80, corroborated by app/jcl/DUSRSECJ.jcl
@@ -1937,14 +2005,14 @@ SECUSER_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 300 bytes with an eleven-byte key at offset zero, corroborated by
+# Assumptions: 300 bytes with an eleven-byte key at offset zero, corroborated by
 #   app/jcl/ACCTFILE.jcl lines 40 and 41 declaring KEYS(11 0) and RECORDSIZE(300 300), and
 #   by the 15000-byte AWS.M2.CARDDEMO.ACCTDATA.PS dividing into exactly fifty records. Its
 #   five PIC S9(10)V99 money fields are the canonical zoned case at twelve bytes each, and
 #   they are precisely the five NUMERIC(12,2) columns the money-total verification pass
 #   aggregates, so their widths are load-bearing for the parity check and not merely for
 #   the decode.
-# WHY (Refactoring Rationale): ACCT-EXPIRAION-DATE at app/cpy/CVACT01Y.cpy line 11 is
+# Refactoring Rationale: ACCT-EXPIRAION-DATE at app/cpy/CVACT01Y.cpy line 11 is
 #   misspelled in the baseline and is transcribed WITH the misspelling, because a
 #   descriptor whose names did not match the copybook would no longer be a transcription of
 #   it. The target column replaces that name with the correctly spelled expiration_date;
@@ -1973,12 +2041,12 @@ ACCOUNT_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 150 bytes with a sixteen-byte key at offset zero, corroborated by
+# Assumptions: 150 bytes with a sixteen-byte key at offset zero, corroborated by
 #   app/jcl/CARDFILE.jcl lines 54 and 55, and by the 7500-byte
 #   AWS.M2.CARDDEMO.CARDDATA.PS dividing into exactly fifty records. Line 85 of that same
 #   job declares an alternate index KEYS(11 16), which is exactly CARD-ACCT-ID, so the
 #   secondary access path is carried below rather than left for a reader to rediscover.
-# WHY (Refactoring Rationale): CARD-EXPIRAION-DATE at app/cpy/CVACT02Y.cpy line 9 carries
+# Refactoring Rationale: CARD-EXPIRAION-DATE at app/cpy/CVACT02Y.cpy line 9 carries
 #   the second of the three baseline misspellings and is transcribed with it, for the reason
 #   recorded on the account master; its target column is expiration_date.
 CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
@@ -1998,11 +2066,11 @@ CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     (AlternateKeySpec("CARD-ACCT-ID", 16, 11),),
 ).validate_geometry()
 
-# WHY (Assumptions): 500 bytes with a nine-byte key at offset zero, corroborated by
+# Assumptions: 500 bytes with a nine-byte key at offset zero, corroborated by
 #   app/jcl/CUSTFILE.jcl lines 50 and 51, and by the 25000-byte
 #   AWS.M2.CARDDEMO.CUSTDATA.PS dividing into exactly fifty records. Its eighteen named
 #   fields sum to 332 and the PIC X(168) pad at line 23 completes the 500.
-# WHY (Assumptions): this is the most heavily identifying record in the corpus, so twelve
+# Assumptions: this is the most heavily identifying record in the corpus, so twelve
 #   of its eighteen named fields are marked sensitive. Two of them drive target encryption
 #   specifically, CUST-SSN at line 17 and CUST-GOVT-ISSUED-ID at line 18; the encryption and
 #   the masking both happen in the domain projection and not here, so marking the field is
@@ -2035,7 +2103,7 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 50 bytes with a sixteen-byte key at offset zero, corroborated by
+# Assumptions: 50 bytes with a sixteen-byte key at offset zero, corroborated by
 #   app/jcl/XREFFILE.jcl lines 43 and 44, and by the 2500-byte
 #   AWS.M2.CARDDEMO.CARDXREF.PS dividing into exactly fifty records. Line 74 of that job
 #   declares an alternate index KEYS(11,25) -- comma-separated where the transaction file
@@ -2044,7 +2112,7 @@ CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
 #   interest program reads this file by account identifier rather than by card number, so
 #   that index is a hard requirement and not an optimisation, and one account may own
 #   several cards, which is why duplicates are permitted.
-# WHY (Assumptions): this copybook indents its 01 group by ONE space where every other base
+# Assumptions: this copybook indents its 01 group by ONE space where every other base
 #   master uses two, and that irregularity is the reason a parser for these files must
 #   tokenise on whitespace RUNS rather than on fixed columns. The same file family also
 #   varies the indentation of its 05 items, so a fixed-column reader would mis-read the
@@ -2063,13 +2131,13 @@ XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     (AlternateKeySpec("XREF-ACCT-ID", 25, 11),),
 ).validate_geometry()
 
-# WHY (Assumptions): 350 bytes with a sixteen-byte key at offset zero, and the 105000-byte
+# Assumptions: 350 bytes with a sixteen-byte key at offset zero, and the 105000-byte
 #   AWS.M2.CARDDEMO.DALYTRAN.PS divides into exactly 300 records. Its geometry is field for
 #   field the same as the posted transaction record's with a different name prefix on every
 #   field, which is exactly why the two are separate registry entries rather than one
 #   aliased entry: a decoder resolving DALYTRAN-AMT against the posted layout would find no
 #   such field.
-# WHY (Assumptions): exactly one of its two timestamps is normalised. The originating stamp
+# Assumptions: exactly one of its two timestamps is normalised. The originating stamp
 #   at offset 278 is deterministic business data copied from the source transaction and is
 #   compared; the processing stamp at offset 304 is read from the clock during the run and is
 #   blanked before comparison. Blanking both would discard business data and shorten the
@@ -2097,14 +2165,14 @@ DALYTRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 350 bytes with a sixteen-byte key at offset zero, corroborated by
+# Assumptions: 350 bytes with a sixteen-byte key at offset zero, corroborated by
 #   app/jcl/TRANFILE.jcl lines 53 and 54. This is the record whose offsets three
 #   independent sources confirm, as the module docstring sets out: its card number at 262
 #   and its processing timestamp at 304 match the ONE-based DFSORT positions 263 and 305 at
 #   app/jcl/TRANREPT.jcl lines 41 and 42, and the ZERO-based alternate index KEYS(26 304)
 #   at line 84 of the same dataset definition. Those two offsets are the most load-bearing
 #   pair in the registry because the report sort and the secondary index both read them.
-# WHY (Assumptions): the alternate index over the processing timestamp is a BATCH access
+# Assumptions: the alternate index over the processing timestamp is a BATCH access
 #   path rather than an online one, which is why it permits duplicates: many transactions
 #   share one processing instant, and a unique index would reject the second of them at
 #   load time.
@@ -2132,14 +2200,14 @@ TRAN_LAYOUT: Final[RecordSpec] = RecordSpec(
     (AlternateKeySpec("TRAN-PROC-TS", 304, 26),),
 ).validate_geometry()
 
-# WHY (Assumptions): 50 bytes with a sixteen-byte COMPOSITE key at offset zero, corroborated
+# Assumptions: 50 bytes with a sixteen-byte COMPOSITE key at offset zero, corroborated
 #   by app/jcl/DISCGRP.jcl lines 40 and 41, and by the 2550-byte
 #   AWS.M2.CARDDEMO.DISCGRP.PS dividing into exactly 51 records -- one more than the other
 #   fifty-record masters, because this dataset additionally carries the DEFAULT group row
 #   the interest calculation falls back to. Line 5 of the copybook brackets the first three
 #   fields under DIS-GROUP-KEY; those three are flattened here and the sixteen-byte
 #   composite survives as the key length, which matches KEYS(16 0) exactly.
-# WHY (Assumptions): the interest rate at line 9 is PIC S9(04)V99, so it is six bytes. It is
+# Assumptions: the interest rate at line 9 is PIC S9(04)V99, so it is six bytes. It is
 #   the only zoned field in the corpus with four integer digits, and its width follows from
 #   the same rule as every other zoned field rather than from an exception -- which matters
 #   because a reader who assumed every money field were twelve bytes would overrun this
@@ -2158,14 +2226,14 @@ DISGROUP_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 60 bytes with a SIX-byte composite key at offset zero, corroborated by
+# Assumptions: 60 bytes with a SIX-byte composite key at offset zero, corroborated by
 #   app/jcl/TRANCATG.jcl lines 40 and 41, and by the 1080-byte
 #   AWS.M2.CARDDEMO.TRANCATG.PS dividing into exactly eighteen records. This is one of the
 #   two records whose key group is named identically to another record's while being a
 #   different width -- here TRAN-CAT-KEY is two plus four bytes; in the category-balance
 #   record it is eleven plus two plus four -- and that pair is the reason field names
 #   resolve per layout rather than globally.
-# WHY (Assumptions): this is the second of the three base masters the parity oracle's codec
+# Assumptions: this is the second of the three base masters the parity oracle's codec
 #   does not register, so its geometry rests on the copybook, the dataset definition and the
 #   byte-size division alone, with no second Python implementation to be compared against.
 TRANCAT_LAYOUT: Final[RecordSpec] = RecordSpec(
@@ -2181,13 +2249,13 @@ TRANCAT_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 60 bytes with a two-byte key at offset zero, corroborated by
+# Assumptions: 60 bytes with a two-byte key at offset zero, corroborated by
 #   app/jcl/TRANTYPE.jcl lines 40 and 41, and by the 420-byte
 #   AWS.M2.CARDDEMO.TRANTYPE.PS dividing into exactly seven records. It is the smallest key
 #   in the registry and it is the parent of the category reference above, which the target
 #   expresses as a restricting foreign key so deleting a type that categories still
 #   reference is refused rather than cascaded.
-# WHY (Assumptions): this is the third of the three base masters the parity oracle's codec
+# Assumptions: this is the third of the three base masters the parity oracle's codec
 #   does not register, so its geometry rests on the copybook, the dataset definition and the
 #   byte-size division alone. No independently written Python implementation of this layout
 #   exists to disagree with it, so a transcription error here would surface only as wrong
@@ -2205,13 +2273,13 @@ TRANTYPE_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 50 bytes with a SEVENTEEN-byte composite key at offset zero,
+# Assumptions: 50 bytes with a SEVENTEEN-byte composite key at offset zero,
 #   corroborated by app/jcl/TCATBALF.jcl lines 40 and 41, and by the 2500-byte
 #   AWS.M2.CARDDEMO.TCATBALF.PS dividing into exactly fifty records. Line 5 of the copybook
 #   brackets its first three fields under a group whose name collides with the category
 #   reference record's at a different width; that collision is why lookup is scoped per
 #   record.
-# WHY (Assumptions): all four of this record's offsets are confirmed by an independent
+# Assumptions: all four of this record's offsets are confirmed by an independent
 #   source. app/jcl/PRTCATBL.jcl lines 47 to 50 declare the ONE-based DFSORT positions 1,
 #   12, 14 and 18, which convert to the offsets 0, 11, 13 and 17 declared below, and its
 #   TRAN-CAT-BAL,18,11,ZD confirms both that the balance is zoned and that eleven bytes is
@@ -2233,7 +2301,7 @@ TCATBAL_LAYOUT: Final[RecordSpec] = RecordSpec(
 # ---------------------------------------------------------------------------
 # The three derived layouts.
 # ---------------------------------------------------------------------------
-# WHY (Assumptions): the statement view is NOT an alias of the posted transaction record
+# Assumptions: the statement view is NOT an alias of the posted transaction record
 #   and must never be treated as one. It is 350 bytes like that record, but it leads with a
 #   THIRTY-TWO byte composite key -- the card number followed by the transaction identifier
 #   -- where the posted record leads with the identifier alone, so every field after the key
@@ -2242,7 +2310,7 @@ TCATBAL_LAYOUT: Final[RecordSpec] = RecordSpec(
 #   tests/helpers/record_codec.py line 1344, calling the two deliberately separate record
 #   types with different geometry rather than aliases, and noting that an earlier aliasing
 #   of the two mis-decoded every statement amount.
-# WHY (Assumptions): app/cpy/COSTM01.CPY line 21 brackets the key as one group and line 24
+# Assumptions: app/cpy/COSTM01.CPY line 21 brackets the key as one group and line 24
 #   brackets the remainder as another, so this copybook nests TWO group items rather than
 #   one. Both are flattened and the thirty-two byte composite survives as the key length.
 TRNX_LAYOUT: Final[RecordSpec] = RecordSpec(
@@ -2268,13 +2336,13 @@ TRNX_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 430 bytes, and the arithmetic is exact. The posting program writes a
+# Assumptions: 430 bytes, and the arithmetic is exact. The posting program writes a
 #   rejected transaction as its verbatim 350-byte daily-transaction image followed by an
 #   80-byte trailer, and app/cbl/CBTRN02C.cbl declares both halves: lines 82 to 84 declare
 #   the file record as a PIC X(350) data area plus a PIC X(80) trailer, and lines 180 to 182
 #   declare that trailer as a four-digit reason code followed by a 76-character description.
 #   350 plus 4 plus 76 is 430.
-# WHY (Assumptions): the four documented reason codes that populate the first trailer field
+# Assumptions: the four documented reason codes that populate the first trailer field
 #   are 100, 101, 102 and 103, moved into it at lines 385, 397, 410 and 417 of that program.
 #   They are recorded here because a field width of four digits is only meaningful alongside
 #   the domain it carries.
@@ -2287,7 +2355,7 @@ REJECT_LAYOUT: Final[RecordSpec] = DALYTRAN_LAYOUT.extend_with(
     ),
 )
 
-# WHY (Assumptions): 350 bytes with the posted record's geometry exactly, differing in one
+# Assumptions: 350 bytes with the posted record's geometry exactly, differing in one
 #   flag only, and the reason is visible in four lines of the reference baseline. The
 #   interest program moves its run-clock value into BOTH timestamps, whereas the posting
 #   program copies the originating stamp from the source transaction and moves the run clock
@@ -2382,7 +2450,7 @@ def _build_registry() -> Mapping[str, _Registration]:
         If two layouts are registered under one name.
     """
     entries: list[tuple[RecordSpec, Provenance, bool]] = [
-        # WHY (Assumptions): these eight base masters are the ones the parity oracle's codec
+        # Assumptions: these eight base masters are the ones the parity oracle's codec
         #   also registers, so a decode here can be checked against an independently written
         #   implementation of the same geometry. That is what the trailing True records, and
         #   it is why the flag is carried as data rather than left as a comment: a comment
@@ -2397,7 +2465,7 @@ def _build_registry() -> Mapping[str, _Registration]:
         (TRAN_LAYOUT, Provenance.BASE_MASTER, True),
         (DISGROUP_LAYOUT, Provenance.BASE_MASTER, True),
         (TCATBAL_LAYOUT, Provenance.BASE_MASTER, True),
-        # WHY (Assumptions): these three base masters have NO counterpart in the parity
+        # Assumptions: these three base masters have NO counterpart in the parity
         #   oracle's codec, which is the whole reason this module distinguishes the two
         #   populations. The oracle registers eleven layouts and the migration has eleven
         #   base masters, but only eight names appear in both, so treating the two elevens
@@ -2407,7 +2475,7 @@ def _build_registry() -> Mapping[str, _Registration]:
         (SECUSER_LAYOUT, Provenance.BASE_MASTER, False),
         (TRANCAT_LAYOUT, Provenance.BASE_MASTER, False),
         (TRANTYPE_LAYOUT, Provenance.BASE_MASTER, False),
-        # WHY (Assumptions): these three are the oracle's other three entries and are NOT
+        # Assumptions: these three are the oracle's other three entries and are NOT
         #   base masters. The statement view is a separate copybook over the same dataset
         #   with a wider leading key; the reject stream and the interest transaction are both
         #   built from a base master by this module. Labelling them derived is what lets a
@@ -2430,7 +2498,7 @@ def _build_registry() -> Mapping[str, _Registration]:
 
 _REGISTRY: Final[Mapping[str, _Registration]] = _build_registry()
 
-# WHY (Trade-offs): the layout mapping is published as a read-only proxy as well as through
+# Trade-offs: the layout mapping is published as a read-only proxy as well as through
 #   the accessor below, because the reference codec publishes a plain LAYOUTS dict at
 #   tests/helpers/record_codec.py line 1349 and a reader coming from that file looks for the
 #   same name. It is a proxy rather than a dict so the parity in NAME does not import the
@@ -2722,7 +2790,7 @@ def derived_names() -> tuple[str, ...]:
     return _names_with_provenance(Provenance.DERIVED)
 
 
-# WHY (Assumptions): the copybook each registered layout was transcribed from is recorded as
+# Assumptions: the copybook each registered layout was transcribed from is recorded as
 #   data rather than only in the comment beside the layout, because two consumers need it
 #   for reasons a comment cannot serve: the traceability document is generated from the
 #   registry, and a reader diagnosing an offset has to reach the copybook without grepping.
@@ -2748,7 +2816,7 @@ COPYBOOK_OF: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
-# WHY (Refactoring Rationale): three field names in the reference baseline are misspelled,
+# Refactoring Rationale: three field names in the reference baseline are misspelled,
 #   and this table is the lineage record for all three. The COBOL names stay misspelled in
 #   every descriptor above and below, because a descriptor whose names did not match the
 #   copybook would no longer be a transcription of it; only the TARGET column and attribute
@@ -2774,7 +2842,7 @@ MISSPELLED_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
 # ---------------------------------------------------------------------------
 # The multi-record export layout, app/cpy/CVEXPORT.cpy.
 # ---------------------------------------------------------------------------
-# WHY (Assumptions): the export layouts are declared here but deliberately NOT registered
+# Assumptions: the export layouts are declared here but deliberately NOT registered
 #   alongside the fourteen above, matching the Java parity anchor, which registers the same
 #   fourteen and no more. The registry answers "which record is this dataset" for the eleven
 #   base masters and the three records derived from them; the export record is a single
@@ -2782,33 +2850,33 @@ MISSPELLED_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
 #   first byte, so a name-keyed registry entry would have to pick one of the five and would
 #   be wrong for the other four. They are reached through EXPORT_HEADER_LAYOUT and
 #   export_branch instead, which makes the two-step nature of the decode explicit.
-# WHY (Assumptions): REDEFINES aliases storage and must NOT advance the offset, and this
+# Assumptions: REDEFINES aliases storage and must NOT advance the offset, and this
 #   copybook is where ignoring that rule is most expensive. Its five branch overlays each
 #   redefine the same 460-byte payload area, so a naive width-summing parser would count
 #   that payload five extra times and make the record 2800 bytes. The same hazard is
 #   arithmetically self-proving in app/cpy/CVCRD01Y.cpy, which redefines three character
 #   fields as numeric at its lines 36, 39 and 42; counted as new storage those three add
 #   exactly 36 spurious bytes, being 11 plus 16 plus 9.
-# WHY (Assumptions): the header's own EXPORT-TIMESTAMP-R at line 12 is a fourth REDEFINES,
+# Assumptions: the header's own EXPORT-TIMESTAMP-R at line 12 is a fourth REDEFINES,
 #   overlaying the 26-byte timestamp as a 10-byte date, a 1-byte separator and a 15-byte
 #   time. It is therefore absent from the field list below and its three subordinates are
 #   recorded in this note instead, because emitting them would double-count 26 bytes and
 #   the header would stop closing at 500.
-# WHY (Assumptions): the header sums to exactly 500 only if the USAGE width rule holds --
+# Assumptions: the header sums to exactly 500 only if the USAGE width rule holds --
 #   1 plus 26 plus 4 plus 4 plus 5 plus 460. Treating EXPORT-SEQUENCE-NUM's PIC 9(9) COMP as
 #   nine display bytes instead of four gives 505, which the dataset's own
 #   RECORDSIZE(500 500) at app/jcl/CBEXPORT.jcl line 33 refuses. The width rule is therefore
 #   load-bearing here rather than cosmetic, and it is independently proven from real bytes in
 #   the note on binary_width.
 
-# WHY (Assumptions): the discriminator occupies the first byte of every export record and is
+# Assumptions: the discriminator occupies the first byte of every export record and is
 #   named as a constant because both the header layout and every branch dispatch depend on
 #   the same one byte. Were the two to state that width separately and disagree, the
 #   dispatch would read a different span than the layout describes and would classify every
 #   record by the wrong byte, which silently routes all 500 records to the wrong branch.
 RECORD_TYPE_LENGTH: Final[int] = 1
 
-# WHY (Assumptions): the payload area begins at zero-based offset 40 and runs for 460 bytes.
+# Assumptions: the payload area begins at zero-based offset 40 and runs for 460 bytes.
 #   Both numbers are derived by summing the six header fields rather than read from the
 #   copybook's prose banner, and every one of the five branch layouts below is declared in
 #   coordinates RELATIVE to that offset -- a branch field's start is its offset within the
@@ -2818,7 +2886,7 @@ RECORD_TYPE_LENGTH: Final[int] = 1
 EXPORT_PAYLOAD_OFFSET: Final[int] = 40
 EXPORT_BRANCH_LENGTH: Final[int] = 460
 
-# WHY (Assumptions): app/cbl/CBEXPORT.cbl line 68 declares RECORD KEY IS
+# Assumptions: app/cbl/CBEXPORT.cbl line 68 declares RECORD KEY IS
 #   EXPORT-SEQUENCE-NUM, and that field sits at zero-based offset 27 for four bytes, so 27
 #   and 4 are the key geometry the RECORD LAYOUT supports and are what this module records.
 #   The dataset definition disagrees: app/jcl/CBEXPORT.jcl line 32 declares KEYS(4 28),
@@ -2851,7 +2919,7 @@ EXPORT_HEADER_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): a group-level OCCURS multiplies the whole group, and this copybook
+# Assumptions: a group-level OCCURS multiplies the whole group, and this copybook
 #   carries two of them -- EXP-CUST-ADDR-LINES at lines 29 and 30 is three occurrences of a
 #   50-byte line, and EXP-CUST-PHONE-NUMS at lines 34 and 35 is two occurrences of a 15-byte
 #   number. Ignoring the two clauses would count 50 and 15 instead of 150 and 30 and
@@ -2864,7 +2932,7 @@ EXP_CUST_ADDR_LINES_ELEMENT_LENGTH: Final[int] = 50
 EXP_CUST_PHONE_NUMS_OCCURS: Final[int] = 2
 EXP_CUST_PHONE_NUMS_ELEMENT_LENGTH: Final[int] = 15
 
-# WHY (Assumptions): each branch overlay has no dataset of its own, so it has no key of its
+# Assumptions: each branch overlay has no dataset of its own, so it has no key of its
 #   own either; the key declared on each one below is the leading identifier of the base
 #   master the branch projects, expressed in payload-relative coordinates. That keeps the key
 #   a real field interval inside the branch and makes the branch's identity addressable,
@@ -2896,7 +2964,7 @@ EXPORT_CUSTOMER_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): this branch is the clearest proof in the corpus that a picture clause
+# Assumptions: this branch is the clearest proof in the corpus that a picture clause
 #   does not determine a byte width, because it declares the SAME PIC S9(10)V99 at THREE
 #   different widths -- seven bytes at line 50 under COMP-3, twelve at line 51 with no usage
 #   clause, and eight at line 57 under COMP. Its 108 bytes of named fields plus the 352-byte
@@ -2925,7 +2993,7 @@ EXPORT_ACCOUNT_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): this branch closes at 460 only because its amount is six bytes under
+# Assumptions: this branch closes at 460 only because its amount is six bytes under
 #   COMP-3 -- eleven digit positions plus a sign nibble is twelve nibbles, which is six bytes
 #   exactly -- and its merchant identifier is four bytes under COMP. The two widths differ
 #   from the eleven and nine display bytes the posted transaction record uses for the same
@@ -2954,7 +3022,7 @@ EXPORT_TRANSACTION_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): this branch closes at 460 only because its eleven-digit account
+# Assumptions: this branch closes at 460 only because its eleven-digit account
 #   identifier is EIGHT bytes under COMP, which is the highest of the three binary tiers.
 #   Sixteen plus nine plus eight plus 427 is 460; at four bytes it would close at 456. This
 #   is the tier that would be easiest to get wrong, because the neighbouring nine-digit
@@ -2972,10 +3040,20 @@ EXPORT_CARD_XREF_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): this branch exercises two binary tiers in adjacent fields -- eight bytes
+# Assumptions: this branch exercises two binary tiers in adjacent fields -- eight bytes
 #   for the eleven-digit account identifier at line 95 and two bytes for the three-digit
 #   verification value at line 96 -- and closes at 460 only with both. It is also where the
 #   second baseline misspelling recurs, at line 98.
+# Refactoring Rationale: the verification value at line 96 is declared through
+#   sensitive_binary and not binary, and the correction matters because the two adjacent binary
+#   fields are NOT alike. The account identifier is an internal key; the verification value is
+#   the card's authentication secret, which app/cpy/CVACT02Y.cpy line 6 carries as three
+#   display digits and this record carries as two binary bytes. It was declared through binary,
+#   which leaves sensitive at its default of False, so mask_record copied those two bytes
+#   through verbatim into every diagnostic rendering of an export record -- the one place a
+#   verification value must never appear, because a masked record is precisely what gets pasted
+#   into a ticket. The classification follows the DATA and never the storage regime, which is
+#   why the sensitive_binary factory had to exist rather than the field being left unmarked.
 EXPORT_CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     "EXPORT-CARD-DATA",
     EXPORT_BRANCH_LENGTH,
@@ -2984,7 +3062,7 @@ EXPORT_CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     (
         sensitive_text("EXP-CARD-NUM", 0, 16),  # CVEXPORT L94 PIC X(16)
         binary("EXP-CARD-ACCT-ID", 16, 11, 0, signed=False),  # L95 9(11) COMP = 8
-        binary("EXP-CARD-CVV-CD", 24, 3, 0, signed=False),  # L96 9(03) COMP = 2
+        sensitive_binary("EXP-CARD-CVV-CD", 24, 3, 0, signed=False),  # L96 9(03) COMP = 2
         sensitive_text("EXP-CARD-EMBOSSED-NAME", 26, 50),  # CVEXPORT L97 PIC X(50)
         text("EXP-CARD-EXPIRAION-DATE", 76, 10),  # CVEXPORT L98 PIC X(10) misspelt
         text("EXP-CARD-ACTIVE-STATUS", 86, 1),  # CVEXPORT L99 PIC X(01)
@@ -2992,7 +3070,7 @@ EXPORT_CARD_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): app/cpy/CVEXPORT.cpy declares NO 88-level condition names at all, so the
+# Assumptions: app/cpy/CVEXPORT.cpy declares NO 88-level condition names at all, so the
 #   five discriminator values are not in the copybook and cannot be transcribed from it. They
 #   are in the program: app/cbl/CBEXPORT.cbl moves 'C' at line 274, 'A' at line 343, 'X' at
 #   line 407, 'T' at line 462 and 'D' at line 527 into EXPORT-REC-TYPE, each immediately
@@ -3056,25 +3134,25 @@ def export_branch(record_type: str) -> RecordSpec:
 # ---------------------------------------------------------------------------
 # The two authorization IMS segments.
 # ---------------------------------------------------------------------------
-# WHY (Assumptions): both authorization copybooks are FRAGMENTS. Each begins at level 05 with
+# Assumptions: both authorization copybooks are FRAGMENTS. Each begins at level 05 with
 #   no 01 group of its own, because a program copies the fragment into a segment-io area it
 #   declares itself, so there is no root name to transcribe and the two names below are
 #   supplied EXTERNALLY. That is possible because RecordSpec always takes its name from the
 #   caller and never parses one out of a copybook -- a design point worth stating, since a
 #   layout API that assumed an 01 existed could not describe either of these segments, nor
 #   the two message payload copybooks in the same tree that share the property.
-# WHY (Assumptions): both copybooks write PIC with TWO spaces before the picture string, for
+# Assumptions: both copybooks write PIC with TWO spaces before the picture string, for
 #   instance PIC  9(09) at CIPAUSMY.cpy line 20, and both indent their level numbers
 #   differently from the base masters. Any parser over these files must therefore tokenise on
 #   whitespace RUNS and never on fixed columns; splitting on a single space would leave an
 #   empty token and the picture string would be read as the field name.
-# WHY (Assumptions): 88-level condition names carry NO storage and must be skipped when
+# Assumptions: 88-level condition names carry NO storage and must be skipped when
 #   summing. CIPAUSMY.cpy declares ZERO of them; CIPAUDTY.cpy declares exactly seven -- one
 #   for the response code at line 31, four for the match status at lines 46 to 49 and two for
 #   the fraud flag at lines 51 and 52. Counting any of the seven as a field would add bytes
 #   the segment does not have, and the 200-byte sum would not close.
 
-# WHY (Assumptions): PA-ACCOUNT-STATUS at CIPAUSMY.cpy line 22 is an ELEMENTARY-level OCCURS,
+# Assumptions: PA-ACCOUNT-STATUS at CIPAUSMY.cpy line 22 is an ELEMENTARY-level OCCURS,
 #   declared on the same line as its own picture clause -- PIC  X(02) OCCURS 5 TIMES -- which
 #   is a different shape from the two group-level OCCURS clauses in the export copybook.
 #   Reading only the picture clause and ignoring the OCCURS gives 2 bytes instead of 10 and
@@ -3087,13 +3165,13 @@ def export_branch(record_type: str) -> RecordSpec:
 PA_ACCOUNT_STATUS_OCCURS: Final[int] = 5
 PA_ACCOUNT_STATUS_ELEMENT_LENGTH: Final[int] = 2
 
-# WHY (Assumptions): 100 bytes, and the sum closes only under the packed width rule: an
+# Assumptions: 100 bytes, and the sum closes only under the packed width rule: an
 #   eleven-digit key at six bytes, six eleven-digit amounts at six bytes each, two four-digit
 #   binary counters at two bytes each, a nine-byte display identifier, two single characters
 #   of status, the ten-byte status table and a 34-byte pad. Seven of its thirteen fields are
 #   packed, which makes this segment and its detail sibling the only place packed decimal
 #   reaches persisted target data.
-# WHY (Assumptions): this segment's key is PA-ACCT-ID, six packed bytes at offset zero, and it
+# Assumptions: this segment's key is PA-ACCT-ID, six packed bytes at offset zero, and it
 #   decomposes downstream into a single account-identifier column. The target collapses these
 #   IMS segments and the neighbouring Db2 tables into one schema, which is what eliminates the
 #   baseline's two-phase commit rather than emulating it.
@@ -3119,17 +3197,17 @@ PENDING_AUTH_SUMMARY_LAYOUT: Final[RecordSpec] = RecordSpec(
     ),
 ).validate_geometry()
 
-# WHY (Assumptions): 200 bytes, and this segment is the proof by contradiction for the
+# Assumptions: 200 bytes, and this segment is the proof by contradiction for the
 #   packed width rule. It carries two PIC S9(10)V99 COMP-3 amounts, at lines 34 and 35, and
 #   its 27 named elementary fields plus its 17-byte pad sum to exactly 200 when each of those
 #   is seven bytes. At six bytes each the sum is 198, which is not a length this segment can
 #   have -- so six is arithmetically impossible here and not merely unlikely.
-# WHY (Assumptions): PA-AUTHORIZATION-KEY at line 19 is an eight-byte GROUP of two packed
+# Assumptions: PA-AUTHORIZATION-KEY at line 19 is an eight-byte GROUP of two packed
 #   fields, a three-byte five-digit date and a five-byte nine-digit time. The group is
 #   flattened into its two leaves below and the eight-byte composite survives as the key
 #   length, which is what the target decomposes into the two integer columns forming its
 #   composite primary key.
-# WHY (Refactoring Rationale): PA-MERCHANT-CATAGORY-CODE at line 36 is the third of the three
+# Refactoring Rationale: PA-MERCHANT-CATAGORY-CODE at line 36 is the third of the three
 #   baseline misspellings and is transcribed with it; its target name is
 #   merchant_category_code, recorded in MISSPELLED_FIELDS above.
 PENDING_AUTH_DETAIL_LAYOUT: Final[RecordSpec] = RecordSpec(
@@ -3173,7 +3251,7 @@ PENDING_AUTH_DETAIL_LAYOUT: Final[RecordSpec] = RecordSpec(
 # ---------------------------------------------------------------------------
 # Sensitive-field diagnostics.
 # ---------------------------------------------------------------------------
-# WHY (Trade-offs): the five names below reveal their last four characters where every other
+# Trade-offs: the five names below reveal their last four characters where every other
 #   sensitive field is replaced wholesale, and the compromise is deliberate. A primary account
 #   number or a national identifier is routinely quoted by its last four digits in operational
 #   practice, so revealing exactly four keeps a diagnostic actionable -- a reader can tell
@@ -3192,14 +3270,177 @@ _LAST4_REVEAL: Final[frozenset[str]] = frozenset(
     }
 )
 
-# WHY (Assumptions): eight hexadecimal characters of a digest is enough for a diagnostic to
-#   tell two differing values apart while being far too little to invert, and the tag is
-#   wrapped in a fixed literal so a masked rendering is unmistakably a mask rather than
-#   something that could be read back as data. A shorter tag would let two different values
-#   render identically and a diff would then report no difference where one exists, and an
-#   unwrapped tag would be indistinguishable from field content, so a masked rendering could
-#   be mistaken for a real value and loaded.
-_REDACTION_DIGEST_CHARS: Final[int] = 8
+# Refactoring Rationale: the tag is now a KEYED code and is sixteen hexadecimal
+#   characters, where it was an unkeyed digest truncated to eight. Both properties of the
+#   earlier form were defects rather than economies. An unkeyed digest of a low-entropy value
+#   can be CONFIRMED: an adversary holding a candidate card number, national identifier or
+#   date of birth computes the same digest and compares, and each of those spaces is small
+#   enough to enumerate outright -- so a "redacted" rendering of a sixteen-digit card number
+#   disclosed the number to anyone who could guess it, which is everyone. Truncation to eight
+#   characters compounded it, leaving 32 bits: two different values collide often enough that
+#   a diff over a few million records would report no difference where one exists, which is
+#   the very failure the tag was introduced to avoid.
+# Assumptions: sixteen hexadecimal characters is 64 bits, which makes an accidental
+#   collision across any record count this migration handles negligible while keeping the tag
+#   short enough that a masked rendering still fits a narrow field. Truncating a keyed code is
+#   safe in a way that truncating an unkeyed digest is not: without the key, no candidate can
+#   be tested against the tag at any length.
+_REDACTION_DIGEST_CHARS: Final[int] = 16
+
+# Assumptions: this names the environment variable that supplies the masking key, and the
+#   variable is OPTIONAL by design. Two situations need different behaviour and one constant
+#   cannot serve both. A single command that reads one dataset and prints one diagnostic needs
+#   only within-run comparability, which a key generated for that process provides; a
+#   verification pass that compares a masked rendering produced yesterday against one produced
+#   today needs the same key both times, which only a supplied key provides. Making the variable
+#   optional lets the first case need no configuration at all while the second states its key
+#   explicitly.
+ENV_MASK_HMAC_KEY: Final[str] = "CARDDEMO_MASK_HMAC_KEY"
+
+# Assumptions: the environment name is folded into the key derivation, so a tag computed
+#   in one deployment cannot be compared against a tag computed in another even when the same
+#   key is supplied to both. Without that separation, a masked rendering from a development
+#   extract and one from production would be equal for equal values, which would let a value
+#   confirmed in the environment holding no real data be recognised in the environment holding
+#   all of it -- the linkage a tokenised identifier exists to prevent.
+ENV_MASK_ENVIRONMENT: Final[str] = "CARDDEMO_ENVIRONMENT"
+
+# Trade-offs: the fallback key is generated ONCE per process, at import, from the
+#   platform's cryptographic source. That is what makes an unconfigured run safe rather than
+#   merely convenient: the tags it produces are comparable within the run, which is all a single
+#   diagnostic needs, and are unreproducible outside it, so nothing an adversary later obtains
+#   can be tested against them. The cost is that two runs of the same command produce different
+#   tags for the same value unless a key is supplied, which is stated in the masking function's
+#   docstring rather than left to be discovered.
+# Alternatives Considered: a committed constant key, and a key derived from the field name
+#   alone. Both were rejected for the same reason the unkeyed digest was: a key an adversary can
+#   read or reconstruct is not a key, and the construction collapses back to a confirmable digest
+#   of a low-entropy value.
+_PROCESS_MASK_KEY: Final[bytes] = secrets.token_bytes(32)
+
+# Refactoring Rationale: the tag is built to FIT the field rather than being written at
+#   one width and then cut down, and this repairs a defect that defeated the whole purpose
+#   stated immediately above. The full tag occupies nineteen characters, and the rendering used
+#   to be truncated to the field width -- so every sensitive field narrower than twenty lost
+#   digest characters and the four narrowest lost ALL of them: a two-byte verification value
+#   rendered as the first two characters of the literal, a three-byte one as the first three,
+#   the eight-byte password as the first eight and the ten-byte date of birth as the whole
+#   literal with no digest at all. Two different values of any of those rendered IDENTICALLY,
+#   which is precisely the "a diff reports no difference where one exists" failure the tag
+#   exists to prevent, and it struck exactly the fields whose values matter most.
+# Trade-offs: the wrapper shrinks before the digest does, so at least one digest
+#   character survives at every width down to two. The discrimination a masked rendering can
+#   offer is bounded by the field's own width and nothing can lift that bound -- a two-byte
+#   field affords one hexadecimal character, sixteen buckets, which is far weaker than eight
+#   characters and infinitely better than none. Alternatives Considered: letting a narrow
+#   field's rendering EXCEED its width, which was rejected because mask_record splices each
+#   rendering back in by slice, so an over-long one would shift every field after it and a
+#   masked record would no longer tile the record it describes -- the same-width invariant is
+#   what lets a reader count offsets across a masked record at all. Also rejected: emitting the
+#   digest alone with no wrapper on narrow fields, because a two-character run of hexadecimal
+#   is indistinguishable from a real two-character field value and could be read back as data.
+# Assumptions: every tier below opens with the same bracket, and the asterisk is
+#   deliberately NOT reused as the narrow-field marker even though it is this module's other
+#   mask character. The asterisk carries one specific meaning here -- the last-four concession
+#   renders asterisks followed by REVEALED characters -- so an asterisk-then-hexadecimal
+#   rendering of a two-byte field would read as a revealed final character and would be
+#   believed, since a digest character is drawn from the same alphabet a numeric value uses. An
+#   opening bracket with no closing one cannot be read that way: no field in this corpus holds
+#   a bracket, so the rendering is unmistakably a tag too narrow to close.
+_REDACTION_PREFIX: Final[str] = "<redacted:"
+_REDACTION_BRACKET_PREFIX: Final[str] = "<"
+_REDACTION_SUFFIX: Final[str] = ">"
+_REDACTION_MARKER: Final[str] = "*"
+_FULL_REDACTION_TAG_WIDTH: Final[int] = (
+    len(_REDACTION_PREFIX) + _REDACTION_DIGEST_CHARS + len(_REDACTION_SUFFIX)
+)
+_BRACKETED_TAG_OVERHEAD: Final[int] = len(_REDACTION_BRACKET_PREFIX) + len(_REDACTION_SUFFIX)
+_UNTERMINATED_TAG_WIDTH: Final[int] = _BRACKETED_TAG_OVERHEAD
+
+
+def _redaction_tag(field_name: str, chunk: str, width: int) -> str:
+    """Return the widest keyed redaction tag that fits one field width.
+
+    Purpose
+    -------
+    Render a stand-in for a sensitive field's characters that is equal for equal inputs under one
+    key, useless to anyone who does not hold that key, and never wider than the field's declared
+    width -- so a masked record stays byte-aligned and a reader can still count offsets across it.
+
+    Refactoring Rationale: the tag is a KEYED code and not a bare digest, and that closes a real
+    disclosure rather than tidying one. A bare digest of a low-entropy value can be CONFIRMED by
+    anyone holding a candidate: they compute the same digest and compare, and the space of
+    sixteen-digit card numbers or of nine-digit national identifiers is small enough to enumerate.
+    The earlier reasoning that a bare digest was "acceptable for a diagnostic that never leaves an
+    operator's log" assumed a boundary this function cannot enforce, because a diagnostic goes
+    wherever its consumer sends it. Keying removes the confirmation entirely: without the key no
+    candidate can be tested, at any tag length -- which is what makes the narrow-field truncation
+    below safe rather than merely short.
+
+    Assumptions: the field name and the environment name are folded into the derivation, so the
+    same value under two different field names produces two unrelated tags. Without the field
+    name a card number appearing in the card record and in the cross-reference record would share
+    a tag, which links the two records for an observer who holds neither; without the environment
+    name a tag computed in one deployment would be comparable with one from another.
+
+    Assumptions: each component is length-prefixed before being fed in, so no two different
+    triples can produce the same input by moving a boundary between them -- the field name
+    ``"AB"`` with value ``"C"`` and the field name ``"A"`` with value ``"BC"`` would otherwise
+    produce identical tags, defeating the per-field separation just described.
+
+    Assumptions: the key comes from :data:`ENV_MASK_HMAC_KEY` when it is set and from a
+    process-scoped random value otherwise, and both are read on every call rather than captured
+    once -- a command-line entry point that parses its own arguments before doing any work is the
+    ordinary case, and caching at import would make the variable's effect depend on import order.
+    The consequence a caller has to know is stated plainly: with no key supplied, tags are
+    comparable within one run and NOT across runs, so a verification pass comparing a rendering
+    produced by an earlier run must supply the key to both.
+
+    Assumptions: the discriminating power of a narrow tag is bounded by the width and is stated
+    rather than implied. A field wide enough for the full form carries
+    :data:`_REDACTION_DIGEST_CHARS` hexadecimal characters; a three-character field affords one,
+    so two different values of that field collide roughly one time in sixteen. That is the most
+    any same-width rendering of a three-character field can offer, which is why the claim here is
+    "not forced to render identically" rather than "cannot collide". Collision resistance is the
+    property that degrades with width; confirmability does not, because the key is absent from the
+    rendering at every width.
+
+    Parameters
+    ----------
+    field_name : str
+        The copybook field name, folded into the derivation for the separation described above.
+    chunk : str
+        The exact field characters being redacted, trailing pad included, so the rendering is a
+        function of the stored bytes and equal chunks always render equally. No part of the value
+        appears in the result.
+    width : int
+        The field's declared width, which the returned tag never exceeds. A width below one is not
+        reachable from :class:`FieldSpec`, whose constructor rejects it.
+
+    Returns
+    -------
+    str
+        A tag of at most ``width`` characters: the full ``<redacted:xxxxxxxx>`` form when it fits,
+        otherwise a bracketed code of as many characters as the width allows, and for a width too
+        narrow to close the bracket an opening bracket followed by whatever code characters remain
+        -- one at a width of two, and none at a width of one, which is the single width at which
+        no code character can be carried.
+    """
+    supplied = os.environ.get(ENV_MASK_HMAC_KEY, "")
+    key = supplied.encode("utf-8") if supplied else _PROCESS_MASK_KEY
+    environment = os.environ.get(ENV_MASK_ENVIRONMENT, "")
+    message = b"".join(
+        f"{len(part)}:{part}".encode("utf-8", "replace")
+        for part in (environment, field_name, chunk)
+    )
+    code = hmac.new(key, message, hashlib.sha256).hexdigest()
+
+    if width >= _FULL_REDACTION_TAG_WIDTH:
+        return f"{_REDACTION_PREFIX}{code[:_REDACTION_DIGEST_CHARS]}{_REDACTION_SUFFIX}"
+    if width > _UNTERMINATED_TAG_WIDTH:
+        room = min(_REDACTION_DIGEST_CHARS, width - _BRACKETED_TAG_OVERHEAD)
+        return f"{_REDACTION_BRACKET_PREFIX}{code[:room]}{_REDACTION_SUFFIX}"
+    return f"{_REDACTION_BRACKET_PREFIX}{code}"[:width]
 
 
 def mask_field(field: FieldSpec, chunk: str) -> str:
@@ -3211,16 +3452,33 @@ def mask_field(field: FieldSpec, chunk: str) -> str:
     shape and WHERE two records differ without emitting a complete cardholder identity or
     payment number. A field not marked sensitive is returned unchanged.
 
-    Trade-offs: the mask is DETERMINISTIC -- equal input characters always yield equal masked
-    characters -- because that is what lets a masked comparison still reveal which field
-    changed and whether two masked records are equal. A random mask would destroy that, and a
-    plaintext value would over-disclose. The accepted cost is that an attacker holding a
-    candidate value could confirm it by hashing, which is acceptable for a diagnostic
-    rendering that never leaves an operator's log.
+    Trade-offs: the mask is deterministic WITHIN one key -- equal input characters yield equal
+    masked characters -- because that is what lets a masked comparison still reveal which field
+    changed and whether two masked records are equal. A random-per-call mask would destroy that,
+    and a plaintext value would over-disclose.
+
+    Refactoring Rationale: the tag is a keyed code and not a bare digest, and the change closes a
+    real disclosure rather than tidying one. A bare digest of a low-entropy value can be
+    CONFIRMED by anyone holding a candidate: they compute the same digest and compare, and the
+    space of sixteen-digit card numbers or of nine-digit national identifiers is small enough to
+    enumerate. The earlier note that this was "acceptable for a diagnostic that never leaves an
+    operator's log" assumed a boundary this function cannot enforce -- a diagnostic goes wherever
+    its consumer sends it. Keying removes the confirmation entirely: without the key no candidate
+    can be tested, at any tag length.
+
+    Assumptions: the key comes from :data:`ENV_MASK_HMAC_KEY` when it is set and from a
+    process-scoped random value otherwise, and the environment name from
+    :data:`ENV_MASK_ENVIRONMENT` is folded in either way. The consequence a caller has to know is
+    stated plainly: with no key supplied, tags are comparable within one run and NOT across runs.
+    A verification pass that compares a rendering produced by an earlier run must supply the key
+    to both.
 
     Trade-offs: the returned rendering is exactly ``field.length`` characters, so a masked
-    record stays byte-aligned and a reader can still count offsets across it. An over-long
-    redaction tag is therefore truncated and a short one is space-padded.
+    record stays byte-aligned and a reader can still count offsets across it. The redaction tag
+    is SIZED to that width by :func:`_redaction_tag` rather than written at one width and cut
+    down, which is what keeps at least one digest character in the rendering of even a two-byte
+    field; the truncation below therefore never removes a digest character and the last-four
+    concession, which is bounded by the field width already, is what the space padding serves.
 
     Assumptions: this operates on ``str`` rather than ``bytes`` because it is the counterpart
     of the text-line ingest path, where a record is already characters. For the byte path --
@@ -3241,7 +3499,9 @@ def mask_field(field: FieldSpec, chunk: str) -> str:
     -------
     str
         Exactly ``field.length`` characters: ``chunk`` verbatim when the field is not
-        sensitive, otherwise a redaction revealing at most the trailing four characters.
+        sensitive, otherwise a redaction revealing at most the trailing four characters, and
+        for every other sensitive field a digest tag carrying no part of the value and at least
+        one digest character.
 
     Raises
     ------
@@ -3259,10 +3519,9 @@ def mask_field(field: FieldSpec, chunk: str) -> str:
         return chunk
     stripped = chunk.rstrip()
     if field.name in _LAST4_REVEAL and len(stripped) >= 4:
-        masked = "*" * (len(stripped) - 4) + stripped[-4:]
+        masked = _REDACTION_MARKER * (len(stripped) - 4) + stripped[-4:]
     else:
-        digest = hashlib.sha256(chunk.encode("utf-8", "replace")).hexdigest()
-        masked = f"<redacted:{digest[:_REDACTION_DIGEST_CHARS]}>"
+        masked = _redaction_tag(field.name, chunk, field.length)
     return masked[: field.length].ljust(field.length)
 
 
@@ -3317,7 +3576,7 @@ def mask_record(raw: str, layout: RecordSpec) -> str:
 # ---------------------------------------------------------------------------
 # Record boundaries: two modes, and they are structurally unmixable.
 # ---------------------------------------------------------------------------
-# WHY (Assumptions): the reference extracts arrive in two genuinely different physical shapes,
+# Assumptions: the reference extracts arrive in two genuinely different physical shapes,
 #   which was MEASURED rather than assumed, so one boundary rule cannot serve both. The
 #   thirteen datasets under app/data/EBCDIC are pure fixed-length byte images with no record
 #   terminator at all: every one of them divides by its record length with remainder zero, and
@@ -3329,15 +3588,23 @@ def mask_record(raw: str, layout: RecordSpec) -> str:
 #   file some lines end CR-LF and others end LF. One of them is not even full width --
 #   cardxref.txt has 50 lines of 36 characters against a declared record length of 50, because
 #   its trailing FILLER X(14) is simply absent from the text form.
-# WHY (Trade-offs): the two modes are therefore SEPARATE FUNCTIONS taking DIFFERENT TYPES --
-#   the byte mode takes bytes and the text mode takes str -- rather than one function with a
-#   mode flag. That is what makes the text tolerance structurally unreachable from the byte
-#   path: this module performs no character decoding at all, so an EBCDIC byte image cannot be
-#   passed to the text function without an explicit decode step the caller would have to write
-#   itself, and no default value of any parameter can lead it there by accident. A flag with a
-#   default would eventually be left at its default over an EBCDIC dataset, and the padding
-#   arm would then silently accept a truncated final record.
-# WHY (Assumptions): the padding tolerance in the text mode is a DELIBERATE, NAMED DIVERGENCE
+# Trade-offs: the two modes are therefore SEPARATE FUNCTIONS taking DIFFERENT TYPES --
+#   the byte mode takes bytes, or any source of bytes, and the text mode takes characters, or
+#   any source of characters -- rather than one function with a mode flag. That is what makes
+#   the text tolerance structurally unreachable from the byte path: this module performs no
+#   character decoding at all, so an EBCDIC byte image cannot be passed to the text function
+#   without an explicit decode step the caller would have to write itself, and no default
+#   value of any parameter can lead it there by accident. A flag with a default would
+#   eventually be left at its default over an EBCDIC dataset, and the padding arm would then
+#   silently accept a truncated final record.
+# Assumptions: accepting a stream or an iterable of pieces in addition to a whole image
+#   does NOT weaken that separation, because each function validates every PIECE it is handed
+#   and refuses the other's type: a stream opened in text mode by mistake yields str pieces,
+#   which the byte mode rejects, and a stream opened in binary mode yields bytes pieces, which
+#   the text mode rejects. The type that reaches a record boundary is therefore checked once
+#   per piece rather than once per call, which is strictly stronger than checking only the
+#   container the caller passed.
+# Assumptions: the padding tolerance in the text mode is a DELIBERATE, NAMED DIVERGENCE
 #   from the reference codec, scoped to ASCII seed ingest alone. The reference's
 #   _validated_record at tests/helpers/record_codec.py lines 513 to 596 REJECTS any row that
 #   is not exactly reclen characters after one trailing newline is stripped, on the stated
@@ -3352,7 +3619,7 @@ def mask_record(raw: str, layout: RecordSpec) -> str:
 #   divergence is therefore in what is tolerated at ONE ingest boundary, never in record
 #   validation generally and never on the EBCDIC path.
 
-# WHY (Assumptions): a text line terminates with a newline, optionally preceded by a carriage
+# Assumptions: a text line terminates with a newline, optionally preceded by a carriage
 #   return, and at most ONE of each is removed. Stripping greedily with rstrip would eat
 #   trailing spaces too, and trailing spaces are DATA in a fixed-width record -- they are how
 #   a short value fills its field -- so a greedy strip would shorten a legitimately
@@ -3411,8 +3678,242 @@ def count_fixed_length_records(size_bytes: int, reclen: int) -> int:
     return size_bytes // reclen
 
 
-def iter_fixed_length_records(data: bytes, reclen: int) -> Iterator[bytes]:
-    """Iterate a fixed-length byte image as whole records, with no newline semantics at all.
+# ---------------------------------------------------------------------------
+# Streaming: one record resident, never the whole dataset.
+# ---------------------------------------------------------------------------
+# Refactoring Rationale: both iterators below originally REQUIRED the complete extract as
+#   one in-memory object -- bytes for the byte mode, str for the text mode -- and the text mode
+#   then DUPLICATED it, because splitting on the separator materialises every line of the file
+#   into a second independent list before the first record is yielded. Resident memory
+#   therefore grew with the dataset rather than with a record, which does not survive contact
+#   with a production extract: the committed seeds under app/data are kilobytes, but the
+#   datasets these layouts describe are the full masters, and the transaction master alone is
+#   350 bytes a row with no bound whatever on the row count. Both functions now additionally
+#   accept a stream or an iterable of pieces, and what they retain is one PIECE -- one bounded
+#   read batch where they do the reading -- plus at most one partial record. That ceiling is
+#   fixed rather than proportional, so a dataset larger than memory reads as a small one does.
+# Alternatives Considered: (a) requiring every caller to memory-map the dataset and pass
+#   a memoryview was rejected because a mapping cannot span a stream -- the staging step reads
+#   a dataset generation out of object storage, where there is no local file to map -- though a
+#   memoryview is still ACCEPTED for the caller who does have one, since slicing it costs no
+#   copy; (b) reading exactly one record per call was rejected because it issues one system
+#   call per record, 350 bytes at a time across a multi-gigabyte master, so reads are batched
+#   to a whole-record multiple of a byte budget instead; (c) returning a list rather than a
+#   generator was never a candidate, and the reason is worth recording: the generator is what
+#   makes the memory bound OBSERVABLE, because a caller cannot accidentally retain every
+#   record by keeping the return value.
+# Assumptions: a stream may legally return FEWER bytes than asked for without having
+#   ended -- that is the documented contract of a raw read, and it is what a network-backed
+#   body does routinely -- so a short read must never be taken for end of stream. The carry
+#   buffer exists for precisely that: whatever a read leaves over is kept and completed by the
+#   next one, and only a NON-EMPTY carry at true end of stream is a truncation. An empty return
+#   is the one and only end-of-stream signal, which is also why an empty piece appearing
+#   mid-iterable is legal and simply contributes nothing.
+# Trade-offs: the strict record-length division is asserted at the earliest point at
+#   which the total size is knowable, and that point differs by input shape. That is a real
+#   consequence of streaming rather than an inconsistency, so it is stated instead of hidden:
+#   a whole image has a length before anything is yielded, so a malformed dataset raises BEFORE
+#   the first record and no row reaches a loader; a stream has no knowable total until it ends,
+#   so records are yielded first and the leftover raises at end of stream. Both reject -- only
+#   the moment differs -- and the end-of-stream message names how many whole records were
+#   already produced, because that is what tells an operator how far a partial load got before
+#   the input ran out mid-record.
+_STREAM_TARGET_BYTES: Final[int] = 1 << 20
+
+
+class _ByteStream(Protocol):
+    """Structural type for a binary stream the byte-mode iterator can read.
+
+    Purpose
+    -------
+    Name the single method the iterator uses, so that every binary stream qualifies without
+    inheriting anything: the object returned by opening a file in binary mode, an in-memory
+    buffer, and the file-like body an object-storage client returns all satisfy it.
+
+    Assumptions: a nominal annotation such as ``typing.BinaryIO`` was rejected because it does
+    not admit that last case, which is exactly the case the dataset-staging step needs. The
+    protocol is private because a caller never names it -- it simply passes its own stream.
+    """
+
+    def read(self, size: int = ..., /) -> bytes:
+        """Return at most ``size`` bytes, or an empty object at end of stream.
+
+        Parameters
+        ----------
+        size : int
+            The maximum number of bytes to return. Fewer may be returned without the stream
+            having ended.
+
+        Returns
+        -------
+        bytes
+            The bytes read, empty only at end of stream.
+        """
+
+
+def _stream_chunk_bytes(reclen: int) -> int:
+    """Return the read size to use for a stream of records of ``reclen`` bytes.
+
+    Purpose
+    -------
+    Batch reads into a whole-record multiple of a fixed byte budget, so that a long dataset
+    costs one read per budget rather than one read per record, and so that in the ordinary case
+    every read ends on a record boundary and the carry buffer stays empty.
+
+    Parameters
+    ----------
+    reclen : int
+        The declared record length in bytes; one or more.
+
+    Returns
+    -------
+    int
+        The largest whole-record multiple of the byte budget, or exactly one record when a
+        single record is already larger than the budget.
+    """
+    return max(reclen, (_STREAM_TARGET_BYTES // reclen) * reclen)
+
+
+def _require_byte_chunk(chunk: object, produced: int) -> bytes | bytearray | memoryview:
+    """Return ``chunk`` unchanged once it is confirmed to be a usable byte piece.
+
+    Purpose
+    -------
+    Refuse character data at the boundary rather than encoding it, which is the same discipline
+    the byte mode applies to a whole image: a stream opened in text mode yields ``str`` pieces,
+    and guessing an encoding for what may be an EBCDIC image is exactly the mistake this module
+    must not make.
+
+    Parameters
+    ----------
+    chunk : object
+        The piece the source produced.
+    produced : int
+        How many whole records were already yielded, reported in the message so an operator can
+        locate the offending piece in a long stream.
+
+    Returns
+    -------
+    bytes | bytearray | memoryview
+        The same object, neither modified nor copied.
+
+    Raises
+    ------
+    LayoutError
+        If the piece is not a byte object, or is a ``memoryview`` that is not a one-dimensional
+        view of single bytes and therefore cannot be sliced by byte offset.
+    """
+    if isinstance(chunk, memoryview):
+        if chunk.ndim != 1 or chunk.itemsize != 1:
+            raise LayoutError(
+                "fixed-length record iteration requires a one-dimensional view of single bytes,"
+                f" but was given a memoryview of {chunk.ndim} dimensions and {chunk.itemsize}"
+                "-byte items; cast it with .cast('B') first, because a record boundary is a byte"
+                " offset and cannot be counted in wider items"
+            )
+        return chunk
+    if isinstance(chunk, (bytes, bytearray)):
+        return chunk
+    raise LayoutError(
+        "fixed-length record iteration requires byte pieces, but the source produced a"
+        f" {type(chunk).__name__} after {produced} whole records; character data belongs to"
+        " iter_ascii_text_records, and no encoding is guessed here"
+    )
+
+
+def _iter_stream_chunks(stream: _ByteStream, chunk_bytes: int) -> Iterator[bytes]:
+    """Yield successive reads from a binary stream until it reports end of stream.
+
+    Purpose
+    -------
+    Turn a stream into the piece iterable the record engine consumes, so the engine has exactly
+    one input shape. The stream is read strictly forward, never seeked and never closed:
+    opening and closing it stay with the caller that owns it.
+
+    Parameters
+    ----------
+    stream : _ByteStream
+        The stream to read, positioned at the first byte to be treated as record data.
+    chunk_bytes : int
+        The maximum number of bytes to request per read.
+
+    Returns
+    -------
+    Iterator[bytes]
+        Each non-empty read, in order.
+    """
+    while True:
+        chunk = stream.read(chunk_bytes)
+        if not chunk:
+            return
+        yield chunk
+
+
+def _iter_records_from_chunks(chunks: Iterable[object], reclen: int) -> Iterator[bytes]:
+    """Yield whole records from an iterable of byte pieces, carrying one partial record.
+
+    Purpose
+    -------
+    Cut records on byte offsets alone across piece boundaries that may fall anywhere, including
+    inside a record, holding at most ``reclen`` minus one bytes of state. A piece is never
+    copied whole: records are sliced straight out of it, and only a genuinely incomplete tail
+    is copied into the carry buffer.
+
+    Parameters
+    ----------
+    chunks : Iterable[object]
+        The pieces to consume, each validated by :func:`_require_byte_chunk`.
+    reclen : int
+        The declared record length in bytes; one or more, already validated by the caller.
+
+    Returns
+    -------
+    Iterator[bytes]
+        Each whole record in order, every one exactly ``reclen`` bytes long.
+
+    Raises
+    ------
+    LayoutError
+        If any piece is not a usable byte object.
+    RecordLengthError
+        If the pieces end mid-record. This is the streaming form of the strict division that
+        :func:`count_fixed_length_records` asserts up front when the total size is knowable.
+    """
+    carry = bytearray()
+    produced = 0
+    for chunk in chunks:
+        piece = _require_byte_chunk(chunk, produced)
+        offset = 0
+        if carry:
+            needed = reclen - len(carry)
+            if len(piece) < needed:
+                carry += piece
+                continue
+            carry += piece[:needed]
+            yield bytes(carry)
+            produced += 1
+            carry.clear()
+            offset = needed
+        limit = len(piece) - reclen
+        while offset <= limit:
+            yield bytes(piece[offset : offset + reclen])
+            produced += 1
+            offset += reclen
+        if offset < len(piece):
+            carry += piece[offset:]
+    if carry:
+        raise RecordLengthError(
+            f"the record source ended {reclen - len(carry)} bytes short of a whole record:"
+            f" {produced} whole records of {reclen} bytes were read and {len(carry)} trailing"
+            " bytes remain, so the dataset is truncated or the record length is wrong"
+        )
+
+
+def iter_fixed_length_records(
+    data: bytes | bytearray | memoryview | _ByteStream | Iterable[object],
+    reclen: int,
+) -> Iterator[bytes]:
+    """Iterate a fixed-length byte source as whole records, with no newline semantics at all.
 
     Purpose
     -------
@@ -3420,6 +3921,12 @@ def iter_fixed_length_records(data: bytes, reclen: int) -> Iterator[bytes]:
     packed or binary record must be read through, because their content is arbitrary bytes: a
     0x0A inside a binary sequence number, a packed nibble pair or a low-value pad byte is data
     and not a boundary.
+
+    The source may be a whole image the caller already holds, an open binary stream, or any
+    iterable of byte pieces. In the latter two cases the resident data is one piece -- one
+    bounded read batch for a stream -- plus at most one partial record, never the dataset, which
+    is what lets a master larger than memory be read; the full rationale is in the streaming
+    comment block earlier in this section.
 
     Assumptions: no line terminator is looked for, honoured or stripped, which is the entire
     point. ``AWS.M2.CARDDEMO.EXPORT.DATA.PS`` is the concrete case -- it holds exactly five
@@ -3429,8 +3936,12 @@ def iter_fixed_length_records(data: bytes, reclen: int) -> Iterator[bytes]:
 
     Parameters
     ----------
-    data : bytes
-        The whole dataset image, whose length must be an exact multiple of ``reclen``.
+    data : bytes | bytearray | memoryview | _ByteStream | Iterable[object]
+        The dataset, in any of three shapes. A whole image -- ``bytes``, ``bytearray`` or a
+        one-dimensional ``memoryview`` of single bytes -- whose length must be an exact multiple
+        of ``reclen``. An object with a ``read`` method, read strictly forward in whole-record
+        batches, never seeked and never closed. Or an iterable of byte pieces whose boundaries
+        may fall anywhere, including inside a record. A ``str`` is refused outright.
     reclen : int
         The declared record length in bytes; one or more, normally obtained from
         :func:`reclen_of`.
@@ -3443,25 +3954,138 @@ def iter_fixed_length_records(data: bytes, reclen: int) -> Iterator[bytes]:
     Raises
     ------
     LayoutError
-        If ``data`` is not a ``bytes`` or ``bytearray``, or if ``reclen`` is below one. A
-        ``str`` is refused explicitly rather than encoded, because guessing a character
-        encoding for an EBCDIC image is exactly the mistake this module must not make.
+        If ``data`` is a ``str``, if it is neither a byte image nor readable nor iterable, if
+        any piece it produces is not a byte object, or if ``reclen`` is below one. A ``str`` is
+        refused explicitly rather than encoded, because guessing a character encoding for an
+        EBCDIC image is exactly the mistake this module must not make.
     RecordLengthError
-        If the length of ``data`` is not an exact multiple of ``reclen``.
+        If the source does not divide into whole records: raised before the first record for a
+        whole image, whose length is known up front, and at end of stream for a stream or an
+        iterable, whose total is not.
     """
-    if not isinstance(data, (bytes, bytearray)):
+    if isinstance(data, str):
         raise LayoutError(
             "fixed-length record iteration requires a byte image, but was given a"
             f" {type(data).__name__}; character data belongs to iter_ascii_text_records, and no"
             " encoding is guessed here"
         )
-    total = count_fixed_length_records(len(data), reclen)
-    for index in range(total):
-        start = index * reclen
-        yield bytes(data[start : start + reclen])
+    if reclen < 1:
+        raise LayoutError(f"a record length must be at least one byte, but reclen={reclen}")
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        image = _require_byte_chunk(data, 0)
+        total = count_fixed_length_records(len(image), reclen)
+        for index in range(total):
+            start = index * reclen
+            yield bytes(image[start : start + reclen])
+        return
+    read = getattr(data, "read", None)
+    if callable(read):
+        chunks: Iterable[object] = _iter_stream_chunks(data, _stream_chunk_bytes(reclen))
+    else:
+        try:
+            chunks = iter(data)
+        except TypeError:
+            raise LayoutError(
+                "fixed-length record iteration requires a byte image, a readable binary stream"
+                f" or an iterable of byte pieces, but was given a {type(data).__name__}, which"
+                " is none of those"
+            ) from None
+    yield from _iter_records_from_chunks(chunks, reclen)
 
 
-def iter_ascii_text_records(text: str, reclen: int) -> Iterator[str]:
+def _iter_text_lines(text: str) -> Iterator[str]:
+    """Yield the separator-delimited pieces of a whole text, one at a time.
+
+    Purpose
+    -------
+    Reproduce exactly what splitting the text on the separator produced -- including dropping
+    the single empty piece that a text ending in a separator yields -- WITHOUT building the
+    list of every line that splitting materialises. Only one line is copied at a time, so the
+    caller's text is scanned in place and never duplicated.
+
+    Assumptions: the drop of that final empty piece belongs HERE rather than to the record
+    iterator, because it is a property of splitting a whole text: a source that hands over
+    lines instead, an open text stream for instance, never produces the phantom piece at all,
+    so applying the drop to it would silently discard a genuinely blank final line.
+
+    Parameters
+    ----------
+    text : str
+        The whole text to scan.
+
+    Returns
+    -------
+    Iterator[str]
+        Each piece between separators, in order, with the separators removed and with no
+        phantom final piece when the text ends with one.
+    """
+    start = 0
+    length = len(text)
+    while start < length:
+        index = text.find(_ASCII_LINE_SEPARATOR, start)
+        if index < 0:
+            yield text[start:]
+            return
+        yield text[start:index]
+        start = index + 1
+
+
+def _strip_one_line_terminator(line: object, number: int) -> str:
+    """Return a line with at most one trailing separator and one carriage return removed.
+
+    Purpose
+    -------
+    Normalise the two line shapes the accepted sources produce -- a piece the whole-text
+    scanner has already stripped of its separator, and a line an open text stream yields WITH
+    its separator still attached -- into one form, in the single place the rule is stated.
+
+    Assumptions: at most one of each terminator is removed, never more, for the reason recorded
+    at the separator constants above: trailing spaces are DATA in a fixed-width record, so a
+    greedy strip would shorten a legitimately space-padded final field and then pad it back to
+    a different width.
+
+    Assumptions: an INTERIOR separator means the caller passed arbitrary chunks where lines were
+    required, so it is refused rather than embedded in a record. Left alone it would silently
+    produce one "record" spanning several rows whenever the merged piece happened to fit inside
+    the declared length, and no later validation could detect that.
+
+    Parameters
+    ----------
+    line : object
+        The piece to normalise, required to be a ``str``.
+    number : int
+        The one-based line number, reported in every message.
+
+    Returns
+    -------
+    str
+        The line without its terminator.
+
+    Raises
+    ------
+    LayoutError
+        If the piece is not a ``str``, which is what a stream opened in binary mode yields, or
+        if it still contains a separator once its own terminator has been removed.
+    """
+    if not isinstance(line, str):
+        raise LayoutError(
+            f"ASCII seed line {number} arrived as a {type(line).__name__}; character data is"
+            " required here and no encoding is guessed, so a binary source belongs to"
+            " iter_fixed_length_records"
+        )
+    stripped = line[:-1] if line.endswith(_ASCII_LINE_SEPARATOR) else line
+    if stripped.endswith(_ASCII_CARRIAGE_RETURN):
+        stripped = stripped[:-1]
+    if _ASCII_LINE_SEPARATOR in stripped:
+        raise LayoutError(
+            f"ASCII seed line {number} contains an interior line separator, so the source is"
+            " producing chunks rather than lines; pass the text itself, an open text stream or"
+            " an iterable of lines"
+        )
+    return stripped
+
+
+def iter_ascii_text_records(text: str | Iterable[object], reclen: int) -> Iterator[str]:
     """Iterate newline-delimited ASCII seed text as whole records, padding a short line.
 
     Purpose
@@ -3471,24 +4095,34 @@ def iter_ascii_text_records(text: str, reclen: int) -> Iterator[str]:
     trailing carriage return and newline are removed, and the result is right-padded with
     spaces to the declared record length.
 
-    Assumptions: this padding tolerance is the named divergence recorded in full in the
-    comment block above this function, and its scope is exactly this function. A line LONGER
-    than the declared length is still refused, because an over-long line means the field
-    offsets have moved and no amount of trimming could put them back. Only a SHORT line is
-    padded, and padding on the right with spaces cannot move a field that exists: the bytes
-    added are precisely the trailing pad the text form omitted, which is why ``cardxref.txt``
-    can be read at all -- its 50 lines are 36 characters each against a declared 50, the
-    missing 14 being exactly its trailing ``FILLER PIC X(14)``.
+    The source may be the whole text, which is scanned one line at a time rather than split
+    into a second copy of the file, or any iterable of lines -- an open text stream being one,
+    since iterating a text stream yields its lines. Either way this function retains one line at
+    a time; a stream's own read buffer is separate and is itself fixed, so nothing here grows
+    with the file. The full rationale is in the streaming comment block earlier in this section.
 
-    Assumptions: a single trailing empty element is dropped, because a file whose final record
-    ends with a newline produces one. Dropping more than one would hide a genuinely blank line,
-    which is corrupt input rather than formatting -- a blank line pads to a record of spaces
-    and would load as a row of empty keys.
+    Assumptions: this padding tolerance is the named divergence recorded in full in the
+    "Record boundaries: two modes" comment block earlier in this section, and its scope is
+    exactly this function. A line LONGER than the declared length is still refused, because an
+    over-long line means the field offsets have moved and no amount of trimming could put them
+    back. Only a SHORT line is padded, and padding on the right with spaces cannot move a field
+    that exists: the characters added are precisely the trailing pad the text form omitted,
+    which is why ``cardxref.txt`` can be read at all -- its 50 lines are 36 characters each
+    against a declared 50, the missing 14 being exactly its trailing ``FILLER PIC X(14)``.
+
+    Assumptions: a single trailing empty piece is dropped when the whole text is passed, because
+    a file whose final record ends with a newline produces one. Dropping more than one would
+    hide a genuinely blank line, which is corrupt input rather than formatting -- a blank line
+    pads to a record of spaces and would load as a row of empty keys -- so a blank line
+    anywhere else is still yielded, and a line source, which never produces the phantom piece,
+    has nothing dropped at all.
 
     Parameters
     ----------
-    text : str
-        The whole seed file decoded as text.
+    text : str | Iterable[object]
+        The seed data, in either of two shapes: the whole file as text, or an iterable whose
+        every element is one LINE, with or without its terminator. Arbitrary chunks are refused
+        rather than accepted as lines, and a byte object is refused outright.
     reclen : int
         The declared record length in characters; one or more, normally obtained from
         :func:`reclen_of`.
@@ -3501,13 +4135,15 @@ def iter_ascii_text_records(text: str, reclen: int) -> Iterator[str]:
     Raises
     ------
     LayoutError
-        If ``text`` is not a ``str``, or if ``reclen`` is below one.
+        If ``text`` is a byte object, if it is neither text nor iterable, if any element it
+        produces is not a ``str`` or still holds an interior separator, or if ``reclen`` is
+        below one.
     RecordLengthError
         If any line is longer than ``reclen`` characters once one trailing carriage return and
         newline are removed. The message reports the line number, its observed length and the
         declared length.
     """
-    if not isinstance(text, str):
+    if isinstance(text, (bytes, bytearray, memoryview)):
         raise LayoutError(
             "ASCII text record iteration requires character data, but was given a"
             f" {type(text).__name__}; a byte image belongs to iter_fixed_length_records, whose"
@@ -3516,11 +4152,19 @@ def iter_ascii_text_records(text: str, reclen: int) -> Iterator[str]:
     if reclen < 1:
         raise LayoutError(f"a record length must be at least one character, but reclen={reclen}")
 
-    lines = text.split(_ASCII_LINE_SEPARATOR)
-    if lines and lines[-1] == "":
-        lines = lines[:-1]
+    if isinstance(text, str):
+        lines: Iterable[object] = _iter_text_lines(text)
+    else:
+        try:
+            lines = iter(text)
+        except TypeError:
+            raise LayoutError(
+                "ASCII text record iteration requires the whole text, an open text stream or an"
+                f" iterable of lines, but was given a {type(text).__name__}, which is none of"
+                " those"
+            ) from None
     for number, line in enumerate(lines, start=1):
-        stripped = line[:-1] if line.endswith(_ASCII_CARRIAGE_RETURN) else line
+        stripped = _strip_one_line_terminator(line, number)
         if len(stripped) > reclen:
             raise RecordLengthError(
                 f"ASCII seed line {number} is {len(stripped)} characters, which exceeds the"
@@ -3533,7 +4177,7 @@ def iter_ascii_text_records(text: str, reclen: int) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 # Import-time self-check.
 # ---------------------------------------------------------------------------
-# WHY (Assumptions): the expected record-length and key-length PAIRS are hard-coded here,
+# Assumptions: the expected record-length and key-length PAIRS are hard-coded here,
 #   deliberately duplicating what each layout already declares, because a check that read its
 #   expectation from the thing being checked would prove nothing. Every pair below is the
 #   IDCAMS KEYS(len off) and RECORDSIZE from the dataset definition that creates the file, so
@@ -3562,7 +4206,7 @@ _EXPECTED_GEOMETRY: Final[Mapping[str, tuple[int, int]]] = MappingProxyType(
     }
 )
 
-# WHY (Assumptions): the three alternate indexes are checked against the fields that back
+# Assumptions: the three alternate indexes are checked against the fields that back
 #   them, and this table is the independent source for that check. Each entry is the layout
 #   name paired with the IDCAMS clause that declares the index: KEYS(11 16) at
 #   app/jcl/CARDFILE.jcl line 85, KEYS(11,25) at app/jcl/XREFFILE.jcl line 74 -- written
@@ -3679,7 +4323,7 @@ def _validate_declarations() -> None:
             f" constants state offset {EXPORT_KEY_OFFSET} and length {EXPORT_KEY_LENGTH}"
         )
 
-    # WHY (Assumptions): the export record is EXEMPT from the key-alignment cross-check the
+    # Assumptions: the export record is EXEMPT from the key-alignment cross-check the
     #   other ten datasets satisfy, and the exemption is asserted here rather than left
     #   unstated. Its program declares the key on a field at offset 27 while its dataset
     #   definition declares KEYS(4 28), so the two genuinely disagree by one byte. Requiring
@@ -3749,7 +4393,7 @@ def _validate_declarations() -> None:
             f" {tuple(sorted(LAYOUTS))}"
         )
 
-    # WHY (Assumptions): each misspelled name is required to resolve in at least one declared
+    # Assumptions: each misspelled name is required to resolve in at least one declared
     #   layout, which is what stops the lineage table from outliving the fields it documents. A
     #   stale entry would be worse than no entry: a reader searching for the baseline spelling
     #   would find a mapping to a target name that nothing produces, and would conclude the

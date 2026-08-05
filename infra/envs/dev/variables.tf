@@ -3,24 +3,31 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the CardDemo `dev` Terraform environment root.
-#   Two of these inputs configure the root's own `provider "aws"` in versions.tf;
-#   the rest are forwarded by main.tf into the sixteen modules under
-#   infra/modules/. Values are supplied by infra/envs/dev/terraform.tfvars.
+#   Two inputs configure the root provider in versions.tf; the environment
+#   composition must forward the remainder into the reusable modules. Optional
+#   non-secret overrides may be supplied at invocation time without making a
+#   missing main.tf or terraform.tfvars file an authority for this contract.
 #
 #   The set of names declared here is deliberately CLOSED, and that closure is
-#   the point of the file. infra/envs/prod declares the same names with the same
-#   types and the same validation, and only the defaults and the supplied values
-#   differ, so that the two environments are identical in TOPOLOGY and differ
-#   only in sizing and retention. A variable present in one root and absent from
-#   the other would be a structural divergence between the environments, which is
-#   precisely the failure this symmetry exists to prevent: `dev` stops being a
-#   valid rehearsal for `prod` the moment their shapes disagree.
+#   the point of the file. The prod root is completed in a later implementation
+#   index and must mirror this same surface; until then, this file is the
+#   authoritative environment-facing contract. The two environments remain
+#   identical in topology and differ only in sizing and retention.
 #
 # Parameters:
-#   Nineteen inputs, none required, in six groups -- the two values the provider
-#   reads; naming and environment identity; the VPC address space; the serverless
-#   database's version, capacity, backup and durability settings; container task
-#   sizing; and log retention, edge footprint and the batch schedule.
+#   Thirty-five inputs, nine of them required, in eight groups -- the two values
+#   the provider reads; naming and environment identity; the VPC address space;
+#   the serverless database's version, capacity, backup and durability settings;
+#   container task sizing; log retention, edge footprint and the batch schedule;
+#   the TLS identities and imported service key material the load balancer,
+#   distribution and tasks each need; and the deployment artifact and the OIDC
+#   identity permitted to publish it. The nine with no default are
+#   `alb_certificate_arn`, `internal_service_domain_name`,
+#   `cloudfront_acm_certificate_arn`, `cloudfront_aliases`,
+#   `service_tls_certificate`, `service_tls_private_key`, `image_tag`,
+#   `github_repository` and `github_oidc_provider_arn`: a certificate, a key or a
+#   deployable artifact has no defensible default, and defaulting one would make a
+#   root that cannot serve TLS look complete.
 #
 #   Each `variable` block below carries its own authoritative `type` and
 #   `description`. The contract for an input lives on the input rather than in a
@@ -39,11 +46,11 @@
 #   subnet arithmetic derived from the VPC address space. Both are owned
 #   elsewhere and are identified at the inputs concerned.
 #
-# WHY (non-obvious design decisions):
+# Non-obvious design decisions:
 #   - Alternatives Considered: accepting the database and seed-user credentials
 #     as inputs, the way a great many Terraform roots do -- a `db_master_password`
 #     variable behind a `sensitive = true` marker. Rejected outright, and that
-#     rejection is why no input of that shape appears anywhere below. Any value
+#     rejection is why no credential input of that shape appears below. Any value
 #     handed to such an input has to come from somewhere, and every somewhere is
 #     worse than the alternative: committed into the tracked terraform.tfvars
 #     beside it, exported in an operator's shell history, or pasted into a CI
@@ -65,19 +72,17 @@
 #     Cost is reduced instead along the axes where reducing it changes nothing
 #     structural: database capacity, task count and task size, retention, and
 #     edge footprint.
-#   - Assumptions: every input is DEFAULTED, which is load-bearing rather than
-#     merely convenient. The infrastructure pipeline checks this directory
-#     non-interactively and with no AWS credentials present, and an input with no
-#     default makes Terraform prompt for a value and then fail in a shell with no
-#     terminal attached -- this would become the one directory in the tree that
-#     could not be checked. The cost accepted is that a defaulted capacity or
-#     retention value is a decision made by silence, which is why outputs.tf
-#     reports back the values actually used.
+#   - Assumptions: sizing and retention inputs are defaulted, while the six TLS
+#     inputs are deliberately required. Certificate ARNs, DNS names and imported
+#     PEM material are deployment identities that cannot be guessed without
+#     creating a stack that either fails TLS validation or presents the wrong
+#     identity. `terraform validate` remains non-interactive with required
+#     variables; a plan or apply must receive them explicitly.
 #   - Assumptions: no default here holds a credential, an account identifier, an
 #     ARN, a bucket name or a table name. Identifiers reach this root only as
-#     module outputs wired together in main.tf -- the customer-managed keys, the
-#     generated database secret and the state backend are each referenced by
-#     output or by backend configuration, never transcribed into a default.
+#     module outputs or required operator inputs wired together in main.tf. The
+#     two sensitive PEM inputs have no defaults and must arrive through an
+#     operator secret channel, never the tracked terraform.tfvars.
 #   - Where a comment below reasons about `terraform apply` or `terraform
 #     destroy`, it describes what an input MEANS at that point; it is not a
 #     report on a provisioned stack. This tree is authored and statically
@@ -89,9 +94,8 @@
 # Provider inputs -- the two values versions.tf reads
 # -----------------------------------------------------------------------------
 
-# WHY this carries a default when the region a deployment lands in is normally
-# something an operator states explicitly. Trade-offs: the infrastructure
-# pipeline checks this root with no variable file and no AWS credentials. An
+# Trade-offs: defaulting the region keeps credential-free static validation
+# non-interactive when no variable file is supplied. An
 # input with no default makes that step prompt and then fail in a
 # non-interactive shell, so this would be the one directory in the tree that
 # could not be checked. A region identifier is configuration and not a
@@ -100,7 +104,7 @@
 # operator who never sets it provisions this environment in us-east-1, which
 # outputs.tf reports back so the choice does not stay invisible.
 #
-# WHY the default matches infra/bootstrap. Assumptions: the state bucket this
+# Assumptions: the default matches infra/bootstrap because the state bucket this
 # root's backend.tf points at is created by infra/bootstrap, which defaults to
 # the same region. A backend in one region with resources in another is legal but
 # confusing, and matching the defaults keeps the simplest possible deployment
@@ -110,7 +114,7 @@ variable "aws_region" {
   type        = string
   default     = "us-east-1"
 
-  # WHY : Trade-offs: this is a shape check on a value the provider would reject
+  # Trade-offs: this is a shape check on a value the provider would reject
   #       anyway. A malformed region does not fail as a bad region -- it fails as
   #       an endpoint-resolution error naming a hostname, raised by whichever
   #       provider call happens to run first, and nothing in that message names
@@ -128,11 +132,9 @@ variable "aws_region" {
   }
 }
 
-# WHY the tag set is a root input applied through the provider rather than a
-# per-resource argument. Trade-offs: versions.tf sets these on the provider's
-# `default_tags` block, so every taggable resource this root creates -- including
-# every resource created inside all sixteen modules -- carries them without any
-# module author remembering to wire a tags argument through. The cost accepted is
+# Trade-offs: versions.tf applies the root tag set through provider
+# `default_tags`, so every taggable resource created by the modules carries it
+# without every module author wiring a tags argument. The cost accepted is
 # locality: reading a module's main.tf does not reveal the tags its resources
 # will carry, so a reader has to know that this root's versions.tf applies them.
 # The alternative, threading a tag map into sixteen module call sites, fails the
@@ -158,7 +160,7 @@ variable "tags" {
   }
 
   validation {
-    # WHY : Assumptions: the service accepts at most 50 tags per resource and
+    # Assumptions: the service accepts at most 50 tags per resource and
     #       rejects an empty key. Both are checked here because the provider
     #       applies this map to every resource in the root, so one bad entry
     #       fails not a single resource but all of them, and the failure names
@@ -172,7 +174,7 @@ variable "tags" {
 # Naming and environment identity
 # -----------------------------------------------------------------------------
 
-# WHY the characters are checked rather than trusted. Trade-offs: this prefix is
+# Trade-offs: this prefix is validated because it is
 # concatenated into resource names across every module this root calls, and
 # several of those names land in namespaces with their own character rules -- an
 # object storage bucket name, a log group name, a composed secret name.
@@ -197,9 +199,10 @@ variable "name_prefix" {
   }
 }
 
-# WHY this input exists but accepts only one value. Trade-offs: `environment` has
-# to exist, because all sixteen modules take it and infra/modules/network
-# declares it required with no default, so main.tf must pass something. But an
+# Trade-offs: `environment` remains an input for root symmetry but accepts only
+# this root's identity. All sixteen modules require a value, but accepting both
+# environment names here would let this state manage resources named and tagged
+# for the other environment. An
 # input that accepts either name is the precise mechanism by which this root's
 # state comes to manage resources named and tagged for the other environment: the
 # operator overrides one value, the plan is clean, and the mistake reads as
@@ -237,7 +240,6 @@ variable "environment" {
 # reason the header gives for the closed input set.
 # -----------------------------------------------------------------------------
 
-# WHY the address space is an input when the subnets derived from it are not.
 # Alternatives Considered: passing the nine subnet ranges in as three explicit
 # lists, one per tier. Rejected -- that is three more inputs which must stay
 # mutually non-overlapping, correctly ordered against the zone list and identical
@@ -257,7 +259,7 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 
   validation {
-    # WHY : Trade-offs: this checks only that the value IS a CIDR block, and
+    # Trade-offs: this checks only that the value IS a CIDR block, and
     #       leaves the prefix-length bound to the module that owns the subnet
     #       arithmetic. Restating the /16-to-/20 rule here would put the same
     #       rule in two files with nothing keeping them in step, and the copy is
@@ -290,7 +292,7 @@ variable "vpc_cidr" {
 # floor is zero, and the ceiling has to reach at least one unit once it is.
 # -----------------------------------------------------------------------------
 
-# WHY : Assumptions: the capacity invariant is NOT restated in this file.
+# Assumptions: the capacity invariant is NOT restated in this file.
 #       infra/modules/aurora-postgresql owns it, across six validation blocks
 #       plus a lifecycle precondition -- the zero-to-256 range, the half-unit
 #       granularity, the requirement that the ceiling not fall below the floor,
@@ -308,7 +310,6 @@ variable "aurora_engine_version" {
   type        = string
   default     = "16.6"
 
-  # WHY this root defaults a value the module deliberately refuses to default.
   # Assumptions: the two are not the same decision. A default in the MODULE would
   # let any caller omit the version, so dev and prod would both silently pin to
   # whatever release was current when that file was written and would drift apart
@@ -318,8 +319,8 @@ variable "aurora_engine_version" {
   # description asks for when it says the version is supplied by the environment
   # root so that an engine upgrade is an explicit change to one file.
   #
-  # WHY this particular release rather than a recent-sounding one. Assumptions:
-  # scaling to zero capacity is available only from Aurora PostgreSQL 13.15,
+  # Assumptions: this release supports scaling to zero; that capability is
+  # available only from Aurora PostgreSQL 13.15,
   # 14.12, 15.7 and 16.3 onward, and this environment sets its capacity floor to
   # zero below. An older release in the 16.x line would have the capacity
   # argument rejected during apply, with the error attributed to the capacity
@@ -338,7 +339,7 @@ variable "aurora_min_capacity" {
   type        = number
   default     = 0
 
-  # WHY zero here and only here. Trade-offs: this environment's database is idle
+  # Trade-offs: a zero floor is specific to development because its database is idle
   # for most of its existence and a paused cluster bills no compute capacity, so
   # a zero floor removes almost all of its standing cost. What is bought with
   # that is a resume delay of roughly fifteen seconds on the first connection
@@ -353,10 +354,10 @@ variable "aurora_min_capacity" {
   # aurora_seconds_until_auto_pause mandatory and forces the ceiling to at least
   # one unit -- both enforced by the module.
   validation {
-    # WHY : Trade-offs: a bare non-negativity check, deliberately weaker than the
+    # Trade-offs: a bare non-negativity check, deliberately weaker than the
     #       module's rule and chosen so it cannot disagree with it. A negative
     #       capacity is the one value worth catching in the root, because it
-    #       reads as an obvious typo rather than as a capacity decision.
+    #       reads as a plain typo rather than as a capacity decision.
     condition     = var.aurora_min_capacity >= 0
     error_message = "aurora_min_capacity must not be negative; the database module additionally requires a value from 0 to 256 in half-unit increments."
   }
@@ -367,7 +368,7 @@ variable "aurora_max_capacity" {
   type        = number
   default     = 4
 
-  # WHY a low ceiling rather than production's. Trade-offs: the ceiling is a cost
+  # Trade-offs: the low ceiling is a cost
   # bound, not a performance target -- the cluster only scales up to it under
   # load. Setting it low in this environment means a mistake in a query or a
   # fixture large enough to drive real load is expensive in seconds rather than
@@ -375,7 +376,7 @@ variable "aurora_max_capacity" {
   # here runs slower than it would in production, which is the correct priority
   # for an environment nobody depends on.
   validation {
-    # WHY : Trade-offs: as with the floor, this is deliberately weaker than the
+    # Trade-offs: as with the floor, this is deliberately weaker than the
     #       module's rule so the two cannot disagree. The module additionally
     #       enforces that this reaches at least one unit when the floor is zero,
     #       which is the case that actually applies in this environment.
@@ -389,7 +390,6 @@ variable "aurora_seconds_until_auto_pause" {
   type        = number
   default     = 300
 
-  # WHY this is declared in both roots when it does nothing in one of them.
   # Assumptions: the module makes it mandatory once the floor is zero and permits
   # it to be null otherwise, so production can leave it inert while this
   # environment must set it. That asymmetry is the reason it appears in both: the
@@ -397,14 +397,14 @@ variable "aurora_seconds_until_auto_pause" {
   # only one of them would be a structural difference between the environments
   # rather than a sizing one.
   #
-  # WHY the shortest interval the service accepts. Trade-offs: the two ends of
-  # the range buy different things. A short interval pauses an idle cluster
+  # Trade-offs: the shortest accepted interval favors this environment's bursty
+  # usage. The two ends of the range buy different things. A short interval pauses an idle cluster
   # sooner and stops it billing; a long one avoids paying the resume delay
   # repeatedly during intermittent use. This takes the short end because the
   # usage this environment actually sees is a burst of work followed by long
   # idleness, which is the case the short end serves.
   validation {
-    # WHY : Trade-offs: a whole-number check only. The module owns the accepted
+    # Trade-offs: a whole-number check only. The module owns the accepted
     #       range and additionally allows null, which this root never passes, so
     #       restating the bounds here would duplicate a rule without being able
     #       to express the null case the module also handles.
@@ -416,11 +416,11 @@ variable "aurora_seconds_until_auto_pause" {
 variable "aurora_backup_retention_period" {
   description = "Days of automated backups the cluster retains, forwarded to the database module. Aurora does not permit automated backups to be switched off, so the module accepts 1 to 35 and there is no value here meaning `none`."
   type        = number
-  default     = 1
+  default     = 7
 
-  # WHY the shortest permitted retention rather than none at all. Assumptions:
-  # the service has no off switch for automated backups -- one day is the floor,
-  # not a choice to keep a token amount. Trade-offs: this environment's data is
+  # Assumptions: the service has no off switch for automated backups, so one day
+  # is the floor rather than a token retention choice.
+  # Trade-offs: this environment's data is
   # reproducible by rerunning the ETL against the reference seed datasets under
   # app/data, so backups here protect nothing that cannot be regenerated, and
   # every retained day is storage that bills. Production keeps far more, because
@@ -438,7 +438,6 @@ variable "aurora_preferred_backup_window" {
   type        = string
   default     = "07:00-08:00"
 
-  # WHY this input is coupled to the batch schedule rather than free to choose.
   # Assumptions: the nightly chain and the backup both act on the same cluster,
   # and the batch chain is the one workload in this environment that drives the
   # database toward its capacity ceiling. Overlapping the two makes each slower
@@ -472,7 +471,7 @@ variable "ecs_task_cpu" {
   type        = number
   default     = 512
 
-  # WHY : Assumptions: Fargate offers a fixed set of CPU sizes, and each one
+  # Assumptions: Fargate offers a fixed set of CPU sizes, and each one
   #       admits only a specific band of memory values. The accepted set here
   #       stops at 2048 rather than covering all seven sizes Fargate offers,
   #       because from 4096 units upward the valid memory band is no longer
@@ -492,7 +491,7 @@ variable "ecs_task_memory" {
   type        = number
   default     = 1024
 
-  # WHY : Assumptions: for the CPU sizes this root admits, Fargate accepts memory
+  # Assumptions: for the CPU sizes this root admits, Fargate accepts memory
   #       from twice to eight times the CPU value in whole gibibyte steps, and
   #       nothing else. Asserting that here turns an apply-time task-definition
   #       registration failure -- which names the task definition, not the input
@@ -518,7 +517,7 @@ variable "ecs_desired_count" {
   type        = number
   default     = 1
 
-  # WHY one task here rather than production's count. Trade-offs: a single task
+  # Trade-offs: a single development task
   # means a deployment or a task failure is a brief outage of that service, which
   # is acceptable in an environment whose purpose is development and is why
   # production defaults higher. It also divides the compute cost of the whole
@@ -527,9 +526,8 @@ variable "ecs_desired_count" {
   # and only the count differs, which is what keeps this a sizing difference
   # rather than a structural one.
   #
-  # WHY zero is refused, when leaving an environment provisioned but idle is an
-  # obvious way to stop it billing. Assumptions: infra/modules/ecs-service rejects
-  # a count below one whenever it is creating a service, because a service with no
+  # Assumptions: zero is refused because infra/modules/ecs-service rejects a
+  # count below one whenever it is creating a service. A service with no
   # running task leaves its load balancer target group empty and every request
   # through the balancer then answers with a gateway error. Refusing zero here
   # rejects that value at the root with a message naming this input, rather than
@@ -538,7 +536,7 @@ variable "ecs_desired_count" {
   # documented domain is wider than what the stack accepts invites exactly the
   # value that cannot work.
   #
-  # WHY : Assumptions: this value is coupled to the service module's AUTOSCALING
+  # Assumptions: this value is coupled to the service module's AUTOSCALING
   #       floor, which is a module input this root deliberately does not declare.
   #       infra/modules/ecs-service cross-checks the task count against that
   #       floor whenever it is both creating a service and enabling autoscaling,
@@ -565,15 +563,16 @@ variable "ecs_desired_count" {
 # Retention and edge footprint
 # -----------------------------------------------------------------------------
 
-# WHY a week here. Trade-offs: logs in this environment are read while the work
-# that produced them is still in progress and have little value afterwards, so a
+# Trade-offs: one week keeps log storage proportional to development use because
+# logs are read while the work that produced them is still in progress and have
+# little value afterwards, so a
 # short retention keeps storage cost proportional to that. Production keeps them
 # far longer, for the audit trail the migrated system inherits from a mainframe
 # whose job logs were retained on the spool. This is a retention value, so the
 # two roots are explicitly permitted to differ on it without changing the stack's
 # shape.
 #
-# WHY : Assumptions: this one value is forwarded to five different module inputs
+# Assumptions: this one value is forwarded to five different module inputs
 #       whose accepted domains are NOT identical, and the domain below is their
 #       intersection rather than any one of them. The log group inputs on the
 #       service, API, batch and observability modules take the enumerated set of
@@ -597,9 +596,9 @@ variable "log_retention_days" {
   }
 }
 
-# WHY the narrowest class here. Trade-offs: the users of this environment are the
-# people building it, so paying for a worldwide edge footprint buys nothing
-# measurable. Production takes the widest class. Neither choice changes the
+# Trade-offs: the narrowest class serves the developers who use this environment;
+# paying for a worldwide edge footprint buys nothing measurable. Production takes
+# the widest class. Neither choice changes the
 # distribution's configuration, its origin access control or its error routing,
 # which is what keeps this a sizing difference between the roots rather than a
 # topology one.
@@ -609,7 +608,7 @@ variable "cloudfront_price_class" {
   default     = "PriceClass_100"
 
   validation {
-    # WHY : Assumptions: these three strings are the service's entire
+    # Assumptions: these three strings are the service's entire
     #       enumeration. A misspelling is otherwise rejected during apply against
     #       the distribution resource rather than against this input, so the
     #       check is here to name the input instead.
@@ -619,17 +618,126 @@ variable "cloudfront_price_class" {
 }
 
 # -----------------------------------------------------------------------------
+# TLS identities and imported internal-service material
+#
+# Four non-secret values identify the certificates and DNS names that ALB,
+# API Gateway and CloudFront must agree on. Two sensitive values carry the
+# internal Spring Boot listeners' certificate chain and private key into the
+# secrets module, which stores each as a scalar Secrets Manager value for ECS
+# injection.
+# -----------------------------------------------------------------------------
+
+# WHY : Assumptions: an ACM certificate ARN identifies the listener credential
+#       but does not encode the DNS name API Gateway verifies. Both values are
+#       required independently so the root can pass the same identity to the
+#       ALB listener and the VPC Link integration without trying to parse one
+#       from the other.
+variable "alb_certificate_arn" {
+  description = "Regional ACM certificate ARN presented by the internal ALB HTTPS listener. Forwarded to the alb module; the certificate must be issued in this environment's region and cover internal_service_domain_name."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$", var.alb_certificate_arn))
+    error_message = "alb_certificate_arn must be a complete regional ACM certificate ARN shaped arn:<partition>:acm:<region>:<account-id>:certificate/<id>."
+  }
+}
+
+variable "internal_service_domain_name" {
+  description = "Bare DNS name covered by alb_certificate_arn. Forwarded to the alb module as its certificate identity and to api-gateway-http as the private integration server name to verify."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$", var.internal_service_domain_name))
+    error_message = "internal_service_domain_name must be a bare DNS hostname covered by the ALB certificate, with no scheme, port, wildcard or path."
+  }
+}
+
+# WHY : Assumptions: CloudFront reads viewer certificates only from us-east-1,
+#       even when the rest of the environment is deployed elsewhere. Keeping a
+#       separate required ARN makes that global-service prerequisite explicit
+#       rather than encouraging reuse of the regional ALB certificate.
+variable "cloudfront_acm_certificate_arn" {
+  description = "ACM certificate ARN issued in us-east-1 for the SPA distribution. Forwarded to cloudfront-spa and required to cover every entry in cloudfront_aliases."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$", var.cloudfront_acm_certificate_arn))
+    error_message = "cloudfront_acm_certificate_arn must be an ACM certificate ARN issued in us-east-1, shaped arn:<partition>:acm:us-east-1:<account-id>:certificate/<id>."
+  }
+}
+
+variable "cloudfront_aliases" {
+  description = "Non-empty list of bare DNS names the SPA distribution serves. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa."
+  type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = length(var.cloudfront_aliases) > 0 && alltrue([
+      for alias in var.cloudfront_aliases :
+      can(regex("^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(alias)))
+    ]) && length(distinct([for alias in var.cloudfront_aliases : lower(alias)])) == length(var.cloudfront_aliases)
+    error_message = "cloudfront_aliases must contain at least one unique bare DNS name, optionally with a leading wildcard label; schemes, ports, paths and duplicate names are not accepted."
+  }
+}
+
+# WHY : Alternatives Considered: generating a self-signed key pair in Terraform.
+#       Rejected because the service clients would not trust a new authority and
+#       the AAP provider set does not include a TLS provider. The imported pair
+#       must come from the environment's existing trust authority.
+#       Assumptions: `sensitive` redacts these values from ordinary CLI output but
+#       does not remove them from state. They must be supplied through an
+#       operator secret channel, and the encrypted remote-state backend remains
+#       part of the security boundary.
+variable "service_tls_certificate" {
+  description = "PEM certificate or certificate chain presented by the CardDemo services' internal HTTPS listeners. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
+  type        = string
+  sensitive   = true
+  nullable    = false
+
+  validation {
+    condition = (
+      strcontains(var.service_tls_certificate, "-----BEGIN CERTIFICATE-----") &&
+      strcontains(var.service_tls_certificate, "-----END CERTIFICATE-----") &&
+      !strcontains(var.service_tls_certificate, "PRIVATE KEY")
+    )
+    error_message = "service_tls_certificate must contain PEM BEGIN/END CERTIFICATE markers and must not contain private-key material."
+  }
+}
+
+variable "service_tls_private_key" {
+  description = "PEM private key paired with service_tls_certificate. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
+  type        = string
+  sensitive   = true
+  nullable    = false
+
+  validation {
+    condition = anytrue([
+      strcontains(var.service_tls_private_key, "-----BEGIN PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN RSA PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END RSA PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN EC PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END EC PRIVATE KEY-----"),
+    ])
+    error_message = "service_tls_private_key must contain matching PEM private-key markers such as BEGIN/END PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY."
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Batch schedule
 # -----------------------------------------------------------------------------
 
-# WHY the schedule is an input at all, when the chain it starts is identical in
-# both environments. Trade-offs: the state machine, its states and their order are
+# Trade-offs: the schedule remains an input so dev and prod can trigger the same
+# state machine at different times; its states and their order are
 # fixed and are not configurable from here -- only the moment the chain is
 # triggered is. Making that an input lets this environment run its chain clear of
 # production's without either root differing in what the chain DOES, which is the
 # distinction the closed input set rests on.
 #
-# WHY : Assumptions: this value must not place the chain inside the window
+# Assumptions: this value must not place the chain inside the window
 #       aurora_preferred_backup_window reserves. Both act on the same cluster and
 #       the chain is the workload that drives this environment's database toward
 #       its deliberately low capacity ceiling, so an overlap makes each slower and
@@ -655,7 +763,7 @@ variable "batch_schedule_expression" {
 # destroyed cleanly
 # -----------------------------------------------------------------------------
 
-# WHY this is false here. Trade-offs: one of this project's acceptance criteria is
+# Trade-offs: deletion protection is false here because an acceptance criterion is
 # that the stack tears down cleanly with `terraform destroy`. Deletion protection
 # makes that command fail against the protected resource and require a
 # preliminary apply to clear the flag before the destroy can proceed, which is
@@ -674,7 +782,7 @@ variable "deletion_protection" {
   default     = false
 }
 
-# WHY this is true here. Trade-offs: a development cluster's contents are
+# Trade-offs: skipping the final snapshot is safe here because development data is
 # reproducible by rerunning the ETL against the reference seed datasets under
 # app/data, which are read-only and always present, so a final snapshot preserves
 # nothing that cannot be regenerated. Skipping it also stops `terraform destroy`
@@ -686,4 +794,208 @@ variable "skip_final_snapshot" {
   description = "Whether destroying the database cluster skips taking a final snapshot first. Skipping makes the destroy fast and complete; taking one leaves a snapshot that survives the cluster and continues to bill until it is deleted by hand."
   type        = bool
   default     = true
+}
+
+# -----------------------------------------------------------------------------
+# Deployment artifact, operational rotation and optional notification inputs.
+# -----------------------------------------------------------------------------
+
+variable "image_tag" {
+  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  type        = string
+  nullable    = false
+
+  # WHY : Assumptions: every ECS task definition must name an explicit,
+  #       immutable artifact. `latest` would let two tasks launched from one
+  #       revision run different bytes and would make rollback non-deterministic.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{6,127}$", var.image_tag)) && lower(var.image_tag) != "latest"
+    error_message = "image_tag must be a 7-128 character explicit tag and must not be latest; the deployment workflow supplies the commit SHA."
+  }
+}
+
+variable "github_repository" {
+  description = "GitHub repository in owner/name form whose protected dev environment may assume the SPA publication role."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository must be an owner/name pair such as example/carddemo."
+  }
+}
+
+variable "github_oidc_provider_arn" {
+  description = "ARN of the account-scoped GitHub Actions OIDC provider created by infra/bootstrap."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$", var.github_oidc_provider_arn))
+    error_message = "github_oidc_provider_arn must identify the token.actions.githubusercontent.com IAM OIDC provider."
+  }
+}
+
+variable "aurora_parameter_group_family" {
+  description = "Aurora PostgreSQL cluster parameter-group family matching aurora_engine_version."
+  type        = string
+  default     = "aurora-postgresql16"
+}
+
+variable "aurora_preferred_maintenance_window" {
+  description = "Weekly UTC maintenance window for Aurora, kept outside the nightly batch and backup windows."
+  type        = string
+  default     = "sun:09:00-sun:10:00"
+}
+
+variable "secret_recovery_window_in_days" {
+  description = "Secrets Manager recovery window for generated database, TLS and Cognito credentials. Development uses immediate deletion so destroy/recreate remains repeatable."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.secret_recovery_window_in_days == 0 || (var.secret_recovery_window_in_days >= 7 && var.secret_recovery_window_in_days <= 30)
+    error_message = "secret_recovery_window_in_days must be 0 or 7-30 days."
+  }
+}
+
+variable "rotation_automatically_after_days" {
+  description = "Days between scheduled rotations of each service database credential after its immediate bootstrap rotation."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.rotation_automatically_after_days >= 1 && var.rotation_automatically_after_days <= 1000
+    error_message = "rotation_automatically_after_days must be between 1 and 1000."
+  }
+}
+
+variable "alarm_email_endpoints" {
+  description = "Email addresses subscribed to the environment observability topic; empty leaves notifications available for a later subscription without inventing an address."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for address in var.alarm_email_endpoints : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", address))])
+    error_message = "Every alarm_email_endpoints entry must be a syntactically valid email address."
+  }
+}
+
+# WHY : Assumptions: this is a security control with no safe default, so it is
+#       required rather than defaulted. The distribution's content-security
+#       policy names the origins the SPA may reach with fetch or XHR, and the
+#       API Gateway endpoint is on a different origin from the bundle, so the
+#       policy has to name it or the browser blocks every call. The value is
+#       supplied per deployment rather than read from module.api_gateway,
+#       because the SPA build learns the same address out of band -- the deploy
+#       workflow passes it as VITE_API_BASE_URL -- and the two have to agree.
+#       Deriving one from Terraform while the other comes from the workflow is
+#       how they silently diverge; a single operator-supplied value cannot.
+#       Alternatives Considered: wiring api_connect_src_origins directly from
+#       module.api_gateway.api_endpoint_url. Rejected because it closes a
+#       dependency ring: the response-header policy would depend on the API
+#       stage, the stage's access log group depends on the S3 CMK, and that key's
+#       policy narrows the CloudFront decrypt grant to this distribution's ARN --
+#       which depends on the response-header policy. Terraform reports that as a
+#       cycle at plan time, and the fix would be to weaken the key-policy
+#       narrowing, which is a real control traded for a convenience.
+#       Trade-offs: an operator must supply one more value per environment, and
+#       an empty list is accepted -- it yields `connect-src 'self'`, which fails
+#       closed by blocking the cross-origin call visibly rather than permitting
+#       any origin.
+variable "cloudfront_api_connect_src_origins" {
+  description = "Origins the SPA is permitted to reach with fetch or XHR, forwarded unchanged to cloudfront-spa as api_connect_src_origins. Scheme and host only, no path and no trailing slash; normally the single API Gateway origin the SPA was built against. Supply it as TF_VAR_cloudfront_api_connect_src_origins, never in terraform.tfvars, so it tracks the deployed endpoint."
+  type        = list(string)
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for origin in var.cloudfront_api_connect_src_origins :
+      can(regex("^https://[a-z0-9][a-z0-9.-]*[a-z0-9](:[0-9]{1,5})?$", lower(origin)))
+    ])
+    error_message = "Each entry in cloudfront_api_connect_src_origins must be an https:// scheme and host, optionally with a port, and must not contain a path, a trailing slash or a wildcard."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The account's deployment permissions boundary
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the boundary is owned by the account, NOT by this deployment.
+#       A boundary that a deployment can rewrite bounds nothing, so it is supplied
+#       rather than created here and has no default: a guessed ARN would either fail
+#       the apply or, worse, attach a boundary that permits everything.
+#       Trade-offs: an operator must create the boundary policy before the first
+#       apply, which is one more prerequisite. Accepted because the alternative is
+#       roles whose maximum permissions are whatever the inline documents in this
+#       root happen to say, with nothing above them.
+variable "permissions_boundary_arn" {
+  description = "ARN of the same-account customer-managed IAM policy used as the permissions boundary on every role this deployment creates. Supplied by the operator or the deploy workflow; never created here."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN, for example arn:aws:iam::111122223333:policy/CardDemoDeploymentBoundary."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The protected-field fingerprint key
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the key is SUPPLIED, not generated here, and it has no default.
+#       A tag is only useful if the same input yields the same tag across runs and
+#       across tasks, so a key generated per apply would silently invalidate every
+#       tag produced by the previous apply. Keeping it outside this configuration
+#       also keeps it outside this state file.
+#       Trade-offs: one more prerequisite before the first apply. Accepted for the
+#       same reason as the permissions boundary: a value this deployment could
+#       rewrite would not be a key it can be held to.
+variable "mask_hmac_secret_arn" {
+  description = "Secrets Manager ARN of the environment-separated HMAC key the data-migration image uses for protected-field fingerprints. Supplied by the operator; never created or rotated by this configuration."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.mask_hmac_secret_arn))
+    error_message = "mask_hmac_secret_arn must be an anchored Secrets Manager secret ARN including its six-character suffix, for example arn:aws:secretsmanager:eu-west-1:111122223333:secret:carddemo/dev/mask-hmac-AbCdEf."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Immutable image references
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the deploy workflow already knows each digest -- it is what the
+#       push returned -- so supplying it costs nothing and removes the one way a
+#       registered task definition can silently change what it runs. In production
+#       infra/modules/ecs-service refuses anything else, so an incomplete map fails
+#       the plan with a message naming the artifact rather than deploying a tag.
+#       Trade-offs: the map is OPTIONAL and defaults to empty, which is what keeps a
+#       development apply able to run straight from a tag. The enforcement therefore
+#       lives in the module, per environment, rather than in this variable.
+variable "image_digests" {
+  description = "Immutable sha256 digests keyed by ECR artifact name, for example { \"auth-service\" = \"sha256:<64 hex>\" }. Any artifact named here is deployed by digest instead of by image_tag. Required in production, where the ECS service module refuses a mutable tag."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for digest in values(var.image_digests) : can(regex("^sha256:[a-f0-9]{64}$", digest))
+    ])
+    error_message = "Every image_digests value must be sha256: followed by exactly 64 lowercase hexadecimal characters, as returned by an ECR push."
+  }
+
+  validation {
+    condition = alltrue([
+      for artifact in keys(var.image_digests) : contains([
+        "auth-service",
+        "account-service",
+        "card-service",
+        "transaction-service",
+        "reference-service",
+        "batch-service",
+        "authorization-service",
+        "reporting-service",
+        "data-migration",
+      ], artifact)
+    ])
+    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment builds: the eight services plus data-migration. A key that names no repository would be silently ignored."
+  }
 }

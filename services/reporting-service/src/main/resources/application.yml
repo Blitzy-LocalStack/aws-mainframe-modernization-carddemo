@@ -11,10 +11,17 @@
 #   and log pattern, and the module-local report-execution and object-storage
 #   keys this context owns.
 #
-#   application-dev.yml and application-prod.yml are OVERLAYS on this document.
-#   They may differ from it only in sizing, retention and verbosity, never in
-#   topology, so a setting that changes behaviour rather than capacity belongs
-#   here and not in a profile.
+#   NEITHER application-dev.yml NOR application-prod.yml EXISTS FOR THIS MODULE
+#   YET. This document is therefore the whole of the configuration today, and it
+#   is written to start the service with no profile active at all -- which is why
+#   every value a profile would otherwise tune is a concrete literal here rather
+#   than a deployment-injection marker. When those two overlays are authored they
+#   may differ from this document only in sizing, retention and verbosity, never
+#   in topology, so a setting that changes behaviour rather than capacity belongs
+#   here and not in a profile. Every statement below about what a profile MAY and
+#   MAY NOT vary is that forward constraint, not a description of overlays that
+#   exist; a reader can confirm the current state with
+#   `ls services/reporting-service/src/main/resources`.
 #
 #   Four COBOL programs are the behavioural oracle for this context. They are
 #   read and never modified, and the uppercase .CBL and .JCL spellings are the
@@ -59,20 +66,38 @@
 #   no claim hides a blocked feature, as a financial-enterprise auditability
 #   requirement.
 #
-#   This module owns NOTHING in the database: no schema, no table, no index and
-#   no relational object of any kind. It reads read-only cross-schema views
-#   through a role holding SELECT-only privileges, and both those views and
-#   those privileges are bootstrapped by
-#   data-migration/sql/V0__schemas_and_roles.sql rather than from here.
+#   This module CREATES nothing in the database and OWNS nothing in it: no table,
+#   no index, no constraint and no DDL of any kind, and no schema-migration
+#   artifact on its classpath. It is precise to say it owns no schema either --
+#   the `reporting` schema its connections pin below does exist, and it is owned by
+#   carddemo_reporting_owner, a separate NON-LOGIN role, specifically so that this
+#   service's own login cannot create, replace or drop anything in it. What this
+#   service holds is USAGE on that schema and SELECT on the named views inside it.
+#   Two different files supply that, and the split matters because a missing
+#   relation and a missing privilege are reported in different places:
+#     - data-migration/sql/V0__schemas_and_roles.sql creates the schema, its owner
+#       role and this service's login role, grants the USAGE, and grants the OWNER
+#       the SELECT it needs on ledger, account, card and reference. It creates NO
+#       VIEW, and says so itself: a view cannot be created before the tables it
+#       reads exist, and no table exists when that script runs.
+#     - data-migration/sql/V1__reporting_views.sql creates the views and grants
+#       SELECT on each one to this service's role. It is ordered AFTER every
+#       per-service Flyway migration for that same reason.
+#   A view or a privilege missing at run time is a defect to report against those
+#   two files, never something for this module to create for itself.
 #
 #   NO CREDENTIAL, ENDPOINT, BUCKET NAME, RESOURCE IDENTIFIER, ACCOUNT
 #   IDENTIFIER OR USER-POOL IDENTIFIER APPEARS ANYWHERE IN THIS FILE. Two
-#   placeholder classes are used and the difference between them is deliberate:
+#   interpolation classes are used and the difference between them is deliberate:
 #     - a value the DEPLOYMENT injects -- the datasource triple, the token
-#       issuer, the state-machine identifier, the output bucket -- is a ${...}
-#       placeholder carrying NO fallback, so an absent one stops start-up loudly
-#       rather than starting a reporting service that cannot reach its data or
-#       write its artifacts;
+#       issuer, the state-machine identifier, the output bucket, and the listener
+#       certificate and its private key -- is an unresolved ${...} interpolation
+#       carrying NO fallback, so an absent one stops start-up loudly rather than
+#       starting a reporting service that cannot reach its data, serve TLS, or
+#       write its artifacts. The certificate pair is the newest member of this
+#       class and the one most easily mistaken for optional: the target group's
+#       protocol is fixed at HTTPS by infra/modules/ecs-service, so a task
+#       without it never turns healthy;
 #     - a value a PROFILE would otherwise tune -- pool sizing, log levels,
 #       health detail, fetch size, object-key prefixes, timeouts -- is a
 #       concrete literal here, so that this document stands alone.
@@ -96,6 +121,19 @@
 #     supplied. The ECS task definition sets SPRING_PROFILES_ACTIVE, and if the
 #     base were incomplete a task launched without that variable would fail to
 #     start rather than start degraded. Detail at spring.config.import.
+#   - Assumptions: the one listener this service exposes serves HTTPS, so the
+#     load-balancer-to-task hop is encrypted rather than stopping the protected
+#     path at the load balancer. This is half of a two-part change whose other
+#     half, target_protocol in infra/modules/ecs-service, is validated to accept
+#     "HTTPS" and nothing else -- so a cleartext task is one whose probes all
+#     speak the wrong protocol. Detail at server.ssl.
+#   - Assumptions: the token contract is recorded in two places because it binds
+#     through two mechanisms, and reading either half alone overstates what is
+#     checked. The issuer key settles who signed the token; three keys under a
+#     namespace this project owns settle what kind of token it is, which client it
+#     was minted for and which scope it carries. The framework's own audiences key
+#     is deliberately absent and the reason is argued in place. Detail at
+#     spring.security and at carddemo.security.jwt.
 #   - Alternatives Considered: naming the four source schemas in the connection
 #     search path, which is the obvious reading of "cross-schema views" and is
 #     wrong against the authored privilege model. Rejected. Detail at
@@ -165,7 +203,6 @@
 
 server:
 
-  # WHAT: the single TCP port this service listens on.
   # WHY : Assumptions: three artifacts outside this file are built against 8080
   #       and they do not negotiate it -- this module's Dockerfile EXPOSEs it and
   #       aims its HEALTHCHECK at 127.0.0.1:8080, the load balancer target group
@@ -176,7 +213,81 @@ server:
   #       coupling is recorded rather than left to be rediscovered.
   port: 8080
 
-  # WHAT: let in-flight requests finish instead of cutting them at SIGTERM.
+  ssl:
+
+    # WHY : (1) Assumptions: without this block the load-balancer-to-task hop is
+    #       cleartext while the hop in front of it is encrypted under the TLS 1.2
+    #       floor the alb module pins on its listener, so the protected path stops
+    #       at the load balancer and every response then crosses the private
+    #       application subnets readable. For this context that traffic is the
+    #       whole of the published read surface: statement and report payloads
+    #       carrying account identifiers, primary account numbers, customer names
+    #       and money amounts, alongside the bearer token that authorised each
+    #       request. Being inside a VPC bounds who can observe the traffic; it does
+    #       not make the traffic unreadable, and the design requires encryption in
+    #       transit end to end rather than up to the edge.
+    #       (2) Assumptions: this is one half of a two-part change and neither half
+    #       works alone. The other half is target_protocol = "HTTPS" in
+    #       infra/modules/ecs-service, which fixes the protocol of both the target
+    #       group and its health check -- and that module VALIDATES the value to
+    #       exactly "HTTPS", refusing anything else with the instruction to fix the
+    #       service's server.ssl configuration rather than lower the target. So the
+    #       protocol is not a choice made here; a task serving cleartext is a task
+    #       whose probes all speak the wrong protocol and which therefore never
+    #       turns healthy.
+    #       (3) Assumptions: the port does not change. The EXPOSE instruction in
+    #       this module's image, the target group registration and the task
+    #       security group are all built against 8080, as the port key above
+    #       records, so this encrypts the existing listener in place rather than
+    #       moving it.
+    enabled: true
+
+    # WHY : (1) Alternatives Considered: a key store file baked into the image.
+    #       Rejected because a private key in an image layer is readable by anyone
+    #       who can pull the image, and one key in one image is one key shared by
+    #       both environments.
+    #       (2) Assumptions: both values arrive from Secrets Manager, injected by
+    #       the task definition as CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through the container secrets
+    #       mechanism, so neither is stored in the task definition, in Terraform
+    #       state or in plan output. They must be passed through the ecs-service
+    #       module's secret_arns input rather than its environment_variables input,
+    #       whose validation refuses a name ending in KEY for exactly this reason.
+    #       (3) Assumptions: these two properties accept PEM CONTENT as well as a
+    #       path, which is what lets an environment-injected value work at all.
+    #       Verified against the pinned framework release rather than assumed:
+    #       org.springframework.boot.ssl.pem.PemContent exposes
+    #       isPresentInText(String), and the loader tests for PEM markers before
+    #       treating the value as a resource location.
+    #       (4) Trade-offs: neither placeholder carries a fallback, matching the
+    #       datasource contract below. An absent certificate stops start-up rather
+    #       than falling back to cleartext, which would present as a healthy
+    #       service that had quietly stopped meeting the requirement this block
+    #       exists for -- and a silent downgrade is the one failure mode a
+    #       transport setting must not have.
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
+
+    # WHY : (1) Assumptions: the two versions are named rather than left to the
+    #       runtime default, which still negotiates the withdrawn TLS 1.1 and, on
+    #       some distributions, TLS 1.0. Naming them holds the same floor the alb
+    #       module pins on its listener and the cloudfront-spa module enforces for
+    #       viewers, so one floor applies at all three hops instead of three
+    #       independently chosen ones.
+    #       (2) Trade-offs: no cipher list is set. A hand-written list ages into a
+    #       liability, silently permitting a suite the runtime has since deprecated
+    #       and excluding suites added later, whereas the runtime's own default set
+    #       for these two versions is maintained by whoever ships it. What is given
+    #       up is the ability to pin an exact suite; what is kept is a set that
+    #       does not rot.
+    #       (3) Assumptions: the load balancer does not verify this certificate --
+    #       an Application Load Balancer trusts whatever a registered target
+    #       presents -- so this encrypts the hop without authenticating it. That
+    #       residual is recorded on target_protocol in the ecs-service module and
+    #       is not something this file can close.
+    protocol: TLS
+    enabled-protocols: TLSv1.2,TLSv1.3
+
   # WHY : (1) Assumptions: deployment is a rolling task replacement, because
   #       blue-green and canary deployment are out of scope, so the platform
   #       stops a task that may be midway through serving a request. The baseline
@@ -192,7 +303,6 @@ server:
   #       at spring.lifecycle.timeout-per-shutdown-phase below.
   shutdown: graceful
 
-  # WHAT: honour the forwarded protocol, host and port headers set upstream.
   # WHY : (1) Assumptions: this service is reached through two hops it cannot
   #       see -- an API Gateway HTTP API in front, and an INTERNAL load balancer
   #       behind it over a private link -- so the scheme, host and port on the
@@ -212,7 +322,74 @@ server:
   #       decides which proxies to trust, and that decision would live in neither
   #       this file nor the Terraform that provisions the two hops. `framework`
   #       keeps the handling in one place that this document can describe.
-  forward-headers-strategy: framework
+  forward-headers-strategy: native
+
+  # WHY : (1) Refactoring Rationale: the strategy is `native` and not `framework`,
+  #       and the change is a trust decision rather than a preference. The
+  #       framework strategy applies the forwarded headers unconditionally: any
+  #       caller that can reach this port -- which inside the private application
+  #       subnets is every other task in the tier -- can therefore dictate the
+  #       scheme, host and port this service believes it was reached on, and those
+  #       values travel into the published contract's server URL and into the
+  #       Location header a report submission answers with. The native strategy
+  #       applies them only when the immediate peer is one of the proxies named
+  #       below, so an unlisted caller's headers are ignored instead of obeyed.
+  #       (2) Assumptions: the earlier note against `native` was that the servlet
+  #       container would then decide which proxies to trust and that the decision
+  #       would live in neither this file nor the Terraform. That is answered by
+  #       naming the trusted range HERE, as a bounded value with a documented
+  #       source, rather than by leaving the container's default in place.
+  tomcat:
+    remoteip:
+      # WHY : Assumptions: the two hops in front of this service are an API
+      #       Gateway HTTP API and an INTERNAL load balancer reached over a VPC
+      #       link, and only the second one is a direct peer. Its addresses are
+      #       drawn from the VPC's own subnets, so the trusted set is expressed as
+      #       the VPC CIDR the network module provisions -- 10.0.0.0/16 by default
+      #       -- rendered as the regular expression this property expects. The
+      #       value is supplied by the environment so that a deployment on a
+      #       different CIDR narrows it without an edit here; the default is the
+      #       private range the plan's own network module uses, and NOT the
+      #       container's default, which additionally trusts the loopback and
+      #       every other private range. The `10.0.0.0/16` figure is the
+      #       network module's own vpc_cidr default.
+      # WHY : Assumptions: the expression uses `\d+` and not `\d{1,3}`, and the
+      #       reason is a placeholder-parsing hazard rather than a matter of
+      #       precision. A property placeholder is terminated by the first
+      #       closing brace, so a repetition count written with braces inside
+      #       the default value would end the placeholder early and leave the
+      #       remainder as literal text -- a pattern that then matches nothing
+      #       and silently trusts no proxy. Nothing is lost: an octet is at most
+      #       three digits in any dotted-quad address a peer can present.
+      internal-proxies: ${CARDDEMO_TRUSTED_PROXY_PATTERN:10\.0\.\d+\.\d+}
+
+      # WHY : Assumptions: the two header names are stated rather than inherited,
+      #       because the load balancer sets exactly these and a value read from
+      #       the wrong header is worse than reading none -- it would be applied
+      #       with the same confidence.
+      protocol-header: x-forwarded-proto
+      remote-ip-header: x-forwarded-for
+
+# WHY : Alternatives Considered: a spring.jackson block, and in particular a
+#       global non-null inclusion policy. Rejected, and the reasoning is the
+#       reason no such key appears anywhere below. The argument FOR one is real:
+#       the report submission response has to omit its execution identifier
+#       entirely, not send it as null, for the two confirm outcomes that submit
+#       nothing. The argument against is decisive, because the same global
+#       setting reaches every serialised type -- it would also suppress the
+#       deliberately nullable first-key and last-key cursor tokens of the shared
+#       keyset page envelope, turning a four-component envelope into a
+#       three-component one on a first page and breaking the contract the browser
+#       client is written against. Presence and absence are therefore a
+#       per-property concern belonging to the DTO and to the shared kernel types,
+#       not a document-wide default. There is a second, independent reason to
+#       leave Jackson alone from configuration: config/OpenApiConfig.java
+#       deliberately declares no object-mapper bean, because declaring one backs
+#       off the framework's Jackson autoconfiguration and would leave the shared
+#       money module unbound, at which point every money field silently
+#       serialises as a JSON number in violation of the migration's fixed-point
+#       money rule. A document-wide Jackson default set here is the same hazard
+#       approached from the other side.
 
 # WHY : Alternatives Considered: a spring.jackson block, and in particular a
 #       global non-null inclusion policy. Rejected, and the reasoning is the
@@ -236,7 +413,6 @@ server:
 #       approached from the other side.
 spring:
 
-  # WHAT: the logical service name.
   # WHY : Assumptions: this value has two consumers that must agree, and it was
   #       matched to the first of them by reading that class rather than by
   #       convention. MetricsConfig in com.carddemo.common.observability exposes
@@ -250,8 +426,6 @@ spring:
   application:
     name: reporting-service
 
-  # WHAT: pull the deployment's non-secret parameters and its credentials from
-  #       Parameter Store and Secrets Manager at start-up, under one namespace.
   # WHY : (1) Assumptions: both locations carry the `optional:` prefix, and that
   #       prefix is what makes profile-free and offline start-up real rather than
   #       aspirational. Without it an unreachable control plane -- a developer
@@ -341,15 +515,12 @@ spring:
 
     hikari:
 
-      # WHAT: a pool name that identifies this service in pool metrics and in
-      #       any connection-level diagnostic on the shared cluster.
       # WHY : Assumptions: eight services connect to one cluster, so pool
       #       telemetry and server-side session listings are only readable if each
       #       pool is named for its owner. The default name is shared by every
       #       Hikari pool in existence, which is what makes it useless here.
       pool-name: reporting-pool
 
-      # WHAT: mark every pooled connection read-only at the JDBC level.
       # WHY : Alternatives Considered: relying on the database role's SELECT-only
       #       privileges alone, which do already make a write impossible.
       #       Rejected because of WHERE each check lives and how each one reports.
@@ -364,7 +535,6 @@ spring:
       #       longer opens a write path.
       read-only: true
 
-      # WHAT: hand out connections with auto-commit already switched off.
       # WHY : (1) Assumptions: a PostgreSQL server-side cursor materialises rows
       #       lazily only when BOTH preconditions hold -- a positive JDBC fetch
       #       size, set at
@@ -390,15 +560,13 @@ spring:
       #       read-only, such a session can hold no uncommitted data.
       auto-commit: false
 
-      # WHAT: pin the schema search order for every pooled connection to the one
-      #       schema that holds this context's read-only views.
       # WHY : (1) Assumptions: this context reads exclusively through read-only
       #       cross-schema views, under a role holding SELECT-only privileges, so
       #       no write path exists at any layer. Those views live in the
       #       `reporting` schema and are owned by a separate, non-login role;
       #       data-migration/sql/V0__schemas_and_roles.sql establishes that schema
-      #       at L539 to L540 and gives this service's login role USAGE on it at
-      #       L892 while withholding everything else. That same file deliberately
+      #       at L564 to L565 and gives this service's login role USAGE on it at
+      #       L917 while withholding everything else. That same file deliberately
       #       sets no search path for any role -- its stated reason is that one
       #       setting with two owners drifts -- so this key is the single owner of
       #       schema resolution for this service, and the resolution has to be
@@ -425,7 +593,7 @@ spring:
       #       or naming all four of ledger, account, reference and card, which is
       #       the obvious reading of "cross-schema views". Rejected on two
       #       independent grounds, either sufficient. First it would resolve
-      #       nothing: V0 withdraws this login role's USAGE on all four at L890,
+      #       nothing: V0 withdraws this login role's USAGE on all four at L915,
       #       and PostgreSQL silently ignores a search-path entry whose schema the
       #       role cannot use, so every unqualified name would fail to resolve and
       #       the entries would be decoration. Second, and worse, they would not
@@ -445,15 +613,18 @@ spring:
       #       an endpoint, it reaches this service the same way every other column
       #       does -- through a view in the `reporting` schema -- so this value
       #       still would not change.
-      #       (6) Assumptions: the views themselves and the SELECT-only privileges
-      #       are bootstrapped by data-migration/sql/V0__schemas_and_roles.sql,
-      #       never from here. A view or a privilege missing at run time surfaces
-      #       as a permission or undefined-relation error naming the view, and
-      #       that is a data-migration defect to be reported rather than anything
-      #       for this module to remedy for itself.
+      #       (6) Assumptions: the SCHEMA, the roles and the USAGE grant come from
+      #       data-migration/sql/V0__schemas_and_roles.sql; the VIEWS themselves and
+      #       the per-view SELECT grants come from
+      #       data-migration/sql/V1__reporting_views.sql, which is ordered after
+      #       every per-service migration because a view cannot precede the tables
+      #       it reads. Neither comes from here. A view or a privilege missing at
+      #       run time surfaces as a permission or undefined-relation error naming
+      #       the view, and that is a data-migration defect to be reported against
+      #       whichever of those two files owns it, rather than anything for this
+      #       module to remedy for itself.
       connection-init-sql: "SET search_path TO reporting"
 
-      # WHAT: the two pool bounds, four concurrent connections and one kept warm.
       # WHY : (1) Trade-offs: four is small for an HTTP service and is chosen
       #       against the shape of the work rather than against request volume. A
       #       borrow in this context is held for the whole of a cursor walk over a
@@ -486,7 +657,6 @@ spring:
       maximum-pool-size: 4
       minimum-idle: 1
 
-      # WHAT: how long a borrow waits for a connection before failing.
       # WHY : Alternatives Considered: ten seconds, which is what card-service and
       #       transaction-service both use. Rejected for a concrete reason: when
       #       Aurora capacity has fallen to zero and auto-pause has taken effect,
@@ -501,8 +671,6 @@ spring:
       #       be first to touch a paused cluster behave the same way.
       connection-timeout: 30000
 
-      # WHAT: when an idle connection is released, and the hard ceiling on the
-      #       age of any connection.
       # WHY : (1) Assumptions: both figures match transaction-service exactly, so
       #       that every pool aimed at this one cluster recycles on a single
       #       cadence instead of eight services each retiring connections on their
@@ -517,6 +685,35 @@ spring:
       #       a pool event. Fifteen minutes keeps the pool ahead of it.
       idle-timeout: 300000
       max-lifetime: 900000
+
+      # WHY : (1) Refactoring Rationale: transport security is asserted HERE and no
+      #       longer left to whatever the injected URL happens to carry. The three
+      #       connection values above arrive as environment variables, so the URL is
+      #       supplied by the task definition; a URL that omitted an SSL mode, or
+      #       carried `require`, would connect successfully and read the ledger over
+      #       a channel that is either plaintext or encrypted-but-unauthenticated,
+      #       and nothing would report it. These properties are applied by the pool
+      #       to every connection it opens, so the mode is a property of this module
+      #       rather than of the string it was handed.
+      #       (2) Assumptions: `verify-full` and not `verify-ca`. Both validate the
+      #       certificate chain; only `verify-full` also checks that the certificate
+      #       identifies the host actually connected to, which is the half that
+      #       defeats redirection to another endpoint presenting a legitimately
+      #       issued certificate of its own. The reporting role reads the account,
+      #       card and ledger schemas, so that is exactly the hop worth binding to a
+      #       host identity.
+      #       (3) Assumptions: the trust anchor is a filesystem path and not a
+      #       secret, so a default is committed and an override is an environment
+      #       value. It matches the anchor the ETL package resolves under the same
+      #       variable name, which is what keeps one deployment from trusting two
+      #       different sets of authorities for one cluster.
+      #       (4) Trade-offs: a missing or wrong anchor now stops start-up rather
+      #       than downgrading the connection, which is the intended direction: the
+      #       alternative failure -- a task that starts, turns healthy and serves
+      #       statements over an unverified channel -- is undetectable from outside.
+      data-source-properties:
+        sslmode: verify-full
+        sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
 
   jpa:
 
@@ -542,6 +739,8 @@ spring:
       # WHY : (1) Assumptions: this module must be unable to emit DDL even by
       #       accident. It owns no relational object, and the objects it reads are
       #       views owned by another role and provisioned by
+      #       data-migration/sql/V1__reporting_views.sql, whose schema, owner and
+      #       USAGE grant come in turn from
       #       data-migration/sql/V0__schemas_and_roles.sql.
       #       (2) Alternatives Considered: `validate`, which is attractive here
       #       because it would act as a start-up canary for a view that had not
@@ -558,8 +757,6 @@ spring:
       hibernate:
         jdbc:
 
-          # WHAT: how many rows the driver materialises per round trip on an open
-          #       server-side cursor. A TRANSPORT BATCH SIZE, nothing more.
           # WHY : (1) Assumptions: a positive value is one of the two
           #       preconditions for a PostgreSQL server-side cursor to
           #       materialise lazily; the other is a connection outside
@@ -648,25 +845,41 @@ spring:
   #       stateless besides -- there is no server-side conversation to keep -- so
   #       no session store, no session timeout and no cookie policy is declared
   #       either.
+  #       (4) Assumptions: this key is one half of the token contract and not the
+  #       whole of it. It settles WHO signed the token; the three
+  #       carddemo.security.jwt keys at the foot of this file settle WHAT KIND of
+  #       token it is, WHICH client it was minted for and WHICH scope it carries.
+  #       The two halves are one decision recorded in two places because they bind
+  #       through different mechanisms -- this one through the framework's own
+  #       autoconfiguration, those three through a validator config/SecurityConfig
+  #       installs -- and reading either half alone overstates what is checked.
   security:
     oauth2:
       resourceserver:
         jwt:
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
-# WHAT: expose the Actuator surface on the APPLICATION port, at the default
-#       /actuator base path, and expose only what something actually polls.
 # WHY : (1) Assumptions: /actuator/health on port 8080 is a deployment contract
 #       with two consumers that live outside this repository's Java and that fail
-#       in different places. This module's Dockerfile declares
-#       HEALTHCHECK ... CMD curl -f http://127.0.0.1:8080/actuator/health, which
-#       decides whether the container is serving, and the load balancer target
-#       group polls the identical path, which decides whether traffic is routed
-#       to the task at all. There is deliberately NO separate management port and
-#       NO relocated base path anywhere in this folder: either one would let those
-#       two consumers disagree about liveness, with one reporting the task healthy
-#       while the other killed it, and that disagreement presents as a task
-#       flapping for no visible reason.
+#       in different places, and BOTH of them now request it over HTTPS because
+#       the server.ssl block above encrypts the one listener they share with
+#       application traffic. The load balancer target group polls it over HTTPS
+#       because target_protocol in infra/modules/ecs-service fixes the protocol of
+#       the target group and its health check together, and that module validates
+#       the value to exactly "HTTPS". This module's container HEALTHCHECK must
+#       therefore probe https://127.0.0.1:8080/actuator/health, and it must do so
+#       with certificate verification disabled for that loopback hop: the
+#       certificate is issued for the task's registered name rather than for the
+#       loopback address, so a verifying probe fails against a correctly
+#       configured service and the platform replaces a task that is in fact
+#       serving. The first consumer decides whether the container is serving and
+#       the second decides whether traffic is routed to the task at all, so a
+#       probe left on cleartext takes a healthy task out of service rather than
+#       reporting a protocol error. There is deliberately NO separate management
+#       port and NO relocated base path anywhere in this folder: either one would
+#       let those two consumers disagree about liveness, with one reporting the
+#       task healthy while the other killed it, and that disagreement presents as
+#       a task flapping for no visible reason.
 #       (2) Assumptions: the Prometheus scrape endpoint is exposed because
 #       micrometer-registry-prometheus is on the classpath at runtime scope for
 #       exactly this purpose, and because the three common tags MetricsConfig
@@ -745,8 +958,6 @@ logging:
 
 carddemo:
 
-  # WHAT: the two remaining inputs to the Micrometer common tags, named exactly
-  #       as MetricsConfig names them.
   # WHY : (1) Assumptions: these two key names were read out of
   #       com.carddemo.common.observability.MetricsConfig rather than chosen --
   #       it exposes ENVIRONMENT_PROPERTY as `carddemo.environment` and
@@ -770,12 +981,61 @@ carddemo:
   environment: ${CARDDEMO_ENVIRONMENT:unspecified}
   version: ${CARDDEMO_VERSION:unspecified}
 
+  # WHY : (1) Assumptions: validating the issuer is not validating the token, and
+  #       the gap is reachable rather than theoretical. The issuer-uri declared
+  #       under spring.security above makes the filter chain verify the signature,
+  #       the issuer and the time claims, and that is where its guarantees end. One
+  #       user pool mints TWO token kinds from the same signing key: an access
+  #       token, whose token_use claim is `access`, and an identity token, whose
+  #       token_use claim is `id`. Both are validly signed by the configured
+  #       issuer, so without the check below an identity token -- meant to describe
+  #       a user to a client and never to authorize an API call -- would be
+  #       accepted as authorization here. It is also the token a browser is most
+  #       likely to have to hand. In this context the consequence is disclosure
+  #       rather than money movement: the endpoints here read statement and report
+  #       surfaces spanning the ledger, account and reference schemas, so a request
+  #       admitted on the wrong token kind reads customer, account and transaction
+  #       detail it was never authorized for.
+  #       (2) Assumptions: one pool can hold more than one app client, and a token
+  #       minted for a different client of the same pool carries that pool's
+  #       issuer. Binding the accepted client identifier closes that, and it is why
+  #       the value is a placeholder rather than a literal -- the identifier is an
+  #       environment fact supplied by the deployment, not a property of this file.
+  #       (3) Alternatives Considered: expressing this through the framework's own
+  #       spring.security.oauth2.resourceserver.jwt.audiences key, which is the
+  #       obvious declarative route and is wrong here. A Cognito ACCESS token
+  #       carries no aud claim at all -- the client identifier travels in client_id
+  #       instead -- so an audience validator would reject every access token the
+  #       sign-on flow issues while accepting the identity tokens this block exists
+  #       to refuse. It would invert the control, which is worse than having no
+  #       control, and that is why no audiences key appears anywhere in this file.
+  #       (4) Assumptions: these keys are read by config/SecurityConfig.java, which
+  #       installs a delegating token validator ahead of the group mapping, so a
+  #       token failing any of the three never reaches JwtRoleConverter and no
+  #       authority is derived from it. The shared kernel's security package owns
+  #       the group mapping alone and explicitly no token validation, so the
+  #       validator belongs to each service; the property shape is identical in
+  #       every service so the eight filter chains cannot diverge in what they
+  #       accept.
+  #       (5) Trade-offs: required-scope names the scope the pool grants to a token
+  #       obtained through its own authentication API rather than a custom
+  #       resource-server scope. Custom scopes are granted only through the OAuth
+  #       flows this design does not use, so requiring one would reject every token
+  #       the sign-on flow can produce. What the value still buys is decisive: an
+  #       identity token carries no scope claim whatsoever, so requiring any scope
+  #       at all is a second, independent rejection of the wrong token kind, and it
+  #       is the same claim the API Gateway route authorization scopes assert at the
+  #       edge -- so edge and service agree rather than each guessing.
+  security:
+    jwt:
+      expected-token-use: access
+      expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
+      required-scope: aws.cognito.signin.user.admin
+
   reporting:
 
     step-functions:
 
-      # WHAT: the state machine this service starts an execution of when a report
-      #       is requested on demand.
       # WHY : (1) Refactoring Rationale: this replaces the baseline's ad hoc
       #       submission path, and the accurate account of what was wrong with it
       #       is subtler than the obvious one, so both halves are stated rather
@@ -808,7 +1068,6 @@ carddemo:
       #       requests it could never fulfil.
       state-machine-arn: ${CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN}
 
-      # WHAT: the ceiling on one control-plane call that starts an execution.
       # WHY : Alternatives Considered: leaving the software development kit's own
       #       default in place, which leaves the overall per-call ceiling unset
       #       and bounds only the socket and connect phases. Rejected because the
@@ -827,7 +1086,6 @@ carddemo:
 
     s3:
 
-      # WHAT: the bucket the three fixed-width artifacts are written to.
       # WHY : Assumptions: this arrives as an environment variable resolved from
       #       Parameter Store, and no bucket name and no storage hostname appears
       #       in this file. It carries no fallback deliberately: a default would
@@ -837,9 +1095,6 @@ carddemo:
       #       and lost.
       output-bucket: ${CARDDEMO_REPORTING_S3_OUTPUT_BUCKET}
 
-      # WHAT: the two object-key prefixes under which report and statement
-      #       artifacts are written. Each run composes a DETERMINISTIC key from
-      #       its prefix, the report identity and the resolved date range.
       # WHY : (1) Assumptions: a rerun REPLACES its prior output and never appends
       #       to it, and that is inherited from the baseline rather than invented.
       #       app/jcl/CREASTMT.JCL is explicitly idempotent about its own outputs:

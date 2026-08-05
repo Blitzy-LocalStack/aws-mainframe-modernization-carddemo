@@ -71,37 +71,38 @@
 > `reference-service`, which owns the date-conversion flow — the three services the
 > catalog records as queue participants at
 > [`service-catalog.md`](service-catalog.md) L892–L894. The shared codec that
-> encodes and decodes both payloads is `CsvAuthCodec` in the shared kernel, and the
-> queue topology is provisioned by the `sqs` infrastructure module.
+> encodes and decodes both payloads is the authored `CsvAuthCodec` in the shared
+> kernel, and the authored `sqs` module defines the queue topology.
 > `docs/architecture/observability.md` names this document in its own
 > dependencies, because the error sink described in the last section is where
 > structured failure records land.
 >
-> **None of those consumers has landed yet, and that is stated rather than
-> implied.** This document is authored ahead of the code it constrains, which is
-> deliberate: a positional wire format has to be written down **before** two
-> independent implementations — a producer-side encoder and a consumer-side
-> decoder — are authored against it, or they will disagree about field nine. Every
-> figure below is therefore derived from a cited baseline file rather than read off
-> a running system.
+> **Measured implementation status.** `CsvAuthCodec` and its golden byte vectors,
+> the twelve-queue SQS module, the per-service queue-permission output and the
+> exact-ARN ECS task-role policy are authored. The environment roots do not yet
+> compose those modules, and authorization/account/reference listeners, an outbox
+> table, an outbox repository/writer/publisher and the external request producer
+> do not exist. Every baseline figure below is therefore derived from cited source,
+> while every unimplemented consumer or delivery flow is labelled as a target.
 >
-> **Caveats.** Five, stated up front rather than buried. First, the queues are
-> authored as infrastructure-as-code and statically validated; **no message has
-> been sent through a provisioned queue**, and no throughput, latency or ordering
+> **Caveats.** Five, stated up front rather than buried. First, the SQS module
+> validates in isolation, but no environment root wires it and **no message has
+> been sent through a provisioned queue**; no throughput, latency or ordering
 > figure anywhere in this document is a measurement. Second, the external
 > point-of-sale authorizer that *produces* authorization requests is **not supplied
 > by the baseline** — only a test stub exists — so the request side of the contract
 > is documented from the consumer's parse rather than exercised against a real
 > producer. Third, the baseline is reference-only: every line citation below is a
 > read, and nothing under [`app/`](../../app) is modified, including the three
-> known baseline defects, which are registered in
+> known baseline defects, which must be registered in the contracted
 > `docs/architecture/cobol-to-service-traceability.md` and are not among the
 > subjects of this document. Fourth, the mainframe MQ path is **preserved intact**
 > — the migration adds a path, it does not remove one, so the queue definitions,
 > the trigger definitions and the programs that use them all remain exactly as they
 > are. Fifth, this document specifies contracts, not capacity: the two bounds it
-> carries across from the baseline are reproduced because they are part of the
-> observable behaviour, not because a target figure has been sized.
+> derives from the baseline are treated separately — the five-second wait is
+> preserved, while the declared 500-message ceiling is enforced exactly rather
+> than reproducing the observed 501-message off-by-one.
 
 ---
 
@@ -120,18 +121,20 @@ below.
    denominated in **milliseconds** — so `5000` also means 5 seconds. A reader who
    carries either literal across without its unit is wrong by a factor of ten in
    one direction or a hundred in the other.
-2. **The declared field widths are not the message length.** The eighteen request
-   fields sum to **153** characters and the six reply fields sum to **57**; both
-   are field-width sums. The comma-delimited messages are longer, and the reply
-   that the baseline actually emits is longer still than the naive delimiter
-   arithmetic suggests, for a reason visible only in the `STRING` statement that
-   builds it. All three figures are given, separately labelled, in
+2. **A field-width sum is not a wire length, and the request receiver overrides
+   one copybook width.** The request copybook declarations sum to **153**, but
+   the observed ordinal-nine receiver is `PIC X(13)`, so the target codec emits
+   **152** data characters plus seventeen commas: **169** characters. The reply
+   declarations sum to **57**; the target codec emits the zero-suppressed amount
+   plus six commas: **63** characters. The baseline passes a length of 64 because
+   its `STRING` pointer advances one position beyond the built payload. These
+   figures are given, separately labelled, in
    [Width sums are not wire lengths](#width-sums-are-not-wire-lengths).
 3. **The three extensions do not share one messaging discipline.** The
-   authorization consumer reads and replies *outside* syncpoint and commits its
-   database work separately; both inquiry programs read and reply *inside*
-   syncpoint. A single uniform consumer design would therefore be wrong for one of
-   the two families — see
+   authorization consumer reads outside syncpoint, sends its reply before its
+   database write, and commits later; both inquiry programs read and reply *inside*
+   one syncpoint. A single uniform consumer design would therefore be wrong for one
+   of the two families — see
    [The three extensions do not share one messaging discipline](#the-three-extensions-do-not-share-one-messaging-discipline).
 
 ---
@@ -164,14 +167,14 @@ convention already established for the test suite at
   cannot be re-derived from a cited file has no standing in a document whose whole
   purpose is byte-level fidelity.
 - Refactoring Rationale: the baseline contains one structural flaw in its
-  messaging that the target does not reproduce — the reply is published outside the
-  transaction that commits the decision the reply reports. That is recorded here as
-  a *closed gap* rather than passed over, because a reader comparing the two
-  designs will otherwise read the target's transactional outbox as gratuitous
-  machinery. Recording what was wrong with the old arrangement is the only way the
-  new one reads as necessary. **No COBOL is changed** to close it; the baseline
-  remains exactly as it is, and the divergence is registered in
-  `docs/architecture/cobol-to-service-traceability.md`.
+  messaging that the target contract deliberately corrects — its request get is
+  outside recovery, and its reply is sent before the decision is committed. That is
+  recorded here as an **open implementation obligation** rather than passed over,
+  because otherwise the specified transactional outbox appears gratuitous. The
+  repository does not yet contain that outbox or its consumer/publisher, so this
+  document does not claim the gap is closed. **No COBOL is changed**; the baseline
+  remains exactly as it is, and the future divergence must be registered in the
+  contracted `docs/architecture/cobol-to-service-traceability.md`.
 - Trade-offs: this document reproduces the **complete positional field list** for
   both payloads rather than pointing at the copybooks, and it accepts the resulting
   duplication. The reason is specific rather than editorial: the copybooks begin at
@@ -191,21 +194,63 @@ convention already established for the test suite at
 
 ---
 
-## The five baseline queues and their target replacements
+## The five baseline queues and six target primary queues
 
 The baseline uses five IBM MQ queues across the two messaging extensions. They
-map to four SQS queues plus a terminal error sink, each request and reply queue
-paired with its own dead-letter queue. Queue names are given in their
-parameterised `<env>` form; no account identifier, resource identifier or
-endpoint appears anywhere in this document.
+map to **six** primary SQS queues plus six dedicated dead-letter queues. The one
+shared baseline inquiry-request queue is deliberately refined into separate
+account and date request queues so competing consumers cannot remove each
+other's work. Queue names are given in their parameterised `<env>` form; no
+account identifier, resource identifier or endpoint appears anywhere in this
+document.
 
 | Target queue | Replaces | Type | Key configuration |
 |---|---|---|---|
-| `carddemo-pauth-request-<env>.fifo` + `-dlq` | the pending-authorization request queue | FIFO | `MessageGroupId = card_num`; `MessageDeduplicationId = transaction_id`; DLQ at `maxReceiveCount` 5 |
-| `carddemo-pauth-reply-<env>.fifo` + `-dlq` | the pending-authorization reply queue | FIFO | Short retention, mirroring the original non-persistent reply |
-| `carddemo-inquiry-request-<env>` | the account-inquiry request queue | Standard | Inquiry has no ordering requirement |
-| `carddemo-inquiry-reply-<env>` | the account-inquiry reply queue | Standard | — |
-| `carddemo-error-<env>` | the error queue | Standard | Terminal error sink |
+| `carddemo-pauth-request-<env>.fifo` + `-dlq` | the pending-authorization request queue | FIFO | `MessageGroupId` is a purpose-scoped opaque HMAC of the card number, never the number itself; `MessageDeduplicationId` is the same purpose-scoped tokenisation of the transaction identifier; DLQ at `maxReceiveCount` 5 |
+| `carddemo-pauth-reply-<env>.fifo` + `-dlq` | the pending-authorization reply queue | FIFO | Short retention, mirroring the original non-persistent reply. The group identity is the same opaque token the request carried, and retention must outlast the whole visibility, receive-count and long-poll budget so a repeatedly failing reply reaches its dead-letter queue before the source can expire it |
+| `carddemo-account-inquiry-request-<env>` + `-dlq` | account-detail traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `account-service` |
+| `carddemo-date-inquiry-request-<env>` + `-dlq` | date-conversion traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `reference-service` |
+| `carddemo-inquiry-reply-<env>` + `-dlq` | the two per-flow inquiry reply queues | Standard | Configured shared destination; replies echo the request's correlation attribute |
+| `carddemo-error-<env>` + `-dlq` | the error queue | Standard | Terminal error sink |
+
+### The ordering contract ends at quarantine
+
+**The authorization guarantee is per-card FIFO on the source queue, not an
+unqualified claim of order across dead-letter handling.** The `MessageGroupId`
+is produced by `CsvAuthCodec.AuthRequest.orderGroup(OpaqueIdentifier)`, using
+the purpose `carddemo/pauth/order-group`. Equal card numbers therefore map to
+one stable 22-character URL-safe token, different purposes cannot be joined by
+token equality, and the primary account number never enters SQS metadata.
+
+SQS dead-lettering creates a real semantic boundary: once a poison message
+exhausts `maxReceiveCount` and leaves the source queue, later messages in the
+same group may proceed. The former statement that two authorizations could
+never be observed out of sequence was therefore too broad. The target makes the
+following narrower and enforceable commitment:
+
+1. Messages that remain on either authorization source queue are delivered in
+   send order within their opaque per-card group.
+2. A failed message is preserved on a FIFO dead-letter queue whose
+   `redrivePermission` is `byQueue` for exactly one source queue and whose
+   retention is fourteen days.
+3. Native `StartMessageMoveTask` is explicitly denied on both authorization
+   dead-letter queues. That operation cannot select one message group and can
+   interleave recovered messages with new traffic, so it is not an admissible
+   recovery path for this flow.
+4. Runtime task roles have receive/delete/send capabilities only for their
+   assigned queues and no message-move capability. Recovery is a reviewed
+   operator action: reconcile the failed authorization first, then replay
+   messages individually with the original opaque group and logical transaction
+   identity. Durable transaction-id idempotency remains the backstop against a
+   duplicate business effect.
+
+- Trade-offs: this revision chooses availability for later authorizations over
+  blocking every future message for one card indefinitely behind an
+  unprocessable payload. What it gives up is uninterrupted order across the
+  quarantine boundary, and the loss is stated rather than hidden. The FIFO DLQ,
+  exact source admission, long evidence retention, denied bulk redrive and
+  controlled replay make that boundary auditable and prevent an automatic
+  recovery operation from creating a second, less visible reordering.
 
 The baseline names those five queues in three different places, and the
 provenance matters because it shows that not all of them are compiled-in
@@ -219,22 +264,21 @@ constants:
 | `CARDDEMO.RESPONSE.QUEUE` | [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L54, defined to CICS at L72 | The two inquiry programs each open a **statically named** reply queue instead: `'CARD.DEMO.REPLY.ACCT'` at `COACCT01.cbl` L198 and `'CARD.DEMO.REPLY.DATE'` at `CODATE01.cbl` L147 |
 | `CARD.DEMO.ERROR` | `COACCT01.cbl` L294 and `CODATE01.cbl` L243 | A program literal in both inquiry programs |
 
-> **Assumptions: neither authorization endpoint is a compiled-in queue name, so
-> the target must not hardcode either one.** The request queue reaches
+> **Assumptions: neither authorization endpoint is a compiled-in baseline queue
+> name, but inbound routing data is not authority.** The request queue reaches
 > `COPAUA0C` in the trigger message — `EXEC CICS RETRIEVE INTO(MQTM)` at L233–L236,
 > then `MOVE MQTM-QNAME TO WS-REQUEST-QNAME` at L238 — and the reply queue reaches
 > it in the inbound message descriptor at L413–L414. Both are resolved at run time.
-> The consequence for the target is concrete: the consumer reads its request queue
-> from injected configuration rather than from a constant, and it sends each reply
-> to the address carried on the message it is answering, never to a statically
-> configured reply queue. The two inquiry programs are the contrast — they resolve
-> their request queue from the trigger the same way but then open a **fixed** reply
-> queue by literal (L198 and L147 respectively), which is why the inquiry reply
-> mapping is a configured destination while the authorization reply mapping is a
-> per-message one.
+> The target consumer reads its request queue from injected configuration and
+> treats `replyToQueueUrl` only as a requested route: it must equal an
+> environment-owned allowlisted reply URL before any send is attempted. The
+> authored topology has one pending-authorization reply queue, so that allowlist
+> is currently a singleton. The two inquiry programs are the contrast — they open
+> fixed reply queues by literal (L198 and L147), and the target account/date
+> consumers likewise send only to the configured shared inquiry-reply queue.
 
-> **Assumptions: two services consume the one inquiry request queue, so the
-> consumer must discriminate by message purpose.** Both inquiry programs are
+> **Refactoring Rationale: the shared inquiry request queue is split at the
+> ownership boundary.** Both inquiry programs are
 > triggered from the same request/reply pair described in
 > [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53–L54, but they
 > answer different questions — `COACCT01.cbl` performs an account inquiry and
@@ -242,9 +286,11 @@ constants:
 > different owners, `account-service` and `reference-service` respectively
 > ([`service-catalog.md`](service-catalog.md) L892–L894). A consumer that assumes
 > every message on the inquiry queue is its own will process the other service's
-> traffic. The target therefore discriminates on the message-purpose attribute
-> before dispatching, and the two services subscribe to the same queue rather than
-> one service silently absorbing both flows.
+> traffic. Two competing SQS consumers cannot safely “peek and put back” a
+> sibling's message, so the authored target routes account inquiries to
+> `account_inquiry_request` and date conversions to `date_inquiry_request` before
+> either consumer receives them. Each has its own DLQ; the reply and error queues
+> remain shared.
 
 - Alternatives Considered: **managed queues rather than a managed IBM MQ broker.**
   A managed broker running IBM MQ would have preserved the wire protocol verbatim
@@ -254,7 +300,8 @@ constants:
   broker: request/reply is preserved by carrying an explicit reply address per
   message plus a correlation attribute, exactly as the descriptor already does
   (L413–L414 inbound, L745 echoed outbound), and per-card ordering is supplied by
-  FIFO grouping on the card number. Second, a broker is a stateful component with
+  FIFO grouping on a keyed opaque token derived from the card number. Second, a
+  broker is a stateful component with
   its own version lifecycle, storage sizing, queue-depth monitoring and failover
   behaviour to operate, and none of those obligations buys anything for a workload
   whose entire requirement is "deliver this record to that consumer in card order,
@@ -294,6 +341,8 @@ something different.
 From [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy),
 data at L19–L36. The `PICTURE` column is the declared width; the position column is
 the field's ordinal on the wire, which is the only thing that identifies it.
+Ordinal nine is the documented exception: the copybook declares fourteen
+characters, but the consuming program receives only thirteen.
 
 | # | Field | `PICTURE` | Width | Notes |
 |---|---|---|---|---|
@@ -305,7 +354,7 @@ the field's ordinal on the wire, which is the only thing that identifies it.
 | 6 | `PA-RQ-MESSAGE-TYPE` | `X(06)` | 6 | |
 | 7 | `PA-RQ-MESSAGE-SOURCE` | `X(06)` | 6 | |
 | 8 | `PA-RQ-PROCESSING-CODE` | `9(06)` | 6 | Unsigned numeric display |
-| 9 | `PA-RQ-TRANSACTION-AMT` | `+9(10).99` | 14 | Edited display money — see [Money on the wire](#money-on-the-wire-is-edited-display-text-not-packed) |
+| 9 | `PA-RQ-TRANSACTION-AMT` | `+9(10).99` | 14 declared / **13 received** | Target emission follows `WS-TRANSACTION-AMT-AN PIC X(13)`, not the wider declaration; see [Money on the wire](#money-on-the-wire-is-edited-display-text-not-packed) |
 | 10 | `PA-RQ-MERCHANT-CATAGORY-CODE` | `X(04)` | 4 | Misspelled in the baseline; corrected only in the persisted column, per `data-model-and-schema-mapping.md` |
 | 11 | `PA-RQ-ACQR-COUNTRY-CODE` | `X(03)` | 3 | |
 | 12 | `PA-RQ-POS-ENTRY-MODE` | `9(02)` | 2 | Unsigned numeric display |
@@ -324,6 +373,9 @@ the field's ordinal on the wire, which is the only thing that identifies it.
 > `PA-RQ-` items above, plus one work field in ordinal position nine. The count is
 > therefore established twice from two independent statements, which is worth having
 > because the ordinal positions are the only field identity the wire carries.
+> The width is established only on the receiving side: L364 receives ordinal nine
+> into `WS-TRANSACTION-AMT-AN`, declared `PIC X(13)` at L63, before
+> `FUNCTION NUMVAL` converts it at L376–L377.
 
 ### The reply — six fields, in this order
 
@@ -352,9 +404,10 @@ levels are given separately and each is labelled.
 
 | Quantity | Request | Reply | What it is |
 |---|---|---|---|
-| Sum of declared field widths | **153** | **57** | A field-width sum. **Not** a message length — it counts no delimiters at all |
-| Interior-delimited nominal length | **170** | **62** | The width sum plus one comma between each adjacent pair — 17 commas for eighteen fields, 5 for six |
-| What the baseline actually emits | not observable | **63** built, **64** sent | See the callout below; only the reply has an emitting statement in the repository |
+| Sum of copybook-declared field widths | **153** | **57** | Declaration arithmetic only; request ordinal nine is wider here than its actual receiver |
+| Target codec emitted-width sum | **152** | **57** | Seventeen request widths plus the observed 13-character amount; six reply widths with the emitted mask |
+| Target codec canonical wire length | **169** | **63** | Request: 152 + 17 interior commas. Reply: 57 + 6 commas, including the trailing comma |
+| What the baseline producer emits | **not observable** | **63 built, 64 passed to MQPUT1** | No request producer exists; the reply pointer contributes one trailing pad byte to the passed length |
 
 > **Measured — the emitted reply is longer than the interior-delimiter arithmetic
 > predicts, because the `STRING` appends a comma after the last field too.** The
@@ -373,20 +426,18 @@ levels are given separately and each is labelled.
 > requires exactly 62 bytes with no trailing delimiter would reject every genuine
 > reply the baseline produces.
 
-> **Assumptions: the target codec parses tolerantly and emits the declared form.**
-> Three properties of the baseline force this. The trailing comma means a decoder
-> splitting on the delimiter must tolerate a final empty field rather than treat it
-> as a nineteenth or seventh value. The trailing space means it must trim the last
-> field rather than compare it byte-for-byte against a 14-character mask. And the
-> request's ordinal-nine intake field is declared `PIC X(13)` at L63 — one byte
-> narrower than the 14-character field the copybook declares at L27 — and is
-> converted by `FUNCTION NUMVAL` at L376–L377, which is a tolerant numeric parse
-> that accepts leading spaces, an optional sign and an embedded decimal point. The
-> safe contract, and the one the shared codec implements, is therefore: **decode by
-> tolerant parse, encode to the copybook's declared width.** Emitting the declared
-> form keeps the target interoperable with the baseline consumer; parsing
-> tolerantly keeps it interoperable with the baseline producer, whose emitted widths
-> cannot be observed from this repository because no producer is supplied.
+> **Assumptions: the target codec parses tolerantly, emits the observed request
+> intake width and emits the reply buffer the baseline actually builds.** The
+> request encoder writes a 13-character amount, giving 152 data characters and a
+> 169-character payload; positive values use ten zero-padded integer digits and
+> two cents without a sign, while a negative value spends one of those thirteen
+> positions on `-`. This is an explicit assumption about the absent producer,
+> chosen because emitting the copybook's fourteenth sign position would be
+> truncated by the only real consumer. The reply encoder writes the
+> fourteen-character `PIC -zzzzzzzzz9.99` rendering and a trailing comma, giving
+> 63 characters. The decoder also tolerates the baseline's 64th pad byte. Golden
+> vectors pin positive, negative, zero and non-zero-cent values so a symmetric but
+> byte-wrong encoder/decoder pair cannot pass by round-tripping itself.
 
 ### The delimiter is a literal comma
 
@@ -473,12 +524,13 @@ decimal column at rest in the table.
 > **exception** — it declares its own `01 ERROR-LOG-RECORD.` at L19 and is therefore
 > self-contained.
 
-### A JSON envelope is additive, never a replacement
+### A future JSON envelope may be additive, never a replacement
 
-A JSON envelope carrying the same eighteen and six fields under names is offered
-**additively**, for consumers written after the migration that have no reason to
-speak a positional format. It does not replace the comma-delimited form, and the
-positional form remains the contract of record for the queues above.
+A JSON envelope carrying the same eighteen and six fields under names may be added
+for future consumers that have no reason to speak a positional format. It is **not
+authored at this checkpoint**, and `CsvAuthCodec` deliberately imports no JSON
+library. If introduced, it must remain additive: it cannot replace the
+comma-delimited form, which remains the contract of record for the queues above.
 
 - Trade-offs: offering two encodings costs a discriminator and a second code path
   in the codec, and that cost is accepted for one specific reason: the baseline
@@ -546,7 +598,7 @@ separately in the following section.
 | message identifier | `messageId` | `COPAUA0C.cbl` L395 (inbound), L746 (outbound) |
 | reply-to queue | `replyToQueueUrl` message attribute | `COPAUA0C.cbl` L413–L414 (captured), L741–L742 (used) |
 | string format indicator | `contentType` of `text/csv` | `COPAUA0C.cbl` L397, L751 |
-| persistence, set to non-persistent | short queue retention on the reply queues | `COPAUA0C.cbl` L749 |
+| persistence, set to non-persistent | retry-budget-bounded queue retention plus dead-letter quarantine; `expiresAt` remains the business-expiry control | `COPAUA0C.cbl` L749 |
 | expiry | `expiresAt` message attribute — see [The expiry gap](#the-expiry-gap) | `COPAUA0C.cbl` L750 |
 | message type, set to reply | inferred from the queue the message is on | `COPAUA0C.cbl` L744 |
 
@@ -577,25 +629,41 @@ there is no ambiguity to resolve:
 | L747–L748 | spaces into the reply's own reply-to queue and queue-manager fields | The reply is **terminal** — it invites no answer |
 | L758 | the put is `MQPUT1`, not `MQPUT` | Open, put and close in one operation per message, with the destination supplied in the call |
 
-> **Assumptions: correlation lives in transport metadata, so the consumer must
-> echo the inbound `correlationId` and must send to the inbound
-> `replyToQueueUrl`.** Two rules follow, and both are binding on
-> `authorization-service`. The consumer copies the inbound `correlationId` attribute
-> onto the reply verbatim rather than deriving a new one, because the requester is
-> waiting on that exact value and a regenerated identifier would leave the reply
-> unmatchable. And it sends the reply to the `replyToQueueUrl` carried on the
-> message it is answering, **never** to a statically configured reply queue,
-> because the baseline resolves that destination per message at L413–L414 and a
-> configured destination would silently misroute any requester that asked for a
-> different one. The `MQPUT1` at `COPAUA0C.cbl` L758 is the mechanical reason the
-> dynamic routing
-> works at all: because open, put and close happen in a single call, no pre-opened
-> queue handle constrains the destination, and each reply can go somewhere
-> different. The two inquiry programs make the contrast visible — they pre-open a
-> fixed reply queue by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147
-> and L210) and then use `MQPUT` against that handle, so their reply destination is
-> configured rather than per-message even though they too capture the inbound
-> reply-to field (`COACCT01.cbl` L366, `CODATE01.cbl` L315).
+> **Assumptions: correlation is echoed, but a reply URL is routing data rather
+> than authority.** The target consumer must copy the inbound `correlationId`
+> verbatim because the requester is waiting on that opaque value. It may use the
+> inbound `replyToQueueUrl` only after exact-match validation against its
+> environment-owned allowlist. The authored topology exposes one
+> pending-authorization reply queue, so the authorization allowlist is a
+> singleton; an arbitrary URL, a queue from another environment and any URL not
+> represented by an allowed ARN are rejected before send. This intentionally
+> narrows the baseline's unrestricted `MQPUT1` destination to prevent the task
+> role becoming a confused deputy.
+>
+> The two inquiry programs remain the contrast: they pre-open fixed reply queues
+> by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147 and L210), and
+> the target account/reference consumers send only to the configured shared
+> inquiry-reply queue. Application validation is still a **target requirement**;
+> no listener is authored yet.
+
+The IAM boundary is already authored independently of that future validation.
+`infra/modules/sqs/outputs.tf` publishes `service_queue_permissions` as three
+closed sets:
+
+| Service | Receives from | Sends to |
+|---|---|---|
+| `authorization-service` | `pauth_request` | `pauth_reply` |
+| `account-service` | `account_inquiry_request` | `inquiry_reply`, `error` |
+| `reference-service` | `date_inquiry_request` | `inquiry_reply`, `error` |
+
+`infra/modules/ecs-service` accepts those exact ARNs through
+`sqs_receive_queue_arns` and `sqs_send_queue_arns`. Its `AllowExactQueueSend`
+statement grants only `sqs:SendMessage`; its consume statement grants receive,
+delete, visibility and queue-metadata actions only on the supplied receive ARNs.
+There is no wildcard SQS resource and no ARN is assembled from
+`replyToQueueUrl`. The environment roots that must pass
+`service_queue_permissions` into each service are not yet authored, so the module
+boundary is implemented but not yet composed into a deployable stack.
 
 > **Assumptions: the FIFO deduplication identifier is a separate concern from
 > correlation, and the two must not be conflated.** The correlation identifier is
@@ -615,7 +683,7 @@ The identity context on the reply is set with `MQPMO-DEFAULT-CONTEXT` at L754,
 meaning the reply's identity context defaults to the putting application rather
 than being passed through from the requester; the target's equivalent is the task
 role under which the consumer runs, and that mapping is specified in
-`docs/architecture/security-and-identity.md` rather than here.
+[`security-and-identity.md`](security-and-identity.md) rather than here.
 
 ---
 
@@ -651,8 +719,8 @@ cannot be set per message, and there is no native field that expires an individu
 message the way the descriptor's expiry field does.
 
 - Trade-offs: the resolution is an **`expiresAt` message attribute that the
-  consumer honours**, backed by short retention on the reply queues, and it accepts
-  a real compromise rather than claiming equivalence. What is preserved is the
+  consumer honours**, separated from queue retention, and it accepts a real
+  compromise rather than claiming equivalence. What is preserved is the
   observable outcome: a reply that arrives after its window has closed is not acted
   upon. What is **not** preserved is the enforcement point — the baseline's queue
   manager discards an expired message without any application involvement, whereas
@@ -660,12 +728,13 @@ message the way the descriptor's expiry field does.
   still occupies the queue, still counts against a receive, and still reaches
   application code before being discarded. The consequence accepted is that expiry
   becomes an application responsibility that a buggy or outdated consumer could
-  fail to apply; the mitigation is that the short queue retention bounds how long an
-  unhonoured message can survive, so the two mechanisms overlap rather than
-  depending on one another. Non-persistent delivery at L749 is what makes short
-  retention on the reply queues a faithful mapping rather than a reduction: the
-  baseline reply is explicitly not durable, so nothing is lost by declining to
-  retain it.
+  fail to apply. Queue retention instead exceeds
+  `visibility_timeout_seconds * (max_receive_count + 1) +
+  receive_wait_time_seconds`, so a repeatedly failing reply reaches its
+  dead-letter queue before the source can expire it. The default is fifteen
+  minutes for the default sixty-second visibility timeout, receive count of five
+  and five-second long poll. This added transport durability is evidence
+  retention, not permission to act on a stale reply.
 - Trade-offs: **the drop is logged, never silent.** When the consumer discards a
   message because `expiresAt` has passed, it emits a log record rather than
   dropping it quietly. The reason is diagnostic rather than tidy: a silently
@@ -674,37 +743,38 @@ message the way the descriptor's expiry field does.
   different failures with four different remedies. Logging the discard, with the
   correlation identifier and the elapsed time, is the only thing that separates
   "the system correctly declined a stale message" from "the system lost a message",
-  and the cost is one log line per expired message on a queue whose retention is
-  already short. The record lands in the structured logging described in
+  and the cost is one log line per expired message. The record lands in the structured logging described in
   `docs/architecture/observability.md`.
-
-This gap is also recorded in `docs/adr/ADR-004-messaging.md`, which is the
-decision record for the transport choice.
 
 ---
 
 ## The three extensions do not share one messaging discipline
 
-**This is a warning, not an observation.** The authorization extension and the two
-inquiry programs use opposite transaction disciplines for their queue operations,
-and a single uniform consumer design would be wrong for one of the two families.
+**This distinction is measured from the queue options and control flow, not inferred
+from the target design.** The authorization extension removes a request outside a
+unit of recovery and sends its reply before attempting the database write. The two
+inquiry programs instead enrol their request get and reply put in the same unit of
+recovery. A target consumer abstraction that erased that difference would describe
+neither baseline accurately.
 
 | Aspect | Authorization (`COPAUA0C.cbl`) | Inquiry (`COACCT01.cbl`, `CODATE01.cbl`) |
 |---|---|---|
 | Get options | `MQGMO-NO-SYNCPOINT + MQGMO-WAIT` at L389 | `MQGMO-SYNCPOINT + ... + MQGMO-WAIT` at L347–L350 and L296–L299 |
 | Put options | `MQPMO-NO-SYNCPOINT` at L753 | `MQPMO-SYNCPOINT` at L475–L477 / L512–L514 and L379–L381 / L416–L418 |
-| Database commit | **Separate**, `EXEC CICS SYNCPOINT` at L334–L336 | Within the same unit of recovery, `SYNCPOINT` at L327 and L276 |
+| Control-flow order | Decide at L459; send the reply at L461; write IMS/Db2 at L463–L464; commit at L334–L336 after `5000-PROCESS-AUTH` returns | Get, read, put, then `SYNCPOINT` at L327 and L276 |
 | Put verb | `MQPUT1` at L758 — no pre-opened handle | `MQPUT` at L479 / L516 and L383 / L420 — against a pre-opened handle |
 | Reply destination | Per message, from the descriptor (L413–L414) | Configured literal (L198, L147) |
-| Net delivery semantic | At-least-once, with the reply published **outside** the commit | Get, work and reply in **one** unit of recovery |
+| Net delivery semantic | **Destructive receive with no rollback restoration.** A crash after the get can lose the request; a reply can also escape before the decision is committed | Get, work and reply in **one** unit of recovery; rollback restores the request and suppresses the reply |
 
 ```mermaid
 graph LR
     subgraph A["Authorization — COPAUA0C (no-syncpoint)"]
-        A1[GET no-syncpoint<br/>L389] --> A2[decide + write<br/>IMS + Db2]
-        A2 --> A3[SYNCPOINT<br/>L334-L336]
-        A3 --> A4[PUT1 no-syncpoint<br/>L753, L758]
-        A3 -.->|"crash here loses a reply<br/>the data says was produced"| A4
+        A1[GET no-syncpoint<br/>L389] --> A2[decide<br/>L459]
+        A2 --> A3[PUT1 reply no-syncpoint<br/>L461, L753, L758]
+        A3 --> A4[write IMS + Db2<br/>L463-L464]
+        A4 --> A5[SYNCPOINT<br/>L334-L336]
+        A1 -.->|"crash after destructive get:<br/>request is not restored"| AX[request lost]
+        A3 -.->|"write failure or crash before commit:<br/>reply reports uncommitted decision"| AY[reply/data divergence]
     end
 
     subgraph B["Inquiry — COACCT01 / CODATE01 (syncpoint)"]
@@ -712,13 +782,13 @@ graph LR
         B2 --> B3[PUT under syncpoint<br/>L475-L477]
         B3 --> B4[SYNCPOINT commits<br/>get + put together<br/>L327]
     end
-%% Two disciplines, one baseline: the right-hand form has no window, the left-hand form does
+%% The baseline authorization path has two loss windows; inquiry rollback keeps request and reply atomic.
 ```
 
 Target mapping follows the two disciplines rather than flattening them. The
-authorization path uses the FIFO queues with `MessageGroupId` grouping and
-`MessageDeduplicationId` suppression, and closes its reply window with the outbox
-described in the next section. The inquiry path uses standard queues with
+authorization path uses FIFO queues with a purpose-scoped opaque
+`MessageGroupId` and an opaque correlation identity, and closes its reply window
+with the outbox described in the next section. The inquiry path uses standard queues with
 delete-on-success, which is the direct analogue of a get under syncpoint: the
 message becomes visible again if the handler fails, and is deleted only once the
 work and the reply have succeeded. Both paths keep a dead-letter queue at
@@ -727,17 +797,16 @@ work and the reply have succeeded. Both paths keep a dead-letter queue at
 - Alternatives Considered: **one consumer abstraction for all three flows was
   evaluated and rejected.** A single shared listener would have been reusable
   across the three services, and that is why it was considered. It was rejected
-  because the two families need opposite acknowledgement points: the inquiry
-  handler must not acknowledge until its reply has been sent, whereas the
-  authorization handler must commit its decision independently of the reply and
-  cannot hold a database transaction open across the send. Forcing the inquiry flow
-  into the authorization shape would drop the property that makes it recoverable —
-  a failure after reading but before replying would consume the request and lose
-  the question. Forcing the authorization flow into the inquiry shape would extend a
-  transaction across a queue operation, coupling the commit of a financial decision
-  to the availability of the reply queue. The shared kernel therefore supplies the
-  codec and the correlation handling, which genuinely are common, and leaves the
-  acknowledgement discipline to each service.
+  because the two flows have different durable success conditions. Inquiry succeeds
+  when its reply send succeeds, so request deletion belongs after that send.
+  Authorization succeeds when the database decision and reply intent commit, so its
+  request deletion belongs after that local transaction and its actual reply send
+  belongs in a separately retryable publisher. Holding the authorization database
+  transaction open across a queue send was rejected because queue availability
+  would then govern the financial commit; copying the baseline's early destructive
+  acknowledgement was rejected because it loses requests. The shared kernel
+  therefore supplies only the codec and correlation handling, which genuinely are
+  common, while each service owns its acknowledgement boundary.
 
 Two further get options appear in **all three** programs and must be carried
 across:
@@ -772,60 +841,52 @@ across:
 
 ---
 
-## The lost-reply window is closed, not reproduced
+## The baseline has two loss windows; the target outbox is prospective
 
-- Refactoring Rationale: **the baseline publishes the reply outside the
-  transaction that commits the decision the reply reports, and that leaves a window
-  in which a crash loses a reply the data says was produced.** The sequence is
-  visible in three statements. The database work is committed at
-  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
-  L334–L336 with an `EXEC CICS SYNCPOINT`. The reply is put with
-  `MQPMO-NO-SYNCPOINT` at L753, so the put is explicitly **not** enrolled in any
-  unit of recovery. And the put itself happens at L758, after the commit. A failure
-  between the commit and the put therefore leaves a durable authorization decision
-  with no reply ever sent — and because the reply is non-persistent (L749) and
-  expires in 5.0 seconds (L750), there is no mechanism by which it is retried. The
-  requester waits, times out, and cannot distinguish a declined authorization from a
-  lost reply, while the authorization record sits committed. This is what is wrong
-  with reproducing the arrangement literally, and it is the reason the target uses an
-  outbox rather than simply sending after committing.
+- Refactoring Rationale: **the baseline sequence is decide → send reply → write
+  database state → commit, not commit → send.** The call order appears directly in
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl):
+  `6000-MAKE-DECISION` at L459, `7100-SEND-RESPONSE` at L461, the conditional
+  `8000-WRITE-AUTH-TO-DB` at L463–L464, and the caller's `EXEC CICS SYNCPOINT` at
+  L334–L336. Both queue operations are outside recovery: the request get uses
+  `MQGMO-NO-SYNCPOINT` at L389 and the reply put uses `MQPMO-NO-SYNCPOINT` at
+  L753. That creates two independently observable failure windows:
+  1. after the destructive get and before successful processing, a crash consumes
+     the request with no committed decision and no reply; rollback cannot restore it;
+  2. after `MQPUT1` at L758 and before the later database commit, a write failure,
+     rollback or crash can leave the requester holding a reply for a decision that
+     was never committed.
 
-The target resolution is a **transactional outbox**: the reply is written as a row
-in the same local transaction that commits the authorization decision, and a
-separate publisher sends it to the reply queue afterwards, marking the row
-published once the send succeeds. Because the row and the decision commit
-together, **a reply exists for every committed decision** — the window is closed
-rather than narrowed. The outbox row's shape and its publication-state column are
-specified in
-[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), which owns
-the `authorization` schema's table definitions.
+The target contract is a **transactional outbox plus delete-on-success**. The
+authorization handler is to commit the decision and reply-intent row in one local
+database transaction, then delete the SQS request. A separately retryable publisher
+is to send unpublished rows and mark them published after success. This changes the
+observable failure semantics deliberately: a pre-commit crash causes request
+redelivery rather than loss, and a post-commit send failure leaves durable reply
+intent for retry rather than an untraceable split between queue and database state.
+The target row shape is specified in
+[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-Two things about this must be stated precisely:
+**Delivery status:** this is a target contract only. At this checkpoint there is no
+`auth_reply_outbox` migration, table, repository, writer, publisher or authorization
+request consumer in the repository. The authored artifacts are the SQS topology,
+its exact-ARN IAM permission sets and `CsvAuthCodec`; they do not by themselves
+close either baseline window. The future implementation must register this
+intentional divergence in the contracted
+`docs/architecture/cobol-to-service-traceability.md`. No COBOL is changed, and the
+reference-only status of [`app/`](../../app) remains absolute.
 
-- **This is a closed gap, not a ported behaviour.** The baseline has no outbox and
-  no reply-retry mechanism; the target adds one. It is therefore an intentional
-  divergence from the baseline's observable behaviour in exactly one respect — a
-  reply may now be delivered after a consumer restart where the baseline would have
-  delivered none — and it is registered as such in
-  `docs/architecture/cobol-to-service-traceability.md`, which is the authoritative
-  register of divergences.
-- **No COBOL is changed.** The baseline remains exactly as it is. This document
-  makes no claim that the defect was fixed in place, and the reference-only status
-  of [`app/`](../../app) is not qualified by anything in this section. The
-  divergence exists in the target implementation only.
-
-- Trade-offs: the outbox costs one additional table write inside the authorization
-  transaction and a publisher that polls it, and it makes reply delivery
-  **at-least-once rather than at-most-once** — a requester may now receive a
-  duplicate reply where the baseline would have sent one or none. That is accepted
-  because the reply is idempotent to apply: it carries the transaction identifier at
-  ordinal 2, so a requester can discard a repeat, whereas it has no way to recover
-  from a reply that was never sent. Trading a detectable duplicate for an
-  undetectable loss is the specific exchange being made here.
+- Trade-offs: the prospective outbox adds one database write and a publisher, and
+  it changes reply delivery from the baseline's lossy sequence to at-least-once
+  publication. A requester may therefore receive a duplicate reply after a send
+  succeeds but before the publisher records success. That is accepted because the
+  reply carries the transaction identifier at ordinal 2, allowing idempotent
+  duplicate suppression, whereas neither a consumed request nor an uncommitted
+  decision reported as final can be reconstructed reliably.
 
 ---
 
-## Two-phase commit is eliminated, not emulated
+## The target eliminates two-phase commit rather than emulating it
 
 The baseline's authorization work spans **two resource managers**, and the
 repository proves it physically rather than by assertion:
@@ -857,53 +918,54 @@ baseline needs a two-phase protocol to commit them atomically.
 > restated here; the reconciliation is repeated because it is what licenses the claim
 > that both segments collapse into one schema without loss.
 
-Because the pending-authorization summary, the pending-authorization detail and
-the fraud rows all become tables in the single `authorization` schema owned by
-`authorization-service`, **the two-phase commit collapses to a single local
-transaction**. The specific reason is that there is now exactly one resource
-manager and therefore exactly one commit: a transaction manager coordinating two
-participants has nothing left to coordinate. This is an earned simplification, not
-an approximation — the atomicity property the baseline achieved with a two-phase
-protocol is achieved in the target by the ordinary transactional guarantee of a
-single database, which is strictly stronger in that it cannot end in a
-heuristically-resolved mixed outcome.
+Under the target persistence contract, the pending-authorization summary, detail
+and fraud rows become tables in the single `authorization` schema owned by
+`authorization-service`, so **the two-phase commit is to collapse to one local
+transaction**. There will then be one resource manager and one commit: a
+transaction manager coordinating two participants will have nothing left to
+coordinate. This is a designed simplification rather than an approximation — a
+single PostgreSQL transaction preserves the baseline's atomicity without a
+heuristically-resolved mixed outcome. The schema migration and service transaction
+boundary are not authored at this checkpoint.
 
-**Exposing distributed transactions is explicitly out of scope**, and nothing in
-the target reintroduces a two-phase protocol. The one place a second participant
-would otherwise appear — publishing the reply — is handled by the outbox described
-above precisely so that the reply does not become a transaction participant. The
-schema's table inventory is specified in
+**Exposing distributed transactions is explicitly out of scope**, and the target
+contract does not reintroduce a two-phase protocol. The one place a second
+participant would otherwise appear — publishing the reply — is to be isolated by
+the prospective outbox described above so the reply queue never becomes a database
+transaction participant. No outbox implementation is authored at this checkpoint.
+The target schema inventory is specified in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md); ownership
 is recorded in [`service-catalog.md`](service-catalog.md).
 
 ---
 
-## Batch discipline is preserved so throughput does not shift silently
+## Batch discipline corrects the observed 501-message off-by-one
 
-The authorization consumer bounds its own work per invocation in two ways, and
-both are carried across.
+The authorization consumer declares a 500-message limit, but its control flow
+processes **501** messages when that many are continuously available. The counter
+starts at zero, is incremented after each message at `COPAUA0C.cbl` L332, and is
+tested with `>` rather than `>=` at L339. Counts 1 through 500 therefore take the
+`ELSE` branch and read another request at L342; only count 501 sets the loop-end
+flag. The declaration and the observed behaviour must not be conflated.
 
 | Baseline bound | Location | Target equivalent |
 |---|---|---|
-| A 500-message processing limit — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declared at `COPAUA0C.cbl` L40, tested at L339 with the loop-end flag set at L340 | A bounded long-poll loop with the same per-invocation message ceiling |
+| **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | Enforce **exactly 500** handled requests per invocation by checking the bound before the next receive |
 | A five-second get-with-wait | `MOVE 5000 TO WS-WAIT-INTERVAL` at L242, applied to the get at L393 | A five-second receive wait |
 
-- Trade-offs: **both bounds are reproduced rather than re-tuned, and the reason is
-  to isolate the transport change.** Preserving the message ceiling and the wait
-  duration keeps the consumer's per-invocation unit of work comparable to the
-  baseline's, so that if behaviour does change after the migration, the transport
-  swap is not confounded with a concurrency or batching change made at the same
-  time. The compromise accepted is that these values were chosen for a queue manager
-  and a CICS region rather than for a container behind a managed queue, so they are
-  very unlikely to be the values a tuned system would use — carrying them across
-  deliberately forgoes whatever a re-tuned setting would give, in exchange for a
-  single-variable comparison against the baseline. They are configuration, not
-  constants, so they can be revisited once there is a basis for it.
+- Refactoring Rationale: **the target preserves the declared business limit, not
+  the baseline's off-by-one implementation.** Enforcing exactly 500 is an
+  intentional divergence because the name and literal both state 500, while the
+  501st message follows only from the order of increment and comparison. Preserving
+  501 would turn an implementation defect into a new contract. The five-second wait
+  remains unchanged to isolate that correction from transport tuning. Both values
+  are to be configurable so later performance work can change them with measured
+  evidence rather than by editing code.
 
 **No throughput, latency or ordering figure in this section is a measurement.**
-The two values above are contract data quoted from the cited lines. Nothing here
-asserts what the target will achieve, because nothing has been run against a
-provisioned queue.
+The declaration, increment, comparison and wait above are quoted from the cited
+lines. Nothing here asserts what the target will achieve, because no application
+consumer has been run against the provisioned queues.
 
 ---
 
@@ -930,7 +992,7 @@ that produced it, which is exactly the dimension an operator filters on first.
 Three of its six values name components that do not exist in the target, so the
 enumeration is mapped rather than carried verbatim, and that mapping — together
 with the full treatment of log destinations, metrics, traces and alarms — belongs
-to `docs/architecture/observability.md`, which names this document among its own
+to [`observability.md`](observability.md), which names this document among its own
 dependencies. This section records only the contract and where it lands.
 
 ---
@@ -943,10 +1005,10 @@ sentence above can be read as a claim to the contrary:
 * **Kafka and Kinesis.** Both were evaluated and both were rejected; neither is
   provisioned, and no streaming platform forms any part of this design. The
   reasoning is recorded under
-  [the queue mapping](#the-five-baseline-queues-and-their-target-replacements).
-* **Exposing distributed transactions.** The two-phase commit is eliminated, and
-  no two-phase protocol, transaction coordinator or distributed-commit endpoint is
-  introduced anywhere in its place.
+  [the queue mapping](#the-five-baseline-queues-and-six-target-primary-queues).
+* **Exposing distributed transactions.** The target contract eliminates the
+  two-phase commit and introduces no replacement two-phase protocol, transaction
+  coordinator or distributed-commit endpoint.
 * **Multi-region and disaster-recovery topology.** Single region, three
   availability zones. No cross-region queue replication and no failover topology.
 * **IMS DC and SFTP integration.** Both are listed as future work by the baseline
@@ -956,11 +1018,12 @@ sentence above can be read as a claim to the contrary:
 
 **Boundaries, stated honestly.**
 
-* The queues are authored as infrastructure-as-code and statically validated.
-  **No message has been sent through a provisioned queue.** Every figure in this
-  document is either quoted from a cited baseline line or arithmetic over declared
-  widths; none is an observation of a running system, and no throughput, latency or
-  ordering behaviour has been measured.
+* The twelve SQS resources are authored as infrastructure-as-code and the module has
+  been statically validated; the authorization/account/reference consumers are not
+  authored. **No application message has been sent through these queues.** Every
+  figure in this document is either quoted from a cited baseline line or arithmetic
+  over declared widths; none is an observation of a running messaging flow, and no
+  throughput, latency or ordering behaviour has been measured.
 * The **external point-of-sale authorizer that produces authorization requests is
   not supplied by the baseline.** Only a test stub exists, and building a real
   producer is not in scope. The practical consequence is asymmetric confidence: the
@@ -976,10 +1039,12 @@ sentence above can be read as a claim to the contrary:
   one, and nothing in this document retires, replaces or deprecates the existing
   messaging arrangement.
 * The three known baseline defects are **not** subjects of this document and are
-  not fixed in place. They are registered in
-  `docs/architecture/cobol-to-service-traceability.md`. The one behavioural
-  divergence this document does introduce — closing the lost-reply window with an
-  outbox — is registered in the same place, and is implemented in the target only.
+  not fixed in place. They must be registered in the contracted
+  `docs/architecture/cobol-to-service-traceability.md`. The two
+  intentional messaging divergences specified here — replacing the authorization
+  loss windows with delete-on-success plus an outbox, and enforcing exactly 500
+  messages rather than the observed 501 — must be registered there when their
+  application code is authored. Neither is implemented at this checkpoint.
 * Every citation above is a **read**. Nothing under [`app/`](../../app),
   [`tests/`](../../tests) or `scripts/` is modified by this document or by the work
   it specifies.
@@ -988,23 +1053,17 @@ sentence above can be read as a claim to the contrary:
 
 ## Related documents
 
-**A linked row exists; a code-span row does not exist yet.** Several of the nine
-documents in this folder are authored at later indexes of the same plan, so their
-paths appear below — and everywhere above — as plain code spans rather than as
-links, per the Markdown convention in
-[`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md). Each
-becomes a link when the file it names exists, which lets a reader tell a written
-document from a contracted one without clicking.
+All related documents are present and linked.
 
 | Document | What it covers that this one does not |
 |---|---|
 | [`service-catalog.md`](service-catalog.md) | The naming authority: which service owns each queue flow, and the responsibilities and dependency edges behind that ownership |
 | [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Where the payload lands: the `authorization` schema's tables, the packed-to-`NUMERIC` derivation, the outbox row, and the full money invariant |
-| `docs/architecture/context-and-container-diagrams.md` | Where the queues sit in the current-state and target-state architecture |
-| `docs/architecture/batch-orchestration.md` | The batch chain, which is scheduled rather than message-driven, and the purge job that bounds pending-authorization retention |
-| `docs/architecture/security-and-identity.md` | Queue encryption, the task roles that grant send and receive, and the identity-context mapping noted at `COPAUA0C.cbl` L754 |
-| `docs/architecture/observability.md` | Logs, metrics, traces and alarms, including where the error-sink records land and how the subsystem enumeration is mapped |
-| `docs/architecture/cobol-to-service-traceability.md` | The program-by-program matrix and the authoritative register of every documented divergence, including the closed lost-reply window |
+| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | Where the queues sit in the current-state and target-state architecture |
+| [`batch-orchestration.md`](batch-orchestration.md) | The batch chain, which is scheduled rather than message-driven, and the purge job that bounds pending-authorization retention |
+| [`security-and-identity.md`](security-and-identity.md) | Queue encryption, the task roles that grant send and receive, and the identity-context mapping noted at `COPAUA0C.cbl` L754 |
+| [`observability.md`](observability.md) | Logs, metrics, traces and alarms, including where the error-sink records land and how the subsystem enumeration is mapped |
+| [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) | The program-by-program matrix and the authoritative register of every documented divergence, including the closed lost-reply window |
 | [`design-token-reference.md`](design-token-reference.md) | The presentation-layer mapping from mapsets to screen routes and tokens |
-| `docs/adr/ADR-004-messaging.md` | The decision record for the transport choice, which also records the expiry-gap resolution |
+| [`../adr/ADR-004-messaging.md`](../adr/ADR-004-messaging.md) | The decision record for the transport choice, which also records the expiry-gap resolution |
 | [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows |

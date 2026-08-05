@@ -4,106 +4,69 @@
 # Purpose:
 #   The dev profile overlay for the CardDemo auth bounded context, the migration
 #   target of COBOL programs COSGN00C and COUSR00C through COUSR03C. It
-#   overrides VALUES ONLY, on keys whose shapes application.yml beside it
-#   already owns, and it introduces no key that is absent there. Six keys are
-#   set, across three of the four axes the profiles are permitted to vary: the
-#   log levels, the Hikari pool sizing and the actuator exposure breadth. The
-#   fourth permitted axis, the Flyway clean flag, is deliberately absent from
-#   this file -- clean-disabled belongs to application-prod.yml, and setting
-#   nothing here leaves the base file's behaviour in place, which is the
+#   overrides VALUES ONLY, on keys application.yml beside it already declares,
+#   and introduces no key that is absent there. Six keys are set across three of
+#   the four axes the profiles may vary: log levels, Hikari pool sizing and
+#   actuator exposure breadth. The fourth axis, the Flyway clean flag, is
+#   deliberately absent -- clean-disabled belongs to application-prod.yml, and
+#   setting nothing here leaves the base behaviour in place, which is the
 #   intended outcome for dev.
 #
-#   Nothing below names an endpoint, an identifier or a credential, and nothing
-#   below supplies a working default for one. Every such value stays an
-#   unresolved placeholder in application.yml and is injected by the platform,
-#   so this overlay cannot point a build at another environment's data.
+#   Nothing below names an endpoint, identifier or credential, or supplies a
+#   working default for one. Every such value stays an unresolved placeholder in
+#   application.yml and is injected by the platform, so this overlay cannot
+#   point a build at another environment's data.
 #
-# WHY (non-obvious design decisions):
-#   1. Trade-offs: three loggers drop to DEBUG and the three beside them
-#      deliberately do not, because two of those three emit credential-adjacent
-#      material at DEBUG. See logging.level.
-#   2. Refactoring Rationale: the pool sizing has no baseline value to carry
-#      forward, because the record this context migrates was reached through a
-#      single VSAM string. See spring.datasource.hikari.
-#   3. Trade-offs: four diagnostic endpoints are published that no other
-#      profile publishes, one of which can rewrite a log level at runtime, and
-#      the four the base file already publishes are restated rather than added
-#      to. See management.endpoints.web.exposure.include.
-#   4. Assumptions: topology is identical in every environment and this file
-#      varies values alone. See the file-wide contract below.
-#   5. Trade-offs: an absent value stops startup instead of resolving to a
-#      local default. See the file-wide contract below.
+#   Each key below carries the rationale for its own value; the file-wide
+#   constraints the whole overlay is held to are stated once immediately after
+#   this header.
 # =============================================================================
 
-# WHAT: the file-wide contract this overlay holds to -- the axes it is permitted
-#       to vary and the axes it must leave alone. It is stated once here rather
-#       than repeated on each key, and it governs the whole file rather than the
-#       key that happens to follow it.
-# WHY : (1) Assumptions: this profile varies values on three axes and nothing
-#       else. It does not vary service topology -- the listener port, the TLS
-#       terms on that listener and the springdoc paths all stay as
-#       application.yml sets them. It does not vary route structure, so every
-#       path a request can reach is the same path in both environments. It does
-#       not vary schema ownership: auth stays the single schema this context
-#       owns, because app/cpy/CSUSR01Y.cpy is the single 80-byte baseline record
-#       it migrates, and neither the Flyway schema list nor the connection
-#       search_path is restated here. It does not vary the identity mechanism,
-#       which stays the Cognito JWT resource server. It does not vary queue
-#       usage, because this context consumes no queue at all. It does not vary
-#       the datastore type, which stays PostgreSQL. The consequence is the whole
-#       point of the constraint: a defect reproduced in dev is reproducible in
-#       prod, because the only difference between the two environments is the
-#       value of a handful of keys, so a diagnosis that holds in one holds in
-#       the other.
-#       (2) Trade-offs: this overlay carries no datasource URL, no database
-#       credential, no Cognito issuer, no user pool or app client identifier and
-#       no region, and it supplies no stand-in for any of them. Startup
-#       therefore fails on the unresolved placeholder in application.yml when
-#       the platform has not supplied a value. That failure is accepted over a
-#       loopback database URL of the kind a dev profile conventionally carries,
-#       which would let the process start and then read or write whichever
-#       database the machine it started on happened to reach. A wrong endpoint
-#       that resolves presents as a working service, which is the harder of the
-#       two faults to notice.
-#       (3) Assumptions: the active profile and every value named above arrive
-#       as environment variables that the task definition injects from
-#       Parameter Store and Secrets Manager, which relaxed environment binding
-#       maps onto the keys application.yml declares. The service image bakes in
-#       neither an endpoint nor -Dspring.profiles.active, so selecting dev is a
-#       deployment act rather than a property of the image -- which is what
-#       makes one image runnable in both environments.
+# Assumptions: this profile varies values on three axes and nothing else. It
+#       does not vary service topology, route structure, schema ownership, the
+#       identity mechanism, queue usage or the datastore type -- the listener
+#       port and its TLS terms, the springdoc paths, the auth schema list and
+#       the connection search_path all stay as application.yml sets them. The
+#       consequence is the point of the constraint: a defect reproduced in dev
+#       is reproducible in prod, because the only difference between the
+#       environments is the value of a handful of keys.
+# Trade-offs: this overlay carries no datasource URL, database credential,
+#       Cognito issuer, pool or app client identifier or region, and supplies no
+#       stand-in for any, so startup fails on the unresolved placeholder when
+#       the platform supplies nothing. That is accepted over the loopback URL a
+#       dev profile conventionally carries, which would let the process start
+#       and then read or write whichever database the machine it started on
+#       happened to reach: a wrong endpoint that resolves presents as a working
+#       service, which is the harder fault to notice.
+# Assumptions: the active profile and every value named above arrive as
+#       environment variables injected from Parameter Store and Secrets
+#       Manager. The image bakes in neither an endpoint nor
+#       -Dspring.profiles.active, so selecting dev is a deployment act rather
+#       than a property of the image -- which is what makes one image runnable
+#       in both environments.
 
 logging:
   level:
-    # Trade-offs: these three loggers drop to DEBUG. At DEBUG com.carddemo, the
-    # application's own package root, emits per-request handler and mapper
-    # detail; org.flywaydb names each migration it resolves and applies rather
-    # than only its summary line; and org.hibernate.SQL prints the statement
-    # behind every repository call. Together they turn a failed sign-on from a
-    # stack trace into a readable sequence. The cost is volume, and it is not a
-    # fixed cost: each request adds a line per statement it issues, so the
-    # output grows with the work the request does. At production request rates
-    # that dominates the log group's ingestion and retention and buries the WARN
-    # and ERROR lines an operator pages on, which is why this setting lives in
-    # this file and not in the base one.
+    # Trade-offs: these three drop to DEBUG, turning a failed sign-on from a
+    # stack trace into a readable sequence of handler, migration and statement
+    # lines. The cost is not fixed -- each request adds a line per statement it
+    # issues -- so at production rates the output dominates log ingestion and
+    # buries the WARN and ERROR lines an operator pages on. Hence this file
+    # rather than the base one.
     #
-    # Assumptions: org.hibernate.SQL is safe to lower here and the logger next
-    # to it is not. This one emits parameterised statements with the values
-    # still as placeholders, so it discloses statement shape; the bound values
-    # travel on org.hibernate.orm.jdbc.bind, which application.yml pins at WARN
-    # and states that neither profile may lower. That pin and the one on
-    # org.springframework.security are honoured here by omission -- this file
-    # restates neither key, so both keep the base level, and DEBUG never reaches
-    # the loggers that would print the eight-character user identifier, a row's
-    # pool subject reference, or a token's claims.
+    # Assumptions: org.hibernate.SQL is safe to lower and the logger beside it
+    # is not. It emits parameterised statements with values still as
+    # placeholders; the bound values travel on org.hibernate.orm.jdbc.bind,
+    # which application.yml pins at WARN. That pin and the one on
+    # org.springframework.security are honoured here by omission -- neither key
+    # is restated -- so DEBUG never reaches the loggers that would print the
+    # eight-character user identifier, a row's pool subject reference, or a
+    # token's claims.
     #
-    # Alternatives Considered: setting root to DEBUG, which asks for the same
-    # detail in one line instead of three. Rejected because root also lowers
-    # every framework package that neither this service nor its diagnosis owns
-    # -- container startup, the autoconfiguration report, pool internals -- and
-    # the lines worth reading end up a minority of the output, which defeats the
-    # reason for lowering a level at all. Naming three loggers keeps the volume
-    # attributable to the three things being diagnosed.
+    # Alternatives Considered: root at DEBUG, which asks for the same detail in
+    # one line instead of three. Rejected because root also lowers every
+    # framework package neither this service nor its diagnosis owns, leaving the
+    # lines worth reading a minority of the output.
     com.carddemo: DEBUG
     org.flywaydb: DEBUG
     org.hibernate.SQL: DEBUG
@@ -111,41 +74,30 @@ logging:
 spring:
   datasource:
     hikari:
-      # Refactoring Rationale: there is no baseline number to carry forward into
-      # maximum-pool-size or minimum-idle below, which is why a bare figure here
-      # would look arbitrary and is not. The record this context migrates was
-      # reached through a CICS file definition that app/csd/CARDDEMO.CSD L91
-      # declares with STRINGS(1) on FILE(USRSEC): one VSAM string, so every
-      # sign-on and every user-maintenance request in the baseline serialised
-      # through a concurrency ceiling of exactly one. Pool sizing is therefore a
-      # degree of freedom the migration introduces rather than a tunable it
-      # inherits. Any value above 1 already exceeds what the baseline could do,
-      # so the number has to be justified by what the target environment can
-      # afford rather than by transcribing what the source did -- and this file
-      # is where that judgement belongs, because the affordable number differs
-      # by environment while the base value stays the conservative one.
+      # Refactoring Rationale: there is no baseline number to carry forward, so
+      # a bare figure here would look arbitrary and is not.
+      # app/csd/CARDDEMO.CSD L91 declares FILE(USRSEC) with STRINGS(1) -- one
+      # VSAM string -- so every baseline sign-on serialised through a
+      # concurrency ceiling of exactly one. Any value above 1 already exceeds
+      # what the baseline could do, so the number is justified by what the
+      # environment can afford, and that differs per environment while the base
+      # value stays conservative.
       #
-      # Assumptions: dev capacity is sized independently of prod, and the dev
-      # cluster is provisioned with a minimum capacity of zero so that it pauses
-      # while idle. Aurora pauses only while no client connection initiated by
-      # user activity exists, so a pool holding a minimum number of idle
-      # connections open would keep compute capacity awake for the entire time
-      # the environment sat unused: the paused state would never be reached, and
-      # the reason for provisioning a zero minimum would be cancelled by this
-      # file. A minimum-idle floor of zero lets the pool drain to nothing and
-      # lets the cluster reach the state it was configured for.
+      # Assumptions: the dev cluster is provisioned with a minimum capacity of
+      # zero so it pauses while idle, and Aurora pauses only while no
+      # user-initiated connection exists. A pool holding idle connections open
+      # would keep capacity awake for the whole time the environment sat unused,
+      # cancelling the reason for provisioning a zero minimum.
       #
-      # Trade-offs: draining to zero means the next caller pays a connection
-      # handshake, and if the cluster has also paused it pays the resume too,
-      # which takes on the order of fifteen seconds. That is exactly why
-      # connection-timeout is NOT restated below the base file's thirty seconds:
-      # the resume has to fit inside the first caller's wait, and shortening
-      # that wait in the one profile whose cluster actually pauses would fail
-      # precisely the request that triggers the resume. The maximum-pool-size
-      # ceiling of five is sized for one developer plus this module's own
-      # repository integration test, not for concurrent traffic; a burst in dev
-      # queues on the pool rather than widening it, and a queue is visible in
-      # the pool's own metrics where a pool wide enough to exhaust a small
+      # Trade-offs: draining to zero means the next caller pays a handshake,
+      # plus a resume of roughly fifteen seconds if the cluster also paused.
+      # That is why connection-timeout is NOT restated below the base file's
+      # thirty seconds -- the resume must fit inside the first caller's wait, and
+      # shortening it in the one profile whose cluster actually pauses would fail
+      # precisely the request that triggers the resume. The ceiling of five is
+      # sized for one developer plus this module's repository integration test,
+      # so a burst queues on the pool rather than widening it; a queue is visible
+      # in the pool's own metrics where a pool wide enough to exhaust a small
       # cluster's connection budget is not.
       maximum-pool-size: 5
       minimum-idle: 0
@@ -154,19 +106,15 @@ management:
   endpoints:
     web:
       exposure:
-        # Assumptions: the four endpoint ids application.yml already publishes
-        # are RESTATED in the list below rather than added to, and that is
-        # load-bearing rather than redundant. This property binds as a Set, and
-        # a profile does not merge a collection into the value it inherits -- it
-        # replaces it -- so a list here naming only the four new ids would
-        # remove health. health is the exact endpoint the load balancer target
-        # group and this service's container HEALTHCHECK both poll, and neither
-        # can present a JWT, so losing it would deregister every task and fail
-        # container liveness in the same moment, in the very environment where a
-        # change is meant to be tested before it reaches prod. Nothing here
-        # alters that path: base-path stays /actuator, the id stays health, and
-        # which principals may reach the other endpoints is still decided in
-        # this service's SecurityConfig rather than by this key.
+        # Assumptions: the four ids application.yml already publishes are
+        # RESTATED below rather than added to, and that is load-bearing. This
+        # property binds as a Set, and a profile replaces an inherited
+        # collection rather than merging into it, so a list naming only the four
+        # new ids would remove health -- the endpoint the load balancer target
+        # group and the container HEALTHCHECK both poll, neither of which can
+        # present a JWT. Losing it would deregister every task and fail
+        # container liveness at once. Which principals may reach the other
+        # endpoints is still decided in SecurityConfig, not by this key.
         #
         # Trade-offs: the four added ids are the ones no other profile
         # publishes, and each gives away something nameable. env and configprops
@@ -176,18 +124,39 @@ management:
         # leaks is the deployment's shape rather than its contents, and that
         # default is one further property away from being removed. flyway
         # reports the migration history, which states the version the auth
-        # schema stands at. loggers is the sharpest of the four: it carries a
-        # write operation, so whoever reaches it can raise
-        # org.hibernate.orm.jdbc.bind or org.springframework.security at runtime
-        # and defeat the two pins the logging block above honours by omission,
-        # turning a read-only diagnostic surface into a way to make the process
-        # log identity. In an internet-adjacent environment that is a
-        # configuration disclosure plus a runtime path to credential-adjacent
-        # logging, reachable without a code change or a deployment. In a
-        # single-developer environment behind a private load balancer it is the
-        # difference between diagnosing a binding failure on the next request
-        # and redeploying to add a log line. The setting is confined to this
-        # file for that reason.
+        # schema stands at.
+        #
+        # Refactoring Rationale: `loggers` was on this list and has been REMOVED,
+        # and it is the one id whose removal changes a capability rather than a
+        # disclosure. Every other id here is read-only; `loggers` carries a WRITE
+        # operation, so whoever reaches it can raise
+        # org.hibernate.orm.jdbc.bind or org.springframework.security at run time
+        # and defeat the level pins those categories carry -- turning a read-only
+        # diagnostic surface into a way to make a running process log identity
+        # material, with no code change, no deployment and no review. Two facts
+        # about this service make that decisive rather than theoretical. It is the
+        # SIGN-ON context, so the categories a caller could raise sit directly on
+        # the credential path. And the health group beneath this list is
+        # deliberately reachable without a token, because the load balancer polls
+        # it uncredentialed -- so the actuator base path is demonstrably reachable
+        # by something holding no credential, and an exposure list is the only
+        # thing that decides which ids under it answer.
+        #
+        # Refactoring Rationale: the reasoning this replaces weighed an
+        # internet-adjacent environment against "a single-developer environment
+        # behind a private load balancer", and concluded the convenience won for
+        # dev. The flaw is that a profile is a runtime choice, not a topology: the
+        # same image with the same profile can be activated anywhere, so the
+        # premise that made the trade acceptable is not something this file can
+        # assert. A capability whose safety depends on where it happens to run is
+        # not confined by being written in a dev file.
+        #
+        # Trade-offs: what is given up is raising a log level on a running task
+        # without redeploying. The compensating path is a task restart with an
+        # overridden level -- every service reads its levels from configuration and
+        # the platform can pass an override at task start -- which costs one
+        # rolling replacement and leaves an audit record of who changed what,
+        # which the write endpoint does not.
         #
         # Alternatives Considered: also publishing heapdump and threaddump,
         # which are the conventional next two on a development profile.
@@ -199,4 +168,8 @@ management:
         # and conditions were rejected on the narrower ground that nothing in
         # this service's diagnosis needs them, and an endpoint published without
         # a named use is only surface.
-        include: health,info,metrics,prometheus,env,configprops,loggers,flyway
+        # Assumptions: every id below is READ-ONLY. That is the property this list
+        # is now chosen for, and it is the one a reviewer can check mechanically:
+        # an id that carries a write operation does not belong here whatever the
+        # profile, and `loggers` was the only one that did.
+        include: health,info,metrics,prometheus,env,configprops,flyway

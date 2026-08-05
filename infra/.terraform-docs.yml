@@ -19,21 +19,17 @@
 #   descriptions out of the HCL and into the README, so the two halves cannot
 #   disagree without the gate noticing.
 #
-#   State at this checkpoint, stated because the paragraph above describes a
-#   working gate and this file is authored ahead of the tree it governs:
-#     - NO README.md exists in any Terraform directory yet. They are a later
-#       deliverable of the same plan, so `--output-check` currently FAILS for
-#       want of anything to compare against, and the regenerate loop below has
-#       nothing to inject into. That is the expected state of a foundation, not
-#       a defect in this configuration.
-#     - Neither does .github/workflows/infra-ci.yml, so the "in CI" half of the
-#       drift gate is a contract rather than a running step. The check runs
-#       today only where an author runs it.
-#     - The module catalogue this migration plans is SIXTEEN modules; FIFTEEN
-#       module directories exist, so the traversal currently covers EIGHTEEN
-#       directories of a planned nineteen. infra/modules/step-functions-batch is
-#       the sixteenth and is authored at a later index of the same plan. The
-#       loops below iterate a glob, so nothing here changes when it lands.
+#   Current state:
+#     - All sixteen module READMEs, both environment-root READMEs and
+#       infra/bootstrap/README.md exist, so the shared traversal covers nineteen
+#       directories and every one of them has a generated region to inject into.
+#     - Each of those regions is regenerated from the directory's own `.tf` files
+#       whenever its inputs or outputs change, so `--output-check` passes across
+#       all nineteen. A hand-edited table inside the markers is the failure this
+#       gate exists to catch, and it presents as a non-zero exit rather than as a
+#       silent rewrite.
+#     - .github/workflows/infra-ci.yml runs the check with terraform-docs 0.20.0
+#       and fails rather than rewriting a stale document.
 #
 #   What this file can and cannot decide, recorded so a green run is not read as
 #   a well-documented tree: it decides whether a README's generated region still
@@ -114,9 +110,8 @@
 #   secrets, ecr, aurora-postgresql, ecs-cluster, ecs-service, alb,
 #   api-gateway-http, cognito, sqs, step-functions-batch,
 #   eventbridge-scheduler, s3-datasets, cloudfront-spa and observability --
-#   sixteen modules planned, of which fifteen exist at this checkpoint;
-#   step-functions-batch is named here as part of the catalogue and is authored
-#   at a later index of the same plan.
+#   sixteen modules, all present, so the two loops below reach nineteen
+#   directories in total.
 #   Both loops require the terraform-docs release named in the version block
 #   below; any other release aborts before producing a document, for the reason
 #   recorded there.
@@ -134,11 +129,13 @@
 #
 #   Both loops iterate a GLOB, never a hand-written list of paths. That
 #   distinction is the whole safety property, and it is load-bearing rather than
-#   theoretical here: the sixteenth module and any third environment are picked
-#   up by infra/modules/*/ and infra/envs/*/ the moment their directories exist,
-#   with no edit here and no edit in CI. Because the catalogue is not yet
-#   complete, a hand-written list would already be a list that goes stale. The
-#   hazard being avoided is ENUMERATION, and a glob is not an enumeration.
+#   theoretical here: it has already been exercised once. The sixteenth module
+#   directory, infra/modules/step-functions-batch, was absent when this file was
+#   written and has since landed; infra/modules/*/ picked it up with no edit here
+#   and no edit in CI, whereas the hand-written list the alternative would have
+#   required was already stale by then and would have excluded it silently. Any
+#   third environment is picked up by infra/envs/*/ the same way. The hazard being
+#   avoided is ENUMERATION, and a glob is not an enumeration.
 #
 #   - Alternatives Considered: the CI loop is CHECK-ONLY and must never write.
 #     An auto-fix arrangement -- regenerate in CI and commit the result back --
@@ -208,9 +205,6 @@
 #       harder to spot.
 formatter: "markdown table"
 
-# WHAT: admit exactly one terraform-docs release, the one this configuration was
-#       verified against. The CI workflow that runs the check loop must install
-#       this same version, or every invocation aborts before producing anything.
 # WHY : Assumptions: a drift check is a byte comparison, so the renderer's own
 #       output shape is part of the contract, not an incidental detail. This is
 #       the same reasoning the repository applies when it pins its test
@@ -276,8 +270,6 @@ recursive:
   path: modules
   include-main: false
 
-# WHAT: emit exactly these seven sections inside the generated region, and no
-#       others.
 # WHY : Assumptions: each of the seven answers a question a consumer of a
 #       reusable module actually asks, and none of them can be answered from
 #       outside the HCL:
@@ -378,7 +370,6 @@ output:
     {{ .Content }}
     <!-- END_TF_DOCS -->
 
-# WHAT: sort rows, grouping required inputs ahead of optional ones.
 # WHY : Trade-offs: a stable order is the precondition for the whole gate.
 #       Row order feeds a byte comparison, so an unstable order would report
 #       drift on runs where nothing changed, and a gate that cries wolf trains
@@ -453,20 +444,44 @@ settings:
   # WHY : Assumptions: .terraform.lock.hcl is deliberately TRACKED in version
   #       control, unlike .terraform/ and the state files, because it is the
   #       provider-checksum lock that makes terraform init reproducible. Reading
-  #       it here means the Requirements table reports the provider version
-  #       actually locked for the directory rather than only the range its
-  #       constraint permits, so the generated document and a fresh init agree.
-  #       Assumptions: a lock exists only in a ROOT, and there are exactly three --
-  #       infra/bootstrap/.terraform.lock.hcl, infra/envs/dev/.terraform.lock.hcl
+  #       it here means the PROVIDERS table reports the provider version actually
+  #       locked for the directory rather than only the range its constraint
+  #       permits, so the generated document and a fresh init agree. It does not
+  #       change the Requirements table, which reports the constraint either way.
+  #       Assumptions: exactly THREE locks are COMMITTED, and all three are roots
+  #       -- infra/bootstrap/.terraform.lock.hcl, infra/envs/dev/.terraform.lock.hcl
   #       and infra/envs/prod/.terraform.lock.hcl, each written by a real
-  #       `terraform init` on the validated toolchain and committed. Terraform
-  #       writes no lock for a child module, because a module does not select a
+  #       `terraform init` on the validated toolchain. A root's init writes no
+  #       lock into the child modules it calls, because a module does not select a
   #       provider version -- the root that calls it does. This setting therefore
-  #       enriches the three root documents and is inert for the sixteen module
-  #       documents, which continue to report the constraint from versions.tf; it
-  #       is enabled globally rather than per directory so that a fourth root
-  #       added later is documented against its lock without a configuration
-  #       change here.
+  #       enriches the three root documents; it is enabled globally rather than
+  #       per directory so that a fourth root added later is documented against
+  #       its lock without a configuration change here.
+  # WHY : Refactoring Rationale: this comment previously went one step further and
+  #       claimed the setting "is inert for the sixteen module documents, which
+  #       continue to report the constraint from versions.tf". That does not hold,
+  #       and the correction is measured rather than reasoned. Running
+  #       `terraform init -backend=false` directly IN a module directory -- which
+  #       is the documented way to make `terraform validate` work there, and so a
+  #       routine local action rather than a mistake -- leaves a lock in that
+  #       directory, and terraform-docs then reads it: rendered against
+  #       infra/modules/kms with such a lock present the Providers row reads
+  #       `6.57.1`, and with the same directory's lock removed it reads
+  #       `~> 6.56`. The setting is therefore inert only for a module directory
+  #       that has never been init'ed on its own.
+  #       Trade-offs: `lockfile: true` is kept regardless, and the consequence is
+  #       named instead of designed away. What it costs is that a module's
+  #       generated region can differ between two machines over an untracked file,
+  #       so `--output-check` can report drift that no committed change caused.
+  #       What it buys is that the three ROOT documents -- the only three a reader
+  #       consults to learn which provider release will actually be installed --
+  #       report the locked release rather than a range. Alternatives Considered:
+  #       setting it false to make every directory report only its constraint,
+  #       which would remove the discrepancy by removing the useful half; and
+  #       ignoring module locks per directory, which this configuration has no
+  #       expression for. Assumption for anyone running the drift gate: regenerate
+  #       and check from a clean checkout, or remove a module's own lock first, so
+  #       that a per-directory init cannot be mistaken for a contract change.
   lockfile: true
 
   # WHY : Trade-offs: with read-comments left at its default, a variable with

@@ -1,24 +1,6 @@
 /**
  * API request and response types of the CardDemo reporting and statement bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p>Every type in this package is declared as a Java 21 {@code record} carrying an explicit
  * constructor, and its component order and declared widths are read from the BMS symbolic
  * maps and the copybooks rather than chosen. That is how the 3270 field-length contract
@@ -110,8 +92,8 @@
  * {@code reporting} is dedicated to it, holds views rather than tables, and is owned in the
  * database by the {@code NOLOGIN} role {@code carddemo_reporting_owner} rather than by the login role
  * the service authenticates as. These types therefore describe read-only projections over
- * cross-schema views that other contexts populate -- views created by
- * {@code data-migration/sql/V1__reporting_views.sql} and reached under a database role holding
+ * cross-schema views that other contexts populate -- views created by a reporting-views
+ * migration under {@code data-migration/sql} and reached under a database role holding
  * {@code SELECT} on them alone; the ledger indexes those queries rely on belong
  * to transaction-service. So no type here carries a version marker for optimistic
  * concurrency, a creation or deletion payload, or an identifier a caller is expected to supply
@@ -135,10 +117,24 @@
  * {@code PageResponse<T>(List<T> items, String firstKey, String lastKey, boolean hasNext)} -
  * four components and one type parameter - where the two boundary keys and the more-to-come
  * flag are what the baseline kept in its communication area between screen turns. In this
- * context those keys carry the two columns a report or statement query orders by, the card
- * number at {@code app/cpy/CVTRA05Y.cpy} L15 and byte 262 and the processing timestamp at L17
- * and byte 304, so the envelope is not a generic convenience here but exactly the cursor those
- * two positions imply. What was wrong with declaring a local equivalent is concrete rather than
+ * context the position those keys mark is the two columns a report or statement query orders
+ * by, the card number at {@code app/cpy/CVTRA05Y.cpy} L15 and byte 262 and the processing
+ * timestamp at L17 and byte 304, so the envelope is not a generic convenience here but exactly
+ * the cursor those two positions imply.
+ *
+ * <p>Refactoring Rationale: those two columns are what the cursor MEANS and no longer what it
+ * CARRIES, and the distinction is a security one rather than a nicety. One of the two is a
+ * primary account number, and the baseline echoed its cursor to a 3270 terminal inside a closed
+ * CICS session whereas this context answers a browser across a public edge - so serialising the
+ * column pair into a response body would hand a client a card number and invite it back on the
+ * next request, where an edge access log could capture it. Both components are therefore tokens
+ * sealed by {@code com.carddemo.common.web.CursorToken}, which carries the ordered key pair
+ * inside a payload authenticated against the query and the requesting subject;
+ * {@code PageResponse} refuses a component that is not sealed, so the raw pair is not
+ * representable here at all. Every field-shape statement in this package still describes the key
+ * pair, because that is what a token opens to and what the repository predicate is built from.
+ *
+ * <p>What was wrong with declaring a local equivalent is concrete rather than
  * stylistic: the same envelope would then exist once per service, and transformation rule T2
  * exists to prevent exactly that, requiring one former {@code COPY} statement to become one
  * type import from the one package that owns the contract. Two copies of a browse cursor

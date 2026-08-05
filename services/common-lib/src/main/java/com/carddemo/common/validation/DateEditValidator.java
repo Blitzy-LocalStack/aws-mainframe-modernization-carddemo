@@ -179,10 +179,10 @@ import java.util.Set;
  * no stated reason, which is precisely what the rule forbids.</p>
  *
  * <p>Refactoring Rationale: what a uniform initialiser would have improved is readability, and what
- * it would have cost is the guarantee that a future arm added to a gate inherits that gate's own
- * default. Every arm of every gate in the baseline today terminates with an explicit marking, so no
- * reachable path observes the difference; the initialisers are the contract for the paths that do
- * not yet exist, and they are kept because that is the only thing they protect.</p>
+ * it would have cost is the guarantee that any arm added to a gate inherits that gate's own default.
+ * Every arm of every gate terminates with an explicit marking, so no reachable path observes the
+ * difference; the initialiser is the contract an added arm would inherit, and that inheritance is the
+ * only thing it protects.</p>
  *
  * <h2>A context object, and why it is nested</h2>
  *
@@ -1009,6 +1009,7 @@ public final class DateEditValidator {
         public boolean acceptable() {
             return severity == SEVERITY_VALID;
         }
+
     }
 
     /**
@@ -1069,7 +1070,6 @@ public final class DateEditValidator {
             Objects.requireNonNull(date, "date must not be null");
             Objects.requireNonNull(mask, "mask must not be null");
 
-            // WHAT: check the two transported numbers against the outcome that produced them.
             // WHY : Assumptions: the severity and the message number are held as components as well as
             //       being derivable from the outcome, because the baseline transports them as two
             //       separate four-character text fields and its callers read those fields rather than any
@@ -1096,6 +1096,37 @@ public final class DateEditValidator {
          */
         public boolean acceptable() {
             return severity == SEVERITY_VALID;
+        }
+
+        /**
+         * Renders this outcome for a log or a diagnostic without reproducing the date it echoed.
+         *
+         * <p>Refactoring Rationale: a record's generated rendering names every component, and two of
+         * this record's components are the submitted date and mask, echoed because the baseline result
+         * layout echoes them at {@code app/cbl/CSUTLDTC.cbl} lines 107 to 113. That echo belongs in
+         * {@link #render()}, which produces the 80-character result a caller asked for and hands it
+         * back to that caller. It does not belong in the rendering a logging framework reaches for
+         * automatically, because a date submitted to this service is frequently a date of birth -- the
+         * range test at {@code app/cbl/COACTUPC.cbl} line 1539 is exactly that -- and one interpolated
+         * result object would put it in a log with nobody having decided to.</p>
+         *
+         * <p>Alternatives Considered: dropping the two echoed components from the record so that the
+         * generated rendering is safe by construction. Rejected because the echo is part of the
+         * baseline layout {@link #render()} has to reproduce, so removing the components would break
+         * the contract this class exists to preserve. Overriding the rendering keeps the layout intact
+         * and closes the accidental path.</p>
+         *
+         * @return the outcome, its severity, its message number and its verdict, together with the
+         *     widths of the echoed date and mask; never the echoed values themselves
+         */
+        @Override
+        public String toString() {
+            return "LanguageEnvironmentResult[feedbackCode=" + feedbackCode
+                    + ", severity=" + severity
+                    + ", messageNumber=" + messageNumber
+                    + ", verdict=" + verdict
+                    + ", dateLength=" + date.length()
+                    + ", maskLength=" + mask.length() + ']';
         }
 
         /**
@@ -1146,7 +1177,6 @@ public final class DateEditValidator {
             rendered.append(' ');
             rendered.append(" ".repeat(TRAILING_FILLER_WIDTH));
 
-            // WHAT: assert the assembled width against the total the four declarations agree on.
             // WHY : Assumptions: the declared width is asserted rather than trusted. The layout is the
             //       one contract four baseline declarations agree on, and an arithmetic slip in the
             //       sequence above would produce a result that still reads correctly field by field while
@@ -1237,7 +1267,6 @@ public final class DateEditValidator {
             Objects.requireNonNull(fieldErrors, "fieldErrors must not be null");
             Objects.requireNonNull(languageEnvironment, "languageEnvironment must not be null");
 
-            // WHAT: defend the outcome against a caller that keeps a reference to the list it supplied.
             // WHY : Trade-offs: the list is copied and sealed rather than stored as supplied. The copy
             //       costs one allocation per edit. It is accepted because a record component is only as
             //       immutable as the object it references, and this list is the migrated form of a screen
@@ -1367,7 +1396,6 @@ public final class DateEditValidator {
             String centuryText =
                     rawYear.length() == YEAR_WIDTH ? rawYear.substring(0, COMPONENT_WIDTH) : "";
 
-            // WHAT: resolve every component's numeric value once, at construction.
             // WHY : Assumptions: the numeric values are resolved once here rather than at each reading,
             //       because the baseline reads them through numeric redefinitions laid over the very same
             //       bytes, so a component's value is whatever its bytes already are and cannot change
@@ -1598,7 +1626,6 @@ public final class DateEditValidator {
     public static DateEditResult validate(String fieldLabel, String date) {
         EditContext context = newContext(fieldLabel, date);
 
-        // WHAT: run all three component gates in sequence, whatever verdict each one reaches.
         // WHY : Assumptions: the first three gates are invoked unconditionally and in sequence because the
         //       baseline's short-circuit branches target each gate's own empty exit paragraph, and every
         //       one of those paragraphs falls straight through into the gate below it -- line 88 into line
@@ -1609,7 +1636,6 @@ public final class DateEditValidator {
         editMonth(context);
         editDay(context);
 
-        // WHAT: let gate four alone decide whether the chain reaches the service gate.
         // WHY : Assumptions: gate four reports whether the chain continues, and it is the only gate that
         //       can stop it. Three of its arms branch to the outer terminus at line 329 directly, at lines
         //       225, 240 and 270, and its closing checkpoint at lines 274 to 279 branches there too
@@ -1663,7 +1689,6 @@ public final class DateEditValidator {
         EditContext context = newContext(fieldLabel, date);
         LocalDate suppliedDate = toCalendarDate(context, date);
 
-        // WHAT: compare strictly, so a birth date equal to the supplied current date fails.
         // WHY : Assumptions: the comparison is strictly greater rather than greater-or-equal, reproducing
         //       line 350, so a date of birth equal to today fails. The baseline compares two day numbers it
         //       derives at lines 345 to 348 purely so that an ordinary relational operator can be used on
@@ -1704,7 +1729,6 @@ public final class DateEditValidator {
                     "year " + year + " is outside the four-digit domain " + MIN_YEAR + " to " + MAX_YEAR);
         }
 
-        // WHAT: select the divisor from the year-within-century component, then take one remainder.
         // WHY : Refactoring Rationale: the divisor, the quotient and the remainder are locals here. The
         //       baseline had no choice but to hoist all three into its includer's storage, at
         //       app/cbl/COACTUPC.cbl lines 152, 154 and 157, because a procedure-only copybook has no data
@@ -1742,8 +1766,17 @@ public final class DateEditValidator {
      * gate chain never reaches it in any case, since a century of zero is neither of the two centuries gate
      * one accepts.</p>
      *
+     * <p>Assumptions: a mask carrying literal separators is matched against them before any component
+     * is read, so a value of the right width whose separator positions hold anything else -- a slash,
+     * a letter, a digit -- is reported as {@link FeedbackCode#BAD_DATE_VALUE} rather than being
+     * sliced around as though the separators were present. That keeps this entry point and the
+     * gate-chain entry point at {@link #validate(String, String)}, whose accumulator applies the
+     * same rule, in agreement about which values
+     * match the mask, which they were not while the check was absent.</p>
+     *
      * @param date the date text to evaluate, whose width must match the mask: eight characters for
-     *     {@link #BASELINE_DATE_FORMAT_MASK} and ten for {@link #DATE_FORMAT_MASK}
+     *     {@link #BASELINE_DATE_FORMAT_MASK} and ten for {@link #DATE_FORMAT_MASK}, and whose
+     *     separator positions must hold {@link #MASK_SEPARATOR} when the mask declares one
      * @param mask the mask describing that text; a mask this method does not recognise yields
      *     {@link FeedbackCode#BAD_PIC_STRING} rather than an exception, because the baseline service
      *     declares a condition for exactly that case and returns it like any other feedback
@@ -1763,6 +1796,37 @@ public final class DateEditValidator {
         String dayText;
         if (DATE_FORMAT_MASK.equals(mask)) {
             requireWidth(date, MASKED_DATE_LENGTH, mask);
+
+            // WHY : Refactoring Rationale: this check was missing, and its absence made the two public
+            //       entry points of this class disagree about the same value. The components below are
+            //       sliced AROUND positions four and seven because the mask declares a hyphen at each,
+            //       and nothing established that either position actually held one -- so
+            //       "2024/02/29", and even "2024x02y29", were accepted here and reported as valid
+            //       dates, while newContext rejects exactly those values for lacking their
+            //       separators. One class cannot hold two answers about whether a value matches a
+            //       mask; a caller choosing between the two entry points would be choosing a verdict.
+            // WHY : Assumptions: the outcome is BAD_DATE_VALUE rather than BAD_PIC_STRING or
+            //       NON_NUMERIC_DATA, and the choice is between three plausible codes.
+            //       BAD_PIC_STRING is what an unrecognised MASK yields, and the mask here is one of
+            //       the two this method recognises -- attributing the fault to the mask would send a
+            //       reader to the wrong side of the pairing. NON_NUMERIC_DATA describes a component
+            //       holding something other than digits, and "2024/02/29" has three components that
+            //       are entirely digits, so that verdict would misdescribe the commonest instance of
+            //       this fault. What is wrong is the submitted VALUE measured against a valid mask,
+            //       which is precisely what BAD_DATE_VALUE reports, and its verdict text
+            //       "Datevalue error" reads correctly for a caller.
+            // WHY : Trade-offs: reported as feedback rather than raised, unlike the width check
+            //       immediately above. The width is a structural contract -- the service reads
+            //       components by offset, so a shorter text has no components to read at all -- while
+            //       a separator is content at a position that exists. Feedback is also what keeps
+            //       this method's contract intact: every judgement it makes about a recognised mask
+            //       is returned as an outcome, so a caller never has to catch an exception for one
+            //       kind of unacceptable date and read a return value for another.
+            if (date.charAt(MASK_FIRST_SEPARATOR_INDEX) != MASK_SEPARATOR
+                    || date.charAt(MASK_SECOND_SEPARATOR_INDEX) != MASK_SEPARATOR) {
+                return feedback(FeedbackCode.BAD_DATE_VALUE, date, mask);
+            }
+
             yearText = date.substring(PACKED_YEAR_START, PACKED_YEAR_END);
             monthText = date.substring(MASKED_MONTH_START, MASKED_MONTH_END);
             dayText = date.substring(MASKED_DAY_START, MASKED_DATE_LENGTH);
@@ -1772,7 +1836,6 @@ public final class DateEditValidator {
             monthText = date.substring(PACKED_MONTH_START, PACKED_MONTH_END);
             dayText = date.substring(PACKED_DAY_START, PACKED_DAY_END);
         } else {
-            // WHAT: report an unrecognised mask as an outcome, not as a raised failure.
             // WHY : Assumptions: an unrecognised mask is reported as feedback rather than raised, because
             //       the baseline service declares a condition for a mask it cannot interpret at
             //       app/cbl/CSUTLDTC.cbl line 68 and selects a verdict for it at lines 141 and 142. Raising
@@ -1796,7 +1859,6 @@ public final class DateEditValidator {
             return feedback(FeedbackCode.BAD_DATE_VALUE, date, mask);
         }
 
-        // WHAT: decline a well-formed date that falls below the supported calendar's inclusive floor.
         // WHY : Assumptions: the supported calendar has an inclusive lower bound and a date below it is
         //       reported as out of range rather than as malformed. The oracle suite pins the boundary from
         //       both sides -- its unit layer accepts the floor date and reports the day below it as an
@@ -1866,7 +1928,6 @@ public final class DateEditValidator {
             return;
         }
 
-        // WHAT: settle the month's domain and its digits in one comparison.
         // WHY : Assumptions: the baseline's two remaining arms are collapsed into one test here, and the
         //       collapse changes nothing a caller can observe. The baseline tests the domain first, at line
         //       111, against a condition declared over a numeric redefinition of two characters, and tests
@@ -1895,7 +1956,6 @@ public final class DateEditValidator {
      * @param context the accumulator to record this gate's verdict into
      */
     private static void editDay(EditContext context) {
-        // WHAT: pre-set the day marker ACCEPTABLE, the opposite of what the two gates above do.
         // WHY : Trade-offs: this pre-set assumes SUCCESS where gates one and two assume failure, and the
         //       opposite polarity is reproduced rather than aligned with them. No route through this gate
         //       observes the difference today, because every arm below ends in an explicit marking; the
@@ -1973,7 +2033,6 @@ public final class DateEditValidator {
             }
         }
 
-        // WHAT: report continuation from the three markers alone.
         // WHY : Assumptions: this is the checkpoint at lines 274 to 279 and it is the only true early exit
         //       in the whole chain. It tests the group-level aggregate condition, so it consults the three
         //       markers and deliberately not the caller-owned error switch, which the baseline declares
@@ -2002,7 +2061,6 @@ public final class DateEditValidator {
      * @param context the accumulator to record this gate's verdict into
      */
     private static void editDateLanguageEnvironment(EditContext context) {
-        // WHAT: submit the ten-character separated form to the service leaf.
         // WHY : Refactoring Rationale: the ten-character mask is used here where the baseline moves an
         //       eight-character one at line 291. Five of the six baseline call sites use ten characters and
         //       the service's own linkage declares ten, at app/cbl/CSUTLDTC.cbl lines 84 and 85, so the
@@ -2029,7 +2087,6 @@ public final class DateEditValidator {
             return;
         }
 
-        // WHAT: assemble the service message from the label and four fragments, in the source order.
         // WHY : Assumptions: the message is assembled from the label and four fragments in the order the
         //       assembly at lines 306 to 313 lists them -- the trimmed label, a severity fragment, the
         //       four-character severity, a message-code fragment and the four-character message number.
@@ -2069,7 +2126,6 @@ public final class DateEditValidator {
             return false;
         }
 
-        // WHAT: delegate to the one implementation of the rule, passing the whole year.
         // WHY : Trade-offs: the divisor selection needs the year-within-century value, which the baseline
         //       reads from a component it redefines separately at app/cpy/CSUTLDWY.cpy line 12, and this
         //       passes the whole year instead and lets isLeapYear reduce it. Reading that component here
@@ -2102,7 +2158,6 @@ public final class DateEditValidator {
     private static EditContext newContext(String fieldLabel, String date) {
         String label = normalizeLabel(fieldLabel);
 
-        // WHAT: decide the no-content case before any width case is considered.
         // WHY : Assumptions: the no-content case is decided before the width cases, using the same
         //       two-armed test the gates use per component, because a request can present an absent field
         //       as null or as an empty string while a terminal presents it as a run of pad characters. All
@@ -2129,12 +2184,31 @@ public final class DateEditValidator {
                     date.substring(MASKED_DAY_START, MASKED_DATE_LENGTH));
         }
 
+        // WHY : Refactoring Rationale: the two ways of arriving here are now reported separately. One
+        //       message covered both, so a ten-character value whose separators were wrong was told
+        //       that it "carries content at width 10" while the same sentence listed a ten-character
+        //       form as accepted -- a contradiction a reader has to decode. The separator case is now
+        //       named as itself, which also makes this rejection legible beside the BAD_DATE_VALUE
+        //       feedback evaluateWithLanguageEnvironment reports for the very same value. Neither
+        //       message carries any part of the date: the width and the mask are the whole diagnosis,
+        //       and the field one caller passes is a date of birth, which the shared record layout
+        //       classifies as sensitive at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy line 19.
+        if (date.length() == MASKED_DATE_LENGTH) {
+            throw new IllegalArgumentException(
+                    "a " + MASKED_DATE_LENGTH + "-character date must carry '" + MASK_SEPARATOR
+                            + "' at positions " + (MASK_FIRST_SEPARATOR_INDEX + 1) + " and "
+                            + (MASK_SECOND_SEPARATOR_INDEX + 1) + " to match " + DATE_FORMAT_MASK
+                            + ", and the supplied date carries something else at one of them");
+        }
+
         // WHY : Trade-offs: an unrecognised width is raised rather than reported as an unacceptable date.
         //       Reporting it would be gentler on the caller and was rejected, because the two accepted
         //       widths are both structural contracts -- one from the baseline's field layout, one from the
         //       service's linkage -- so a third width means the caller assembled the value wrongly, and
         //       attributing that to the user's input would send a field error for a fault the user cannot
-        //       correct.
+        //       correct. The separator case above is raised for the same reason: the map field the
+        //       baseline reads from carries its two hyphens as map literals, so a value reaching this
+        //       method without them was assembled by the caller rather than typed by a user.
         throw new IllegalArgumentException(
                 "date carries content at width " + date.length() + ", but only the "
                         + PACKED_DATE_LENGTH + "-character unseparated form and the "
@@ -2201,11 +2275,77 @@ public final class DateEditValidator {
                 || context.monthValue > MAX_VALID_MONTH
                 || context.dayValue < MIN_VALID_DAY
                 || context.dayValue > daysInMonth(context.yearValue, context.monthValue)) {
+            // WHY : Refactoring Rationale: the message described the submitted text and now describes
+            //       only its SHAPE. It previously interpolated the date itself, and the one caller
+            //       that reaches this method is the date-of-birth gate -- a field the shared record
+            //       layout classifies as sensitive, at CUST-DOB-YYYY-MM-DD in app/cpy/CVCUS01Y.cpy
+            //       line 19. An IllegalArgumentException message reaches a stack trace, and a stack
+            //       trace reaches a log aggregator and sometimes an error response, so a date of
+            //       birth was one unhandled exception away from a place it must not be. What an
+            //       operator needs in order to act is which component was unacceptable, and that is
+            //       what is reported: the fault is in the caller's ordering rather than in the
+            //       value's digits, so the digits add nothing to the diagnosis.
             throw new IllegalArgumentException(
                     "the date-of-birth test requires a date the general edit has already accepted, but "
-                            + describe(date) + " is not a well-formed calendar date");
+                            + describe(date) + " is not a well-formed calendar date: "
+                            + componentVerdicts(context));
         }
         return LocalDate.of(context.yearValue, context.monthValue, context.dayValue);
+    }
+
+    /**
+     * Describes which of the three date components an accumulator holds are unacceptable.
+     *
+     * <p>Assumptions: this reports a VERDICT per component and never a component's value. The month
+     * and the day are bounded small integers whose acceptable ranges are public, so naming which one
+     * is out of range identifies the fault; naming the value would additionally disclose part of a
+     * field the layout classifies as sensitive, and would identify nothing the range does not.</p>
+     *
+     * @param context the accumulator whose three component values are to be judged
+     * @return a comma-separated rendering naming each unacceptable component and the constraint it
+     *     failed, or a phrase stating that each component is individually acceptable -- which happens
+     *     when only the combination is invalid, a day of 31 in a 30-day month being the instance
+     */
+    private static String componentVerdicts(EditContext context) {
+        StringBuilder verdicts = new StringBuilder();
+        if (context.yearValue == NOT_NUMERIC) {
+            verdicts.append("the year is not four digits");
+        }
+        if (context.monthValue < MIN_VALID_MONTH || context.monthValue > MAX_VALID_MONTH) {
+            appendVerdict(verdicts, "the month is outside " + MIN_VALID_MONTH + " to " + MAX_VALID_MONTH);
+        }
+        if (context.dayValue < MIN_VALID_DAY || context.dayValue > MAX_VALID_DAY) {
+            appendVerdict(verdicts, "the day is outside " + MIN_VALID_DAY + " to " + MAX_VALID_DAY);
+        } else if (context.yearValue != NOT_NUMERIC
+                && context.monthValue >= MIN_VALID_MONTH
+                && context.monthValue <= MAX_VALID_MONTH
+                && context.dayValue > daysInMonth(context.yearValue, context.monthValue)) {
+            appendVerdict(verdicts, "the day exceeds the "
+                    + daysInMonth(context.yearValue, context.monthValue)
+                    + " days that month of that year holds");
+        }
+
+        return verdicts.isEmpty()
+                ? "each component is individually within range, so the combination is what fails"
+                : verdicts.toString();
+    }
+
+    /**
+     * Appends one verdict to a rendering, separating it from any already present.
+     *
+     * <p>Trade-offs: a separator is applied conditionally here rather than every verdict being
+     * collected into a list and joined. The list form reads better in isolation and was rejected
+     * because it allocates a collection on a path that exists only to describe a caller fault, and
+     * because this helper keeps the three call sites above one line each.</p>
+     *
+     * @param verdicts the rendering to append to, appended in place
+     * @param verdict the verdict text to add
+     */
+    private static void appendVerdict(StringBuilder verdicts, String verdict) {
+        if (!verdicts.isEmpty()) {
+            verdicts.append(", ");
+        }
+        verdicts.append(verdict);
     }
 
     /**
@@ -2271,7 +2411,6 @@ public final class DateEditValidator {
         for (int index = 0; index < width; index++) {
             char digit = text.charAt(index);
 
-            // WHAT: restrict the accepted domain to the ten ASCII digits and to no other digit character.
             // WHY : Assumptions: only the ten ASCII digits count, so the platform's general digit test is
             //       deliberately not used -- it accepts digits from every script the character set defines,
             //       and a component holding one of those would be reported numeric here while the baseline's
@@ -2333,13 +2472,26 @@ public final class DateEditValidator {
     }
 
     /**
-     * Describes a supplied date text for a failure message without letting a null read as the word null.
+     * Describes a supplied date text for a failure message by its width rather than by its content.
      *
-     * @param date the date text as supplied, which may be {@code null}
-     * @return a quoted rendering of the text, or a phrase naming its absence
+     * <p>Refactoring Rationale: this rendered the text inside quotation marks and now renders only its
+     * width. Its one caller is {@link #toCalendarDate(EditContext, String)}, which the date-of-birth gate
+     * reaches, and the shared record layout classifies that field as sensitive at
+     * {@code CUST-DOB-YYYY-MM-DD} in {@code app/cpy/CVCUS01Y.cpy} line 19. The rendering travels inside an
+     * {@link IllegalArgumentException} message, so every stack trace that fault produced carried a date of
+     * birth into a log aggregator and, on an unhandled path, into an error response.</p>
+     *
+     * <p>Trade-offs: an operator reading the message alone can no longer see which value was rejected and
+     * has to correlate with the request that carried it. That is accepted because the width plus the
+     * per-component verdicts composed alongside it already identify the fault -- the caller reached a gate
+     * out of order, which the value's digits do not help diagnose -- and because the alternative places a
+     * date of birth in a durable, widely readable place.</p>
+     *
+     * @param date the date text as supplied, which may be {@code null}; read only for its length
+     * @return a phrase naming the text's width, or a phrase naming its absence; never any part of the text
      */
     private static String describe(String date) {
-        return date == null ? "an absent date" : "\"" + date + "\"";
+        return date == null ? "an absent date" : "the supplied " + date.length() + "-character date";
     }
 
     /**
@@ -2350,16 +2502,25 @@ public final class DateEditValidator {
      * a field of declared width, which pads or reduces the value before the call; a Java caller passes a
      * string of whatever length it holds, so the check has to be made explicitly.</p>
      *
-     * @param date the date text to measure
+     * <p>Refactoring Rationale: the failure message quoted the measured text and now reports only the
+     * expected width and the observed width. Both public entry points pass a caller-supplied date through
+     * here, and one of them is the date-of-birth gate over a field the shared record layout classifies as
+     * sensitive at {@code CUST-DOB-YYYY-MM-DD} in {@code app/cpy/CVCUS01Y.cpy} line 19; the message travels
+     * in an exception, so the quoted form put that value into every stack trace this fault produced. A
+     * width mismatch is diagnosed entirely by the two widths and the mask that declares one of them, so
+     * removing the content removes nothing an operator acts on.</p>
+     *
+     * @param date the date text to measure; read only for its length
      * @param width the width the mask declares
      * @param mask the mask itself, named in the failure message so a caller can see which pairing failed
-     * @throws IllegalArgumentException if {@code date} is not exactly {@code width} characters
+     * @throws IllegalArgumentException if {@code date} is not exactly {@code width} characters; the message
+     *     names the two widths and the mask, and never any part of {@code date}
      */
     private static void requireWidth(String date, int width, String mask) {
         if (date.length() != width) {
             throw new IllegalArgumentException(
-                    "mask " + mask + " declares a " + width + "-character date, but \"" + date
-                            + "\" is " + date.length() + " characters");
+                    "mask " + mask + " declares a " + width + "-character date, but the supplied date is "
+                            + date.length() + " characters");
         }
     }
 }

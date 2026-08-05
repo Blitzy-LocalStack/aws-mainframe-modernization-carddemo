@@ -12,25 +12,6 @@
 /**
  * Pending credit-card authorization bounded context of the migrated CardDemo system.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter
- * describes the package's <b>target contract</b> as the migration plan assigns it,
- * not the set of files present beside this one today. The migration lands its
- * artifacts in plan order and this charter is authored first, so at the checkpoint
- * that authored it this directory holds this charter and nothing else, and no subpackage of it
- * exists yet. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p>This package is the Java root of one of the eight bounded contexts the migration defines. The
  * context decides authorization requests arriving asynchronously from a point-of-sale channel,
  * records each decision and its supporting detail, lets an operator inspect what is pending and
@@ -133,11 +114,13 @@
  * best-effort: a per-environment authorization request queue and a per-environment authorization
  * reply queue, each named {@code carddemo-pauth-request-} and {@code carddemo-pauth-reply-}
  * followed by the environment name and the {@code .fifo} suffix, and each paired with its own
- * dead-letter queue at a {@code maxReceiveCount} of 5. Ordering is grouped by card number, so
- * two authorizations against one card cannot be observed out of sequence, while different cards
- * proceed in parallel. No queue URL, endpoint, account identifier or credential appears in this
- * file or anywhere else in this package tree; every such value is resolved at startup from
- * configuration owned by the infrastructure and resources channels.
+ * dead-letter queue at a {@code maxReceiveCount} of 5. Ordering uses a purpose-scoped opaque HMAC
+ * token derived from the card number, so source-queue messages for one card remain ordered while
+ * the number itself never becomes queue metadata. Dead-letter transfer is the documented
+ * quarantine boundary: later messages may proceed, native bulk redrive is denied, and recovery is
+ * reviewed per-message replay after reconciliation. No queue URL, endpoint, account identifier or
+ * credential appears in this file or anywhere else in this package tree; every such value is
+ * resolved at startup from configuration owned by the infrastructure and resources channels.
  *
  * <p><strong>Charter of the eight packages in this context.</strong> Each of the seven
  * subpackages carries its own {@code package-info.java} for exactly the reason this file exists,
@@ -179,7 +162,7 @@
  * {@code .batch}, {@code .authorization} and {@code .reporting}. The dependency arrow points
  * inward only: every context may depend on the shared kernel, and no context may depend on
  * another. The shared kernel depends on none of them. The only intra-reactor Maven dependency this
- * module declares is that kernel, whose target inventory is 17 production types across its {@code money},
+ * module declares is that kernel, whose contract admits 17 production types across its {@code money},
  * {@code codec}, {@code error}, {@code web}, {@code security}, {@code observability},
  * {@code time} and {@code validation} packages.
  *
@@ -195,10 +178,12 @@
  * forbidden. A {@code domain} package may not import a cloud software development kit type or a
  * web type. The language's two binary floating-point types are forbidden anywhere in the money
  * path, because a binary floating-point value cannot hold a decimal cent exactly and the resulting
- * error is silent rather than loud. All three are asserted by the ArchUnit layering test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
- * which is a test, so it cannot rot. It is not duplicated here, and no import-control module is
- * added to the rule set, which omits one deliberately so that the boundary keeps a single owner.
+ * error is silent rather than loud. All three belong to the layering rules the
+ * {@code architecture-rules} Surefire execution in {@code services/pom.xml} selects by the simple
+ * name {@code LayeringRulesTest} and evaluates against each module's own compiled classes, so they
+ * are settled by a build rather than by a reading and cannot decay into prose. They are not
+ * duplicated here, and no import-control module is added to the rule set, which omits one
+ * deliberately so that the boundary keeps a single owner.
  *
  * <p><strong>Cited here and authored elsewhere.</strong> Each of the following is named in this
  * charter so that it can be found, and none of it is this file's to create or change:

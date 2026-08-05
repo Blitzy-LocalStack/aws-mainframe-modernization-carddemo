@@ -1,0 +1,417 @@
+# =============================================================================
+# .github/workflows/infra-ci.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Performs credential-free Terraform format, initialization, validation,
+#   lint, documentation-drift, secret, and explicit material-security policy
+#   gates. A manual same-repository run may additionally produce a real
+#   remote-state plan through short-lived OIDC credentials. This workflow never
+#   mutates infrastructure.
+#
+# Parameters:
+#   workflow_dispatch.run_plan selects the optional credentialed plan job;
+#   workflow_dispatch.environment selects the one environment root it evaluates.
+# Return values:
+#   Every static gate and required artifact is GATING. The plan job is
+#   CONDITIONAL, but once selected every initialization and plan error is fatal.
+# Exceptions or errors:
+#   Fork pull requests run the credential-free graph only. No lint, docs,
+#   secret, or policy failure is tolerated.
+#
+# WHY (non-obvious design decisions):
+#   - Alternatives Considered: action wrappers for Terraform and security tools.
+#     Rejected where no reviewed SHA was needed; checksum-pinned binaries preserve
+#     native exit codes and avoid a mutable wrapper in the policy gate.
+#   - Trade-offs: tool downloads are intentionally cacheless, accepting repeated
+#     transfer in exchange for no cache-poisoning surface in a security job.
+#   - Assumptions: backend-free init validates providers and modules without AWS
+#     credentials; backend correctness is exercised by the optional real plan.
+# =============================================================================
+
+name: CardDemo Infrastructure CI
+
+# Assumptions: infrastructure, workflow, and ignore-policy changes are included
+# because each can weaken a gate. Migration-owned application and documentation
+# paths also trigger this workflow so the hard secret scan cannot be bypassed by
+# committing a credential outside infra/. Immutable parity-oracle paths remain
+# owned by tests.yml and are deliberately excluded from the scan.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "services/**"
+      - "ui/**"
+      - "data-migration/**"
+      - "config/**"
+      - "docs/**"
+      - "MIGRATION_README.md"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - ".gitignore"
+      - ".github/workflows/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "services/**"
+      - "ui/**"
+      - "data-migration/**"
+      - "config/**"
+      - "docs/**"
+      - "MIGRATION_README.md"
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - ".gitignore"
+      - ".github/workflows/**"
+  workflow_dispatch:
+    inputs:
+      run_plan:
+        description: "Run a real remote-state Terraform plan after all credential-free gates pass."
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: "Environment root to plan when run_plan is enabled."
+        required: false
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  contents: read
+
+# Trade-offs: static validation has no persistent side effect, so a stale run
+# may be cancelled safely instead of racing a newer revision for runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-static:
+    name: Format, validate, lint and scan the Terraform package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assumptions: Python 3.13 is used only to install the exact CI-only
+      # Checkov release; it never enters a runtime artifact.
+      - name: Configure Python for the policy scanner
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      # Assumptions: every archive is bound to a reviewed release and literal
+      # digest. The visible version checks fail before a gate runs with the wrong
+      # executable.
+      - name: Install checksum-pinned infrastructure tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/carddemo-infra-tools"
+          mkdir -p "$install_dir"
+
+          terraform_version="1.15.8"
+          terraform_archive="terraform_${terraform_version}_linux_amd64.zip"
+          curl -fsSLo "$install_dir/$terraform_archive" "https://releases.hashicorp.com/terraform/${terraform_version}/${terraform_archive}"
+          printf '%s  %s\n' "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d" "$install_dir/$terraform_archive" | sha256sum -c -
+          unzip -q "$install_dir/$terraform_archive" -d "$install_dir"
+
+          tflint_version="0.64.0"
+          tflint_archive="tflint_linux_amd64.zip"
+          curl -fsSLo "$install_dir/$tflint_archive" "https://github.com/terraform-linters/tflint/releases/download/v${tflint_version}/${tflint_archive}"
+          printf '%s  %s\n' "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537" "$install_dir/$tflint_archive" | sha256sum -c -
+          unzip -q "$install_dir/$tflint_archive" -d "$install_dir"
+
+          docs_version="0.20.0"
+          docs_archive="terraform-docs-v${docs_version}-linux-amd64.tar.gz"
+          curl -fsSLo "$install_dir/$docs_archive" "https://github.com/terraform-docs/terraform-docs/releases/download/v${docs_version}/${docs_archive}"
+          printf '%s  %s\n' "34ae01772412bb11474e6718ea62113e38ff5964ee570a98c69fafe3a6dff286" "$install_dir/$docs_archive" | sha256sum -c -
+          tar -xzf "$install_dir/$docs_archive" -C "$install_dir"
+
+          gitleaks_version="8.30.1"
+          gitleaks_archive="gitleaks_${gitleaks_version}_linux_x64.tar.gz"
+          curl -fsSLo "$install_dir/$gitleaks_archive" "https://github.com/gitleaks/gitleaks/releases/download/v${gitleaks_version}/${gitleaks_archive}"
+          printf '%s  %s\n' "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" "$install_dir/$gitleaks_archive" | sha256sum -c -
+          tar -xzf "$install_dir/$gitleaks_archive" -C "$install_dir" gitleaks
+
+          echo "$install_dir" >> "$GITHUB_PATH"
+          python -m pip install "checkov==3.3.8"
+
+      - name: Verify infrastructure tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform version
+          tflint --version
+          terraform-docs --version
+          gitleaks version
+          checkov --version
+
+      # Alternatives Considered: bare terraform fmt, which rewrites the checkout
+      # and lets drift pass. Check mode preserves the review boundary.
+      - name: Check Terraform formatting without mutation
+        shell: bash
+        run: terraform fmt -check -recursive infra/
+
+      # Assumptions: validate needs initialized provider schemas, while a normal
+      # init would require the remote backend and credentials. -backend=false
+      # resolves modules/providers without touching state.
+      - name: Initialize and validate every Terraform root without a backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in infra/bootstrap infra/envs/dev infra/envs/prod; do
+            terraform -chdir="$root" init -backend=false -lockfile=readonly -input=false
+            terraform -chdir="$root" validate
+          done
+
+      # Assumptions: the AWS ruleset is itself pinned in infra/.tflint.hcl.
+      # Initialization verifies its signature before recursive lint executes.
+      - name: Run the Rule 1 HCL lint gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          tflint --init --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
+          tflint --recursive --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
+
+      # Alternatives Considered: regenerating README tables in CI. Rejected
+      # because silent mutation would hide the documentation drift this gate is
+      # intended to make reviewable.
+      - name: Check terraform-docs drift across all modules and roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in infra/bootstrap infra/modules/* infra/envs/dev infra/envs/prod; do
+            terraform-docs --config "$GITHUB_WORKSPACE/infra/.terraform-docs.yml" --output-check "$dir"
+          done
+
+      # Refactoring Rationale: the immutable baseline contains known sample
+      # credentials, so the scanner stages only migration-owned tracked files.
+      # This remains a hard gate for every new service, UI, ETL, infra, docs, and
+      # workflow artifact rather than suppressing findings repository-wide.
+      - name: Scan migration-owned source for committed secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p infra-reports secret-scan
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              app/*|tests/*|scripts/*|samples/*) continue ;;
+            esac
+            mkdir -p "secret-scan/$(dirname "$path")"
+            cp "$path" "secret-scan/$path"
+          done < <(git ls-files -z)
+
+          # Assumptions: these two exact literals are cryptographic algorithm
+          # identifiers, not credentials. The allowlist matches the complete
+          # assignment so a real value beside the same field name still fails.
+          cat > "$RUNNER_TEMP/gitleaks.toml" <<'TOML'
+          [extend]
+          useDefault = true
+
+          [[allowlists]]
+          description = "Reviewed Terraform cryptographic algorithm identifiers"
+          regexTarget = "line"
+          regexes = [
+            '''password_encryption"\s*=\s*"scram-sha-256"''',
+            '''key_algorithm\s*=\s*"EC_prime256v1"''',
+          ]
+          TOML
+
+          gitleaks dir secret-scan --config "$RUNNER_TEMP/gitleaks.toml" \
+            --no-banner --redact \
+            --report-format sarif --report-path infra-reports/gitleaks.sarif \
+            2>&1 | tee infra-reports/gitleaks.log
+
+      # Assumptions: scanner exceptions are architecture contracts rather than
+      # blanket suppressions. This guard fails if an exception broadens or loses
+      # the condition that made it acceptable before Checkov runs.
+      - name: Verify bounded policy-scan exceptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          api = Path("infra/modules/api-gateway-http/main.tf").read_text()
+          sqs = Path("infra/modules/sqs/main.tf").read_text()
+          step = Path("infra/modules/step-functions-batch/main.tf").read_text()
+          observability = Path("infra/modules/observability/main.tf").read_text()
+          datasets = Path("infra/modules/s3-datasets/main.tf").read_text()
+          dev = Path("infra/envs/dev/main.tf").read_text()
+          prod = Path("infra/envs/prod/main.tf").read_text()
+
+          assert "#checkov:skip=CKV_AWS_309:" in api
+          assert 'resource "aws_apigatewayv2_route" "public_auth"' in api
+          assert 'authorization_type = "NONE"' in api
+          assert 'for_each = toset(var.public_route_keys)' in api
+
+          assert 'resource "aws_sqs_queue_policy" "security"' in sqs
+          assert '"aws:SecureTransport" = "false"' in sqs
+          assert 'resource "aws_sqs_queue_redrive_allow_policy" "exact_source"' in sqs
+          assert 'redrivePermission = "byQueue"' in sqs
+
+          assert 'sid       = "ObserveAndStopTasksInCluster"' in step
+          assert 'actions   = ["ecs:DescribeTasks", "ecs:StopTask"]' in step
+          assert 'variable = "ecs:cluster"' in step
+          assert 'sid    = "ManageVendedLogDelivery"' in step
+          assert '"logs:CreateLogDelivery"' in step
+          assert step.count('resources = ["*"]') >= 2
+
+          assert observability.count("checkov:skip=CKV_AWS_145:") == 1
+          assert 'sse_algorithm = "AES256"' in observability
+
+          assert datasets.count("checkov:skip=CKV_AWS_145:") == 1
+          assert datasets.count("checkov:skip=CKV_AWS_35:") == 1
+          assert 'resource "aws_cloudtrail" "dataset_object_access"' in datasets
+          assert 'enable_log_file_validation    = true' in datasets
+
+          for root in (dev, prod):
+              assert root.count("checkov:skip=CKV2_AWS_57:") == 1
+              assert 'resource "aws_cloudwatch_event_rule" "service_tls_available"' in root
+              assert 'resource "aws_lambda_invocation" "service_tls_initial"' in root
+          PY
+
+      # Trade-offs: the offline Checkov distribution does not carry policy
+      # severities, so `--check HIGH,CRITICAL` selects zero checks and creates a
+      # false-green gate. The first scan keeps the complete result set visible;
+      # the second hard-fails on an explicit, reviewable material-security
+      # baseline spanning IAM, encryption, audit, network, edge, messaging and
+      # workload isolation. The summary assertion prevents an empty selection
+      # from ever reporting success again.
+      - name: Run the Terraform material-security policy gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checkov -d infra --framework terraform --soft-fail \
+            --skip-path '\.terraform' --compact --output json \
+            2>&1 | tee infra-reports/checkov-all.json
+
+          material_checks=(
+            CKV_AWS_1 CKV_AWS_2 CKV_AWS_7 CKV_AWS_17 CKV_AWS_19
+            CKV_AWS_20 CKV_AWS_21 CKV_AWS_23 CKV_AWS_24 CKV_AWS_25
+            CKV_AWS_26 CKV_AWS_27 CKV_AWS_28 CKV_AWS_33 CKV_AWS_34
+            CKV_AWS_35 CKV_AWS_36 CKV_AWS_41 CKV_AWS_45 CKV_AWS_51
+            CKV_AWS_53 CKV_AWS_54 CKV_AWS_55 CKV_AWS_56 CKV_AWS_57
+            CKV_AWS_60 CKV_AWS_61 CKV_AWS_62 CKV_AWS_63 CKV_AWS_66
+            CKV_AWS_72 CKV_AWS_76 CKV_AWS_91 CKV_AWS_93 CKV_AWS_96
+            CKV_AWS_97 CKV_AWS_103 CKV_AWS_107 CKV_AWS_108 CKV_AWS_110
+            CKV_AWS_119 CKV_AWS_130 CKV_AWS_136 CKV_AWS_145 CKV_AWS_149
+            CKV_AWS_158 CKV_AWS_163 CKV_AWS_168 CKV_AWS_174 CKV_AWS_223
+            CKV_AWS_227 CKV_AWS_251 CKV_AWS_260 CKV_AWS_274 CKV_AWS_277
+            CKV_AWS_283 CKV_AWS_285 CKV_AWS_301 CKV_AWS_304 CKV_AWS_309
+            CKV_AWS_324 CKV_AWS_327 CKV_AWS_333 CKV_AWS_336 CKV_AWS_337
+            CKV_AWS_358 CKV_AWS_382 CKV_AWS_387 CKV_AWS_393
+            CKV2_AWS_6 CKV2_AWS_11 CKV2_AWS_12 CKV2_AWS_20
+            CKV2_AWS_32 CKV2_AWS_40 CKV2_AWS_42 CKV2_AWS_46
+            CKV2_AWS_54 CKV2_AWS_56 CKV2_AWS_57 CKV2_AWS_64
+            CKV2_AWS_65 CKV2_AWS_72
+          )
+          material_checks_csv="$(IFS=,; echo "${material_checks[*]}")"
+
+          checkov -d infra --framework terraform --check "$material_checks_csv" \
+            --skip-path '\.terraform' --compact --output json \
+            2>&1 | tee infra-reports/checkov.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("infra-reports/checkov.json").read_text())
+          summary = report["summary"]
+          assert summary["resource_count"] > 0, summary
+          assert summary["passed"] > 0, summary
+          assert summary["failed"] == 0, summary
+          assert summary["parsing_errors"] == 0, summary
+          PY
+
+      - name: Upload infrastructure security reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-infra-reports
+          path: infra-reports/**
+          if-no-files-found: error
+
+  terraform-plan:
+    name: Produce a real plan for the selected environment
+    needs: terraform-static
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_plan }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      # Assumptions: this scope mints a per-run OIDC token that STS exchanges for
+      # short-lived credentials, eliminating any stored cloud access key.
+      id-token: write
+
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.CARDDEMO_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.CARDDEMO_AWS_REGION }}
+          role-session-name: carddemo-infra-plan
+          mask-aws-account-id: true
+
+      - name: Install checksum-pinned Terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.15.8"
+          archive="terraform_${version}_linux_amd64.zip"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://releases.hashicorp.com/terraform/${version}/${archive}"
+          printf '%s  %s\n' "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d" "$RUNNER_TEMP/$archive" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/$archive" -d "$RUNNER_TEMP/terraform-bin"
+          echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+
+      # Assumptions: environment tfvars contains sizing/retention only. Resource
+      # identifiers arrive from protected GitHub environment variables and the
+      # current deployed image-digest map, never from a committed credential.
+      - name: Initialize remote state and create the plan
+        shell: bash
+        env:
+          TF_STATE_BUCKET: ${{ vars.CARDDEMO_TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.CARDDEMO_TF_STATE_REGION }}
+          TF_STATE_LOCK_TABLE: ${{ vars.CARDDEMO_TF_STATE_LOCK_TABLE }}
+          TF_STATE_KMS_KEY_ID: ${{ vars.CARDDEMO_TF_STATE_KMS_KEY_ID }}
+          TF_VAR_permissions_boundary_arn: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
+          TF_VAR_image_digests: ${{ vars.CARDDEMO_IMAGE_DIGESTS_JSON }}
+          TF_VAR_release_version: ${{ github.sha }}
+          TF_VAR_route53_zone_id: ${{ vars.CARDDEMO_ROUTE53_ZONE_ID }}
+          TF_VAR_spa_domain_name: ${{ vars.CARDDEMO_SPA_DOMAIN_NAME }}
+          TF_VAR_alb_tls_server_name: ${{ vars.CARDDEMO_ALB_TLS_SERVER_NAME }}
+          TF_VAR_service_tls_domain_name: ${{ vars.CARDDEMO_SERVICE_TLS_DOMAIN_NAME }}
+          TF_VAR_mask_hmac_secret_arn: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
+          TF_VAR_batch_glue_function_arns: ${{ vars.CARDDEMO_BATCH_GLUE_FUNCTION_ARNS_JSON }}
+        run: |
+          set -euo pipefail
+          root="infra/envs/${{ inputs.environment }}"
+          mkdir -p infra-reports
+          terraform -chdir="$root" init -input=false -lockfile=readonly \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="region=$TF_STATE_REGION" \
+            -backend-config="dynamodb_table=$TF_STATE_LOCK_TABLE" \
+            -backend-config="kms_key_id=$TF_STATE_KMS_KEY_ID"
+          terraform -chdir="$root" plan -input=false \
+            -var-file=terraform.tfvars -out=tfplan
+          terraform -chdir="$root" show -no-color tfplan > "$GITHUB_WORKSPACE/infra-reports/${{ inputs.environment }}-plan.txt"
+
+      - name: Upload the environment plan
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-infra-plan-${{ inputs.environment }}
+          path: infra-reports/${{ inputs.environment }}-plan.txt
+          if-no-files-found: error

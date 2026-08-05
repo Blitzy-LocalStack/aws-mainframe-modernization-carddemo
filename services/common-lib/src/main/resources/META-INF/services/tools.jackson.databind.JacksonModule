@@ -1,0 +1,46 @@
+# Provider-configuration file for the platform service-provider mechanism.
+#
+# Purpose: names com.carddemo.common.money.MoneyModule as an implementation of
+#       tools.jackson.databind.JacksonModule, so that every mapper built with
+#       findAndAddModules() discovers and registers it without any consumer
+#       writing a line of wiring.
+#
+# WHY : Assumptions: this is the ONLY registration mechanism the eight services
+#       share. Jackson 3 resolves modules through
+#       java.util.ServiceLoader.load(tools.jackson.databind.JacksonModule.class),
+#       which is why this file is named for that exact interface -- the file name
+#       IS the lookup key, so a typo produces no error anywhere and simply leaves
+#       the module unregistered. Spring Boot's Jackson auto-configuration calls
+#       MapperBuilder.findAndAddModules(ClassLoader) whenever
+#       spring.jackson.find-and-add-modules is true, and true is its default, so
+#       placing this file on the classpath registers the money handlers in every
+#       service that starts a web context and in any plain
+#       JsonMapper.builder().findAndAddModules() as well.
+#
+# WHY : Refactoring Rationale: the module previously relied on each consumer
+#       registering it by hand, and no consumer did. The measured consequence was
+#       not a loss of precision but a loss of the amount: with no handler bound to
+#       the value type, the mapper treats it as an ordinary bean, discovers only
+#       its three sign predicates, and writes
+#       {"negative":false,"positive":true,"zero":false} with the amount absent
+#       from the payload altogether. Nothing in a build, a startup log or a
+#       response status reports that, so the defect was silent by construction.
+#       Discovery removes the per-consumer step that was the single point of
+#       failure.
+#
+# WHY : Alternatives Considered: a Spring @AutoConfiguration class declaring a
+#       bean of the module type, registered through
+#       META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports.
+#       Rejected: it would work only inside a Spring context, so a batch step or
+#       a test building a bare mapper would still render the broken form, and it
+#       would make this library depend on the framework's auto-configuration
+#       artifact. The platform mechanism used here is framework-neutral and is
+#       the one Jackson itself documents.
+#
+# WHY : Trade-offs: registration is now implicit, which is one thing a reader
+#       cannot see from the Java source alone. The compromise accepted is this
+#       file's own commentary plus the pointer to it in the module's Javadoc; what
+#       is bought is that no service can forget the step, and the module's
+#       registration identifier makes a second registration idempotent rather
+#       than additive.
+com.carddemo.common.money.MoneyModule

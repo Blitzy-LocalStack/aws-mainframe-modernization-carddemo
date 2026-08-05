@@ -2,30 +2,30 @@
 # infra/modules/sqs/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The ten queues of the `sqs` module: five primary queues, each paired with a
-#   dead-letter queue of its own. Together they replace the five IBM MQ queues
+#   The twelve queues of the `sqs` module: six primary queues, each paired with
+#   a dead-letter queue of its own. Together they replace the five IBM MQ queues
 #   the CardDemo baseline used -- AWS.M2.CARDDEMO.PAUTH.REQUEST and
 #   AWS.M2.CARDDEMO.PAUTH.REPLY carrying the pending-authorization exchange
 #   (app/app-authorization-ims-db2-mq/README.md:278-279),
-#   CARDDEMO.REQUEST.QUEUE and CARDDEMO.RESPONSE.QUEUE carrying the account
-#   inquiry (app/app-vsam-mq/README.md:53-54), and CARD.DEMO.ERROR as the
+#   CARDDEMO.REQUEST.QUEUE and CARDDEMO.RESPONSE.QUEUE carrying account and date
+#   inquiries (app/app-vsam-mq/README.md:53-54), and CARD.DEMO.ERROR as the
 #   terminal error sink (app/app-vsam-mq/cbl/CODATE01.cbl:243 and
 #   app/app-vsam-mq/cbl/COACCT01.cbl:294).
 #
-#   The authorization pair is FIFO and the other three are standard, and that
+#   The authorization pair is FIFO and the other four are standard, and that
 #   split is the module's central claim: message order is observable behaviour
 #   for authorization and is required per card, whereas the inquiry exchange
-#   has no ordering requirement at all. Every one of the ten queues is
+#   has no ordering requirement at all. Every one of the twelve queues is
 #   encrypted with the customer-managed key the caller supplies, and every one
-#   of the five primary queues redrives to its own dead-letter queue once a
-#   message has been received max_receive_count times.
+#   of the six primary queues redrives to its own dead-letter queue once a
+#   message has been received max_receive_count times. Every queue also receives
+#   an exact-ARN resource policy that denies requests made without TLS.
 #
 #   Two properties of the baseline shape this file and are easy to misread from
 #   the source, so both are set out in full below rather than left to be
 #   rediscovered: the two extensions do NOT share one messaging discipline, and
-#   the baseline's SEVEN distinct queue-name literals map onto FIVE queues here
-#   because replies are routed by a message attribute instead of by a per-flow
-#   queue name.
+#   the baseline's shared inquiry request queue must split into two owning
+#   queues, while replies follow one dynamic replyToQueueUrl contract.
 #
 #   Parameters: none are declared in this file. Every input is declared in
 #   variables.tf, which carries the description and the domain validation for
@@ -53,6 +53,9 @@
 #     * An over-long name_prefix composes a queue name past the SQS limit of 80
 #       characters, which counts the .fifo suffix. variables.tf refuses that at
 #       `plan`; the arithmetic it guards is the naming block below.
+#     * A signed request made over plaintext transport is denied by the queue's
+#       own policy even when the caller's identity policy would otherwise allow
+#       the action; transport enforcement is therefore independent of who calls.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: the baseline is the specification for the constants this
@@ -61,19 +64,19 @@
 #     interval in milliseconds. Each conversion is stated at the point of use,
 #     because the bare literal is misleading by an order of magnitude on its
 #     own.
-#   - Trade-offs: ten explicit resources rather than one `for_each` over a map
-#     of five queue definitions. The loop would be materially shorter, and it
+#   - Trade-offs: twelve explicit resources rather than one `for_each` over a map
+#     of six queue definitions. The loop would be materially shorter, and it
 #     would also push every difference between the queues into a conditional
-#     expression -- two queues are FIFO and carry four further arguments, two
-#     take a different retention from the other three -- when those differences
-#     are the entire point of the module. Ten blocks also let each queue keep
+#     expression -- two queues are FIFO and carry four further arguments, while
+#     replies take a different retention from requests -- when those differences
+#     are the entire point of the module. Twelve blocks also let each queue keep
 #     its rationale beside the argument that needs it, which one templated
 #     block cannot do.
-#   - Alternatives Considered: no resource-based queue policy is created, in
-#     either of the two forms the provider offers for one. Access is granted by
-#     the identity-based task-role policies owned by the ecs-service and
-#     step-functions-batch modules instead. The closing note of this file
-#     records the reasoning.
+#   - Alternatives Considered: no resource-based ALLOW statement is created.
+#     Access is granted by the identity-based task-role policies owned by the
+#     ecs-service and step-functions-batch modules. Resource policies contribute
+#     only the mandatory insecure-transport deny and the authorization FIFO
+#     dead-letter recovery guard recorded near the end of this file.
 #   - Refactoring Rationale: the MQ queue-manager connection and the two CICS
 #     queue aliases have no analogue here and are retired rather than ported.
 #     SQS needs no broker resource at all, and the alias indirection is
@@ -81,10 +84,10 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# The two extensions do NOT share one messaging discipline.
+# Messaging boundary.
 #
 # This is the single most consequential thing to know before changing anything
-# below, because a change that treats the five queues uniformly breaks one of
+# below, because a change that treats the six queues uniformly breaks one of
 # the two flows. The baseline's own MQ option words differ between them:
 #
 #   Authorization. app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl receives
@@ -111,33 +114,38 @@
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Seven baseline queue-name literals, five queues.
+# Seven baseline queue-name literals, six target queues.
 #
-# A reader who greps the baseline for queue names finds SEVEN and may conclude
-# that two queues are missing here. They are not. A repository-wide search
-# finds queue-name literals in exactly four files, so this inventory is
-# complete:
+# A reader who greps the baseline for queue names finds SEVEN. The target has
+# one more PRIMARY queue than the baseline because CARDDEMO.REQUEST.QUEUE fed
+# two different owning consumers; SQS competing-consumer semantics require a
+# dedicated request queue for each owner.
 #
 #   1. AWS.M2.CARDDEMO.PAUTH.REQUEST  -> the FIFO authorization request queue
 #   2. AWS.M2.CARDDEMO.PAUTH.REPLY    -> the FIFO authorization reply queue
-#   3. CARDDEMO.REQUEST.QUEUE         -> the standard inquiry request queue
+#   3. CARDDEMO.REQUEST.QUEUE         -> account and date request queues
 #   4. CARDDEMO.RESPONSE.QUEUE        -> the standard inquiry reply queue
 #   5. CARD.DEMO.ERROR                -> the standard error queue
-#   6. CARD.DEMO.REPLY.DATE           -> NOT a sixth queue
-#   7. CARD.DEMO.REPLY.ACCT           -> NOT a seventh queue
+#   6. CARD.DEMO.REPLY.DATE           -> absorbed by replyToQueueUrl contract
+#   7. CARD.DEMO.REPLY.ACCT           -> absorbed by replyToQueueUrl contract
 #
+# WHY : Refactoring Rationale: the shared baseline REQUEST queue is split because
+#       account-service and reference-service are independent SQS consumers.
+#       SQS does not deliver a copy to each consumer and does not inspect a type
+#       before choosing one; post-receive discrimination lets the wrong service
+#       hide or remove a sibling's message. Producer-side routing to the
+#       account/date queues closes that window while preserving standard,
+#       unordered delivery for both flows.
 # WHY : Refactoring Rationale: names six and seven are hard-coded reply-queue
 #       NAMES, one per inquiry flow -- MOVE 'CARD.DEMO.REPLY.DATE' TO
 #       REPLY-QUEUE-NAME at app/app-vsam-mq/cbl/CODATE01.cbl:147 and
 #       MOVE 'CARD.DEMO.REPLY.ACCT' TO REPLY-QUEUE-NAME at
 #       app/app-vsam-mq/cbl/COACCT01.cbl:198. Each program names its own reply
-#       destination, so the baseline needed one queue per flow to distinguish
-#       replies. The target distinguishes them by a replyToQueueUrl message
-#       attribute carried on the request, so one shared inquiry reply queue
-#       serves both flows and adding a flow adds no infrastructure. The
-#       existence of two per-flow reply-name literals is precisely WHY the
-#       target routes by attribute; they are the problem the single queue
-#       solves, not queues that were overlooked. The baseline documents the
+#       destination. The target uses separate request queues because the
+#       responders have different owners, but distinguishes reply destinations
+#       through the request's replyToQueueUrl attribute. One shared provisioned
+#       reply queue therefore serves the CardDemo requester. The baseline
+#       documents the
 #       correlation pattern this relies on at app/app-vsam-mq/README.md:135,
 #       "Message Correlation: Demonstrates how to correlate request and
 #       response messages".
@@ -200,7 +208,7 @@
 
 # -----------------------------------------------------------------------------
 # Naming. Every name is composed once here so that the two FIFO suffixes and
-# the five dead-letter suffixes cannot drift apart across ten resources.
+# the six dead-letter suffixes cannot drift apart across twelve resources.
 # -----------------------------------------------------------------------------
 locals {
   # WHY : Assumptions: the .fifo suffix has to be the LAST characters of a FIFO
@@ -234,8 +242,11 @@ locals {
   pauth_reply_name     = "${var.name_prefix}-pauth-reply-${var.environment}.fifo"
   pauth_reply_dlq_name = "${var.name_prefix}-pauth-reply-${var.environment}-dlq.fifo"
 
-  inquiry_request_name     = "${var.name_prefix}-inquiry-request-${var.environment}"
-  inquiry_request_dlq_name = "${var.name_prefix}-inquiry-request-${var.environment}-dlq"
+  account_inquiry_request_name     = "${var.name_prefix}-account-inquiry-request-${var.environment}"
+  account_inquiry_request_dlq_name = "${var.name_prefix}-account-inquiry-request-${var.environment}-dlq"
+
+  date_inquiry_request_name     = "${var.name_prefix}-date-inquiry-request-${var.environment}"
+  date_inquiry_request_dlq_name = "${var.name_prefix}-date-inquiry-request-${var.environment}-dlq"
 
   inquiry_reply_name     = "${var.name_prefix}-inquiry-reply-${var.environment}"
   inquiry_reply_dlq_name = "${var.name_prefix}-inquiry-reply-${var.environment}-dlq"
@@ -245,7 +256,7 @@ locals {
 }
 
 # -----------------------------------------------------------------------------
-# Ordering of the ten resources below.
+# Ordering of the twelve queue resources below.
 #
 # WHY : Trade-offs: each dead-letter queue is declared immediately BEFORE the
 #       primary queue that redrives to it, because the primary's redrive_policy
@@ -258,10 +269,10 @@ locals {
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Five arguments are carried by all ten queues for the same reasons each time.
+# Five arguments are carried by all twelve queues for the same reasons each time.
 # The full rationale is recorded once here; each resource below then carries a
 # short pointer rather than five repeated paragraphs, because a rationale
-# restated ten times is read zero times.
+# restated twelve times is read zero times.
 #
 #   kms_master_key_id = var.kms_key_arn
 # WHY : Alternatives Considered: sqs_managed_sse_enabled, the service-managed
@@ -287,7 +298,7 @@ locals {
 # WHY : Trade-offs: a direct exchange, stated in both directions because neither
 #       end is obviously right. A longer period means fewer GenerateDataKey and
 #       Decrypt calls, which matters because KMS bills per request and enforces
-#       a per-account request-rate quota that ten queues sharing one key can
+#       a per-account request-rate quota that twelve queues sharing one key can
 #       contend for; it also means a data key stays cached in the service for
 #       longer, so revoking access only takes effect once the period lapses. A
 #       shorter period inverts both halves.
@@ -345,7 +356,7 @@ locals {
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Two arguments are deliberately left at the service default on all ten queues.
+# Two arguments are deliberately left at the service default on all twelve queues.
 # An unexplained absence and an unexplained presence are equally unreadable, so
 # both absences are recorded.
 #
@@ -410,10 +421,11 @@ resource "aws_sqs_queue" "pauth_request_dlq" {
   #       read.
   message_retention_seconds = var.dlq_message_retention_seconds
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -425,13 +437,13 @@ resource "aws_sqs_queue" "pauth_request" {
   name = local.pauth_request_name
 
   # WHY : Assumptions: the ordering requirement is PER CARD, not global, and a
-  #       FIFO queue is the only queue type that can express it. Consumers set
-  #       MessageGroupId to the card number, which orders every authorization
-  #       for one card while leaving different cards free to progress in
-  #       parallel. The card number is available to do that because it is an
-  #       explicit field of the request: the CSV field order documented from
-  #       app/app-authorization-ims-db2-mq/README.md:285 onward lists CARD-NUM
-  #       as its third field, at :290, after AUTH-DATE and AUTH-TIME.
+  #       FIFO queue is the only queue type that can express it. Producers derive
+  #       MessageGroupId through CsvAuthCodec.AuthRequest.orderGroup using the
+  #       purpose-scoped HMAC held by OpaqueIdentifier. Equal cards therefore
+  #       produce one stable group while the primary account number itself never
+  #       appears in SQS metadata, queue telemetry or send traces. The key arrives
+  #       through CARDDEMO_MASK_HMAC_KEY, so every producer in one environment
+  #       derives the same group without carrying key material in source.
   # WHY : Alternatives Considered: a single constant message group would give
   #       total ordering across the whole stream. It is rejected because it
   #       serialises every card behind every other and collapses throughput to
@@ -444,15 +456,15 @@ resource "aws_sqs_queue" "pauth_request" {
   #       to this, and it is set to false EXPLICITLY rather than left to default
   #       because the difference between the two is a correctness question and
   #       not a tuning one. With content_based_deduplication true, SQS derives a
-  #       deduplication identifier from a SHA-256 of the message body and ignores
-  #       any identifier the producer supplied. The design instead specifies a
-  #       producer-supplied MessageDeduplicationId of the transaction identifier,
-  #       which is content-INDEPENDENT, and the two are directly opposed: body
-  #       hashing would silently collapse two genuinely distinct authorizations
-  #       that happened to serialise identically, while accepting the same
-  #       logical transaction twice whenever a resend differed by so much as a
-  #       timestamp. Stating false here makes the producer's identifier the sole
-  #       basis for deduplication and makes a later flip to true a visible edit.
+  #       SHA-256 identifier from the body ONLY WHEN the producer omits an
+  #       explicit MessageDeduplicationId; an explicit identifier overrides the
+  #       generated body hash. This design requires every producer to supply the
+  #       transaction identifier, which is content-INDEPENDENT, so enabling the
+  #       fallback would make an accidentally omitted identifier look successful
+  #       while changing semantics: two distinct authorizations with identical
+  #       bodies could collapse, and a resend whose body changed could be
+  #       accepted as new. Stating false makes omission fail at SendMessage and
+  #       keeps the producer-supplied transaction id mandatory and reviewable.
   # WHY : Assumptions: the guarantee this buys is BOUNDED. The deduplication
   #       interval is five minutes, so a duplicate arriving after it lapses is
   #       accepted as a new message. The queue is therefore a first line of
@@ -489,7 +501,7 @@ resource "aws_sqs_queue" "pauth_request" {
   #       order instead of the author asserting it with depends_on. A hand-written
   #       string embedding a literal ARN would lose both properties at once.
   # WHY : Assumptions: this queue has its OWN dead-letter queue rather than
-  #       sharing one across the five sources, so a poison message is
+  #       sharing one across the six sources, so a poison message is
   #       attributable to the flow that produced it without inspecting its body.
   #       A receive count of five is corroborated twice over: it is the figure
   #       the messaging design fixes, and the baseline was already operated to
@@ -500,10 +512,11 @@ resource "aws_sqs_queue" "pauth_request" {
     maxReceiveCount     = var.max_receive_count
   })
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -526,17 +539,17 @@ resource "aws_sqs_queue" "pauth_reply_dlq" {
   #       last in the name.
   fifo_queue = true
 
-  # WHY : Trade-offs: this is the widest retention gap in the module, because its
-  #       source queue retains for only the service floor. Widening it this
-  #       sharply is the point: a reply that failed repeatedly is exactly the
-  #       case where the deliberately short reply retention would otherwise
-  #       destroy the only surviving record of the failure.
+  # WHY : Trade-offs: this remains the widest retention gap in the module. The
+  #       source queue retains long enough to finish every retry cycle, while
+  #       this dead-letter queue keeps the failed reply for fourteen days so the
+  #       evidence survives the incident that produced it.
   message_retention_seconds = var.dlq_message_retention_seconds
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -548,9 +561,9 @@ resource "aws_sqs_queue" "pauth_reply" {
   name = local.pauth_reply_name
 
   # WHY : Assumptions: the reply is FIFO because it is the return leg of a FIFO
-  #       exchange. Replies for one card are ordered with respect to one another
-  #       under the same MessageGroupId the request used, so a consumer reading
-  #       replies for a card observes them in the order the decisions were made.
+  #       exchange. Replies use the same purpose-scoped opaque per-card group
+  #       identity as requests, so a consumer observes decisions for one card in
+  #       send order without the primary account number becoming message metadata.
   fifo_queue = true
 
   # WHY : Alternatives Considered: false for the same reason as the request
@@ -566,57 +579,35 @@ resource "aws_sqs_queue" "pauth_reply" {
   deduplication_scope   = "messageGroup"
   fifo_throughput_limit = "perMessageGroupId"
 
-  # WHY : Assumptions: this argument is the one part of the message-expiry
-  #       semantic gap that THIS module implements, and it is the shortest
-  #       retention in the file on purpose. The baseline puts a hard expiry on
-  #       the reply: MOVE 50 TO MQMD-EXPIRY at
-  #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl:750. MQ expresses
-  #       expiry in TENTHS OF A SECOND, so 50 is five seconds, and read as
-  #       seconds the literal is wrong by an order of magnitude -- a reply older
-  #       than five seconds was discarded by the queue manager and never
-  #       delivered. SQS has no per-message time to live; queue-level retention
-  #       exists, per-message expiry does not. The semantic is therefore
-  #       reassembled from three parts, and ONLY the third is here: (1) the
-  #       producer stamps an expiresAt message attribute, (2) the consumer in
-  #       authorization-service honours it by dropping and logging a stale
-  #       message, and (3) this retention keeps the reply queue short so an
-  #       unread reply does not linger. Parts (1) and (2) are consumer-side and
-  #       cannot be configured from a queue, so setting this value alone does not
-  #       deliver the expiry.
-  # WHY : Assumptions: the baseline supports the short value a second time and
-  #       independently of the expiry. The reply is published non-persistent --
-  #       MOVE MQPER-NOT-PERSISTENT TO MQMD-PERSISTENCE at COPAUA0C.cbl:749 --
-  #       so it was never intended to survive a restart of the queue manager,
-  #       let alone days of retention. A short-lived reply is what the system
-  #       already chose; a long retention here would impose durability the
-  #       baseline declined.
-  # WHY : Trade-offs: this is NOT parity and must not be recorded as parity. The
-  #       baseline's five seconds were enforced by the broker, which withheld an
-  #       expired message from every consumer. The target's are enforced by the
-  #       consumer, so a stale reply remains in the queue -- visible, and counted
-  #       in queue depth -- until something receives it and discards it. The
-  #       observable difference is in queue depth and metrics during a consumer
-  #       outage, not in delivered data: no expired reply is acted upon under
-  #       either mechanism. docs/adr/ADR-004-messaging.md is the decision record
-  #       for the gap and owns the transport reasoning, which is not restated
-  #       here.
+  # WHY : Assumptions: queue retention implements transport recovery, not the
+  #       baseline's five-second business-expiry rule. The producer stamps the
+  #       `expiresAt` attribute and the consumer rejects stale replies; this value
+  #       is instead validated to outlast every visibility interval, every receive
+  #       wait and the final dead-letter transition. That separation prevents a
+  #       poison reply from disappearing before quarantine while preserving the
+  #       baseline outcome that no stale reply is acted upon.
+  # WHY : Trade-offs: the resulting transport lifetime exceeds the non-persistent
+  #       reply at COPAUA0C.cbl:749-750. The extra durability is restricted to
+  #       diagnosis and recovery: `expiresAt` remains authoritative for business
+  #       use, and the dead-letter queue records a failure that a sixty-second
+  #       source retention previously could erase.
   message_retention_seconds = var.reply_message_retention_seconds
 
   # WHY : Assumptions: a reply queue needs a dead-letter queue as much as a
-  #       request queue does, even though its retention is sixty seconds. The
-  #       redrive threshold counts RECEIVES, not elapsed time, so a reply that a
-  #       consumer keeps failing to process reaches five receives well inside
-  #       that window and is preserved on the dead-letter queue for the full
-  #       fourteen days rather than expiring unexamined.
+  #       request queue does. Its source retention is validated against the
+  #       complete visibility and receive-wait retry budget, so a reply cannot
+  #       expire before the configured receive count moves it to the dead-letter
+  #       queue, where it remains available for investigation.
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.pauth_reply_dlq.arn
     maxReceiveCount     = var.max_receive_count
   })
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -625,13 +616,14 @@ resource "aws_sqs_queue" "pauth_reply" {
 }
 
 # -----------------------------------------------------------------------------
-# Account inquiry: request. Replaces CARDDEMO.REQUEST.QUEUE, defined as
-# DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md:53 and
-# aliased to CICS as MQQUEUE(CARDREQ) at :71.
+# Account inquiry request. The baseline shared CARDDEMO.REQUEST.QUEUE across
+# COACCT01 and CODATE01, but one SQS queue cannot have two owning consumers:
+# each receive hides the message from the other. This queue belongs only to
+# account-service and carries the COACCT01 flow.
 # -----------------------------------------------------------------------------
 
-resource "aws_sqs_queue" "inquiry_request_dlq" {
-  name = local.inquiry_request_dlq_name
+resource "aws_sqs_queue" "account_inquiry_request_dlq" {
+  name = local.account_inquiry_request_dlq_name
 
   # WHY : Trade-offs: standard rather than FIFO, matching its source queue. A
   #       dead-letter queue has to be the same type as the source it serves, so
@@ -640,10 +632,11 @@ resource "aws_sqs_queue" "inquiry_request_dlq" {
   #       .fifo suffix.
   message_retention_seconds = var.dlq_message_retention_seconds
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -651,19 +644,20 @@ resource "aws_sqs_queue" "inquiry_request_dlq" {
   tags                              = var.tags
 }
 
-resource "aws_sqs_queue" "inquiry_request" {
-  name = local.inquiry_request_name
+resource "aws_sqs_queue" "account_inquiry_request" {
+  name = local.account_inquiry_request_name
 
-  # WHY : Trade-offs: this queue is standard, and the absence of fifo_queue here
-  #       is a decision rather than an oversight -- it is the other half of the
-  #       FIFO choice made on the authorization pair. The inquiry exchange has no
-  #       ordering requirement: each request names an account or asks for a date
-  #       and is answered independently, so two inquiries have no ordering
-  #       relationship to preserve. FIFO requests are also charged at a higher
-  #       rate than standard requests, so applying FIFO here would pay more to
-  #       obtain a guarantee this flow does not need, and would additionally
-  #       oblige every producer to supply a message group identifier that has no
-  #       natural value in an inquiry.
+  # WHY : Refactoring Rationale: this queue is exclusive to account-service.
+  #       Two independent consumers on one standard queue do not receive a copy
+  #       each; they COMPETE, and whichever receives first hides the message for
+  #       the visibility timeout. Discriminating after receive therefore loses
+  #       valid work whenever the wrong service wins. A dedicated queue moves
+  #       dispatch to the producer, where the request type is already known,
+  #       and makes receipt itself proof that the message belongs here.
+  # WHY : Trade-offs: this queue is standard, and the absence of fifo_queue is a
+  #       decision rather than an oversight. Account inquiries are independent,
+  #       so ordering buys no business guarantee and would require a synthetic
+  #       message group while costing more per request.
   # WHY : Assumptions: standard delivery is at-least-once and may reorder, and
   #       that is acceptable specifically because the consumer reads under the
   #       visibility-timeout-plus-delete-on-success discipline described in the
@@ -672,14 +666,57 @@ resource "aws_sqs_queue" "inquiry_request" {
   message_retention_seconds = var.request_message_retention_seconds
 
   redrive_policy = jsonencode({
-    deadLetterTargetArn = aws_sqs_queue.inquiry_request_dlq.arn
+    deadLetterTargetArn = aws_sqs_queue.account_inquiry_request_dlq.arn
     maxReceiveCount     = var.max_receive_count
   })
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
+  kms_master_key_id                 = var.kms_key_arn
+  kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
+  receive_wait_time_seconds         = var.receive_wait_time_seconds
+  visibility_timeout_seconds        = var.visibility_timeout_seconds
+  tags                              = var.tags
+}
+
+resource "aws_sqs_queue" "date_inquiry_request_dlq" {
+  name = local.date_inquiry_request_dlq_name
+
+  # WHY : Assumptions: standard to match the source queue, with the same
+  #       evidence-retention horizon as every other dead-letter queue. Keeping
+  #       this separate from the account DLQ prevents a failed date conversion
+  #       from being redriven onto the account queue by operator error.
+  message_retention_seconds = var.dlq_message_retention_seconds
+
+  kms_master_key_id                 = var.kms_key_arn
+  kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
+  receive_wait_time_seconds         = var.receive_wait_time_seconds
+  visibility_timeout_seconds        = var.visibility_timeout_seconds
+  tags                              = var.tags
+}
+
+resource "aws_sqs_queue" "date_inquiry_request" {
+  name = local.date_inquiry_request_name
+
+  # WHY : Refactoring Rationale: this queue is exclusive to reference-service
+  #       and closes the same competing-consumer loss window as the account
+  #       queue above. CODATE01 and COACCT01 shared one MQ request name in the
+  #       baseline because one CICS/MQ integration owned both program targets;
+  #       after decomposition they are separate deployables, so preserving one
+  #       physical queue would no longer preserve the delivery semantics.
+  # WHY : Assumptions: date requests have no ordering relationship and remain
+  #       standard. The visibility-timeout-plus-delete-on-success discipline is
+  #       what preserves the baseline's syncpoint receive behaviour.
+  message_retention_seconds = var.request_message_retention_seconds
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.date_inquiry_request_dlq.arn
+    maxReceiveCount     = var.max_receive_count
+  })
+
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -688,10 +725,9 @@ resource "aws_sqs_queue" "inquiry_request" {
 }
 
 # -----------------------------------------------------------------------------
-# Account inquiry: reply. Replaces CARDDEMO.RESPONSE.QUEUE, defined as
+# Inquiry reply. Replaces CARDDEMO.RESPONSE.QUEUE, defined as
 # DEFINE QLOCAL('CARDDEMO.RESPONSE.QUEUE') at app/app-vsam-mq/README.md:54 and
-# aliased to CICS as MQQUEUE(CARDRES) at :72. This one queue also absorbs the
-# two per-flow reply NAMES the baseline hard-codes; see the inventory above.
+# aliased to CICS as MQQUEUE(CARDRES) at :72.
 # -----------------------------------------------------------------------------
 
 resource "aws_sqs_queue" "inquiry_reply_dlq" {
@@ -702,10 +738,11 @@ resource "aws_sqs_queue" "inquiry_reply_dlq" {
   #       its source queue's sixty-second window has closed.
   message_retention_seconds = var.dlq_message_retention_seconds
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -716,16 +753,12 @@ resource "aws_sqs_queue" "inquiry_reply_dlq" {
 resource "aws_sqs_queue" "inquiry_reply" {
   name = local.inquiry_reply_name
 
-  # WHY : Refactoring Rationale: ONE queue serves both inquiry flows, where the
-  #       baseline used a distinct reply-queue name per flow --
-  #       CARD.DEMO.REPLY.DATE at app/app-vsam-mq/cbl/CODATE01.cbl:147 and
-  #       CARD.DEMO.REPLY.ACCT at app/app-vsam-mq/cbl/COACCT01.cbl:198. Those two
-  #       literals are the reason this consolidation exists rather than an
-  #       argument against it: a per-flow reply queue makes the transport
-  #       responsible for telling replies apart, so every new flow needs new
-  #       infrastructure and a new hard-coded name. Routing on a replyToQueueUrl
-  #       attribute carried by the request moves that responsibility to the
-  #       message, so one queue serves both flows and a third flow needs none.
+  # WHY : Refactoring Rationale: request queues split by owning service, while
+  #       replies follow one explicit request/reply contract: each request names
+  #       its destination in `replyToQueueUrl`, and the responder sends only to
+  #       that nominated, IAM-authorized queue. This provisioned queue is the
+  #       CardDemo requester's shared destination; responders do not choose a
+  #       hard-coded flow-specific queue.
   # WHY : Trade-offs: the consolidation means the two flows' replies share a
   #       queue depth and a set of metrics, so a backlog cannot be attributed to
   #       the date flow or the account flow from queue metrics alone. That is
@@ -739,10 +772,11 @@ resource "aws_sqs_queue" "inquiry_reply" {
     maxReceiveCount     = var.max_receive_count
   })
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -768,10 +802,11 @@ resource "aws_sqs_queue" "error_dlq" {
   #       operator can still find it.
   message_retention_seconds = var.dlq_message_retention_seconds
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -803,10 +838,11 @@ resource "aws_sqs_queue" "error" {
     maxReceiveCount     = var.max_receive_count
   })
 
-  # WHY : the five arguments below are identical on every one of the ten
-  #       queues, so their Assumptions, Trade-offs and Alternatives Considered
-  #       are recorded once in the shared block above rather than restated ten
-  #       times. Nothing about them is queue-specific.
+  # Alternatives Considered: restating the reasoning for the five arguments below on
+  #       each of the twelve queues was rejected. They take the same value on every
+  #       queue and nothing about them is queue-specific, so the reasoning is
+  #       recorded once in the shared block above; twelve copies would be twelve
+  #       places for one decision to drift.
   kms_master_key_id                 = var.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
   receive_wait_time_seconds         = var.receive_wait_time_seconds
@@ -815,43 +851,207 @@ resource "aws_sqs_queue" "error" {
 }
 
 # -----------------------------------------------------------------------------
+# Queue-level transport enforcement.
+#
+# Each object pairs the URL the provider attaches the policy to with the exact
+# ARN the policy statement protects. The inventory is read from the twelve queue
+# resources themselves so it cannot name a thirteenth queue or omit an ARN while
+# still pointing at a URL.
+# -----------------------------------------------------------------------------
+locals {
+  tls_policy_targets = {
+    pauth_request = {
+      arn = aws_sqs_queue.pauth_request.arn
+      url = aws_sqs_queue.pauth_request.url
+    }
+    pauth_request_dlq = {
+      arn = aws_sqs_queue.pauth_request_dlq.arn
+      url = aws_sqs_queue.pauth_request_dlq.url
+    }
+    pauth_reply = {
+      arn = aws_sqs_queue.pauth_reply.arn
+      url = aws_sqs_queue.pauth_reply.url
+    }
+    pauth_reply_dlq = {
+      arn = aws_sqs_queue.pauth_reply_dlq.arn
+      url = aws_sqs_queue.pauth_reply_dlq.url
+    }
+    account_inquiry_request = {
+      arn = aws_sqs_queue.account_inquiry_request.arn
+      url = aws_sqs_queue.account_inquiry_request.url
+    }
+    account_inquiry_request_dlq = {
+      arn = aws_sqs_queue.account_inquiry_request_dlq.arn
+      url = aws_sqs_queue.account_inquiry_request_dlq.url
+    }
+    date_inquiry_request = {
+      arn = aws_sqs_queue.date_inquiry_request.arn
+      url = aws_sqs_queue.date_inquiry_request.url
+    }
+    date_inquiry_request_dlq = {
+      arn = aws_sqs_queue.date_inquiry_request_dlq.arn
+      url = aws_sqs_queue.date_inquiry_request_dlq.url
+    }
+    inquiry_reply = {
+      arn = aws_sqs_queue.inquiry_reply.arn
+      url = aws_sqs_queue.inquiry_reply.url
+    }
+    inquiry_reply_dlq = {
+      arn = aws_sqs_queue.inquiry_reply_dlq.arn
+      url = aws_sqs_queue.inquiry_reply_dlq.url
+    }
+    error = {
+      arn = aws_sqs_queue.error.arn
+      url = aws_sqs_queue.error.url
+    }
+    error_dlq = {
+      arn = aws_sqs_queue.error_dlq.arn
+      url = aws_sqs_queue.error_dlq.url
+    }
+  }
+
+  # Exact dead-letter admission.
+  #
+  # Each entry pairs ONE dead-letter queue URL with the single source queue ARN
+  # permitted to move messages into it. The six pairs are the six source queues
+  # in the inventory above; a dead-letter queue that appears here can therefore
+  # receive from exactly one source and nothing else.
+  #
+  # WHY : Assumptions: this is expressed through the standalone
+  #       aws_sqs_queue_redrive_allow_policy resource rather than inline on the
+  #       queue. Inline is not merely inelegant, it is impossible: the dead-letter
+  #       queue would reference its source's ARN while that source already
+  #       references the dead-letter queue's ARN in its redrive_policy, and
+  #       Terraform builds its graph per resource, so the mutual reference fails at
+  #       `validate` with "Cycle: aws_sqs_queue.<dlq>, aws_sqs_queue.<source>". The
+  #       standalone resource depends on both queues and breaks the cycle.
+  #       Alternatives Considered: relying on identity policies alone, since only a
+  #       principal holding sqs:StartMessageMoveTask can redrive at all. Rejected
+  #       because the identity model bounds WHO may redrive but not WHICH source a
+  #       dead-letter queue will accept, so a misconfigured redrive_policy on an
+  #       unrelated queue could still land foreign messages in an authorization
+  #       dead-letter queue and be replayed as if it belonged there.
+  dlq_source_pairs = {
+    pauth_request = {
+      dlq_url    = aws_sqs_queue.pauth_request_dlq.url
+      source_arn = aws_sqs_queue.pauth_request.arn
+    }
+    pauth_reply = {
+      dlq_url    = aws_sqs_queue.pauth_reply_dlq.url
+      source_arn = aws_sqs_queue.pauth_reply.arn
+    }
+    account_inquiry_request = {
+      dlq_url    = aws_sqs_queue.account_inquiry_request_dlq.url
+      source_arn = aws_sqs_queue.account_inquiry_request.arn
+    }
+    date_inquiry_request = {
+      dlq_url    = aws_sqs_queue.date_inquiry_request_dlq.url
+      source_arn = aws_sqs_queue.date_inquiry_request.arn
+    }
+    inquiry_reply = {
+      dlq_url    = aws_sqs_queue.inquiry_reply_dlq.url
+      source_arn = aws_sqs_queue.inquiry_reply.arn
+    }
+    error = {
+      dlq_url    = aws_sqs_queue.error_dlq.url
+      source_arn = aws_sqs_queue.error.arn
+    }
+  }
+
+  # The two dead-letter queues that hold FIFO authorization traffic. Native bulk
+  # redrive is denied on exactly these, for the reason recorded at the deny
+  # statement: a bulk move replays a group's messages without the reconciliation
+  # the ordering contract depends on.
+  authorization_fifo_dlq_keys = toset([
+    "pauth_request_dlq",
+    "pauth_reply_dlq",
+  ])
+}
+
+# WHY : Assumptions: one policy instance is attached to EACH queue, including
+#       every dead-letter queue. An identity policy can restrict which principal
+#       may call SQS but cannot require that the signed request travelled over
+#       TLS; the `aws:SecureTransport` condition is the independent transport
+#       control. The Resource is the same queue's exact ARN, so a policy cannot
+#       accidentally govern a sibling queue.
+#       Alternatives Considered: twelve copied policy blocks. Rejected because the
+#       policy is intentionally identical across all queues; one for_each makes
+#       the twelve-instance inventory auditable while keeping the queue-specific
+#       URL and ARN paired in one object.
+resource "aws_sqs_queue_policy" "tls_only" {
+  for_each = local.tls_policy_targets
+
+  queue_url = each.value.url
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      [
+        {
+          Sid       = "DenyInsecureTransport"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "sqs:*"
+          Resource  = each.value.arn
+          Condition = {
+            Bool = {
+              "aws:SecureTransport" = "false"
+            }
+          }
+        }
+      ],
+      contains(local.authorization_fifo_dlq_keys, each.key) ? [
+        {
+          Sid       = "DenyUnorderedNativeBulkRedrive"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "sqs:StartMessageMoveTask"
+          Resource  = each.value.arn
+        }
+      ] : []
+    )
+  })
+}
+
+# WHY : Assumptions: every dead-letter queue belongs to exactly one source.
+#       `byQueue` turns that topology into an admission rule, so a mistaken or
+#       compromised source cannot attach the queue as a failure sink. A separate
+#       resource depends on both queues after creation and avoids the dependency
+#       cycle that an inline DLQ-to-source reference would create.
+resource "aws_sqs_queue_redrive_allow_policy" "exact_source" {
+  for_each = local.dlq_source_pairs
+
+  queue_url = each.value.dlq_url
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "byQueue"
+    sourceQueueArns   = [each.value.source_arn]
+  })
+}
+
+# -----------------------------------------------------------------------------
 # What this file deliberately does NOT declare.
+# -----------------------------------------------------------------------------
 #
-# Each absence below is a decision with a reasonable alternative, so each is
-# recorded. A reader cannot otherwise tell a decision from an oversight, and
-# the usual consequence of that ambiguity is someone adding the thing back.
-#
-# WHY : Alternatives Considered: NO resource-based queue policy, in either of the
-#       two forms the provider offers -- neither the `policy` argument on
-#       aws_sqs_queue nor a separate aws_sqs_queue_policy resource appears
-#       anywhere above. Both were considered and both are unnecessary: every
-#       producer and consumer of these queues is an IAM principal in the same
-#       account, so access is granted by the identity-based task-role policies
-#       owned by the ecs-service and step-functions-batch modules, which is
-#       where the permission belongs and where it is reviewed. A resource policy
-#       would duplicate that grant in a second place, and the wildcard or
-#       broad-principal form it is usually written in is exactly what the
-#       HIGH/CRITICAL policy scan in .github/workflows/infra-ci.yml flags. The
-#       construction that satisfies the scan is to create no such policy at all,
-#       not to write a narrow one. A cross-account producer would change this
+# WHY : Assumptions: resource-based ALLOW statements remain absent. Every
+#       producer and consumer is a same-account IAM principal, so positive
+#       access stays in the identity-based task-role policies owned by
+#       ecs-service and step-functions-batch. The queue policies above contain
+#       only denials and therefore harden transport and recovery without
+#       duplicating a grant or widening a principal. Adding an allow here would
+#       duplicate the identity grants in a second place and make access the union
+#       of two policy surfaces. A cross-account producer would change that
 #       analysis; there is none.
 #
-# WHY : Alternatives Considered: NO redrive_allow_policy on any dead-letter
-#       queue. Restricting which source queues may target a given dead-letter
-#       queue is a genuine hardening measure, and it was tested rather than
-#       assumed. Setting it inline is not merely inelegant -- it is impossible:
-#       the dead-letter queue would have to reference its source queue's ARN
-#       while that source already references the dead-letter queue's ARN in its
-#       redrive_policy, and because Terraform builds its dependency graph per
-#       resource that mutual reference fails outright with
-#       "Cycle: aws_sqs_queue.<dlq>, aws_sqs_queue.<source>" at `validate`,
-#       before any plan is produced. The standalone
-#       aws_sqs_queue_redrive_allow_policy resource would break the cycle by
-#       depending on both queues, and it is declined for proportion: it would
-#       add five more resources to bound something the identity-based model
-#       already bounds, since only principals holding sqs:StartMessageMoveTask
-#       can redrive at all. The policy scan checks that each SOURCE queue has a
-#       redrive policy, which all five do; it does not require this.
+# WHY : Trade-offs: FIFO dead-lettering is an explicit QUARANTINE boundary, not
+#       a claim of uninterrupted order through poison handling. SQS documents
+#       that moving a failed FIFO message to a dead-letter queue can let later
+#       messages in that group proceed. The target therefore guarantees
+#       per-card order while messages remain processable on the source queue,
+#       preserves the failed message on an exact-source FIFO dead-letter queue,
+#       denies unsafe native bulk redrive, and requires reconciliation before
+#       controlled per-message replay. Availability for later authorizations is
+#       chosen over blocking one card forever; docs/architecture/
+#       messaging-contracts.md records that bounded guarantee and its operator
+#       controls without claiming exact order across the quarantine boundary.
 #
 # WHY : Alternatives Considered: NO Amazon MQ broker, and no Kafka or Kinesis
 #       stream. The requirement these queues serve is request/reply, which SQS

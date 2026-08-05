@@ -69,7 +69,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the oldest Terraform CLI this module and its callers are written for.
   # WHY : Assumptions: the infrastructure package is validated on 1.15.8, and it
   #       depends on provider behaviour that no older release can express -- a
   #       zero minimum Aurora capacity requires hashicorp/aws 5.81.0 or later,
@@ -81,7 +80,6 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the only provider this module needs, held inside the 6.x major.
     # WHY : Trade-offs: the pessimistic constraint admits 6.56 and later 6.x
     #       releases but excludes 7.x, so a provider major bump cannot silently
     #       change resource schemas underneath eight instantiations at once;
@@ -96,8 +94,6 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHAT: hashicorp/random is deliberately absent from this list, even though
-    #       the environment roots that call this module do require it.
     # WHY : Assumptions: nothing in this module generates a random value. Every
     #       generated credential -- database passwords, seed-user passwords --
     #       is produced by infra/modules/secrets at apply time and written

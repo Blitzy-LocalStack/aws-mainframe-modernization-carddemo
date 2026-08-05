@@ -14,7 +14,16 @@
 #                          customer national and government identifiers
 #                          [app/cpy/CVCUS01Y.cpy:L17-L18].
 #     aws_kms_key.s3       The versioned dataset bucket, where the batch chain
-#                          and the ETL stage dataset generations.
+#                          and the ETL stage dataset generations, and the private
+#                          bucket holding the single-page application bundle,
+#                          which CloudFront reads through an origin access
+#                          control -- so this key's policy grants that service
+#                          principal a decrypt, narrowed to this account's
+#                          distributions.
+#     aws_kms_key.s3       The versioned dataset and SPA buckets, CloudWatch
+#                          log groups, and the encrypted alert topic. Service
+#                          grants are scoped to the regional logging and
+#                          notification paths.
 #     aws_kms_key.secrets  The Secrets Manager entries holding the database
 #                          credential and the seed-user passwords the stack
 #                          generates rather than commits -- the mechanism that
@@ -34,10 +43,10 @@
 #
 # Parameters / Return values:
 #   None are declared here -- this file holds only resources and data sources.
-#   The module's nine inputs, each carrying its own `type` and `description`,
+#   The module's ten inputs, each carrying its own `type` and `description`,
 #   are declared in infra/modules/kms/variables.tf, and the identifiers, ARNs
 #   and alias names the module publishes to its caller are declared in
-#   infra/modules/kms/outputs.tf. All nine inputs are consumed below: an input
+#   infra/modules/kms/outputs.tf. All ten inputs are consumed below: an input
 #   this file stopped reading would be a contract still published to callers
 #   and to the module's generated documentation but no longer honoured, which is
 #   the case tflint's unused-declaration rule is enabled to catch.
@@ -54,10 +63,11 @@
 #       rejected by the service's own lockout safety check. Every policy below
 #       therefore opens with an administration statement; that check is relied
 #       on, never bypassed.
-#   The module's three input `validation` blocks -- on `environment`,
-#   `name_prefix` and `deletion_window_in_days` -- reject a bad value at plan
-#   time before any of this file is reached; they are documented at the
-#   declarations themselves in variables.tf.
+#   The module's four input `validation` blocks -- on `environment`,
+#   `name_prefix`, `deletion_window_in_days` and
+#   `s3_cloudfront_distribution_arns` -- reject a bad value at plan time before
+#   any of this file is reached; they are documented at the declarations
+#   themselves in variables.tf.
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: four separate keys rather than one shared key for
@@ -89,11 +99,10 @@
 #   both on its own and through a root that calls it as
 #   `source = "../../modules/kms"`. What is still outside that boundary is a
 #   `plan` or an `apply` against a live account, which needs credentials no part
-#   of this repository holds. One finding remains against this directory and it
-#   is not in this file: the module-structure rule reports the absent
-#   outputs.tf, which is authored at a later index of the same plan. It is left
-#   unannotated deliberately -- a `tflint-ignore` for a condition that resolves
-#   itself would outlive the condition and quietly narrow the rule.
+#   of this repository holds. The sibling outputs.tf is now authored and
+#   publishes the four key/alias contracts, so this directory no longer carries
+#   a module-structure finding. No `tflint-ignore` is needed: the earlier
+#   missing-file condition was fixed at its source rather than suppressed.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -158,24 +167,102 @@ locals {
   # principals because there is only one expression to get wrong.
   account_root_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
 
-  # Assumptions: these five actions are the whole of cryptographic USE of a key
-  # -- encrypt, decrypt, re-encrypt, obtain a data key, and read the key's
-  # metadata so a client can tell which key a ciphertext belongs to. They are
-  # deliberately the same five for all four keys while the PRINCIPALS differ per
-  # key, because the per-domain boundary this module exists to draw is a boundary
-  # over who may use which key, not over which operations exist. Note what the
-  # set excludes: no `kms:PutKeyPolicy`, no `kms:CreateGrant`, no
-  # `kms:ScheduleKeyDeletion` and no `kms:*`. A trusted workload that could
-  # rewrite the policy of the key it uses could grant itself, or anything else,
-  # access to that key -- which would make the key policy describe a boundary it
-  # no longer enforces. Administration stays with the account root.
-  key_user_actions = [
-    "kms:Encrypt",
+  # Refactoring Rationale: integrated AWS services ask KMS for data keys and
+  # decrypt ciphertext; they do not need a workload role to call Encrypt,
+  # ReEncrypt, change grants or administer the key directly. Keeping only these
+  # three operations prevents a role trusted for one storage capability from
+  # turning that trust into a general-purpose cryptographic oracle.
+  service_data_key_actions = [
     "kms:Decrypt",
-    "kms:ReEncrypt*",
     "kms:GenerateDataKey*",
     "kms:DescribeKey",
   ]
+
+  # Assumptions: the S3 key's CloudFront grant is conditioned on a source ARN,
+  # and this expression is the whole of how that ARN is decided -- it is composed
+  # here rather than inline so the fallback and the caller-supplied form are
+  # visibly the same value used by one condition, not two branches that could
+  # drift. When the caller names distributions, the condition matches exactly
+  # those; when it names none, the pattern admits distributions of THIS account
+  # in THIS partition and nothing else.
+  #
+  # Trade-offs: the fallback contains a wildcard, and a wildcard in a condition
+  # value is normally the thing to avoid. It is accepted here because the
+  # alternative is worse in both available directions: omitting the statement
+  # makes the front end return 403 for every asset, and omitting the condition
+  # makes the grant usable by any account's distribution. The wildcard sits
+  # inside the account and partition segments of the ARN, so what it widens is
+  # WHICH of this account's distributions may decrypt -- never whose.
+  #
+  # Assumptions: the account identifier and the partition are resolved from the
+  # caller's session for the reasons recorded at those two data sources; no part
+  # of this ARN is a literal.
+  # Assumptions: ALL THREE module inputs narrow the same grant and are read
+  # together -- s3_cloudfront_distribution_arns and cloudfront_distribution_arns
+  # take lists, cloudfront_distribution_arn takes the single SPA distribution an
+  # environment root wires straight from the cloudfront-spa module. Reading only
+  # one of them would leave a root that used another silently falling back to the
+  # account-wide pattern below, which is exactly the widening the condition exists
+  # to prevent.
+  #
+  # Trade-offs: three spellings for one concept is more surface than one, and the
+  # alternative considered was to delete two of them. It is rejected because each
+  # spelling is already consumed by a caller -- the list form by the exact-ARN
+  # narrowing statement and its precondition, the scalar by roots that wire the
+  # distribution output directly -- so removing either would silently widen the
+  # grant for that caller rather than fail its plan.
+  cloudfront_distribution_narrowing_arns = compact(concat(
+    var.s3_cloudfront_distribution_arns,
+    var.cloudfront_distribution_arns,
+    [var.cloudfront_distribution_arn],
+  ))
+
+  cloudfront_distribution_source_arns = length(local.cloudfront_distribution_narrowing_arns) > 0 ? local.cloudfront_distribution_narrowing_arns : ["arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*"]
+
+  # Assumptions: CloudWatch Logs uses a REGIONAL service principal, and the
+  # DNS suffix changes with the AWS partition. Composing both values from the
+  # provider context keeps the key policy aligned with the region that owns the
+  # log groups and avoids a commercial-partition literal in reusable source.
+  cloudwatch_logs_service_principal                   = "logs.${data.aws_region.current.region}.${data.aws_partition.current.dns_suffix}"
+  cloudwatch_log_group_arn_pattern                    = "arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:*"
+  cloudwatch_alarm_arn_pattern                        = "arn:${data.aws_partition.current.partition}:cloudwatch:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.name_prefix}-${var.environment}-*"
+  current_account_role_arn_pattern                    = "^arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$"
+  current_account_cloudfront_distribution_arn_pattern = "^arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/[A-Z0-9]+$"
+  current_account_secret_arn_pattern                  = "^arn:${data.aws_partition.current.partition}:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$"
+  current_account_log_delivery_source_arn_pattern     = "^arn:${data.aws_partition.current.partition}:logs:us-east-1:${data.aws_caller_identity.current.account_id}:delivery-source:[A-Za-z0-9._-]+$"
+  current_account_log_group_arn_pattern               = "^arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:[A-Za-z0-9_./#-]+$"
+  current_account_sns_topic_arn_pattern               = "^arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:[A-Za-z0-9_-]+$"
+
+  # Assumptions: every service grant on the S3 key exists in exactly two shapes --
+  # an EXACT-ARN shape used when the environment root can name the distribution,
+  # log group, delivery source or topic, and a PATTERN shape used when it cannot.
+  # The pair is mutually exclusive by construction: each statement's for_each
+  # inverts the other's emptiness test, so precisely one of the two renders for a
+  # given purpose.
+  #
+  # WHY : Assumptions: two independent hazards have to be avoided at once, and
+  #       neither shape avoids both. Emitting only the exact-ARN shape leaves a
+  #       root that supplies no ARNs with NO service grant at all, and CloudWatch
+  #       Logs, SNS and CloudFront then fail closed at create time. Emitting both
+  #       shapes unconditionally makes the broader pattern dominate the narrow
+  #       grant, so the narrowing becomes decorative, and duplicate statement
+  #       identifiers are rejected outright by the key-policy API -- something
+  #       `terraform validate` does not detect. Inverting one for_each against the
+  #       other is the only arrangement that keeps the module deployable from a
+  #       minimal root while still collapsing to least privilege as soon as the
+  #       root can name its resources.
+  emit_exact_cloudfront_grant = length(local.cloudfront_distribution_narrowing_arns) > 0
+  emit_exact_log_group_grant  = length(var.cloudwatch_log_group_arns) > 0
+  emit_exact_topic_grant      = length(var.sns_topic_arns) > 0
+
+  # S3 Bucket Keys use the bucket ARN as their encryption context, while direct
+  # object data keys use the object ARN. Deriving both forms from exact bucket
+  # ARNs keeps the caller from supplying a wildcard broad enough to cover a
+  # different bucket.
+  s3_encryption_context_arns = distinct(flatten([
+    for bucket_arn in var.s3_encryption_context_bucket_arns :
+    [bucket_arn, "${bucket_arn}/*"]
+  ]))
 }
 
 # =============================================================================
@@ -240,13 +327,12 @@ locals {
 # Assumptions: ROTATION IS NOT A CALLER PREFERENCE. `enable_key_rotation` is
 # wired to the module input on every key, and that input defaults to `true`
 # because rotation is the posture the target architecture specifies for all
-# four keys. What keeps it true is external to this file: the policy scan in the
-# infrastructure pipeline reports at HIGH and CRITICAL severity, and a
-# customer-managed key with rotation disabled is exactly the class of finding it
-# raises. Wiring the argument on all four keys satisfies that gate by
-# construction, so no inline suppression is needed anywhere in this module --
-# which is the difference between a gate that is passed and a gate that is
-# silenced.
+# four keys. The infrastructure pipeline's explicit material-security baseline
+# includes the CMK-rotation check, and the variable validation additionally
+# accepts only `true`; wiring the argument on all four keys therefore satisfies
+# that gate by construction. No inline suppression is needed anywhere in this
+# module, which is the difference between a gate that is passed and a gate that
+# is silenced.
 #
 # Alternatives Considered: NO `multi_region` ARGUMENT ON ANY KEY, so every key
 # below is single-Region. A multi-Region key is the alternative and it is out of
@@ -398,12 +484,30 @@ data "aws_iam_policy_document" "aurora" {
     content {
       sid       = "AllowCryptographicUseByAuroraPrincipals"
       effect    = "Allow"
-      actions   = local.key_user_actions
+      actions   = local.service_data_key_actions
       resources = ["*"]
 
       principals {
         type        = "AWS"
         identifiers = var.aurora_key_user_role_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["rds.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:EncryptionContext:aws:rds:db-id"
+        values   = var.aurora_encryption_context_ids
       }
     }
   }
@@ -414,16 +518,30 @@ resource "aws_kms_key" "aurora" {
   enable_key_rotation     = var.enable_key_rotation
   deletion_window_in_days = var.deletion_window_in_days
 
-  # Assumptions: this argument names THIS key's own document. Pointing two keys
-  # at one document would silently merge their trust lists and reduce the four
-  # keys to one boundary expressed four times, which is the failure the
-  # per-key-list note in the banner above describes.
-  policy = data.aws_iam_policy_document.aurora.json
-
   tags = merge(var.tags, {
     Name      = "${local.alias_prefix}aurora-${var.environment}"
     DataClass = "aurora-postgresql"
   })
+}
+
+resource "aws_kms_key_policy" "aurora" {
+  key_id = aws_kms_key.aurora.key_id
+  policy = data.aws_iam_policy_document.aurora.json
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for arn in var.aurora_key_user_role_arns :
+        can(regex(local.current_account_role_arn_pattern, arn))
+      ])
+      error_message = "Every aurora_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
+    }
+
+    precondition {
+      condition     = length(var.aurora_key_user_role_arns) == 0 || length(var.aurora_encryption_context_ids) > 0
+      error_message = "aurora_encryption_context_ids must name at least one exact Aurora cluster resource identifier when Aurora key users are configured."
+    }
+  }
 }
 
 # Assumptions: this note governs all four aliases in this module -- this one and
@@ -444,18 +562,34 @@ resource "aws_kms_alias" "aurora" {
 #
 # Assumptions: this key protects the dataset generations the batch chain and the
 # ETL stage in object storage -- the target form of the generation datasets the
-# baseline defines with a five-generation scratch limit. Its trust list names the
-# task roles that read and write those objects.
+# baseline defines with a five-generation scratch limit -- AND the private bucket
+# holding the single-page application bundle, which the `cloudfront-spa` module
+# encrypts with this same key. Its trust list names the task roles that read and
+# write those objects.
 #
-# Assumptions: NO service-principal statement appears in this policy either.
-# Every writer to the dataset bucket in this architecture is a task role running
-# a container -- the staging, backup, statement and report steps -- and object
-# storage performs its encryption and decryption on behalf of whichever
-# principal made the request, using that principal's permissions on this key.
-# Nothing in scope delivers into the bucket as a service principal instead: log
-# delivery, inventory and cross-region replication are all outside this
-# migration, and each would be the reason to add such a statement if it were in
-# it.
+# Refactoring Rationale: this policy previously named NO service principal, on
+# the stated ground that every writer to the dataset bucket is a task role and
+# that object storage encrypts and decrypts on behalf of whichever principal
+# called it. That reasoning is sound for the dataset bucket and was incomplete
+# for the key: the application bundle is fetched from its bucket by CloudFront
+# through an origin access control, and CloudFront -- not a task role, and not
+# the storage service acting for one -- is the principal that must decrypt those
+# objects. With no grant to it, every asset request answered 403 while the
+# bucket, the distribution, the origin access control and the key each looked
+# correct in isolation, which is the hardest shape of failure to diagnose. The
+# grant below is therefore unconditional: whether the front end can be served
+# must not depend on an operator populating an optional list.
+#
+# Trade-offs: the grant is one action rather than the five in
+# `local.key_user_actions`. Retrieving an encrypted object needs a decrypt and
+# nothing else; `kms:Encrypt` and `kms:GenerateDataKey*` would only be needed if
+# objects were uploaded THROUGH the distribution, which this architecture never
+# does -- the deployment pipeline publishes the bundle under its own identity.
+#
+# Assumptions: log delivery, inventory and cross-region replication remain out of
+# scope, and each would be its own separately reviewable statement if it were
+# ever brought in. This one statement is not a precedent for adding others
+# unexamined.
 # -----------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "s3" {
@@ -477,12 +611,435 @@ data "aws_iam_policy_document" "s3" {
     content {
       sid       = "AllowCryptographicUseByS3Principals"
       effect    = "Allow"
-      actions   = local.key_user_actions
+      actions   = local.service_data_key_actions
       resources = ["*"]
 
       principals {
         type        = "AWS"
         identifiers = var.s3_key_user_role_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      # Assumptions: the encryption-context condition can only be asserted when the
+      # caller named the buckets it applies to. Rendering it from an empty list
+      # would emit a condition with no permitted value, which denies every request
+      # the surrounding statement exists to allow, so the block is emitted only
+      # when a value exists. The alternative considered -- defaulting the context
+      # to a wildcard -- was rejected because a wildcard here would let the grant
+      # cover a bucket in this account that this key does not protect.
+      #
+      # Trade-offs: with the block omitted the grant is bounded only by which
+      # buckets reference this key, which is broader than an exact context but
+      # still narrower than the key's own key-user grant. Accepted because the
+      # environment roots that name principals also name their buckets, so the
+      # unbound form is reachable only from a deliberately minimal caller.
+      dynamic "condition" {
+        for_each = length(local.s3_encryption_context_arns) > 0 ? [1] : []
+
+        content {
+          test     = "ArnLike"
+          variable = "kms:EncryptionContext:aws:s3:arn"
+          values   = local.s3_encryption_context_arns
+        }
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.emit_exact_cloudfront_grant ? [1] : []
+
+    content {
+      sid       = "AllowCloudFrontOriginAccessControlDecrypt"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudfront.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "AWS:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "AWS:SourceArn"
+        values   = local.cloudfront_distribution_narrowing_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      # Assumptions: the encryption-context condition can only be asserted when the
+      # caller named the buckets it applies to. Rendering it from an empty list
+      # would emit a condition with no permitted value, which denies every request
+      # the surrounding statement exists to allow, so the block is emitted only
+      # when a value exists. The alternative considered -- defaulting the context
+      # to a wildcard -- was rejected because a wildcard here would let the grant
+      # cover a bucket in this account that this key does not protect.
+      #
+      # Trade-offs: with the block omitted the grant is bounded only by which
+      # buckets reference this key, which is broader than an exact context but
+      # still narrower than the key's own key-user grant. Accepted because the
+      # environment roots that name principals also name their buckets, so the
+      # unbound form is reachable only from a deliberately minimal caller.
+      dynamic "condition" {
+        for_each = length(local.s3_encryption_context_arns) > 0 ? [1] : []
+
+        content {
+          test     = "ArnLike"
+          variable = "kms:EncryptionContext:aws:s3:arn"
+          values   = local.s3_encryption_context_arns
+        }
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.cloudwatch_log_delivery_source_arns) > 0 ? [1] : []
+
+    content {
+      sid    = "AllowCloudFrontV2LogDeliveryEncryption"
+      effect = "Allow"
+      actions = [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+      ]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["delivery.logs.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "AWS:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "AWS:SourceArn"
+        values   = var.cloudwatch_log_delivery_source_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      # Assumptions: the encryption-context condition can only be asserted when the
+      # caller named the buckets it applies to. Rendering it from an empty list
+      # would emit a condition with no permitted value, which denies every request
+      # the surrounding statement exists to allow, so the block is emitted only
+      # when a value exists. The alternative considered -- defaulting the context
+      # to a wildcard -- was rejected because a wildcard here would let the grant
+      # cover a bucket in this account that this key does not protect.
+      #
+      # Trade-offs: with the block omitted the grant is bounded only by which
+      # buckets reference this key, which is broader than an exact context but
+      # still narrower than the key's own key-user grant. Accepted because the
+      # environment roots that name principals also name their buckets, so the
+      # unbound form is reachable only from a deliberately minimal caller.
+      dynamic "condition" {
+        for_each = length(local.s3_encryption_context_arns) > 0 ? [1] : []
+
+        content {
+          test     = "ArnLike"
+          variable = "kms:EncryptionContext:aws:s3:arn"
+          values   = local.s3_encryption_context_arns
+        }
+      }
+    }
+  }
+
+  # Assumptions: CloudWatch Logs uses the regional service principal and binds
+  # every KMS request to the exact log-group ARN in the encryption context.
+  # Exact values keep the grant from covering unrelated application groups.
+  dynamic "statement" {
+    for_each = local.emit_exact_log_group_grant ? [1] : []
+
+    content {
+      sid    = "AllowCloudWatchLogGroupEncryption"
+      effect = "Allow"
+      actions = [
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey*",
+        "kms:ReEncrypt*",
+      ]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["logs.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "kms:EncryptionContext:aws:logs:arn"
+        values   = var.cloudwatch_log_group_arns
+      }
+    }
+  }
+
+  # Assumptions: SNS performs envelope encryption for the exact topic ARN in
+  # the encryption context. SourceAccount and SourceArn prevent another account
+  # or another topic from reusing the service-principal grant.
+  dynamic "statement" {
+    for_each = local.emit_exact_topic_grant ? [1] : []
+
+    content {
+      sid    = "AllowSnsTopicEncryption"
+      effect = "Allow"
+      actions = [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+      ]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["sns.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = var.sns_topic_arns
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "kms:EncryptionContext:aws:sns:topicArn"
+        values   = var.sns_topic_arns
+      }
+    }
+  }
+
+  # Assumptions: CloudWatch alarms publish as a service principal. The source
+  # ARN is limited to alarms in this account and Region, while the encryption
+  # context still binds cryptographic use to the exact alert topic.
+  dynamic "statement" {
+    for_each = local.emit_exact_topic_grant ? [1] : []
+
+    content {
+      sid    = "AllowCloudWatchAlarmEncryption"
+      effect = "Allow"
+      actions = [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+      ]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudwatch.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = ["arn:${data.aws_partition.current.partition}:cloudwatch:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:alarm:*"]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "kms:EncryptionContext:aws:sns:topicArn"
+        values   = var.sns_topic_arns
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.emit_exact_cloudfront_grant ? [] : [1]
+
+    content {
+      sid    = "AllowCloudFrontOriginAccessControlDecryptByPattern"
+      effect = "Allow"
+
+      actions   = ["kms:Decrypt"]
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudfront.${data.aws_partition.current.dns_suffix}"]
+      }
+
+      # WHY : Assumptions: the first confines the grant to requests the service
+      #       makes on behalf of THIS account, and the second to requests whose
+      #       source resource is a distribution matching the pattern composed
+      #       below. Either alone would be insufficient: without the account
+      #       condition the grant is usable for another account's resource, and
+      #       without the ARN condition it is usable by any CloudFront feature
+      #       rather than by a distribution reading this origin.
+      #       Assumptions: `ArnLike` rather than `ArnEquals`, because the default
+      #       pattern ends in a wildcard and `ArnEquals` performs no wildcard
+      #       expansion -- it would match nothing and deny every asset request.
+      #       With exact ARNs supplied, `ArnLike` on a pattern containing no
+      #       wildcard is equality, so one operator serves both shapes.
+      condition {
+        test     = "StringEquals"
+        variable = "AWS:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "AWS:SourceArn"
+        values   = local.cloudfront_distribution_source_arns
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.emit_exact_log_group_grant ? [] : [1]
+
+    content {
+      sid    = "AllowRegionalCloudWatchLogsEncryption"
+      effect = "Allow"
+
+      actions = [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey",
+      ]
+
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = [local.cloudwatch_logs_service_principal]
+      }
+
+      # WHY : Assumptions: the regional Logs principal serves every account in
+      #       that region. CallerAccount and ViaService confine the grant to this
+      #       account's Logs path, while the encryption-context ARN limits it to
+      #       log groups in this account and region. Without the service-principal
+      #       grant a log group can reference the key but cannot encrypt an event.
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = [local.cloudwatch_logs_service_principal]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "kms:EncryptionContext:aws:logs:arn"
+        values   = [local.cloudwatch_log_group_arn_pattern]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.emit_exact_topic_grant ? [] : [1]
+
+    content {
+      sid    = "AllowCloudWatchAlarmEncryptionForAlertTopic"
+      effect = "Allow"
+
+      actions = [
+        "kms:GenerateDataKey*",
+        "kms:Decrypt",
+      ]
+
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudwatch.${data.aws_partition.current.dns_suffix}"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = [local.cloudwatch_alarm_arn_pattern]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.emit_exact_topic_grant ? [] : [1]
+
+    content {
+      sid    = "AllowSnsEnvelopeEncryptionInThisAccount"
+      effect = "Allow"
+
+      actions = [
+        "kms:GenerateDataKey*",
+        "kms:Decrypt",
+      ]
+
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["sns.${data.aws_partition.current.dns_suffix}"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["sns.${data.aws_region.current.region}.${data.aws_partition.current.dns_suffix}"]
       }
     }
   }
@@ -492,12 +1049,67 @@ resource "aws_kms_key" "s3" {
   description             = "CardDemo ${var.environment}: customer-managed key for the versioned S3 dataset bucket holding the staged dataset generations produced by the batch chain and the ETL."
   enable_key_rotation     = var.enable_key_rotation
   deletion_window_in_days = var.deletion_window_in_days
-  policy                  = data.aws_iam_policy_document.s3.json
 
   tags = merge(var.tags, {
     Name      = "${local.alias_prefix}s3-${var.environment}"
     DataClass = "s3-datasets"
   })
+}
+
+resource "aws_kms_key_policy" "s3" {
+  key_id = aws_kms_key.s3.key_id
+  policy = data.aws_iam_policy_document.s3.json
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for arn in var.s3_key_user_role_arns :
+        can(regex(local.current_account_role_arn_pattern, arn))
+      ])
+      error_message = "Every s3_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
+    }
+
+    precondition {
+      condition = alltrue([
+        for arn in var.cloudfront_distribution_arns :
+        can(regex(local.current_account_cloudfront_distribution_arn_pattern, arn))
+      ])
+      error_message = "Every cloudfront_distribution_arns value must name an exact CloudFront distribution in the account applying this module."
+    }
+
+    precondition {
+      condition = alltrue([
+        for arn in var.cloudwatch_log_delivery_source_arns :
+        can(regex(local.current_account_log_delivery_source_arn_pattern, arn))
+      ])
+      error_message = "Every cloudwatch_log_delivery_source_arns value must name an exact CloudWatch Logs delivery source in us-east-1 in the account applying this module."
+    }
+
+    precondition {
+      condition = alltrue([
+        for arn in var.cloudwatch_log_group_arns :
+        can(regex(local.current_account_log_group_arn_pattern, arn))
+      ])
+      error_message = "Every cloudwatch_log_group_arns value must name an exact CloudWatch log group in the account and region applying this module."
+    }
+
+    precondition {
+      condition = alltrue([
+        for arn in var.sns_topic_arns :
+        can(regex(local.current_account_sns_topic_arn_pattern, arn))
+      ])
+      error_message = "Every sns_topic_arns value must name an exact SNS topic in the account and region applying this module."
+    }
+
+    precondition {
+      condition = (
+        length(var.s3_key_user_role_arns) == 0 &&
+        length(var.cloudfront_distribution_arns) == 0 &&
+        length(var.cloudwatch_log_delivery_source_arns) == 0
+      ) || length(var.s3_encryption_context_bucket_arns) > 0
+      error_message = "s3_encryption_context_bucket_arns must name at least one exact bucket whenever an S3 role, CloudFront distribution or log-delivery source is trusted."
+    }
+  }
 }
 
 resource "aws_kms_alias" "s3" {
@@ -544,12 +1156,30 @@ data "aws_iam_policy_document" "secrets" {
     content {
       sid       = "AllowCryptographicUseBySecretsPrincipals"
       effect    = "Allow"
-      actions   = local.key_user_actions
+      actions   = local.service_data_key_actions
       resources = ["*"]
 
       principals {
         type        = "AWS"
         identifiers = var.secrets_key_user_role_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "ArnEquals"
+        variable = "kms:EncryptionContext:SecretARN"
+        values   = var.secrets_encryption_context_arns
       }
     }
   }
@@ -559,12 +1189,39 @@ resource "aws_kms_key" "secrets" {
   description             = "CardDemo ${var.environment}: customer-managed key for the Secrets Manager entries holding the generated database credential and seed-user passwords, which the stack stores rather than commits."
   enable_key_rotation     = var.enable_key_rotation
   deletion_window_in_days = var.deletion_window_in_days
-  policy                  = data.aws_iam_policy_document.secrets.json
 
   tags = merge(var.tags, {
     Name      = "${local.alias_prefix}secrets-${var.environment}"
     DataClass = "secrets-manager"
   })
+}
+
+resource "aws_kms_key_policy" "secrets" {
+  key_id = aws_kms_key.secrets.key_id
+  policy = data.aws_iam_policy_document.secrets.json
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for arn in var.secrets_key_user_role_arns :
+        can(regex(local.current_account_role_arn_pattern, arn))
+      ])
+      error_message = "Every secrets_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
+    }
+
+    precondition {
+      condition = alltrue([
+        for arn in var.secrets_encryption_context_arns :
+        can(regex(local.current_account_secret_arn_pattern, arn))
+      ])
+      error_message = "Every secrets_encryption_context_arns value must name an exact Secrets Manager secret in the region and account applying this module."
+    }
+
+    precondition {
+      condition     = length(var.secrets_key_user_role_arns) == 0 || length(var.secrets_encryption_context_arns) > 0
+      error_message = "secrets_encryption_context_arns must name at least one exact secret when Secrets Manager key users are configured."
+    }
+  }
 }
 
 resource "aws_kms_alias" "secrets" {
@@ -581,9 +1238,11 @@ resource "aws_kms_alias" "secrets" {
 # number, so a message body is cardholder data at rest for as long as it sits in
 # a queue.
 #
-# Assumptions: this is the ONE key of the four whose policy names a service
-# principal, and it is named because a specific delivery in this architecture
-# fails silently without it. The nightly batch schedule is configured with a
+# Assumptions: this is one of the two keys whose policy names a service
+# principal -- the other being the S3 key, which grants CloudFront a decrypt so
+# the application bundle can be served from a private encrypted origin -- and it
+# is named here because a specific delivery in this architecture fails silently
+# without it. The nightly batch schedule is configured with a
 # dead-letter target, which is a queue encrypted with this key; when an
 # invocation cannot be delivered, the scheduler service -- not a task role --
 # is the principal that must obtain a data key to write the failed invocation
@@ -615,12 +1274,24 @@ data "aws_iam_policy_document" "sqs" {
     content {
       sid       = "AllowCryptographicUseBySqsPrincipals"
       effect    = "Allow"
-      actions   = local.key_user_actions
+      actions   = local.service_data_key_actions
       resources = ["*"]
 
       principals {
         type        = "AWS"
         identifiers = var.sqs_key_user_role_arns
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["sqs.${data.aws_region.current.region}.amazonaws.com"]
       }
     }
   }
@@ -670,12 +1341,26 @@ resource "aws_kms_key" "sqs" {
   description             = "CardDemo ${var.environment}: customer-managed key for the SQS request, reply and error queues and their dead-letter queues, whose payloads carry card numbers."
   enable_key_rotation     = var.enable_key_rotation
   deletion_window_in_days = var.deletion_window_in_days
-  policy                  = data.aws_iam_policy_document.sqs.json
 
   tags = merge(var.tags, {
     Name      = "${local.alias_prefix}sqs-${var.environment}"
     DataClass = "sqs"
   })
+}
+
+resource "aws_kms_key_policy" "sqs" {
+  key_id = aws_kms_key.sqs.key_id
+  policy = data.aws_iam_policy_document.sqs.json
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for arn in var.sqs_key_user_role_arns :
+        can(regex(local.current_account_role_arn_pattern, arn))
+      ])
+      error_message = "Every sqs_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
+    }
+  }
 }
 
 resource "aws_kms_alias" "sqs" {

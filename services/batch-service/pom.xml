@@ -190,11 +190,7 @@
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- WHAT: No web server and no actuator. This module is the one deployable
-               in the reactor that declares NEITHER
-               spring-boot-starter-web NOR spring-boot-starter-actuator, and the
-               absence is the load-bearing decision recorded here.
-         WHY : Assumptions: this is a ONE-SHOT task, not a server. Every job here
+    <!-- WHY : Assumptions: this is a ONE-SHOT task, not a server. Every job here
                is started by a Step Functions state through the synchronous
                ecs:runTask.sync integration, which passes the job token and the
                business date as container command overrides, waits for the task
@@ -240,9 +236,7 @@
          WHY THIS MODULE DECLARES NO SECURITY STARTER
          ==================================================================== -->
 
-    <!-- WHAT: No spring-boot-starter-security and no
-               spring-boot-starter-oauth2-resource-server, deliberately.
-         WHY : Assumptions: an authorization filter chain defends a LISTENER, and
+    <!-- WHY : Assumptions: an authorization filter chain defends a LISTENER, and
                this module opens none. Both starters install their chains from
                autoconfiguration that is conditional on a servlet web
                application, so with the web starter absent above they contribute
@@ -311,9 +305,7 @@
       <artifactId>spring-boot-starter-flyway</artifactId>
     </dependency>
 
-    <!-- WHAT: The PostgreSQL dialect plugin for Flyway. Mandatory companion to
-               the starter above, not an optional extra.
-         WHY : Assumptions: from Flyway 10 onward, per-database support was
+    <!-- WHY : Assumptions: from Flyway 10 onward, per-database support was
                moved OUT of flyway-core into a separate module per database, and
                the Boot starter above pulls no database module of its own. The
                build therefore compiles, packages and passes every test without
@@ -445,11 +437,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHAT: the engine that evaluates architecture assertions as ordinary
-               tests. The assertions themselves are authored in this module's own
-               test tree and land at a later index of this plan; this declaration
-               is what lets them run when they do.
-         WHY : Refactoring Rationale: the two prohibitions this module depends on
+    <!-- WHY : Refactoring Rationale: the two prohibitions this module depends on
                most, that the money path never uses a binary floating-point type
                and that no service imports another service's domain package,
                were previously expressible only as review conventions, and a
@@ -466,8 +454,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- WHAT: the shared kernel's test artifact, carrying the one rule class.
-         WHY : Refactoring Rationale: the engine above was declared alone and the
+    <!-- WHY : Refactoring Rationale: the engine above was declared alone and the
                comment above it said the rule set was inherited. Maven resolution
                passes a module's MAIN classes to its consumers and never its test
                classes, so no rule was ever evaluated against com.carddemo.batch
@@ -581,8 +568,7 @@
   <build>
     <plugins>
 
-      <!-- WHAT: Repackages the module jar as an executable Spring Boot archive.
-           WHY : Assumptions: the Spring Boot parent only MANAGES this plugin, it
+      <!-- WHY : Assumptions: the Spring Boot parent only MANAGES this plugin, it
                  does not activate it, and the reactor parent at services/pom.xml
                  activates checkstyle, enforcer and failsafe but deliberately not
                  this one, because common-lib is a library that must stay a
@@ -604,10 +590,7 @@
         <artifactId>spring-boot-maven-plugin</artifactId>
       </plugin>
 
-      <!-- WHAT: Activates the integration-test runner for this module. Version,
-                 lifecycle bindings and configuration all come from the
-                 inherited pluginManagement; nothing is restated here.
-           WHY : Assumptions: the inherited pluginManagement supplies the
+      <!-- WHY : Assumptions: the inherited pluginManagement supplies the
                  bindings but a module must still opt in for the plugin to run
                  at all, and the default include pattern already matches the
                  IT-suffixed class names used by this module's repository tests,

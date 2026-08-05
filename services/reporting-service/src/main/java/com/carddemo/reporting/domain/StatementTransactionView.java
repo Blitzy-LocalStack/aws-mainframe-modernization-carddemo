@@ -18,8 +18,10 @@ import org.hibernate.annotations.Immutable;
 /**
  * Read-only projection of the card-ordered transaction record that drives statement generation.
  *
- * <p>One row of this projection is one row of the physical view
- * {@code reporting.statement_transactions}, and that view's row shape is the 350-byte record declared
+ * <p>One row of this projection is one row of the view
+ * {@code reporting.v_statement_transactions}, declared by
+ * {@code data-migration/sql/V1__reporting_views.sql} as a card-number-leading projection of
+ * {@code ledger.transactions}, and that view's row shape is the 350-byte record declared
  * as {@code 01 TRNX-RECORD} at L20 of {@code app/cpy/COSTM01.CPY}. The copybook has exactly one
  * consumer in the baseline: {@code app/cbl/CBSTM03A.CBL} copies it at L51. Note the uppercase
  * extension, which is not a transcription slip -- that member is the single uppercase-extension
@@ -34,13 +36,11 @@ import org.hibernate.annotations.Immutable;
  * through 16 -- its L5, which is the indexed key of the ledger cluster -- and the card number at 263
  * through 278.</p>
  *
- * <p>The re-keying is deliberate and its whole mechanism is legible in one job. STEP010 of
- * {@code app/jcl/CREASTMT.JCL} at L44 invokes a sort whose L53 control statement reads
- * {@code SORT FIELDS=(263,16,CH,A,1,16,CH,A)}, ordering by card number and then by transaction
- * identifier, and whose L54 statement reads {@code OUTREC FIELDS=(1:263,16,17:1,262,279:279,50)},
- * rebuilding each record with the card number hoisted to position 1. STEP020 at L56 then loads the
- * sorted result into an indexed cluster, which is what gives the statement generator a card-ordered
- * browse. So the card-leading order is the access path the statement read exists to use, and this
+ * <p>The re-keying is deliberate and its mechanism is legible in one job: STEP010 of
+ * {@code app/jcl/CREASTMT.JCL} at L44 invokes a sort whose L53 statement orders by card number then
+ * transaction identifier and whose L54 {@code OUTREC} rebuilds each record with the card number
+ * hoisted to position 1, and STEP020 at L56 loads the sorted result into an indexed cluster. The
+ * card-leading order is therefore the access path the statement read exists to use, and this
  * projection preserves it as its declared identity.</p>
  *
  * <p>Assumptions: the report transaction record and this statement transaction record stay two
@@ -49,9 +49,8 @@ import org.hibernate.annotations.Immutable;
  * {@code CVTRA05Y.cpy}; positions 263 through 278 hold a card number there and part of a merchant
  * city here. Both records are 350 bytes and both carry the same thirteen field names, so a single
  * mapped ancestor would compile, run, and read a card number out of the bytes where an identifier
- * lives. The two lexically distinct class names are the only thing standing between a reader and that
- * outcome, which is why a shared superclass, a shared mapped ancestor and a shared attribute
- * converter for the two key components are all declined here.</p>
+ * lives. That is why a shared superclass, a shared mapped ancestor and a shared attribute converter
+ * for the two key components are all declined here.</p>
  *
  * <h2>Record geometry, asserted from two agreeing sources</h2>
  *
@@ -76,9 +75,9 @@ import org.hibernate.annotations.Immutable;
  *   <li>L25 {@code TRNX-TYPE-CD PIC X(02)}, one-based 33 through 34, column {@code type_cd}
  *       {@code CHAR(2)}, held as a {@code String}. </li>
  *   <li>L26 {@code TRNX-CAT-CD PIC 9(04)}, one-based 35 through 38, column {@code category_cd}
- *       {@code SMALLINT}, held as an {@code Integer}. </li>
+ *       {@code CHAR(4)}, held as a {@code String}. </li>
  *   <li>L27 {@code TRNX-SOURCE PIC X(10)}, one-based 39 through 48, column {@code source}
- *       {@code VARCHAR(10)}, held as a {@code String}. </li>
+ *       {@code CHAR(10)}, held as a {@code String}. </li>
  *   <li>L28 {@code TRNX-DESC PIC X(100)}, one-based 49 through 148, column {@code description}
  *       {@code VARCHAR(100)}, held as a {@code String}. </li>
  *   <li>L29 {@code TRNX-AMT PIC S9(09)V99}, one-based 149 through 159, eleven bytes, column
@@ -90,7 +89,7 @@ import org.hibernate.annotations.Immutable;
  *   <li>L32 {@code TRNX-MERCHANT-CITY PIC X(50)}, one-based 219 through 268, column
  *       {@code merchant_city} {@code VARCHAR(50)}, held as a {@code String}. </li>
  *   <li>L33 {@code TRNX-MERCHANT-ZIP PIC X(10)}, one-based 269 through 278, column
- *       {@code merchant_zip} {@code VARCHAR(10)}, held as a {@code String}. </li>
+ *       {@code merchant_zip} {@code CHAR(10)}, held as a {@code String}. </li>
  *   <li>L34 {@code TRNX-ORIG-TS PIC X(26)}, one-based 279 through 304, column {@code orig_ts}
  *       {@code TIMESTAMP(6)}, held as a {@link LocalDateTime}, nullable. </li>
  *   <li>L35 {@code TRNX-PROC-TS PIC X(26)}, one-based 305 through 330, column {@code proc_ts}
@@ -123,32 +122,20 @@ import org.hibernate.annotations.Immutable;
  * and belongs to the account context rather than to the card context, so a reader who cannot find a
  * card read here has not overlooked one.</p>
  *
- * <p>Assumptions: only four of the six operations the baseline's generic input-output module offers are
- * ever reachable through this projection. {@code app/cbl/CBSTM03B.CBL} is a subprogram rather than a
- * job -- its {@code PROCEDURE DIVISION USING LK-M03B-AREA} header is at L114 -- and its L118
- * {@code EVALUATE LK-M03B-DD} dispatches on the data-definition name first, with {@code 'TRNXFILE'} at
- * L119, {@code 'XREFFILE'} at L121, {@code 'CUSTFILE'} at L123 and {@code 'ACCTFILE'} at L125, and only
- * then on the operation code. The six codes are declared at L103 through L108 as open, close, read,
- * keyed read, write and rewrite. Because the read path this projection sits on holds
- * {@code SELECT} and nothing else, only open, close, read and keyed read are exercised, and no write
- * path of any kind is introduced here.</p>
- *
- * <p>Assumptions: that module's transfer area is not a competing declaration of this record's key
- * width. {@code CBSTM03B.CBL} L110 declares {@code LK-M03B-KEY PIC X(25)} while the key mapped here is
- * 32 bytes, and L111 declares {@code LK-M03B-KEY-LN PIC S9(4)} alongside it. A separate
- * significant-key-length parameter is the signature of a generic keyed browse rather than a whole-key
- * read of one declared width, so the 25-byte field is that module's own transfer buffer sized for the
- * widest key it handles generically, and the normative width remains the copybook's. This is recorded
- * as an observation about a generic handle, not as a fault in the baseline.</p>
+ * <p>Assumptions: the transfer area of the baseline's generic input-output module is not a competing
+ * declaration of this record's key width. {@code app/cbl/CBSTM03B.CBL} L110 declares
+ * {@code LK-M03B-KEY PIC X(25)} while the key mapped here is 32 bytes, and L111 declares a separate
+ * significant-key-length parameter beside it -- the signature of a generic keyed browse rather than a
+ * whole-key read of one declared width. The 25-byte field is that module's own transfer buffer sized
+ * for the widest key it handles generically, and the normative width remains the copybook's. Because
+ * the read path this projection sits on holds {@code SELECT} and nothing else, no write path of any
+ * kind is introduced here.</p>
  *
  * <h2>Decisions</h2>
  *
- * <p>What follows discharges the obligation user-specified Rule 1 (Explainability) states at L43,
- * using the four categories it names at L31-L34, for the choices on this type that a reasonable
- * alternative could have gone the other way on. L40 forbids leaving such a choice undocumented and L41
- * forbids a rationale carrying no specific justification, so every entry below names the line, the
- * declared width or the byte count it rests on. The written convention this file conforms to is stated
- * once at {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and owned elsewhere.</p>
+ * <p>Each entry below is a choice a reasonable alternative could have gone the other way on, and names
+ * the line, the declared width or the byte count it rests on. The written convention these blocks
+ * conform to is {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and owned elsewhere.</p>
  *
  * <p>Trade-offs: this type is mapped immutable, and it carries no optimistic-locking version column,
  * no setter, no cascade and no write path at all. What is given up is real and is accepted
@@ -182,30 +169,44 @@ import org.hibernate.annotations.Immutable;
  * the narrowly-scoped read privilege behind it, never through code, which is why this type declares no
  * relationship annotation to {@code CardXrefView}, {@code AccountView} or {@code CustomerView} and the
  * four-way statement read is composed in the repository layer by a query over the view. Two mechanisms
- * hold that line: the ArchUnit layering rule at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * forbids one context's domain package importing another's, and being a test it cannot rot; and this
- * module's build declares exactly one dependency inside the reactor, the shared kernel, so no other
- * service module is on its compile classpath to be imported from. That is the discipline the baseline
+ * hold that line: the shared kernel's layering rules, which the {@code architecture-rules} Surefire
+ * execution in {@code services/pom.xml} selects by the simple name {@code LayeringRulesTest} and
+ * evaluates against this module's own compiled classes, forbid one context's domain package importing
+ * another's, and being a build rule rather than prose that cannot decay unnoticed; and this module's
+ * build declares exactly one dependency inside the reactor, the shared kernel, so no other service
+ * module is on its compile classpath to be imported from. That is the discipline the baseline
  * read under too, where the statement generator reached its four inputs through job control alone and
  * never through a compile-time bond. The database half is authored elsewhere and cited by path:
  * {@code data-migration/sql/V0__schemas_and_roles.sql} establishes the schemas, the roles and, at its
- * L816 and the default-privilege statements following it, the {@code SELECT}-only reach; and
- * {@code data-migration/sql/V1__reporting_views.sql} declares the view itself, ordered after every
- * per-service migration because a view cannot precede the rows it reads. A view absent at run time is
- * a defect to report against those artifacts and never one to work around from inside this type.</p>
+ * L944 and the default-privilege statements following it at L963 to L966, the {@code SELECT}-only
+ * reach; and {@code data-migration/sql/V1__reporting_views.sql} declares the view itself, ordered
+ * after every per-service migration because a view cannot precede the rows it reads. A view absent at
+ * run time is a defect to report against those artifacts and never one to work around from inside
+ * this type.</p>
  *
- * <p>Assumptions: the view is also where the column contract this type declares is produced, and the
- * cast it has to perform is named here so its author is not left to infer it. The underlying rows are
- * declared in {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql},
- * which stores the category code, the source and the postal code as fixed-width character columns,
- * whereas the normative copybook declares the category code numerically at L26 and declares the other
- * two as text whose trailing blanks are padding. The view must therefore present {@code category_cd} as
- * a small whole number and {@code source} and {@code merchant_zip} as variable-length text, which is
- * precisely the contract the geometry list above states. The view is the single place that conversion
- * belongs, because performing it here instead would mean a projection whose declared type disagreed
- * with the column it reads, and performing it in the base table would change a contract another context
- * owns.</p>
+ * <p>Assumptions: the view is also where the column contract this type declares is produced, and it
+ * performs no conversion at all -- which is stated here because a projection is exactly the place a
+ * reader would expect one. The underlying rows are declared in
+ * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}, and
+ * {@code reporting.statement_transactions} in {@code data-migration/sql/V1__reporting_views.sql}
+ * projects every one of them under its own name, width and type. The geometry list above therefore
+ * names the base table's types, not converted ones.</p>
+ *
+ * <p>Alternatives Considered: having the view cast {@code category_cd} to a small whole number and
+ * {@code source} and {@code merchant_zip} to variable-length text, on the reading that the normative
+ * copybook declares the category numerically at L26 and treats the trailing blanks of the other two
+ * as padding. Rejected for two independent reasons. First, the sibling
+ * {@code ReportTransactionView} projects the same three base columns and reaches the opposite
+ * reading on measured evidence: the source is compared blank-padded to its full declared width, so
+ * a ten-character value and the same value trimmed are one value in the baseline and would be two
+ * under a variable-length column; the postal code's leading zeros are significant and its padding
+ * participates in comparison; and the category is a label whose leading zeros carry rather than a
+ * magnitude. Two views over one base column that disagreed on its type would make the same stored
+ * value compare differently depending on which report read it. Second, a pass-through projection is
+ * auditable against the base table by inspection, whereas a casting one has to be reasoned about
+ * column by column -- and the narrowing this view exists for is a privilege boundary, not a type
+ * conversion. What is given up is a projection that pre-shapes its columns for a reader; what is
+ * kept is one type per stored column across every context that reads it.</p>
  *
  * <p>Assumptions: the trailing {@code FILLER PIC X(20)} declared at L36 of {@code COSTM01.CPY},
  * occupying one-based positions 331 through 350, is dropped and mapped to no column, and the line it
@@ -298,7 +299,7 @@ import org.hibernate.annotations.Immutable;
  */
 @Entity
 @Immutable
-@Table(name = "statement_transactions", schema = "reporting")
+@Table(name = "v_statement_transactions", schema = "reporting")
 public class StatementTransactionView {
 
     // WHY : Assumptions: the declared lengths and the decimal precision below restate the copybook
@@ -320,10 +321,28 @@ public class StatementTransactionView {
     @Column(name = "type_cd", length = 2)
     private String typeCode;
 
-    // WHY : Assumptions: L26 declares PIC 9(04), unsigned, so four decimal digits with no sign, and
-    //       a whole-number type covering 0 through 9999 holds every value the declaration admits.
-    @Column(name = "category_cd")
-    private Integer categoryCode;
+    // WHY : (1) Assumptions: L26 of COSTM01.CPY declares PIC 9(04), unsigned, and a width-only
+    //       reading maps that to a whole-number type since 9999 fits one. The code is a label
+    //       rather than a magnitude, though: no program performs arithmetic on it, and its leading
+    //       zeros carry. Two independent sources settle it against the numeric reading. The
+    //       physical column is CHAR(4) -- ledger.transactions declares category_cd that way in
+    //       transaction-service's V1__ledger.sql, and reporting.statement_transactions projects it
+    //       unchanged in data-migration/sql/V1__reporting_views.sql -- and the baseline's own
+    //       relational expression of the same field declares
+    //       TRC_TYPE_CATEGORY CHAR(4) NOT NULL at app/app-transaction-type-db2/ddl/TRNTYCAT.ddl L3.
+    //       A whole-number mapping over a four-character column renders 0001 as 1, losing the
+    //       zeros between the projection and the statement line.
+    //       (2) Assumptions: the declared length of four is stated rather than left off, for the
+    //       same reason the two-character type code above states its own: for a code the width is
+    //       part of the contract rather than an upper bound.
+    //       (3) Alternatives Considered: keeping the whole-number type and re-padding to four
+    //       digits at the rendering layer. Rejected because it puts the width contract in a
+    //       formatter rather than in the mapping, so a second reader of the same column that
+    //       forgot to pad would emit a different value for one row -- and the sibling
+    //       ReportTransactionView, which projects the same base column, would then disagree with
+    //       this one on the type of a shared field.
+    @Column(name = "category_cd", length = 4)
+    private String categoryCode;
 
     @Column(name = "source", length = 10)
     private String source;
@@ -378,12 +397,33 @@ public class StatementTransactionView {
     @Column(name = "proc_ts", nullable = true)
     private LocalDateTime processingTimestamp;
 
+    // WHY : Refactoring Rationale: this member exists because the card number this projection exposes
+    //       is MASKED to its last four digits, and a statement is a per-card document that has to be
+    //       grouped by card. Grouping on the masked value would merge two genuinely different cards
+    //       that happen to share their last four digits into one statement, and with a twelve-digit
+    //       prefix suppressed that collision is a certainty rather than a risk -- the baseline never
+    //       had the problem because it broke on the full card number read through its alternate index.
+    // WHY : Trade-offs: the alternative was to project the full card number and mask it in the
+    //       presentation mapper instead. Rejected because it would give the reporting service role read
+    //       access to every primary account number in the ledger and reduce the masking from a boundary
+    //       the database enforces to a convention the reporting code is trusted to follow -- which is
+    //       exactly the arrangement data-migration/sql/V0__schemas_and_roles.sql withdrew.
+    // WHY : Assumptions: the value is a deterministic digest of the trimmed card number, computed by
+    //       reporting.statement_transactions in data-migration/sql/V1__reporting_views.sql. It is a
+    //       GROUPING KEY and nothing else: it is not a credential, no client ever receives it, and it
+    //       reveals no card number to a party that does not already hold one. It is deliberately not
+    //       part of {@link StatementTransactionKey}, because the transaction identifier already makes
+    //       that key unique and widening a key to carry a grouping column would change the identity of
+    //       every row for the sake of an ordering concern.
+    @Column(name = "card_fingerprint", length = 32)
+    private String cardFingerprint;
+
     /**
      * Creates an unpopulated instance for the persistence provider to fill by field access.
      *
      * <p>Trade-offs: this is the only constructor, and no constructor accepting data is declared, so
      * the sole way an instance acquires values is the mapping layer populating them from a row of
-     * {@code reporting.statement_transactions}. Two costs are accepted knowingly. An instance cannot be
+     * {@code reporting.v_statement_transactions}. Two costs are accepted knowingly. An instance cannot be
      * assembled inside a unit test without the persistence provider or reflection, and the compensating
      * mechanism is the module's container-backed repository test, which reads a real view and is the
      * test shape the migration plan prescribes for a projection. The second cost is convenience: a
@@ -427,12 +467,13 @@ public class StatementTransactionView {
     }
 
     /**
-     * Returns the transaction category code as a whole number.
+     * Returns the transaction category code at its declared four-character width.
      *
-     * @return the whole-number value of column {@code category_cd}, in the range the four-digit
-     *     unsigned declaration at L26 admits, or {@code null} where the view presents no value
+     * @return the value of column {@code category_cd}, four characters wide as the declaration at
+     *     L26 fixes it and with any leading zeros intact, or {@code null} where the view presents
+     *     no value
      */
-    public Integer categoryCode() {
+    public String categoryCode() {
         return categoryCode;
     }
 
@@ -527,6 +568,26 @@ public class StatementTransactionView {
      */
     public LocalDateTime processingTimestamp() {
         return processingTimestamp;
+    }
+
+    /**
+     * Returns the collision-free token that groups this row's card together with its siblings.
+     *
+     * <p>Assumptions: this is what a statement run breaks on, and not {@link #key()}'s card number.
+     * That card number is masked to its last four digits, so breaking on it would merge two genuinely
+     * different cards that share those four digits into a single statement; this token is a
+     * deterministic digest of the full card number, so it distinguishes them while revealing neither.
+     * The digest is computed by {@code reporting.statement_transactions} and never by this type.</p>
+     *
+     * <p>Trade-offs: the token has no meaning outside a grouping comparison. It is not an identifier
+     * any client receives, it is not ordered in any way that corresponds to card ordering, and it must
+     * not be rendered -- the card number a statement displays is the masked value on the key.</p>
+     *
+     * @return the thirty-two-character digest held in column {@code card_fingerprint}, never
+     *     {@code null} for a row read from the view because the source card number is itself not-null
+     */
+    public String cardFingerprint() {
+        return cardFingerprint;
     }
 
     /**

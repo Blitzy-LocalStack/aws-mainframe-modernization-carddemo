@@ -9,10 +9,11 @@
 #   configuration relies on, and the exact provider majors whose resource
 #   schemas the module's resources are written against.
 #
-#   The module provisions Secrets Manager entries whose values are generated
-#   at apply time rather than read from source. That is the mechanism by which
-#   no credential ever reaches this repository, and it is why a random-value
-#   provider is a genuine requirement here rather than an incidental one.
+#   The module generates its service database passwords at apply time and
+#   imports environment-issued TLS material through required sensitive inputs.
+#   The random provider is therefore a genuine requirement for the database
+#   family rather than an incidental one; certificate issuance remains outside
+#   Terraform and needs no third provider.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: this directory is a reusable MODULE, not a root. It is
@@ -32,7 +33,7 @@
 #     account, and declaring an alias would force every caller to pass an
 #     explicit provider map for no gain. `experiments`, `cloud` and
 #     `provider_meta` are absent for the same reason: nothing here needs them.
-#   - Trade-offs: exactly two providers are declared and no more. A third entry
+#   - Trade-offs: exactly three providers are declared and no more. A fourth entry
 #     that no resource consumed would be reported by tflint's
 #     terraform_unused_required_providers rule, so this list is kept as a
 #     precise statement of what the module actually uses.
@@ -51,21 +52,22 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHY : Assumptions: one AWS provider major.minor is pinned across the
-    #       ENTIRE infra/ tree so that two modules composed into the same root
-    #       can never disagree. Terraform has to select a single version
-    #       satisfying every constraint in the configuration, so a divergent
-    #       pin in one module becomes an init-time resolution failure for the
-    #       whole root. The 6.56 floor is inherited from the sibling
+    # WHY : Assumptions: one AWS provider major-line constraint is shared across
+    #       the entire infra/ tree so that composed modules have an intersecting
+    #       range. Terraform selects one exact version satisfying every
+    #       constraint in the configuration. The 6.56 floor is inherited from
+    #       the sibling
     #       aurora-postgresql module, which needs >= 5.81.0 to express a
     #       zero-minimum Aurora Serverless capacity range; 6.56 clears that
     #       comfortably, and matching it here keeps this module composable
     #       with that sibling.
-    # WHY : Trade-offs: `~>` rather than an exact `=` pin. An exact pin would
-    #       freeze provider patch releases and require a commit for each one,
-    #       whereas `~>` accepts a patch update but refuses a minor bump, so
-    #       resource schemas cannot change underneath a plan that was reviewed
-    #       against this file.
+    # WHY : Trade-offs: `~> 6.56` means `>= 6.56.0, < 7.0.0`, so later 6.x
+    #       minor releases remain compatible with this module contract. The
+    #       adjacent `.terraform.lock.hcl` currently selects 6.57.1 and records
+    #       its checksums; CI uses `-lockfile=readonly`, so any exact-version or
+    #       checksum change is a reviewed lock-file diff rather than an ambient
+    #       upgrade. An exact constraint here was rejected because it would
+    #       duplicate the lock's responsibility in every module.
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.56"
@@ -86,6 +88,16 @@ terraform {
     random = {
       source  = "hashicorp/random"
       version = "~> 3.9"
+    }
+
+    # WHY : Assumptions: the rotation Lambda source is committed as readable
+    #       Python and packaged deterministically during planning. Checking in a
+    #       binary zip would hide the reviewed source behind an opaque artifact;
+    #       a local-exec zip command would make correctness depend on whichever
+    #       shell utilities happen to exist on the apply host.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
     }
   }
 }

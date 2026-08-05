@@ -9,10 +9,17 @@
 #   schema this module owns, persistence-provider behaviour, job-launch policy
 #   and log levels.
 #
-#   application-dev.yml and application-prod.yml are OVERLAYS on this document.
-#   They differ from it only in sizing, pool limits, log level and retention,
-#   never in topology, so a setting that changes behaviour rather than capacity
-#   belongs here and not in a profile.
+#   application-dev.yml EXISTS and is an OVERLAY on this document;
+#   application-prod.yml DOES NOT EXIST YET. This document is consequently the
+#   whole of the production configuration today, and it is written to start with
+#   no profile active at all, which is why every value a profile would otherwise
+#   tune is a concrete literal here. An overlay -- the one that exists and the one
+#   still to be authored -- may differ from this document only in sizing, pool
+#   limits, log level and retention, never in topology, so a setting that changes
+#   behaviour rather than capacity belongs here and not in a profile. Every
+#   statement below about what an overlay MAY and MAY NOT vary is that constraint,
+#   which for `prod` is a forward one; a reader can confirm the current state with
+#   `ls services/batch-service/src/main/resources`.
 #
 #   This module is NOT a server. Every invocation is a short-lived container
 #   task started by one state of the nightly orchestration, which passes the job
@@ -23,7 +30,7 @@
 #   under WHY below.
 #
 #   The seven jobs are named as classes at
-#   src/main/java/com/carddemo/batch/package-info.java L95 to L102:
+#   src/main/java/com/carddemo/batch/package-info.java L77 to L82:
 #   PreflightDailyTransactionsJob, PostTransactionsJob, CalculateInterestJob,
 #   BackupTransactionsJob, CombineTransactionsJob, ExportJob and ImportJob.
 #   Their behavioural oracle is the COBOL under app/**, which is read and cited
@@ -31,17 +38,9 @@
 #
 # Inputs (the "parameters" this document consumes):
 #   Property namespaces it owns and is the only declarer of:
-#     spring.application.name        service identity for metrics and logs
-#     spring.config.import           AWS Parameter Store overlay
-#     spring.cloud.aws               region for the eagerly built AWS clients,
-#                                    and listener policy for the one-shot lifecycle
-#     spring.lifecycle               shutdown drain budget
-#     spring.datasource[.hikari]     connection, pool and schema search path
-#     spring.flyway                  migration of the `batch` schema only
-#     spring.jpa                     persistence-provider behaviour
-#     spring.batch.job               job-launch policy
-#     spring.sql.init                generic script-initialisation policy
-#     logging.level                  base log levels
+#     spring.application.name  spring.config.import  spring.cloud.aws
+#     spring.lifecycle  spring.datasource[.hikari]  spring.flyway  spring.jpa
+#     spring.batch.job  spring.sql.init  logging.level
 #   Injected environment variables, every one resolved at run time and none
 #   carrying a value committed to this repository:
 #     SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME,
@@ -51,70 +50,59 @@
 #     CARDDEMO_DB_SSL_ROOT_CERT   -- certificate-bundle path inside the image.
 #     AWS_REGION                  -- required for the module to START, because the
 #     AWS starters build their clients eagerly. See the note at spring.cloud.aws.
-#     CARDDEMO_ENV                 -- environment label used only to address the
+#     CARDDEMO_ENVIRONMENT         -- environment label used only to address the
 #     Parameter Store prefix.
 #     SPRING_PROFILES_ACTIVE       -- read by the framework, never set here, so
 #     that the two overlays stay reachable.
 #   Command-line arguments this document deliberately does NOT usurp:
-#     --job=<one of the seven names above> and --business-date=<10-character
-#     token>. Both arrive as container command arguments and are consumed by
-#     BatchApplication. No property here selects a job, defaults a job, or
-#     defaults or reformats a business date.
+#   --job=<one of the seven names above> and --business-date=<10-character token>.
+#   Both arrive as container command arguments and are consumed by
+#   BatchApplication. No property here selects a job, defaults a job, or defaults
+#   or reformats a business date.
 #
 # Outputs (what this document establishes for every task):
-#   - An ordered five-schema connection search path -- batch, ledger, account,
-#     card, reference -- applied once per physical pooled connection, so every
-#     unqualified table name in the entity mappings resolves deterministically
-#     and Flyway's own connections are pinned by the same mechanism.
-#   - Flyway scoped to this module's own classpath location and to the `batch`
-#     schema for both the migration and its schema-history table, creating no
-#     schema and cleaning nothing.
-#   - The persistence provider held to validate-only, so a mapping that
-#     disagrees with a physical table stops the task at startup.
-#   - The job-repository tables resolved to batch.BATCH_* through the search
-#     path above rather than through a prefix property, for the reason recorded
-#     at spring.batch.
-#   - Exactly one non-distributed datasource and therefore the single
-#     auto-configured transaction manager, which is what keeps the three-write
-#     posting unit of work at app/cbl/CBTRN02C.cbl:440-442 one atomic commit.
-#   - No listening socket of any kind.
+#   An ordered five-schema connection search path -- batch, ledger, account, card,
+#   reference -- applied once per physical pooled connection, so every unqualified
+#   table name resolves deterministically and Flyway's own connections are pinned
+#   by the same mechanism; Flyway scoped to this module's classpath location and to
+#   the `batch` schema for both the migration and its history table, creating no
+#   schema and cleaning nothing; the persistence provider held to validate-only, so
+#   a mapping that disagrees with a physical table stops the task at startup; the
+#   job-repository tables resolved to batch.BATCH_* through that search path rather
+#   than a prefix property; exactly one non-distributed datasource and therefore
+#   the single auto-configured transaction manager, which is what keeps the
+#   three-write posting unit of work at app/cbl/CBTRN02C.cbl:440-442 one atomic
+#   commit; and no listening socket of any kind.
 #
 # Fails when (the "exceptions" a reader must know about):
 #   - Flyway core reaches the classpath without its PostgreSQL companion. Per
 #     database support was moved out of Flyway core, so the core artifact alone
 #     compiles, packages and passes every test, then aborts on FIRST CONTAINER
-#     START with a missing-database-plugin error. Both artifacts are declared
-#     side by side in services/batch-service/pom.xml and neither is re-pinned
-#     here. This is the one failure mode in this file that no build gate in the
-#     repository can catch.
-#   - The search path omits `reference`. CalculateInterestJob cannot then
-#     resolve disclosure_groups and the interest state of the nightly chain
-#     fails at the database. app/cbl/CBACT04C.cbl:47 opens DISCGRP for exactly
-#     this lookup.
-#   - The search path omits `card`. PreflightDailyTransactionsJob cannot then
-#     resolve the card master, which app/cbl/CBTRN01C.cbl:46 opens as CARDFILE
-#     to validate the daily feed against.
-#   - reference.disclosure_groups holds no 'DEFAULT' row. This is a
-#     cross-service precondition owned by reference-service, not something this
-#     file can establish. app/cbl/CBACT04C.cbl:437 moves 'DEFAULT' into the
-#     group key as its fallback, and :443-459 abends the program at :458 when
-#     that read does not return status '00'. At this checkpoint
-#     services/reference-service/src/main/resources/db/migration holds only
-#     V1__reference.sql, which contains no INSERT, so the row is contracted
-#     rather than present.
+#     START with a missing-database-plugin error. Both artifacts are declared side
+#     by side in services/batch-service/pom.xml and neither is re-pinned here. This
+#     is the one failure mode in this file that no build gate can catch.
+#   - The search path omits `reference` or `card`. CalculateInterestJob then cannot
+#     resolve disclosure_groups, which app/cbl/CBACT04C.cbl:47 opens as DISCGRP,
+#     and PreflightDailyTransactionsJob cannot resolve the card master, which
+#     app/cbl/CBTRN01C.cbl:46 opens as CARDFILE to validate the daily feed. Either
+#     way the nightly chain fails at the database rather than in this file.
+#   - reference.disclosure_groups holds no 'DEFAULT' row. This is a cross-service
+#     precondition owned by reference-service, which seeds the row in
+#     db/migration/V2__seed_reference.sql; that migration having been applied is a
+#     precondition of the interest step rather than of this document.
+#     app/cbl/CBACT04C.cbl:437 moves 'DEFAULT' into the group key as its fallback,
+#     and :443-459 abends the program at :458 when that read does not return '00'.
 #   - A migration owned by another context has not been applied when a task
 #     starts. Validate-only then refuses to start rather than failing mid-chunk.
-#     The trade-off is recorded at spring.jpa.hibernate.ddl-auto.
 #   - No region is available. The AWS starters build their clients while
-#     configuration is still loading, so a context with no region aborts before
-#     any parameter is read and before the datasource is touched -- even though
-#     nothing in a given job may use AWS at all. The `optional:` prefix on the
-#     import does NOT cover this, because it makes a missing PARAMETER PATH
-#     tolerable, not a client that cannot be constructed. Detail at
-#     spring.cloud.aws.
-#   - Any injected environment variable above is absent. The placeholders carry
-#     no fallback on purpose, so startup fails loudly instead of quietly
-#     selecting something committed here.
+#     configuration is still loading, so a context with no region aborts before any
+#     parameter is read and before the datasource is touched -- even though nothing
+#     in a given job may use AWS at all. The `optional:` prefix does NOT cover
+#     this: it makes a missing PARAMETER PATH tolerable, not a client that cannot
+#     be constructed.
+#   - Any injected environment variable above is absent. The placeholders carry no
+#     fallback on purpose, so startup fails loudly instead of quietly selecting
+#     something committed here.
 #
 # Deliberate omissions, so that each absence reads as a decision:
 #   - No server.* and no management.*: this module declares neither a web nor an
@@ -143,14 +131,18 @@
 #     needed.
 #
 # State at this checkpoint:
-#   This document is authored ahead of the Java it configures, and the migration
-#   lands its artifacts in plan order. The following are contracted and NOT yet
-#   present, so nothing below should be read as a description of code that runs
-#   today: BatchApplication, which consumes --job and --business-date and
-#   publishes the process exit status; the com.carddemo.batch.config classes;
-#   and the domain, dto, repository, mapper and service packages holding the
-#   eight entity mappings this document's search path and validate-only setting
-#   exist to serve. Every key below is nevertheless declared now, deliberately:
+#   BatchApplication now exists and consumes --job and --business-date. The
+#   domain, dto and job package contracts also exist as package-info.java
+#   surfaces. The com.carddemo.batch.config classes and the concrete domain,
+#   repository, mapper, service and job implementations remain contracted at
+#   later indexes, so the current source tree does not yet contain the eight
+#   entity mappings this document's search path and validate-only setting exist
+#   to serve.
+#   Refactoring Rationale: the former inventory said BatchApplication and every
+#   package surface were absent after the entry point and three package
+#   contracts had landed. Distinguishing package contracts from concrete
+#   implementations keeps this state block useful without overstating runtime
+#   completeness. Every key below is nevertheless declared now, deliberately:
 #   these are the decisions a module author needs settled BEFORE writing the
 #   first class, and a schema search path or a migration scope retrofitted
 #   afterwards is exactly how a service ends up applying one context's migration
@@ -179,35 +171,20 @@
 #     unnecessary; with no web module and no actuator on the classpath they bind
 #     to nothing, and a property that binds to nothing is accepted in silence,
 #     which is the least diagnosable defect this file could carry.
-#   Refactoring Rationale: an earlier framing of this document set server.port
-#     and a health-only actuator surface, and paired them with a container
-#     health probe. That framing does not survive contact with the module's own
-#     dependency list, and reproducing it would have advertised a liveness
-#     guarantee this image cannot provide -- there is no steady state for a
-#     run-and-exit task to be healthy IN. Its outcome is the process exit
-#     status, which the invoking state reads directly.
-#   Assumptions: the job-repository table prefix is NOT set here because the
-#     property no longer exists. Spring Boot 4.1.0 exposes exactly two keys
-#     under spring.batch -- job.enabled and job.name -- and no spring.batch.jdbc
-#     group at all. Detail at spring.batch.
-#   Assumptions: no script-based schema initialiser can race Flyway in this
-#     stack, because none is on the classpath. Detail at spring.batch and
-#     spring.sql.init.
-#   Assumptions: the AWS clients are built EAGERLY by the two starters this module
-#     declares, so a region is a startup requirement rather than a call-time one,
-#     while credentials are resolved lazily and are not. This was established by
-#     running the context rather than inferred. Detail at spring.cloud.aws.
-#   Alternatives Considered: pinning the schema search path with a currentSchema
-#     parameter on the JDBC URL. Rejected, in agreement with all three peer
-#     services. Detail at spring.datasource.hikari.connection-init-sql.
-#   Alternatives Considered: a distributed transaction coordinator, a saga or a
-#     compensating reversal for transaction posting. Rejected. Detail at
-#     spring.datasource.
-#   Trade-offs: the persistence provider validates rather than ignoring the
-#     physical schema, which is a deliberate divergence from the peer services.
-#     Detail at spring.jpa.hibernate.ddl-auto.
-#   Trade-offs: statement timeouts are left un-tightened while lock waits are
-#     bounded. Detail at spring.datasource.hikari.data-source-properties.
+#   Alternatives Considered: setting server.port with a health-only actuator
+#     surface and pairing them with a container health probe, which is the shape
+#     every request-serving peer in this reactor takes. Rejected here because it
+#     would advertise a liveness guarantee this image cannot provide -- there is
+#     no steady state for a run-and-exit task to be healthy IN. Its outcome is
+#     the process exit status, which the invoking state reads directly.
+#   Eight further decisions are argued at the keys that carry them rather than
+#     summarised twice here: the two keys spring.batch still exposes and the
+#     absent script initialiser; the eager AWS client construction that makes a
+#     region a startup requirement while credentials stay lazy; the search-path
+#     pin chosen over a currentSchema URL parameter; the single ACID commit
+#     chosen over a coordinator, a saga or a compensating reversal; the
+#     validate-only persistence provider; and the bounded lock waits left
+#     alongside un-tightened statement timeouts.
 #   Trade-offs: the mainframe condition-code rubric is quarantined. A return
 #     code of 4 is a WARN tier that still lets the chain continue -- its single
 #     origin is app/cbl/CBTRN02C.cbl:229, reading IF WS-REJECT-COUNT > 0, and
@@ -237,15 +214,15 @@
 
 spring:
 
-  # WHY : Assumptions: MetricsConfig in com.carddemo.common.observability turns
-  #       this value into a Micrometer common tag on every meter, and the shared
-  #       correlation filter emits it beside the correlation identifier it copies
-  #       into the logging context. Both read this framework property rather than
-  #       holding a constant of their own, so leaving it unset would publish
-  #       untagged meters that no dashboard could attribute to this module and log
-  #       lines that could not be separated from a peer's. The value matches the
-  #       Maven artifactId in services/batch-service/pom.xml so that an image
-  #       tag, a log stream and a meter tag all read the same.
+  # Assumptions: MetricsConfig in com.carddemo.common.observability turns
+  #   this value into a Micrometer common tag on every meter, and the shared
+  #   correlation filter emits it beside the correlation identifier it copies
+  #   into the logging context. Both read this framework property rather than
+  #   holding a constant of their own, so leaving it unset would publish
+  #   untagged meters that no dashboard could attribute to this module and log
+  #   lines that could not be separated from a peer's. The value matches the
+  #   Maven artifactId in services/batch-service/pom.xml so that an image
+  #   tag, a log stream and a meter tag all read the same.
   application:
     name: batch-service
 
@@ -266,539 +243,549 @@ spring:
   #       configuration-loading phase, before `optional:` can take effect; a
   #       label that always resolves keeps that phase survivable off-platform
   #       while every VALUE imported through the prefix still has no fallback.
+  #       (3) Refactoring Rationale: the label variable was CARDDEMO_ENV and is now
+  #       CARDDEMO_ENVIRONMENT. This module was the ONLY place in the repository
+  #       reading the short spelling: every other configuration path, every metric
+  #       tag through MetricsConfig, and the container overrides the orchestrator
+  #       passes all use the long one. Two names for one value means a task
+  #       definition can set CARDDEMO_ENVIRONMENT while this key reads
+  #       CARDDEMO_ENV, and because the import is `optional:` the mismatch says
+  #       nothing at all -- the batch job simply resolves the fallback path,
+  #       reads whatever `local` publishes, and runs a production night against a
+  #       parameter set nobody intended. That is the exact failure a single
+  #       spelling removes.
+  #       (4) Assumptions: the shared defaults document is imported FIRST and from
+  #       the classpath. It carries the one console log pattern that renders the
+  #       correlation identifier from the logging context, which BatchApplication
+  #       populates with the orchestrator's run identifier -- so without this
+  #       import every line of a batch run would omit the one value that ties the
+  #       eleven tasks of a night's chain together. It is listed first so anything
+  #       the parameter store publishes still wins over it.
   config:
-    import: "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENV:local}/batch/"
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:local}/batch/"
 
-  # WHY : Assumptions: this block exists only because services/batch-service/pom.xml
-  #       declares the parameter-store and queue starters. It settles what those
-  #       two starters need in EVERY environment and nothing else: no queue name,
-  #       no queue URL, no bucket, no key identifier and no account identifier is
-  #       named here or anywhere else in this file. Those are outputs of
-  #       infra/modules/sqs and its siblings, published to Parameter Store and read
-  #       through the import above, which is what keeps this file free of them
-  #       rather than merely short of them.
+  # Assumptions: this block exists only because services/batch-service/pom.xml
+  #   declares the parameter-store and queue starters. It settles what those
+  #   two starters need in EVERY environment and nothing else: no queue name,
+  #   no queue URL, no bucket, no key identifier and no account identifier is
+  #   named here or anywhere else in this file. Those are outputs of
+  #   infra/modules/sqs and its siblings, published to Parameter Store and read
+  #   through the import above, which is what keeps this file free of them
+  #   rather than merely short of them.
   cloud:
     aws:
-      # WHY : (1) Assumptions: a region is required for this module to START, not
-      #       merely to reach AWS, and that is the non-obvious part. Declaring the
-      #       two AWS starters in services/batch-service/pom.xml puts their
-      #       auto-configuration on the classpath, and it builds its clients
-      #       EAGERLY -- the parameter-store client is constructed while
-      #       configuration is still loading, and again as a bean, before any
-      #       parameter has been read. A client cannot be built without a region,
-      #       so a context with no region fails even when nothing is ever looked
-      #       up. Verified by running this module's context with the region
-      #       removed: it aborted in the parameter-store client factory, not in
-      #       any lookup. Credentials behave differently and are NOT needed to
-      #       start, because they are resolved on first call rather than at build
-      #       time -- which is what lets the `optional:` import above degrade
-      #       cleanly once a region is present.
-      #       (2) Assumptions: no fallback, deliberately, and no region name
-      #       appears in this repository. AWS_REGION is the same variable the
-      #       SDK's own resolution chain consults first, so declaring it here
-      #       changes nothing about how a deployed task resolves its region; what
-      #       it buys is a failure that NAMES the missing variable instead of the
-      #       chain's own message, which reports an inability to reach the EC2
-      #       instance metadata service and sends a reader looking for an EC2
-      #       problem that a Fargate task does not have.
-      #       (3) Trade-offs: a default such as a single hard-coded region would
-      #       let a credential-less JVM start with no environment at all, and is
-      #       refused. The deployment is single-region, so a baked default that
-      #       disagreed with the deployment would send every parameter lookup to a
-      #       region that holds none of them; paired with the `optional:` prefix
-      #       above, those lookups would then be SKIPPED rather than reported, and
-      #       the first visible symptom would be an unresolved placeholder far
-      #       from its cause. A run that needs no AWS supplies this one variable,
-      #       or switches the starters off in a test profile, rather than having a
-      #       location committed here on its behalf.
+      # Assumptions: a region is required for this module to START, not
+      #   merely to reach AWS, and that is the non-obvious part. Declaring the
+      #   two AWS starters in services/batch-service/pom.xml puts their
+      #   auto-configuration on the classpath, and it builds its clients
+      #   EAGERLY -- the parameter-store client is constructed while
+      #   configuration is still loading, and again as a bean, before any
+      #   parameter has been read. A client cannot be built without a region,
+      #   so a context with no region fails even when nothing is ever looked
+      #   up. Verified by running this module's context with the region
+      #   removed: it aborted in the parameter-store client factory, not in
+      #   any lookup. Credentials behave differently and are NOT needed to
+      #   start, because they are resolved on first call rather than at build
+      #   time -- which is what lets the `optional:` import above degrade
+      #   cleanly once a region is present.
+      # Assumptions: no fallback, deliberately, and no region name
+      #   appears in this repository. AWS_REGION is the same variable the
+      #   SDK's own resolution chain consults first, so declaring it here
+      #   changes nothing about how a deployed task resolves its region; what
+      #   it buys is a failure that NAMES the missing variable instead of the
+      #   chain's own message, which reports an inability to reach the EC2
+      #   instance metadata service and sends a reader looking for an EC2
+      #   problem that a Fargate task does not have.
+      # Trade-offs: a default such as a single hard-coded region would
+      #   let a credential-less JVM start with no environment at all, and is
+      #   refused. The deployment is single-region, so a baked default that
+      #   disagreed with the deployment would send every parameter lookup to a
+      #   region that holds none of them; paired with the `optional:` prefix
+      #   above, those lookups would then be SKIPPED rather than reported, and
+      #   the first visible symptom would be an unresolved placeholder far
+      #   from its cause. A run that needs no AWS supplies this one variable,
+      #   or switches the starters off in a test profile, rather than having a
+      #   location committed here on its behalf.
       region:
         static: ${AWS_REGION}
 
-      # WHY : Assumptions: this module PUBLISHES to the error queue and consumes
-      #       nothing, so no listener container should ever start. Leaving the
-      #       framework free to start one would reintroduce the exact hazard
-      #       services/batch-service/pom.xml:197-207 records for an embedded
-      #       servlet container: a queue listener is a non-daemon poller, so it
-      #       would keep the JVM alive after the last job step had finished, the
-      #       task would never reach a terminal state, the invoking state would
-      #       never complete, and the nightly chain would stall at the step that
-      #       ran correctly. Turning listener startup off is therefore a lifecycle
-      #       requirement, not a tuning choice.
+      # Assumptions: this module PUBLISHES to the error queue and consumes
+      #   nothing, so no listener container should ever start. Leaving the
+      #   framework free to start one would reintroduce the exact hazard
+      #   services/batch-service/pom.xml:197-207 records for an embedded
+      #   servlet container: a queue listener is a non-daemon poller, so it
+      #   would keep the JVM alive after the last job step had finished, the
+      #   task would never reach a terminal state, the invoking state would
+      #   never complete, and the nightly chain would stall at the step that
+      #   ran correctly. Turning listener startup off is therefore a lifecycle
+      #   requirement, not a tuning choice.
       sqs:
         listener:
           auto-startup: false
 
-  # WHY : Trade-offs: the platform allows a fixed window between SIGTERM and
-  #       SIGKILL, and the framework default for this key coincides with it
-  #       exactly, so a task can be killed at the moment it is still draining.
-  #       Shortening it gives up the tail of that window to buy the certainty that
-  #       the JVM finishes and flushes its log buffers rather than being
-  #       terminated part-way. Abandoning a chunk that is still running is safe
-  #       here in a way it would not be in an online service: the chunk
-  #       transaction rolls back whole, and the batch_run step ledger plus an
-  #       orchestrator redrive resume the step, so the cost of the abandoned chunk
-  #       is repeated work rather than lost or half-applied work.
+  # Trade-offs: the platform allows a fixed window between SIGTERM and
+  #   SIGKILL, and the framework default for this key coincides with it
+  #   exactly, so a task can be killed at the moment it is still draining.
+  #   Shortening it gives up the tail of that window to buy the certainty that
+  #   the JVM finishes and flushes its log buffers rather than being
+  #   terminated part-way. Abandoning a chunk that is still running is safe
+  #   here in a way it would not be in an online service: the chunk
+  #   transaction rolls back whole, and the batch_run step ledger plus an
+  #   orchestrator redrive resume the step, so the cost of the abandoned chunk
+  #   is repeated work rather than lost or half-applied work.
   lifecycle:
     timeout-per-shutdown-phase: 20s
 
-  # WHY : (1) Assumptions: each value below is injected as a plain environment
-  #       variable by the task definition, which resolves the URL from Parameter
-  #       Store and the credentials from Secrets Manager, both populated from
-  #       infrastructure outputs. The placeholders carry no fallback on purpose. A
-  #       missing injection then fails startup loudly instead of quietly selecting
-  #       something committed to this repository, and that is the mechanism by
-  #       which this file holds no credential and no endpoint rather than merely
-  #       happening not to.
-  #       (2) Assumptions: the connecting role is carddemo_batch, created by
-  #       data-migration/sql/V0__schemas_and_roles.sql, which owns the `batch`
-  #       schema (V0:469) and holds narrowly scoped grants on the other four
-  #       schemas named in the search path below. This module never grants itself
-  #       anything and never creates a role.
-  #       (3) Alternatives Considered: exactly ONE datasource is configured, and
-  #       therefore exactly one auto-configured transaction manager. No XA
-  #       datasource, no JTA coordinator, no second transaction manager and no
-  #       read replica. A saga with compensating reversals was evaluated for
-  #       transaction posting and rejected: app/cbl/CBTRN02C.cbl commits its three
-  #       writes as one unit of work at lines 440 to 442
-  #       (2700-UPDATE-TCATBAL, then 2800-UPDATE-ACCOUNT-REC, then
-  #       2900-WRITE-TRANSACTION-FILE), so a saga would replace one atomic commit
-  #       with a sequence of committed steps and make states such as a posted
-  #       transaction whose category balance has not moved yet observable. Those
-  #       states do not exist in the baseline, so the golden masters would
-  #       correctly flag them as a parity failure. One local transaction over
-  #       scoped cross-schema grants preserves atomicity and needs no coordinator
-  #       at all.
+  # Assumptions: each value below is injected as a plain environment
+  #   variable by the task definition, which resolves the URL from Parameter
+  #   Store and the credentials from Secrets Manager, both populated from
+  #   infrastructure outputs. The placeholders carry no fallback on purpose. A
+  #   missing injection then fails startup loudly instead of quietly selecting
+  #   something committed to this repository, and that is the mechanism by
+  #   which this file holds no credential and no endpoint rather than merely
+  #   happening not to.
+  # Assumptions: the connecting role is carddemo_batch, created by
+  #   data-migration/sql/V0__schemas_and_roles.sql, which owns the `batch`
+  #   schema (V0:469) and holds narrowly scoped grants on the other four
+  #   schemas named in the search path below. This module never grants itself
+  #   anything and never creates a role.
+  # Alternatives Considered: exactly ONE datasource is configured, and
+  #   therefore exactly one auto-configured transaction manager. No XA
+  #   datasource, no JTA coordinator, no second transaction manager and no
+  #   read replica. A saga with compensating reversals was evaluated for
+  #   transaction posting and rejected: app/cbl/CBTRN02C.cbl commits its three
+  #   writes as one unit of work at lines 440 to 442
+  #   (2700-UPDATE-TCATBAL, then 2800-UPDATE-ACCOUNT-REC, then
+  #   2900-WRITE-TRANSACTION-FILE), so a saga would replace one atomic commit
+  #   with a sequence of committed steps and make states such as a posted
+  #   transaction whose category balance has not moved yet observable. Those
+  #   states do not exist in the baseline, so the golden masters would
+  #   correctly flag them as a parity failure. One local transaction over
+  #   scoped cross-schema grants preserves atomicity and needs no coordinator
+  #   at all.
   datasource:
     url: ${SPRING_DATASOURCE_URL}
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
 
     hikari:
-      # WHY : Assumptions: pool metrics arrive at the observability stack tagged
-      #       with this name only, and every service plus this module draws on one
-      #       Aurora cluster. A name that says which context a saturated pool
-      #       belongs to is the difference between a usable alarm and one that
-      #       reports the framework default from nine different tasks.
+      # Assumptions: pool metrics arrive at the observability stack tagged
+      #   with this name only, and every service plus this module draws on one
+      #   Aurora cluster. A name that says which context a saturated pool
+      #   belongs to is the difference between a usable alarm and one that
+      #   reports the framework default from nine different tasks.
       pool-name: batch-pool
 
-      # WHY : (1) Assumptions: unqualified table names in the entity mappings must
-      #       resolve to a known schema in a known order. FIVE schemas are reached
-      #       by this module and each is listed for a verified reason, with `batch`
-      #       first so that the schema this module OWNS wins any future name
-      #       collision and so that the job-repository tables, the batch_run
-      #       ledger and Flyway's own history table all resolve there:
-      #         batch     -- owned. V0:469 creates it AUTHORIZATION carddemo_batch,
-      #                      and db/migration/V1__batch.sql declares everything in
-      #                      it.
-      #         ledger    -- write, under grant. V0:666-667 grants SELECT, INSERT
-      #                      and UPDATE on all its tables. Owned by
-      #                      transaction-service.
-      #         account   -- read, plus one narrow write. V0:719 grants SELECT on
-      #                      all its tables and V0:730 grants UPDATE on
-      #                      account.accounts and nothing else. Owned by
-      #                      account-service.
-      #         card      -- read only. V0:757. Required because
-      #                      app/cbl/CBTRN01C.cbl:46 opens CARDFILE to validate
-      #                      the daily feed against the card master, and that
-      #                      program is PreflightDailyTransactionsJob. Omitting
-      #                      this entry fails the preflight state at the database.
-      #         reference -- read only. V0:766. Required because
-      #                      app/cbl/CBACT04C.cbl:47 opens DISCGRP for the
-      #                      disclosure-group rate, and that program is
-      #                      CalculateInterestJob. Omitting this entry means
-      #                      disclosure_groups cannot be resolved and the interest
-      #                      state of the nightly chain fails at the database.
-      #       No two of the five own a table of the same name, so the extra
-      #       resolution candidates cannot shadow anything.
-      #       (2) Alternatives Considered: a currentSchema parameter on the JDBC
-      #       URL, and a role-level search path. Both rejected, and not only by
-      #       this file. The URL arrives from the environment and is therefore
-      #       outside this artifact's control, so an operator editing the
-      #       Parameter Store value would silently drop the pin and every query
-      #       would begin resolving against the default path with no error to show
-      #       for it; all three peer services reject it on the same ground.
-      #       V0:543-552 separately declines to set a role-level path, because one
-      #       setting with two owners drifts and the drift stays invisible until a
-      #       query resolves an unqualified name in the wrong schema. This key is
-      #       consequently the single owner of schema resolution for this module,
-      #       and the path is declared HERE and nowhere else.
-      #       (3) Assumptions: the pool runs this once per PHYSICAL connection, so
-      #       Flyway's connections are pinned by the same mechanism as the
-      #       application's without a second declaration.
+      # Assumptions: unqualified table names in the entity mappings must resolve
+      #   to a known schema in a known order. FIVE schemas are reached, each
+      #   listed for a verified reason, with `batch` first so the schema this
+      #   module OWNS wins any future name collision and so the job-repository
+      #   tables, the batch_run ledger and Flyway's own history table all resolve
+      #   there:
+      #     batch     owned; V0:469 creates it AUTHORIZATION carddemo_batch and
+      #               db/migration/V1__batch.sql declares everything in it.
+      #     ledger    write under grant; V0:666-667 grants SELECT, INSERT and
+      #               UPDATE on all its tables. Owned by transaction-service.
+      #     account   read plus one narrow write; V0:719 grants SELECT on all its
+      #               tables and V0:730 grants UPDATE on account.accounts alone.
+      #     card      read only, V0:757. Required because app/cbl/CBTRN01C.cbl:46
+      #               opens CARDFILE to validate the daily feed against the card
+      #               master, and that program is PreflightDailyTransactionsJob.
+      #     reference read only, V0:766. Required because app/cbl/CBACT04C.cbl:47
+      #               opens DISCGRP for the disclosure-group rate, and that
+      #               program is CalculateInterestJob.
+      #   Omitting either of the last two fails its state at the database rather
+      #   than in this file. No two of the five own a table of the same name, so
+      #   the extra resolution candidates cannot shadow anything.
+      # Alternatives Considered: a currentSchema parameter on the JDBC URL, and a
+      #   role-level search path. Both rejected, and not only by this file. The
+      #   URL arrives from the environment and is outside this artifact's
+      #   control, so an operator editing the Parameter Store value would
+      #   silently drop the pin and every query would resolve against the default
+      #   path with no error to show for it; all three peer services reject it on
+      #   the same ground. V0:543-552 separately declines a role-level path,
+      #   because one setting with two owners drifts and the drift stays
+      #   invisible until a query resolves an unqualified name in the wrong
+      #   schema. This key is consequently the single owner of schema resolution
+      #   for this module.
+      # Assumptions: the pool runs this once per PHYSICAL connection, so Flyway's
+      #   connections are pinned by the same mechanism as the application's
+      #   without a second declaration.
       connection-init-sql: "SET search_path TO batch, ledger, account, card, reference"
 
-      # WHY : Assumptions: this is a correctness requirement for the streaming
-      #       readers, not a tuning preference, and it is inseparable from the
-      #       fetch size set under spring.jpa.properties below. The driver honours
-      #       a fetch size and opens a server-side cursor ONLY when the connection
-      #       is not in auto-commit mode; with auto-commit left on it ignores the
-      #       fetch size and buffers the entire result in the client. Measured
-      #       against PostgreSQL 17 with a deliberately large result and a small
-      #       heap, auto-commit off with a positive fetch size returned its first
-      #       row promptly, while auto-commit on with the same fetch size, and
-      #       auto-commit off with a fetch size of zero, both exhausted the heap.
-      #       The daily feed is read one record at a time by the baseline
-      #       (app/cbl/CBTRN02C.cbl:202-219 loops on 1000-DALYTRAN-GET-NEXT), so a
-      #       reader that materialised the whole feed would fail on feed size
-      #       alone rather than on anything about the data.
+      # Assumptions: this is a correctness requirement for the streaming
+      #   readers, not a tuning preference, and it is inseparable from the
+      #   fetch size set under spring.jpa.properties below. The driver honours
+      #   a fetch size and opens a server-side cursor ONLY when the connection
+      #   is not in auto-commit mode; with auto-commit left on it ignores the
+      #   fetch size and buffers the entire result in the client. Measured
+      #   against PostgreSQL 17 with a deliberately large result and a small
+      #   heap, auto-commit off with a positive fetch size returned its first
+      #   row promptly, while auto-commit on with the same fetch size, and
+      #   auto-commit off with a fetch size of zero, both exhausted the heap.
+      #   The daily feed is read one record at a time by the baseline
+      #   (app/cbl/CBTRN02C.cbl:202-219 loops on 1000-DALYTRAN-GET-NEXT), so a
+      #   reader that materialised the whole feed would fail on feed size
+      #   alone rather than on anything about the data.
       auto-commit: false
 
-      # WHY : Trade-offs: the floor is what matters here, and the floor is
-      #       strictly above one. A pool of one DEADLOCKS this module outright:
-      #       the job repository writes step and job execution state in a
-      #       transaction SEPARATE from the chunk transaction, so a step holding
-      #       the only connection would wait for a connection that only the step
-      #       can release. Flyway also holds one for the whole migration at
-      #       startup. Four leaves room for the chunk transaction, the job
-      #       repository's own transaction and a set-based step without drawing
-      #       further on a connection budget the whole cluster shares with eight
-      #       peer roles. Sizing is governed by how many transactions ONE job runs
-      #       concurrently, not by request throughput: this process starts, runs
-      #       exactly one job, and exits, so it never serves traffic and a larger
-      #       pool would starve the peers rather than make any job finish.
+      # Trade-offs: the floor is what matters here, and the floor is
+      #   strictly above one. A pool of one DEADLOCKS this module outright:
+      #   the job repository writes step and job execution state in a
+      #   transaction SEPARATE from the chunk transaction, so a step holding
+      #   the only connection would wait for a connection that only the step
+      #   can release. Flyway also holds one for the whole migration at
+      #   startup. Four leaves room for the chunk transaction, the job
+      #   repository's own transaction and a set-based step without drawing
+      #   further on a connection budget the whole cluster shares with eight
+      #   peer roles. Sizing is governed by how many transactions ONE job runs
+      #   concurrently, not by request throughput: this process starts, runs
+      #   exactly one job, and exits, so it never serves traffic and a larger
+      #   pool would starve the peers rather than make any job finish.
       maximum-pool-size: 4
 
-      # WHY : Trade-offs: a run-and-exit task should not open connections it may
-      #       never use. Different jobs in the chain touch different schemas, and
-      #       several run only set-based statements, so pre-warming the pool to its
-      #       maximum would open connections against the shared cluster budget that
-      #       the selected job then never checks out. Keeping one idle connection
-      #       accepts that the first checkout of a second connection pays its own
-      #       establishment cost, which for a task measured in job steps is not a
-      #       cost worth pre-paying.
+      # Trade-offs: a run-and-exit task should not open connections it may
+      #   never use. Different jobs in the chain touch different schemas, and
+      #   several run only set-based statements, so pre-warming the pool to its
+      #   maximum would open connections against the shared cluster budget that
+      #   the selected job then never checks out. Keeping one idle connection
+      #   accepts that the first checkout of a second connection pays its own
+      #   establishment cost, which for a task measured in job steps is not a
+      #   cost worth pre-paying.
       minimum-idle: 1
 
-      # WHY : Trade-offs: this reports the ONE leak shape the server cannot see. A
-      #       streaming reader legitimately holds a connection for the whole of a
-      #       step, so the threshold is deliberately set ABOVE the
-      #       idle-in-transaction ceiling configured below rather than above a
-      #       normal query. That ordering divides the work cleanly: a connection
-      #       stuck INSIDE a transaction is terminated by the server-side bound,
-      #       while this client-side detector is left to report the case the server
-      #       considers healthy -- a connection checked out but in no transaction,
-      #       which is exactly the signature of a stream that was never closed.
-      #       Setting it below the server bound would instead produce a warning for
-      #       every legitimately long step and train a reader to ignore the one
-      #       that matters. The detector only warns; it never closes a connection,
-      #       so a false positive here could not break a job, and that is why the
-      #       looser bound is the safe direction to err in.
+      # Trade-offs: this reports the ONE leak shape the server cannot see. A
+      #   streaming reader legitimately holds a connection for the whole of a
+      #   step, so the threshold is deliberately set ABOVE the
+      #   idle-in-transaction ceiling configured below rather than above a
+      #   normal query. That ordering divides the work cleanly: a connection
+      #   stuck INSIDE a transaction is terminated by the server-side bound,
+      #   while this client-side detector is left to report the case the server
+      #   considers healthy -- a connection checked out but in no transaction,
+      #   which is exactly the signature of a stream that was never closed.
+      #   Setting it below the server bound would instead produce a warning for
+      #   every legitimately long step and train a reader to ignore the one
+      #   that matters. The detector only warns; it never closes a connection,
+      #   so a false positive here could not break a job, and that is why the
+      #   looser bound is the safe direction to err in.
       leak-detection-threshold: 600000
 
-      # WHY : (1) Assumptions: TLS is the CLIENT half of a two-sided requirement.
-      #       The cluster parameter group forces encrypted connections, so the
-      #       server refuses an unencrypted one; neither half is redundant, because
-      #       without the server flag a misconfigured client could downgrade, and
-      #       without these properties a forced-TLS server would still accept a
-      #       connection that verified no certificate at all. Only verify-full
-      #       checks both the chain and the hostname, which is what makes the
-      #       endpoint reached the endpoint the credential was issued for.
-      #       verify-full needs a trust anchor and this driver does not fall back
-      #       to the JVM trust store, so the bundle path is explicit; it names
-      #       where the image places the managed bundle, and an environment
-      #       holding it elsewhere overrides the variable rather than editing this
-      #       file.
-      #       (2) Trade-offs: statement_timeout is deliberately NOT set. A batch
-      #       step legitimately runs a single long set-based statement -- the
-      #       combine step replaces the sort-and-merge of app/jcl/COMBTRAN.jcl with
-      #       one ordered query -- and the outer bound on a step is the per-state
-      #       timeout the invoking state machine already enforces, which can stop
-      #       the task. A statement timeout here would add a SECOND, shorter bound
-      #       that cancels correct work mid-statement and reports it as a failure,
-      #       for no outcome the state machine does not already guarantee.
-      #       (3) Trade-offs: lock waiting and idle-in-transaction ARE bounded,
-      #       because those two are the shapes that hold the batch window open
-      #       rather than doing long work in it. Posting rewrites account.accounts
-      #       rows an online service may hold, so an unbounded lock wait would
-      #       block until that other holder released, with the nightly chain
-      #       waiting behind it; a bounded wait turns that into a failure the
-      #       state's retry can act on. Bounding the idle-in-transaction case
-      #       likewise stops a task that has stopped making progress from holding
-      #       rows against every peer. Both are expressed as server startup options
-      #       rather than as init statements so they are established before the
-      #       first statement of a session runs, and they were verified to take
-      #       effect against PostgreSQL 17 through this driver.
+      # Assumptions: TLS is the CLIENT half of a two-sided requirement.
+      #   The cluster parameter group forces encrypted connections, so the
+      #   server refuses an unencrypted one; neither half is redundant, because
+      #   without the server flag a misconfigured client could downgrade, and
+      #   without these properties a forced-TLS server would still accept a
+      #   connection that verified no certificate at all. Only verify-full
+      #   checks both the chain and the hostname, which is what makes the
+      #   endpoint reached the endpoint the credential was issued for.
+      #   verify-full needs a trust anchor and this driver does not fall back
+      #   to the JVM trust store, so the bundle path is explicit; it names
+      #   where the image places the managed bundle, and an environment
+      #   holding it elsewhere overrides the variable rather than editing this
+      #   file.
+      # Trade-offs: statement_timeout is deliberately NOT set. A batch
+      #   step legitimately runs a single long set-based statement -- the
+      #   combine step replaces the sort-and-merge of app/jcl/COMBTRAN.jcl with
+      #   one ordered query -- and the outer bound on a step is the per-state
+      #   timeout the invoking state machine already enforces, which can stop
+      #   the task. A statement timeout here would add a SECOND, shorter bound
+      #   that cancels correct work mid-statement and reports it as a failure,
+      #   for no outcome the state machine does not already guarantee.
+      # Trade-offs: lock waiting and idle-in-transaction ARE bounded,
+      #   because those two are the shapes that hold the batch window open
+      #   rather than doing long work in it. Posting rewrites account.accounts
+      #   rows an online service may hold, so an unbounded lock wait would
+      #   block until that other holder released, with the nightly chain
+      #   waiting behind it; a bounded wait turns that into a failure the
+      #   state's retry can act on. Bounding the idle-in-transaction case
+      #   likewise stops a task that has stopped making progress from holding
+      #   rows against every peer. Both are expressed as server startup options
+      #   rather than as init statements so they are established before the
+      #   first statement of a session runs, and they were verified to take
+      #   effect against PostgreSQL 17 through this driver.
       data-source-properties:
         sslmode: verify-full
         sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
         options: "-c lock_timeout=30000 -c idle_in_transaction_session_timeout=300000"
 
 
-  # WHAT: schema migration for the one schema this module owns.
-  # WHY : (1) Assumptions: flyway-core on its own is not enough, and the WAY it
-  #       fails is why this needs saying in this file and not only in the POM.
-  #       Per-database support was moved out of the core artifact into one module
-  #       per database, so services/batch-service/pom.xml declares
-  #       flyway-database-postgresql alongside the starter. Without that second
-  #       artifact the module still compiles, still packages and still passes
-  #       every test, then aborts on FIRST CONTAINER START when Flyway cannot
-  #       resolve a PostgreSQL URL to any database type it knows -- inside a
-  #       batch window, from a build that reported success. A reader of this file
-  #       alone would otherwise have no way to connect that startup failure to a
-  #       missing dependency. Neither artifact is versioned anywhere in this
-  #       module: the parent POM owns both versions, and restating one here would
-  #       fork that decision.
-  #       (2) Assumptions: the keys below are the contract db/migration/V1__batch.sql
-  #       is written against. That file states the same four preconditions from the
-  #       database side at its lines 27 to 45, so the two documents have to agree
-  #       or the module does not start.
+  # Assumptions: flyway-core on its own is not enough, and the WAY it
+  #   fails is why this needs saying in this file and not only in the POM.
+  #   Per-database support was moved out of the core artifact into one module
+  #   per database, so services/batch-service/pom.xml declares
+  #   flyway-database-postgresql alongside the starter. Without that second
+  #   artifact the module still compiles, still packages and still passes
+  #   every test, then aborts on FIRST CONTAINER START when Flyway cannot
+  #   resolve a PostgreSQL URL to any database type it knows -- inside a
+  #   batch window, from a build that reported success. A reader of this file
+  #   alone would otherwise have no way to connect that startup failure to a
+  #   missing dependency. Neither artifact is versioned anywhere in this
+  #   module: the parent POM owns both versions, and restating one here would
+  #   fork that decision.
+  # Assumptions: the keys below are the contract db/migration/V1__batch.sql
+  #   is written against. That file states the same four preconditions from the
+  #   database side at its lines 27 to 45, so the two documents have to agree
+  #   or the module does not start.
   flyway:
-    # WHY : Assumptions: stated rather than inherited, because this module is the
-    #       only one in the reactor whose durable restart capability depends on a
-    #       migration having run. batch.batch_run is the step ledger an
-    #       orchestrator redrive reads to decide whether a step already completed;
-    #       if migration were switched off, the first nightly run would fail on a
-    #       missing relation instead of on anything about the data.
+    # Assumptions: stated rather than inherited, because this module is the
+    #   only one in the reactor whose durable restart capability depends on a
+    #   migration having run. batch.batch_run is the step ledger an
+    #   orchestrator redrive reads to decide whether a step already completed;
+    #   if migration were switched off, the first nightly run would fail on a
+    #   missing relation instead of on anything about the data.
     enabled: true
 
-    # WHY : Assumptions: exactly one location, holding exactly one migration,
-    #       V1__batch.sql. The location is inside this module's own jar, so it
-    #       cannot reach another context's migrations even by accident. A location
-    #       list that named a second path would be the mechanism by which two
-    #       modules became authoritative for one table.
+    # Assumptions: exactly one location, holding exactly one migration,
+    #   V1__batch.sql. The location is inside this module's own jar, so it
+    #   cannot reach another context's migrations even by accident. A location
+    #   list that named a second path would be the mechanism by which two
+    #   modules became authoritative for one table.
     locations: classpath:db/migration
 
-    # WHY : (1) Assumptions: `batch` and nothing else, for BOTH the migration and
-    #       Flyway's own schema-history table. This module writes rows into
-    #       ledger.* and account.* under grant and reads card.* and reference.*,
-    #       but the DDL for all four belongs to the contexts that own them --
-    #       transaction-service, account-service, card-service and
-    #       reference-service respectively. A schema list that reached beyond
-    #       `batch` would let this module create, alter or seed another service's
-    #       structure, which is precisely the failure schema-per-service exists to
-    #       prevent. Pinning default-schema as well as schemas is what keeps the
-    #       history table in the owned schema rather than in whichever schema the
-    #       search path happens to resolve first.
-    #       (2) Assumptions: concurrency is safe without extra configuration.
-    #       Flyway takes a lock on its history table, so a second task starting
-    #       close behind a first waits rather than corrupting state; and the
-    #       orchestration runs these states sequentially in any case, its one
-    #       parallel state running the data-migration image rather than this one.
+    # Assumptions: `batch` and nothing else, for BOTH the migration and
+    #   Flyway's own schema-history table. This module writes rows into
+    #   ledger.* and account.* under grant and reads card.* and reference.*,
+    #   but the DDL for all four belongs to the contexts that own them --
+    #   transaction-service, account-service, card-service and
+    #   reference-service respectively. A schema list that reached beyond
+    #   `batch` would let this module create, alter or seed another service's
+    #   structure, which is precisely the failure schema-per-service exists to
+    #   prevent. Pinning default-schema as well as schemas is what keeps the
+    #   history table in the owned schema rather than in whichever schema the
+    #   search path happens to resolve first.
+    # Assumptions: concurrency is safe without extra configuration.
+    #   Flyway takes a lock on its history table, so a second task starting
+    #   close behind a first waits rather than corrupting state; and the
+    #   orchestration runs these states sequentially in any case, its one
+    #   parallel state running the data-migration image rather than this one.
     schemas: batch
     default-schema: batch
 
-    # WHY : Assumptions: the schema and its owning role already exist when this
-    #       runs. data-migration/sql/V0__schemas_and_roles.sql creates all eight
-    #       schemas, the per-service roles and the cross-schema grants before any
-    #       service starts, creating `batch` AUTHORIZATION carddemo_batch at its
-    #       line 469. Letting Flyway create the schema instead would conjure it
-    #       with whatever owner happened to connect, and the default privileges V0
-    #       grants for objects owned by carddemo_batch would then never fire. With
-    #       creation off, a missing schema fails loudly here instead.
+    # Assumptions: the schema and its owning role already exist when this
+    #   runs. data-migration/sql/V0__schemas_and_roles.sql creates all eight
+    #   schemas, the per-service roles and the cross-schema grants before any
+    #   service starts, creating `batch` AUTHORIZATION carddemo_batch at its
+    #   line 469. Letting Flyway create the schema instead would conjure it
+    #   with whatever owner happened to connect, and the default privileges V0
+    #   grants for objects owned by carddemo_batch would then never fire. With
+    #   creation off, a missing schema fails loudly here instead.
     create-schemas: false
 
-    # WHY : Trade-offs: stated explicitly even though the current default already
-    #       disables it, because the cost of the redundancy is one line and the
-    #       cost of relying on a default is the whole `batch` schema. This module's
-    #       role is the only one in the system holding write grants that reach
-    #       OUTSIDE its own schema, so it is the worst possible role to leave a
-    #       destructive operation reachable from. Naming it here makes the
-    #       operation structurally impossible in every environment, including a
-    #       developer's, rather than merely improbable in production.
+    # Trade-offs: stated explicitly even though the current default already
+    #   disables it, because the cost of the redundancy is one line and the
+    #   cost of relying on a default is the whole `batch` schema. This module's
+    #   role is the only one in the system holding write grants that reach
+    #   OUTSIDE its own schema, so it is the worst possible role to leave a
+    #   destructive operation reachable from. Naming it here makes the
+    #   operation structurally impossible in every environment, including a
+    #   developer's, rather than merely improbable in production.
     clean-disabled: true
 
-    # WHY : (1) Assumptions: an applied migration must never change on disk.
-    #       Validation compares the checksum of each applied migration against the
-    #       file, so an edit to V1__batch.sql after it has been applied fails
-    #       startup rather than leaving the database silently disagreeing with the
-    #       source that supposedly describes it. For a schema whose column types
-    #       are half of a two-way contract with the entity mappings -- the other
-    #       half being the validate-only setting below -- a silent disagreement is
-    #       the failure mode with the longest fuse.
-    #       (2) Assumptions: baselining is off because there is no pre-existing
-    #       populated `batch` schema to adopt. V0 creates the schema EMPTY, so a
-    #       baseline would mark V1__batch.sql as already applied and skip the file
-    #       that creates batch_run and the job-repository tables, producing exactly
-    #       the missing-relation failure that migration exists to prevent.
+    # Assumptions: an applied migration must never change on disk.
+    #   Validation compares the checksum of each applied migration against the
+    #   file, so an edit to V1__batch.sql after it has been applied fails
+    #   startup rather than leaving the database silently disagreeing with the
+    #   source that supposedly describes it. For a schema whose column types
+    #   are half of a two-way contract with the entity mappings -- the other
+    #   half being the validate-only setting below -- a silent disagreement is
+    #   the failure mode with the longest fuse.
+    # Assumptions: baselining is off because there is no pre-existing
+    #   populated `batch` schema to adopt. V0 creates the schema EMPTY, so a
+    #   baseline would mark V1__batch.sql as already applied and skip the file
+    #   that creates batch_run and the job-repository tables, producing exactly
+    #   the missing-relation failure that migration exists to prevent.
     validate-on-migrate: true
     baseline-on-migrate: false
 
   jpa:
     hibernate:
-      # WHY : (1) Refactoring Rationale: this DIVERGES from the peer services on
-      #       purpose, and a reader comparing the two should read this block rather
-      #       than align them. services/transaction-service/src/main/resources/
-      #       application.yml uses `none`, and its stated reason is sound for a
-      #       context that owns its own schema: `validate` would fail startup on a
-      #       mapping mismatch that its own next migration was about to resolve,
-      #       turning an ordering difference into an outage. That reason does not
-      #       transfer here. Only one of this module's eight entity mappings
-      #       describes a table it owns; the other seven describe tables in
-      #       ledger, account, card and reference, and this module's Flyway is
-      #       scoped to `batch`, so no migration of ITS OWN will ever resolve a
-      #       drift in those seven. `none` would therefore defer the mismatch to
-      #       the first query that touched the drifted column -- mid-chunk, part
-      #       way through a posting run, with a partially processed feed -- whereas
-      #       `validate` reports it at startup, before the first record is read.
-      #       (2) Assumptions: `update` and `create` are not merely unused but
-      #       unreachable: the connecting role holds no CREATE privilege in any
-      #       schema but its own, so an attempt to widen another context's column
-      #       would fail on privilege anyway. Declaring `validate` states the
-      #       intent rather than relying on a grant to enforce it.
-      #       (3) Trade-offs: the cost is a startup check on every task in the
-      #       chain, and one real ordering dependency -- a task started before the
-      #       owning context has applied its migration will not start. That is
-      #       accepted, and for a nightly chain it is the better failure: the
-      #       invoking state's catch handler routes it to failure notification
-      #       with nothing half-applied, which is strictly preferable to
-      #       discovering the same mismatch after a run has already committed part
-      #       of a feed.
+      # Refactoring Rationale: this DIVERGES from the peer services on
+      #   purpose, and a reader comparing the two should read this block rather
+      #   than align them. services/transaction-service/src/main/resources/
+      #   application.yml uses `none`, and its stated reason is sound for a
+      #   context that owns its own schema: `validate` would fail startup on a
+      #   mapping mismatch that its own next migration was about to resolve,
+      #   turning an ordering difference into an outage. That reason does not
+      #   transfer here. Only one of this module's eight entity mappings
+      #   describes a table it owns; the other seven describe tables in
+      #   ledger, account, card and reference, and this module's Flyway is
+      #   scoped to `batch`, so no migration of ITS OWN will ever resolve a
+      #   drift in those seven. `none` would therefore defer the mismatch to
+      #   the first query that touched the drifted column -- mid-chunk, part
+      #   way through a posting run, with a partially processed feed -- whereas
+      #   `validate` reports it at startup, before the first record is read.
+      # Assumptions: `update` and `create` are not merely unused but
+      #   unreachable: the connecting role holds no CREATE privilege in any
+      #   schema but its own, so an attempt to widen another context's column
+      #   would fail on privilege anyway. Declaring `validate` states the
+      #   intent rather than relying on a grant to enforce it.
+      # Trade-offs: the cost is a startup check on every task in the
+      #   chain, and one real ordering dependency -- a task started before the
+      #   owning context has applied its migration will not start. That is
+      #   accepted, and for a nightly chain it is the better failure: the
+      #   invoking state's catch handler routes it to failure notification
+      #   with nothing half-applied, which is strictly preferable to
+      #   discovering the same mismatch after a run has already committed part
+      #   of a feed.
       ddl-auto: validate
 
-    # WHY : Assumptions: there is no web request scope in this module at all, so
-    #       there is no view to render and no request boundary for a persistence
-    #       context to outlive. The setting is declared anyway because its default
-    #       is on and the framework logs a warning when it is left unset; stating
-    #       it removes a warning that would otherwise appear in every task's log
-    #       and invite a reader to look for the request handling that produces it.
+    # Assumptions: there is no web request scope in this module at all, so
+    #   there is no view to render and no request boundary for a persistence
+    #   context to outlive. The setting is declared anyway because its default
+    #   is on and the framework logs a warning when it is left unset; stating
+    #   it removes a warning that would otherwise appear in every task's log
+    #   and invite a reader to look for the request handling that produces it.
     open-in-view: false
 
-    # WHY : Trade-offs: this key echoes statements through the provider directly to
-    #       standard output rather than through the logging framework, so no logger
-    #       level can filter it and the floors set under `logging` at the foot of
-    #       this file do not reach it. Turning it off here is therefore the only
-    #       place the decision can be made at all. It matters more in this module
-    #       than in an online one: a batch statement is executed once per record
-    #       across an entire daily feed, and the values bound into it include the
-    #       primary account number carried by every posted transaction, so leaving
-    #       it on would write cardholder data to the container's log stream at feed
-    #       volume. What is given up is the convenience of seeing statements
-    #       without attaching a debugger.
+    # Trade-offs: this key echoes statements through the provider directly to
+    #   standard output rather than through the logging framework, so no logger
+    #   level can filter it and the floors set under `logging` at the foot of
+    #   this file do not reach it. Turning it off here is therefore the only
+    #   place the decision can be made at all. It matters more in this module
+    #   than in an online one: a batch statement is executed once per record
+    #   across an entire daily feed, and the values bound into it include the
+    #   primary account number carried by every posted transaction, so leaving
+    #   it on would write cardholder data to the container's log stream at feed
+    #   volume. What is given up is the convenience of seeing statements
+    #   without attaching a debugger.
     show-sql: false
 
     properties:
       hibernate:
         jdbc:
-          # WHY : Trade-offs: a positive value is what makes a streaming reader
-          #       actually stream, and it is inseparable from the auto-commit
-          #       setting above: the driver opens a server-side cursor only when
-          #       BOTH hold, and with either missing it buffers the entire result
-          #       in the client -- measured against PostgreSQL 17 as heap
-          #       exhaustion on a large result, not as a slowdown. The value is
-          #       the number of rows the driver retrieves per round trip, so it
-          #       bounds the reader's memory to a fixed window no matter how large
-          #       the feed grows. It is set well above one deliberately: one row
-          #       per round trip would reproduce the baseline's record-at-a-time
-          #       I/O pattern rather than its semantics, and it is the semantics
-          #       that parity requires -- app/cbl/CBTRN02C.cbl:202-219 loops one
-          #       record at a time because a VSAM read returns one record, not
-          #       because the record count per I/O is part of the contract.
+          # Trade-offs: a positive value is what makes a streaming reader
+          #   actually stream, and it is inseparable from the auto-commit
+          #   setting above: the driver opens a server-side cursor only when
+          #   BOTH hold, and with either missing it buffers the entire result
+          #   in the client -- measured against PostgreSQL 17 as heap
+          #   exhaustion on a large result, not as a slowdown. The value is
+          #   the number of rows the driver retrieves per round trip, so it
+          #   bounds the reader's memory to a fixed window no matter how large
+          #   the feed grows. It is set well above one deliberately: one row
+          #   per round trip would reproduce the baseline's record-at-a-time
+          #   I/O pattern rather than its semantics, and it is the semantics
+          #   that parity requires -- app/cbl/CBTRN02C.cbl:202-219 loops one
+          #   record at a time because a VSAM read returns one record, not
+          #   because the record count per I/O is part of the contract.
           fetch_size: 100
 
-          # WHY : (1) Trade-offs: this groups statements the provider was going to
-          #       issue anyway into fewer round trips. It is safe for parity
-          #       because it changes neither WHICH statements run nor their order:
-          #       only adjacent statements of the same type are grouped, and a
-          #       statement of a different type ends the group.
-          #       (2) Alternatives Considered: hibernate.order_inserts and
-          #       hibernate.order_updates, the two settings usually paired with
-          #       this one, are deliberately NOT set. They increase grouping by
-          #       REORDERING statements across entity types, and this module has
-          #       one place where statement order is worth protecting: the posting
-          #       unit of work transcribed from app/cbl/CBTRN02C.cbl:440-442, whose
-          #       three writes follow the baseline's order. The provider's flush
-          #       already groups by action type, so that physical order differs
-          #       from the transcribed order under any use of a persistence
-          #       provider; adding cross-type reordering would move it further
-          #       still, and would buy nothing observable, because what the golden
-          #       masters compare is the COMMITTED state and the return code, and
-          #       atomicity is guaranteed by the single transaction rather than by
-          #       the order of statements inside it. The grouping given up is the
-          #       accepted cost of keeping the smaller distance.
+          # Trade-offs: this groups statements the provider was going to
+          #   issue anyway into fewer round trips. It is safe for parity
+          #   because it changes neither WHICH statements run nor their order:
+          #   only adjacent statements of the same type are grouped, and a
+          #   statement of a different type ends the group.
+          # Alternatives Considered: hibernate.order_inserts and
+          #   hibernate.order_updates, the two settings usually paired with
+          #   this one, are deliberately NOT set. They increase grouping by
+          #   REORDERING statements across entity types, and this module has
+          #   one place where statement order is worth protecting: the posting
+          #   unit of work transcribed from app/cbl/CBTRN02C.cbl:440-442, whose
+          #   three writes follow the baseline's order. The provider's flush
+          #   already groups by action type, so that physical order differs
+          #   from the transcribed order under any use of a persistence
+          #   provider; adding cross-type reordering would move it further
+          #   still, and would buy nothing observable, because what the golden
+          #   masters compare is the COMMITTED state and the return code, and
+          #   atomicity is guaranteed by the single transaction rather than by
+          #   the order of statements inside it. The grouping given up is the
+          #   accepted cost of keeping the smaller distance.
           batch_size: 50
 
   batch:
     job:
-      # WHY : (1) Assumptions: job selection belongs to the container command and
-      #       to nothing else. The orchestrator passes --job and --business-date as
-      #       command overrides, so the framework's own startup launcher must not
-      #       also try to launch something. Left enabled, that launcher runs at
-      #       startup and, with seven jobs registered and no name configured,
-      #       cannot determine which one was wanted. Disabling it hands selection
-      #       to BatchApplication, which reads the argument. No job name and no
-      #       default job is set anywhere in this file for the same reason: a
-      #       property that named one would give the task a second, silent source
-      #       of truth that could disagree with the argument it was started with.
-      #       (2) Assumptions: this does NOT suppress the exit status. The
-      #       framework contributes its startup launcher conditionally on this
-      #       property, but contributes its exit-code generator on the separate
-      #       condition that the context declares no generator of its own, so
-      #       turning the launcher off leaves exit-status translation intact and
-      #       still lets BatchApplication supply its own. That matters because the
-      #       process exit status is the ONLY channel by which a job reports its
-      #       outcome: 0 clean, 4 completed with rejects, 8 or more a hard
-      #       failure. The warn tier has a single origin in the baseline,
-      #       app/cbl/CBTRN02C.cbl:229 reading IF WS-REJECT-COUNT > 0 and :230
-      #       reading MOVE 4 TO RETURN-CODE, and
-      #       tests/golden/posting/reject_102_overlimit/return_code.expected
-      #       records exactly 4, so a run that produced rejects and reported 0
-      #       would be a parity failure rather than a tidier result.
-      #       (3) Assumptions: no table-prefix property is set because none
-      #       exists. This framework version exposes exactly two keys under
-      #       spring.batch, job.enabled and job.name, and no spring.batch.jdbc
-      #       group at all, so the prefix cannot be configured from a property
-      #       here and a key that looked like it did would be accepted in silence
-      #       and do nothing. The default prefix is unqualified, which is
-      #       CORRECT in this module: the search path above resolves it to the
-      #       `batch` schema, exactly where db/migration/V1__batch.sql:664-739
-      #       creates the six job-repository tables and their three sequences.
+      # Assumptions: job selection belongs to the container command and
+      #   to nothing else. The orchestrator passes --job and --business-date as
+      #   command overrides, so the framework's own startup launcher must not
+      #   also try to launch something. Left enabled, that launcher runs at
+      #   startup and, with seven jobs registered and no name configured,
+      #   cannot determine which one was wanted. Disabling it hands selection
+      #   to BatchApplication, which reads the argument. No job name and no
+      #   default job is set anywhere in this file for the same reason: a
+      #   property that named one would give the task a second, silent source
+      #   of truth that could disagree with the argument it was started with.
+      # Assumptions: this does NOT suppress the exit status. The
+      #   framework contributes its startup launcher conditionally on this
+      #   property, but contributes its exit-code generator on the separate
+      #   condition that the context declares no generator of its own, so
+      #   turning the launcher off leaves exit-status translation intact and
+      #   still lets BatchApplication supply its own. That matters because the
+      #   process exit status is the ONLY channel by which a job reports its
+      #   outcome: 0 clean, 4 completed with rejects, 8 or more a hard
+      #   failure. The warn tier has a single origin in the baseline,
+      #   app/cbl/CBTRN02C.cbl:229 reading IF WS-REJECT-COUNT > 0 and :230
+      #   reading MOVE 4 TO RETURN-CODE, and
+      #   tests/golden/posting/reject_102_overlimit/return_code.expected
+      #   records exactly 4, so a run that produced rejects and reported 0
+      #   would be a parity failure rather than a tidier result.
+      # Assumptions: no table-prefix property is set because none
+      #   exists. This framework version exposes exactly two keys under
+      #   spring.batch, job.enabled and job.name, and no spring.batch.jdbc
+      #   group at all, so the prefix cannot be configured from a property
+      #   here and a key that looked like it did would be accepted in silence
+      #   and do nothing. The default prefix is unqualified, which is
+      #   CORRECT in this module: the search path above resolves it to the
+      #   `batch` schema, exactly where db/migration/V1__batch.sql:664-739
+      #   creates the six job-repository tables and their three sequences.
       enabled: false
 
   sql:
     init:
-      # WHY : Assumptions: this module ships no schema or data script, so this key
-      #       currently governs nothing; it is set so that ADDING one later cannot
-      #       silently start a second writer of the same tables. The framework
-      #       version in use contributes no batch-specific schema initialiser at
-      #       all, so the classic race in which a framework initialiser and Flyway
-      #       both create the job-repository tables is not reachable here -- and
-      #       stating that is the point, because a reader who expects that race to
-      #       need disabling would otherwise look for the setting that disables it
-      #       and not find one. V1__batch.sql uses no IF NOT EXISTS anywhere,
-      #       precisely so that a second creator would surface as an error rather
-      #       than as a silent skip; this key keeps a script from becoming that
-      #       second creator.
+      # Assumptions: this module ships no schema or data script, so this key
+      #   currently governs nothing; it is set so that ADDING one later cannot
+      #   silently start a second writer of the same tables. The framework
+      #   version in use contributes no batch-specific schema initialiser at
+      #   all, so the classic race in which a framework initialiser and Flyway
+      #   both create the job-repository tables is not reachable here -- and
+      #   stating that is the point, because a reader who expects that race to
+      #   need disabling would otherwise look for the setting that disables it
+      #   and not find one. V1__batch.sql uses no IF NOT EXISTS anywhere,
+      #   precisely so that a second creator would surface as an error rather
+      #   than as a silent skip; this key keeps a script from becoming that
+      #   second creator.
       mode: never
 
 logging:
   level:
-    # WHY : Assumptions: the base document sets floors and a baseline only.
-    #       Per-environment verbosity belongs in application-dev.yml and
-    #       application-prod.yml, which may raise a category here but must not
-    #       lower either floor below.
+    # Assumptions: the base document sets floors and a baseline only.
+    #   Per-environment verbosity belongs in application-dev.yml and
+    #   application-prod.yml, which may raise a category here but must not
+    #   lower either floor below.
     root: INFO
 
-    # WHY : Assumptions: the module's own code is left at the same level as the
-    #       root rather than raised, because a job's progress is recorded durably
-    #       in batch.batch_run and its outcome in the process exit status, so the
-    #       log stream is a diagnostic channel rather than the record of what
-    #       happened. Raising it here would put per-record lines into every
-    #       nightly run at feed volume.
+    # Assumptions: the module's own code is left at the same level as the
+    #   root rather than raised, because a job's progress is recorded durably
+    #   in batch.batch_run and its outcome in the process exit status, so the
+    #   log stream is a diagnostic channel rather than the record of what
+    #   happened. Raising it here would put per-record lines into every
+    #   nightly run at feed volume.
     com.carddemo: INFO
 
-    # WHY : Assumptions: this comment governs BOTH keys immediately below, which
-    #       are kept at this level deliberately because they are the two
-    #       categories an operator reads FIRST when a task fails. The batch
-    #       framework logs job and step start, completion and exit status at this
-    #       level, and the migration engine logs which migrations it applied,
-    #       which together answer "did the schema change, and which step stopped"
-    #       without any per-record output.
+    # Assumptions: this comment governs BOTH keys immediately below, which
+    #   are kept at this level deliberately because they are the two
+    #   categories an operator reads FIRST when a task fails. The batch
+    #   framework logs job and step start, completion and exit status at this
+    #   level, and the migration engine logs which migrations it applied,
+    #   which together answer "did the schema change, and which step stopped"
+    #   without any per-record output.
     org.springframework.batch: INFO
     org.flywaydb: INFO
 
-    # WHY : Trade-offs: this comment governs BOTH keys immediately below --
-    #       statement logging and bind-parameter logging -- which are floored OFF
-    #       rather than merely left unset, and this is a data-protection floor,
-    #       not a volume control. A bound parameter in this module carries the
-    #       primary account number of every transaction in the feed, and the
-    #       masking that suppresses it elsewhere lives in the mapper layer, which
-    #       these categories sit underneath and therefore bypass entirely -- a
-    #       single raised level here would write unmasked cardholder data to the
-    #       container's log stream at feed volume, defeating the masking without
-    #       touching it. OFF rather than a higher level because these categories
-    #       emit at DEBUG and TRACE, so any threshold above them merely happens
-    #       to exclude them and would let a profile re-enable them by lowering one
-    #       number. What is given up is the ability to read executed SQL from a
-    #       deployed task's log; the accepted substitute is reproducing the step
-    #       locally against a database container.
+    # Trade-offs: this comment governs BOTH keys immediately below --
+    #   statement logging and bind-parameter logging -- which are floored OFF
+    #   rather than merely left unset, and this is a data-protection floor,
+    #   not a volume control. A bound parameter in this module carries the
+    #   primary account number of every transaction in the feed, and the
+    #   masking that suppresses it elsewhere lives in the mapper layer, which
+    #   these categories sit underneath and therefore bypass entirely -- a
+    #   single raised level here would write unmasked cardholder data to the
+    #   container's log stream at feed volume, defeating the masking without
+    #   touching it. OFF rather than a higher level because these categories
+    #   emit at DEBUG and TRACE, so any threshold above them merely happens
+    #   to exclude them and would let a profile re-enable them by lowering one
+    #   number. What is given up is the ability to read executed SQL from a
+    #   deployed task's log; the accepted substitute is reproducing the step
+    #   locally against a database container.
     org.hibernate.SQL: "OFF"
     org.hibernate.orm.jdbc.bind: "OFF"

@@ -309,3 +309,17 @@ output "noncurrent_version_retention" {
   value       = var.noncurrent_version_retention
 }
 
+output "audit_bucket_name" {
+  description = "Name of the versioned bucket receiving validated CloudTrail data-event logs for dataset object reads and writes."
+  value       = aws_s3_bucket.audit.bucket
+}
+
+output "audit_bucket_arn" {
+  description = "ARN of the versioned dataset object-access audit bucket, consumed by exact KMS encryption-context policy wiring in the environment root."
+  value       = aws_s3_bucket.audit.arn
+}
+
+output "object_access_trail_arn" {
+  description = "ARN of the CloudTrail trail whose advanced selector audits object-level access to the CardDemo dataset bucket."
+  value       = aws_cloudtrail.dataset_object_access.arn
+}

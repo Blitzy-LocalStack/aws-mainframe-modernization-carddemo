@@ -2,24 +2,6 @@
  * Owns the date edit rules and the three-state field validation flag triad that
  * together produce every per-field error the migrated CardDemo services report.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> This package is the shared-kernel home for two contracts
  * that the reference baseline keeps in separate files and that every bounded
  * context has to apply identically. The first is the date edit algorithm: a
@@ -268,24 +250,25 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel's target inventory is 17 production classes and 9 package charter files,
- * for 26 compilation units in total. This package contributes 2 of those
- * production classes and 1 of those charters. The arithmetic is recorded so
- * that a later reader can tell a class that is missing from one that was never
- * planned:
+ * <p>The shared kernel's contract is 21 production classes and 9 package charter
+ * files, for 30 compilation units in total. This package contributes 2 of those
+ * production classes -- {@code DateEditValidator} and {@code FieldValidationFlag},
+ * both present in this directory -- and 1 of those charters. The arithmetic is
+ * recorded so that a class absent from the module is distinguishable from one the
+ * contract never admitted:
  *
  * <pre>
- * money 2 + codec 5 + error 3 + web 2 + security 1 + observability 1 + time 1 + validation 2 = 17
+ * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
  * </pre>
  *
  * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 1 + 3 + 6 + 4 + 3 + 2 + 2 + 2 + 3 = 26,
- * the root contributing its charter alone. And 17 production classes plus 9
- * charters is 26. All three paths agree, and this file is one of the nine
+ * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
+ * the root contributing its charter and the one auto-configuration class. And 21 production classes plus 9
+ * charters is 30. All three paths agree, and this file is one of the nine
  * charters.
  *
- * <p>Assumptions: the authoritative totals are <strong>17 production classes and
- * 26 compilation units, 9 of them charters</strong>. The total is always stated
+ * <p>Assumptions: the authoritative totals are <strong>21 production classes and
+ * 30 compilation units, 9 of them charters</strong>. The total is always stated
  * beside a breakdown that re-derives it, which is why both are kept here instead
  * of the total alone: a figure that does not reproduce all three sums above is
  * rejected on sight rather than adopted.

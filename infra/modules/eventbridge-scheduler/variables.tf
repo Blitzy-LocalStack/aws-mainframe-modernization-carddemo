@@ -318,7 +318,7 @@ variable "flexible_time_window_mode" {
 }
 
 variable "flexible_time_window_minutes" {
-  description = "Width in minutes of the window an invocation may be shifted within, from 1 to 1440. Meaningful only when flexible_time_window_mode is FLEXIBLE; leave null when the mode is OFF."
+  description = "Width in whole minutes of the window an invocation may be shifted within. Must be null when flexible_time_window_mode is OFF and must be an integer from 1 to 1440 when the mode is FLEXIBLE."
   type        = number
   default     = null
   nullable    = true
@@ -326,23 +326,24 @@ variable "flexible_time_window_minutes" {
   # WHY : Assumptions: null rather than a number, because the value is
   #       meaningless unless the mode above is FLEXIBLE, and the mode defaults
   #       to OFF. A numeric default would therefore ship a width that describes
-  #       a window the module does not open, and main.tf gates the argument on
-  #       the mode rather than on this being set. The pinned provider does not
-  #       object to a width supplied alongside mode OFF -- that combination was
-  #       measured and accepted -- so the gating has to be the module's job.
+  #       a window the module does not open.
   validation {
-    # WHY : Assumptions: the 1-1440 bound is the pinned provider's, obtained
-    #       by driving it until it complained: it reports `expected
-    #       maximum_window_in_minutes to be in the range (1 - 1440)` and
-    #       rejects both 0 and 1441. The null branch is explicit because a
-    #       comparison against null is not a false condition but an evaluation
-    #       error, which would surface as an internal expression failure rather
-    #       than as the clear message below.
-    condition = var.flexible_time_window_minutes == null ? true : (
-      var.flexible_time_window_minutes >= 1 &&
-      var.flexible_time_window_minutes <= 1440
+    # WHY : Refactoring Rationale: validating only the numeric value allowed the
+    #       contradictory states OFF-with-a-window and FLEXIBLE-without-a-window.
+    #       The service rejects those combinations at apply, so this condition
+    #       validates the pair during plan. `try` makes null in the FLEXIBLE arm
+    #       a clean false result instead of an expression error from `floor`.
+    condition = (
+      var.flexible_time_window_mode == "OFF" ? var.flexible_time_window_minutes == null :
+      var.flexible_time_window_mode == "FLEXIBLE" ? try(
+        var.flexible_time_window_minutes == floor(var.flexible_time_window_minutes) &&
+        var.flexible_time_window_minutes >= 1 &&
+        var.flexible_time_window_minutes <= 1440,
+        false
+      ) :
+      true
     )
-    error_message = "The flexible_time_window_minutes value must be between 1 and 1440, or null when flexible_time_window_mode is OFF."
+    error_message = "flexible_time_window_mode and flexible_time_window_minutes must be paired: OFF requires null; FLEXIBLE requires a whole number from 1 to 1440."
   }
 }
 
@@ -442,7 +443,7 @@ variable "maximum_event_age_in_seconds" {
 # -----------------------------------------------------------------------------
 
 variable "kms_key_arn" {
-  description = "Customer-managed KMS key used to encrypt the schedule's own stored payload, or null to use the service-owned key."
+  description = "Customer-managed KMS key used to encrypt the schedule's stored target payload, or null to use the service-owned key. When set, main.tf grants the schedule execution role kms:Decrypt on this exact key so it can read the payload before invoking the state machine."
   type        = string
   default     = null
   nullable    = true

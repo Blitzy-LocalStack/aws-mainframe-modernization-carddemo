@@ -1,0 +1,153 @@
+# =============================================================================
+# .github/workflows/ui-ci.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Installs the lock-file-exact SPA dependency graph, type-checks it, enforces
+#   the JSDoc gate, runs component tests, audits high-severity advisories, and
+#   creates the production bundle without publishing it. All source gates and
+#   report presence are GATING; JUnit annotations alone are ADVISORY.
+#
+# Parameters:
+#   workflow_dispatch.run_format_check controls only the independently labelled
+#   Prettier check on a manual diagnostic run; type, documentation, test, audit,
+#   and production-build gates are never optional.
+# Return values:
+#   A failing gate returns failure and a Vitest JUnit artifact is uploaded even
+#   when an earlier step fails.
+# Exceptions or errors:
+#   The annotation publisher may degrade without masking Vitest. No other
+#   non-zero exit is tolerated.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: every command runs under ui/, so one job-level working
+#     directory prevents path drift between the lock file and the tools it pins.
+#   - Trade-offs: npm caching is scoped by ui/package-lock.json; the extra cache
+#     dependency is accepted because npm ci still verifies the reviewed lock.
+#   - Alternatives Considered: uploading ui/dist from CI. Rejected because this
+#     workflow validates only; deploy.yml rebuilds and publishes the artifact.
+# =============================================================================
+
+name: CardDemo UI CI
+
+# Assumptions: UI source, manifest, delivery config, and this workflow are the
+# complete owning surface. Service, infrastructure, and immutable baseline paths
+# have separate workflows and are intentionally excluded.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-ci.yml"
+  workflow_dispatch:
+    inputs:
+      run_format_check:
+        description: "Run the independent Prettier drift check in addition to all mandatory gates."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Trade-offs: validation has no remote mutation, so replacing a stale run is
+# safer than allowing redundant dependency installs and test suites to queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: Lint, type-check, test and build the CardDemo SPA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: ui
+
+    steps:
+      # Assumptions: full-SHA action pins cannot be moved to attacker-controlled
+      # code while this job's token remains trusted (CWE-1357).
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assumptions: Node 22.23.1 matches the pinned UI build-stage line.
+      # Trade-offs: TypeScript remains 6.0.3 because typescript-eslint 8.65.0
+      # accepts >=4.8.4 <6.1.0; raising the compiler alone disables the
+      # type-aware lint/JSDoc gate while leaving installation apparently green.
+      - name: Configure the reviewed Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Alternatives Considered: npm install. Rejected because it may rewrite
+      # the lock and resolve a graph different from the one reviewed.
+      - name: Install the lock-file-exact dependency graph
+        shell: bash
+        run: npm ci
+
+      - name: Type-check application and tool configuration
+        shell: bash
+        run: npm run typecheck
+
+      # Assumptions: --max-warnings=0 is already part of the script and turns a
+      # JSDoc warning into a failing Rule 1 gate rather than decorative output.
+      - name: Run ESLint and the JSDoc documentation gate
+        shell: bash
+        run: npm run lint
+
+      - name: Check formatting drift
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_format_check }}
+        shell: bash
+        run: npm run format
+
+      # Assumptions: Vitest's run mode exits after one pass; watch mode would
+      # wait for input indefinitely on a non-interactive runner.
+      - name: Run component tests once and emit JUnit XML
+        shell: bash
+        run: |
+          mkdir -p ../ui-reports
+          npm test -- --reporter=junit --outputFile=../ui-reports/vitest.xml
+
+      # Trade-offs: the advisory database is a network dependency, but a known
+      # high-severity UI vulnerability is a release blocker. The explicit
+      # threshold avoids failing on informational churn while keeping this gate
+      # authoritative for material findings.
+      - name: Audit production and development dependencies
+        shell: bash
+        run: npm audit --audit-level=high
+
+      # Assumptions: ui/dist is intentionally git-ignored. Producing it proves
+      # the shipping bundle is valid; only deploy.yml publishes a fresh rebuild.
+      - name: Build the production SPA bundle
+        shell: bash
+        run: npm run build
+
+      - name: Upload Vitest reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: carddemo-ui-reports
+          path: ui-reports/**
+          if-no-files-found: error
+
+      # Trade-offs: check annotations are convenient but non-authoritative; a
+      # publisher outage cannot turn a passing or failing Vitest result around.
+      - name: Publish UI JUnit annotations
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
+        with:
+          report_paths: "ui-reports/*.xml"
+          check_name: CardDemo UI Test Results
+          fail_on_failure: false

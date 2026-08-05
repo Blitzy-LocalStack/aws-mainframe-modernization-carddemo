@@ -76,7 +76,7 @@
 #     would quietly resolve to null instead of failing validation, whereas
 #     one() expresses zero-or-one exactly and lets every unrelated error
 #     through.
-#   - Trade-off: publishing a nullable value was chosen over both
+#   - Trade-offs: publishing a nullable value was chosen over both
 #     alternatives to it. The full reasoning sits at target_group_arn below,
 #     which is where the choice bites hardest.
 # =============================================================================
@@ -86,8 +86,6 @@
 # Log destination.
 # -----------------------------------------------------------------------------
 
-# WHAT: the name of the CloudWatch Logs group this service's tasks write to,
-#       read from the resource rather than from the local that composed it.
 # WHY : Refactoring Rationale: this replaces where the baseline's job and
 #       console output went. The JCL wrote it to the JES spool through SYSOUT
 #       and SYSPRINT DD statements, which made it readable only from the system
@@ -95,7 +93,7 @@
 #       alarms and metric filters on this group instead. Publishing the name is
 #       what stops that module recomposing it from name_prefix, service_name
 #       and environment and owning a second copy of the composition rule.
-#       Assumption: reading aws_cloudwatch_log_group.this.name rather than
+#       Assumptions: reading aws_cloudwatch_log_group.this.name rather than
 #       local.log_group_name is deliberate. The local is a plain string that
 #       resolves whether or not the group exists, while the resource attribute
 #       carries a dependency edge, so a consumer creating a metric filter
@@ -113,8 +111,7 @@ output "log_group_name" {
   value       = aws_cloudwatch_log_group.this.name
 }
 
-# WHAT: the same log group addressed as an ARN, in one normalised form.
-# WHY : Assumption: main.tf already trims the trailing ":*" into
+# WHY : Assumptions: main.tf already trims the trailing ":*" into
 #       local.log_group_arn, because the two Resource forms its execution
 #       policy needs differ only by that suffix and the provider attribute has
 #       not consistently carried one. Publishing that normalised local rather
@@ -144,8 +141,7 @@ output "log_group_arn" {
 # The two IAM roles.
 # -----------------------------------------------------------------------------
 
-# WHAT: the run-time identity of the application itself.
-# WHY : Assumption: RACF has no cloud analogue and is not ported. Its role is
+# WHY : Assumptions: RACF has no cloud analogue and is not ported. Its role is
 #       filled by one least-privilege task role per service together with
 #       Cognito groups, which makes this ARN the entire mechanism by which a
 #       per-service privilege boundary is expressible at all. main.tf
@@ -171,8 +167,7 @@ output "task_role_arn" {
   value       = aws_iam_role.task.arn
 }
 
-# WHAT: the same application task role, addressed by name instead of by ARN.
-# WHY : Assumption: about the AWS API shape rather than a preference. Both
+# WHY : Assumptions: about the AWS API shape rather than a preference. Both
 #       aws_iam_role_policy and aws_iam_role_policy_attachment identify their
 #       target role by NAME, while every resource policy that grants TO a role
 #       names it by ARN, so the two forms are not interchangeable and a caller
@@ -190,9 +185,7 @@ output "task_role_name" {
   value       = aws_iam_role.task.name
 }
 
-# WHAT: the identity ECS uses to get the task off the ground, which is not the
-#       identity the application then runs as.
-# WHY : Assumption: one trust policy backs both roles, because the difference
+# WHY : Assumptions: one trust policy backs both roles, because the difference
 #       between them is what each may DO and not who may assume it -- ECS
 #       assumes the execution role to start the task, before any container
 #       exists, and assumes the task role on the application's behalf once it
@@ -215,8 +208,7 @@ output "execution_role_arn" {
   value       = aws_iam_role.execution.arn
 }
 
-# WHAT: the same execution role, addressed by name instead of by ARN.
-# WHY : Assumption: the same AWS API shape recorded at task_role_name above.
+# WHY : Assumptions: the same AWS API shape recorded at task_role_name above.
 #       Published even though this module writes the execution role's only
 #       policy itself, because a root attaching an AWS-managed policy to it
 #       would otherwise be the single caller forced to cut a name back out of
@@ -236,15 +228,14 @@ output "execution_role_name" {
 # The task definition and its single container.
 # -----------------------------------------------------------------------------
 
-# WHAT: the exact task-definition revision this module last registered.
-# WHY : Assumption: ADR-002 puts batch on Step-Functions-invoked Fargate tasks
+# WHY : Assumptions: ADR-002 puts batch on Step-Functions-invoked Fargate tasks
 #       rather than on a long-running service, so for that one instantiation
 #       this output and container_name below are the WHOLE interface -- a state
 #       machine needs a task definition it can start and a container it can
 #       address, and nothing else this module produces. That is precisely why
 #       main.tf creates the task definition unconditionally while gating the
 #       service, and why this output is never null.
-#       Trade-off: a revision-qualified ARN pins a consumer to the revision
+#       Trade-offs: a revision-qualified ARN pins a consumer to the revision
 #       that was current at apply. That is reproducible, which is what a
 #       reviewed plan wants, but it does not pick up a later revision;
 #       task_definition_family below is the unpinned form. Both are published
@@ -264,13 +255,12 @@ output "task_definition_arn" {
   value       = aws_ecs_task_definition.this.arn
 }
 
-# WHAT: the same task definition addressed by family, with no revision.
-# WHY : Assumption: ECS resolves an unqualified family name to that family's
+# WHY : Assumptions: ECS resolves an unqualified family name to that family's
 #       latest ACTIVE revision, whereas a revision-qualified ARN addresses one
 #       fixed revision. Those are two genuinely different contracts rather than
 #       two spellings of one, so both are published and the choice belongs to
 #       the caller that knows which behaviour it wants.
-#       Trade-off: publishing both admits a caller mixing them, pinning one
+#       Trade-offs: publishing both admits a caller mixing them, pinning one
 #       state while floating another. The alternative was publishing only the
 #       pinned ARN, which would have forced any caller wanting
 #       latest-revision behaviour to rebuild the family string from
@@ -288,9 +278,12 @@ output "task_definition_family" {
   value       = aws_ecs_task_definition.this.family
 }
 
-# WHAT: the resolved container name, which is not the same thing as the input
-#       that may or may not have supplied it.
-# WHY : Assumption: a ContainerOverrides entry in the synchronous run-task
+output "task_definition_family_arn" {
+  description = "Revisionless task-definition family ARN assembled from the module's provider-resolved partition, Region and account identity. Step Functions consumes this form so workflow creation does not depend on the reporting task definition that later reads the workflow ARN from Parameter Store."
+  value       = "arn:${data.aws_partition.current.partition}:ecs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.resource_name}"
+}
+
+# WHY : Assumptions: a ContainerOverrides entry in the synchronous run-task
 #       integration identifies the container it overrides BY NAME, and every
 #       batch step passes its arguments that way, so this name is a value two
 #       modules have to agree on rather than a label. Publishing the resolved
@@ -311,8 +304,7 @@ output "container_name" {
   value       = local.container_name
 }
 
-# WHAT: the one port the container listens on, published as the number it is.
-# WHY : Assumption: the application security group admits load-balancer traffic
+# WHY : Assumptions: the application security group admits load-balancer traffic
 #       on this port and no other, so a listener or a health probe configured
 #       against a different port is refused by the security group rather than
 #       by the task, and the symptom is a target that never turns healthy
@@ -336,14 +328,13 @@ output "container_port" {
 # The target group. This is the boundary with infra/modules/alb.
 # -----------------------------------------------------------------------------
 
-# WHAT: the one value another module cannot function without.
-# WHY : Assumption: the target group lives in this module rather than in alb
+# WHY : Assumptions: the target group lives in this module rather than in alb
 #       because registering a target needs this module's container name,
 #       container port and health-check path -- three values alb has no other
 #       reason to know. That division is why no aws_lb, aws_lb_listener or
 #       aws_lb_listener_rule appears anywhere in this module, and why this ARN
 #       is published in their place.
-#       Trade-off: publishing a NULLABLE output was chosen over both
+#       Trade-offs: publishing a NULLABLE output was chosen over both
 #       alternatives to it. Omitting the output for the batch shape is not
 #       expressible at all -- an output block is unconditional, so the real
 #       choice is a null value or no output for any of the eight
@@ -372,9 +363,7 @@ output "target_group_arn" {
   value       = one(aws_lb_target_group.this[*].arn)
 }
 
-# WHAT: the same target group addressed by name, and a warning about which of
-#       these two values a CloudWatch dimension actually takes.
-# WHY : Assumption: a target-group NAME and the TargetGroup dimension value are
+# WHY : Assumptions: a target-group NAME and the TargetGroup dimension value are
 #       different strings that look similar enough to be confused. The
 #       description says which is which because getting it wrong fails
 #       silently: an alarm built on the name matches no metric, so it never
@@ -383,9 +372,9 @@ output "target_group_arn" {
 output "target_group_name" {
   description = <<-EOT
     Name string of the same target group, or null under exactly the same
-    condition as target_group_arn. At most 32 characters, because that is the
-    ceiling Elastic Load Balancing enforces on a target-group name and the
-    reason variables.tf bounds name_prefix and service_name in the first place.
+    condition as target_group_arn. At most 32 characters: a readable service
+    stem followed by the stable replacement hash that lets create-before-destroy
+    provision a new group before the old name is released.
     Consumed where a human-readable identifier is wanted rather than an ARN: an
     operator locating the group in the console, or a runbook step naming it.
     NOT the value a CloudWatch TargetGroup dimension takes -- that is
@@ -394,9 +383,7 @@ output "target_group_name" {
   value       = one(aws_lb_target_group.this[*].name)
 }
 
-# WHAT: the trailing portion of the target-group ARN, which is a distinct value
-#       from both the ARN and the name.
-# WHY : Assumption: about the CloudWatch metric schema rather than about
+# WHY : Assumptions: about the CloudWatch metric schema rather than about
 #       Terraform. The AWS/ApplicationELB namespace identifies a target
 #       group by its ARN SUFFIX, and the provider exposes exactly that form
 #       as its own attribute, so publishing it is the difference between a
@@ -422,9 +409,7 @@ output "target_group_arn_suffix" {
 # The service.
 # -----------------------------------------------------------------------------
 
-# WHAT: the service's plain name, which is the form its CloudWatch dimension
-#       takes -- the opposite of the target-group case above.
-# WHY : Assumption: the AWS/ECS namespace identifies a service by its plain
+# WHY : Assumptions: the AWS/ECS namespace identifies a service by its plain
 #       name paired with a ClusterName dimension, whereas AWS/ApplicationELB
 #       identifies a target group by an ARN suffix. Both are stated explicitly
 #       because the inconsistency is AWS's rather than this module's, and
@@ -442,8 +427,7 @@ output "service_name" {
   value       = one(aws_ecs_service.this[*].name)
 }
 
-# WHAT: the same service named unambiguously rather than described.
-# WHY : Assumption: a service name is unique only within one cluster, while the
+# WHY : Assumptions: a service name is unique only within one cluster, while the
 #       ARN carries the account, the region and the cluster with it. The two
 #       are therefore not interchangeable in an IAM Resource element or in any
 #       record meant to outlive the cluster it named. Both forms are published
@@ -467,9 +451,7 @@ output "service_arn" {
 # Autoscaling.
 # -----------------------------------------------------------------------------
 
-# WHAT: the composite identifier by which Application Auto Scaling addresses
-#       this service.
-# WHY : Assumption: that composite form is an Application Auto Scaling API
+# WHY : Assumptions: that composite form is an Application Auto Scaling API
 #       contract and not a naming convention -- a service is addressed as
 #       service/<cluster name>/<service name> and nothing else is accepted. It
 #       is also the reason variables.tf declares cluster_name separately from
@@ -499,8 +481,6 @@ output "autoscaling_target_resource_id" {
 # Two decisions about this surface as a whole.
 # -----------------------------------------------------------------------------
 
-# WHAT: not one output above carries sensitive = true, which is a decision
-#       taken rather than a step skipped.
 # WHY : Alternatives Considered: marking the ARNs sensitive was evaluated and
 #       rejected on two independent grounds. First, every value here is an ARN,
 #       a name, a port or a composite identifier -- none is a credential and
@@ -514,12 +494,11 @@ output "autoscaling_target_resource_id" {
 #       every generated credential is produced by infra/modules/secrets at
 #       apply time and written straight into Secrets Manager. Note the
 #       asymmetry that makes this safe rather than merely convenient --
-#       var.secret_arns and var.ssm_parameter_arns carry only ARNs into this
+#       var.secret_sources and var.ssm_parameter_arns carry only ARNs into this
 #       module, never the values behind them, so no secret value is ever in
 #       scope to be published.
 
-# WHAT: four things a reader may expect to find here and will not.
-# WHY : Assumption: each is owned by another module, and re-exporting a value
+# WHY : Assumptions: each is owned by another module, and re-exporting a value
 #       this module either received as an input or does not own would publish a
 #       second apparent source of truth for one fact -- after which a
 #       divergence between the two copies becomes possible and nothing reports

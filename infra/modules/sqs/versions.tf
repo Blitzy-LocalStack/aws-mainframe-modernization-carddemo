@@ -3,11 +3,12 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   Declares the Terraform CLI version floor and the AWS provider constraint
-#   for the `sqs` module. That module provisions ten queues -- five primary
+#   for the `sqs` module. That module provisions twelve queues -- six primary
 #   queues plus one dead-letter queue for each -- which together replace the
 #   CardDemo baseline's five IBM MQ queues: a FIFO pair carrying the
-#   pending-authorization request and reply, a standard pair carrying the
-#   account-inquiry request and reply, and a standard terminal error sink.
+#   pending-authorization request and reply, standard request queues for the
+#   account-inquiry and date-conversion flows sharing one standard reply queue,
+#   and a standard terminal error sink.
 #
 #   This file deliberately declares NO provider configuration, because `sqs` is
 #   a reusable module rather than a root; the two environment roots that call
@@ -53,7 +54,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the oldest Terraform CLI that a caller of this module may run.
   # WHY : Assumptions: the whole infra/ tree is authored against the 1.15
   #       language behaviour and is validated on 1.15.8 specifically. Declaring
   #       the floor makes an older CLI stop at `init` and name the version it
@@ -64,8 +64,6 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the single AWS provider constraint that every directory under
-    #       infra/ repeats verbatim.
     # WHY : Assumptions: one identical constraint tree-wide means a root
     #       resolves exactly one provider version for every module at
     #       once; constraints that drifted per module could leave a root unable
@@ -87,7 +85,6 @@ terraform {
     #       tree-wide edit per upstream patch, and a bare `>=` would admit
     #       7.0.0 without review.
     aws = {
-      # WHAT: the fully-qualified registry address rather than the bare name.
       # WHY : Assumptions: tflint's terraform_required_providers rule expects an
       #       explicit source, and naming the namespace removes any doubt over
       #       which `aws` provider a caller resolves through a mirror.

@@ -4,24 +4,6 @@
  * carries validation failures inside it, and the structured equivalent of the
  * baseline abend data block.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
- *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
- *
  * <p><b>Purpose.</b> Three questions have exactly one answer each across all
  * eight bounded contexts, and this package is where those three answers live.
  * What does a failed request look like on the wire? What does a field-level
@@ -44,20 +26,18 @@
  * Exceptions or errors -- exactly one applies to this compilation unit, and the
  * paragraph above discharges it.
  *
- * <h2>What this package is to hold</h2>
+ * <h2>The closed set this package owns</h2>
  *
  * <pre>
- * file                          holds                                          landed
- * package-info.java             this charter                                      yes
- * ApiError.java                 the problem shape, with the per-field array        no
- * GlobalExceptionHandler.java   the one advice that renders every failure          no
- * AbendDetail.java              the structured abend data equivalent               no
+ * file                          holds
+ * package-info.java             this charter
+ * ApiError.java                 the problem shape, with the per-field array
+ * GlobalExceptionHandler.java   the one advice that renders every failure
+ * AbendDetail.java              the structured abend data equivalent
  * </pre>
  *
  * <p>Three production classes and one charter, four compilation units, and the
- * set is closed. The landed column is the state at the checkpoint that authored
- * this charter; the three production classes are authored at later indexes of the
- * same plan. There is no fourth production class here and none is to be
+ * set is closed. There is no fifth compilation unit here and none is to be
  * added: anything that would have been a fourth top-level type is a nested type
  * inside one of the three instead. The per-field entry nests inside
  * {@code ApiError}, beside the array that holds it, and any exception type this
@@ -537,22 +517,21 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>Assumptions: the shared kernel's target inventory is 17 production classes and 9 package
- * charter files, for 26 compilation units in total. This package contributes 3
+ * <p>Assumptions: the shared kernel's target inventory is 21 production classes and 9 package
+ * charter files, for 30 compilation units in total. This package contributes 3
  * of those production classes and 1 of those charters, so the directory holds
- * 3 + 1 = 4 compilation units when complete. The arithmetic is recorded so that
- * a later reader can tell a class that is missing from one that was never
- * planned, and so that a stale total cannot survive next to a breakdown that
- * re-derives it:
+ * 3 + 1 = 4 compilation units. The arithmetic is recorded so that a class absent
+ * from the module stays distinguishable from one the contract never admitted, and
+ * so that a stale total cannot survive next to a breakdown that re-derives it:
  *
  * <pre>
- * money 2 + codec 5 + error 3 + web 2 + security 1 + observability 1 + time 1 + validation 2 = 17
+ * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
  * </pre>
  *
  * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 1 + 3 + 6 + 4 + 3 + 2 + 2 + 2 + 3 = 26,
- * the root package contributing its charter alone. And 17 production classes
- * plus 9 charters is 26. All three paths agree, this file is one of the nine
+ * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
+ * the root package contributing its charter and the one auto-configuration class. And 21 production classes
+ * plus 9 charters is 30. All three paths agree, this file is one of the nine
  * charters, and the 4 in the fourth position of that second sum is this
  * directory.
  *
@@ -573,11 +552,12 @@
  * {@code time} siblings, and must not be depended upon by {@code validation},
  * {@code codec}, {@code money} or {@code time}.
  *
- * <p>Assumptions: that layering has exactly one owner, and it is a test:
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}.
- * It is a test precisely so that it cannot rot into a comment nobody runs. The
- * audit configuration's import-restriction module is deliberately not enabled
- * and must not be added, because two owners would mean two files to change
+ * <p>Assumptions: layering has one configured enforcement site: the
+ * {@code architecture-rules} Surefire execution declared in
+ * {@code services/pom.xml}, which scans the shared kernel's test artifact into
+ * every module and selects the layering rules by the simple name
+ * {@code LayeringRulesTest}. The audit configuration's import-restriction
+ * module is deliberately not enabled and must not be added, because two owners would mean two files to change
  * whenever a boundary moves and no way to tell from either which is
  * authoritative. A test also names the offending class together with the
  * offending dependency, which is the information needed to act on it.
@@ -635,11 +615,14 @@
  * <p>Trade-offs: every message this package carries is a Java constant, and
  * none is externalised to a properties file or a resource bundle. That is not a
  * preference; it follows from what this module is. {@code common-lib} is a
- * library rather than a deployable, so it has no resources directory beside its
- * sources, no application configuration of any kind, no container definition,
- * no interface contract directory and no schema migration directory. A message
- * moved into a bundle would need one of those, which would turn a library into
- * something that has to be configured before it can be used. What is given up
+ * library rather than a deployable: it has no application configuration of its
+ * own, no container definition, no interface contract directory and no schema
+ * migration directory. Its resources directory holds exactly two entries and
+ * neither is a message source -- the auto-configuration registration file the
+ * framework requires by name, and the shared configuration defaults a service
+ * imports deliberately. A message moved into a bundle would turn a library into
+ * something that has to be configured before it can be used, and would make the
+ * text overridable from a consumer's classpath. What is given up
  * is the ability to change a message without recompiling, and the loss is small
  * here because these strings are not meant to change: transformation rule T8
  * requires them to match the baseline character for character, so a deployment

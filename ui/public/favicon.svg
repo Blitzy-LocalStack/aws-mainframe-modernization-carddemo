@@ -21,17 +21,26 @@
      Naming this directory in that href resolves nowhere, no such path surviving
      the build.
 
-  3) Static and self contained. Assumptions, stated as contracts still to be met
-     rather than as descriptions of what exists, because ui/nginx.conf is authored
-     later in this same plan: nothing under ui/public is content hashed, yet that
-     configuration is to match its immutable long lived cache rule by file
-     extension, so a browser or CloudFront edge may hold these exact bytes
-     indefinitely with no hashed name to invalidate. Hence no external reference,
+  3) Static and self contained. Assumptions: nothing under ui/public is content
+     hashed, so this file keeps one name across every deploy and a hashed name can
+     never be used to invalidate it. Both delivery layers account for that by
+     serving it with a short revalidated lifetime instead of the immutable year
+     they grant the hashed bundle: ui/nginx.conf matches it in a location keyed on
+     a dotted final path segment, and the CloudFront distribution reaches the same
+     outcome through its cache policy. Replacing the icon therefore takes effect
+     within that short window rather than never. Hence also no external reference,
      remote font, script or embedded image: each would be a second thing to
-     invalidate and none can be. It is also to return index.html as the history
-     fallback, so were this file absent the request would answer HTML with HTTP 200
-     against an image/svg+xml expectation, a broken icon reported as success and
-     far harder to diagnose than a 404.
+     invalidate, and self containment is what keeps this file's cache behaviour a
+     property of one request.
+     Refactoring Rationale: two claims previously made here were wrong and are
+     corrected rather than softened. The extension matched rule was said to be the
+     IMMUTABLE one, which would have pinned this unhashed icon into browsers for a
+     year with no means of revoking it; the rule that matches it is the short
+     revalidated one, and that is deliberate for exactly this reason. And a missing
+     file was said to answer HTML with HTTP 200 against an image/svg+xml
+     expectation, which was true of the history fallback as it then stood; both
+     layers now classify a dotted final segment as a file and answer 404, so the
+     absence is reported as an absence.
 
   4) The mark is derived, not invented. Assumptions: app/bms/COSGN00.bms places
      nine consecutive 42 character DFHMDF fields at POS=(7,21) through (15,21)
@@ -55,7 +64,8 @@
      box of its own then has no intrinsic size to fall back on, which costs
      nothing because every surface requesting a favicon states its size.
 
-  7) Assumptions, so this is not helpfully 'corrected' later: XML forbids two
+  7) Assumptions: the following is recorded so it is not helpfully 'corrected'
+     later. XML forbids two
      consecutive hyphens inside a comment body, and a parser meeting that sequence
      closes the comment early and spills the rest into the document. The rules
      above use '=' where this repository's header style uses a row of hyphens, and
@@ -90,7 +100,7 @@
     map token fixed at #fff (es/theme/themes/shared/genColorMapToken.js). Browser
     chrome renders a favicon with no algorithm in scope, so only the unconditional
     token describes the byte that ships.
-    Alternatives Considered for the band's inset, all three rendered at 16 and
+    Alternatives Considered: three insets for the band were rendered at 16 and
     inspected pixel by pixel rather than judged by eye. Spanning the full card
     width was rejected: against a light tab bar a white band running edge to edge
     merges with the background and splits the mark into two blue bars instead of

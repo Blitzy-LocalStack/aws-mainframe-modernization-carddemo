@@ -29,7 +29,7 @@
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: this root is structurally identical to infra/envs/dev by
-#     design, so the `terraform` block and both provider constraints are the
+#     design, so the `terraform` block and all four provider constraints are the
 #     same in both roots. Production differs from development only in sizing and
 #     retention values, and every one of those lives in terraform.tfvars, never
 #     here. A reader tempted to narrow a constraint "because production does not
@@ -42,8 +42,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: the Terraform CLI series permitted to plan or apply this root -- the
-  #       1.15 minor series, any patch release within it.
   # WHY : Refactoring Rationale: this was `>= 1.15.0`, an open-ended floor, and
   #       the openness was the defect. A bare floor admits every future release
   #       of the 1.x line, so the CLI that produced the reviewed plan and the CLI
@@ -70,9 +68,9 @@ terraform {
   required_version = "~> 1.15.0"
 
   required_providers {
-    # WHAT: pins the AWS provider to the 6.56 minor series (6.56.0 verified as
-    #       the constraint's floor; 6.57.1 resolves within it).
-    # WHY : Assumptions: this constraint is shared with infra/envs/dev and is
+    # WHY : Assumptions: `~> 6.56` means `>= 6.56.0, < 7.0.0`; it establishes a
+    #       floor inside the supported 6.x major line rather than pinning one
+    #       minor series. This constraint is shared with infra/envs/dev and is
     #       identical in both roots by design. Its floor is set by a requirement
     #       THIS root never exercises: an Aurora Serverless v2 minimum capacity
     #       of zero needs provider 5.81.0 or later, and `~> 6.56` comfortably
@@ -85,14 +83,15 @@ terraform {
     #       caller: were production to constrain the provider differently from
     #       development, one module source could resolve two different provider
     #       versions, and a plan reviewed against development would stop being
-    #       evidence for production.
+    #       evidence for production. The adjacent lock file selects AWS provider
+    #       6.57.1 with reviewed checksums, and CI's `-lockfile=readonly` prevents
+    #       a plan from silently resolving another allowed 6.x release. Provider
+    #       upgrades therefore require an explicit lock-file diff.
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.56"
     }
 
-    # WHAT: pins the random provider, which generates the Aurora master
-    #       password and the Cognito seed-user passwords at apply time.
     # WHY : Alternatives Considered: omitting this entry and letting each child
     #       module carry its own `random` constraint. Rejected. Only two of the
     #       two modules generate values with this provider -- `secrets` for
@@ -123,10 +122,26 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.9"
     }
+
+    # WHY : Refactoring Rationale: Lambda deployment packages are assembled
+    #       deterministically from repository sources during plan. An external
+    #       zip command would add an untracked build step whose bytes Terraform
+    #       could not hash into each function's source_code_hash.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
+
+    # WHY : Refactoring Rationale: the internal API→ALB→task TLS chain needs a
+    #       certificate and PEM producer with no committed private key. The TLS
+    #       provider generates both into encrypted state during apply.
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.1"
+    }
   }
 }
 
-# WHAT: the one and only AWS provider configuration for the production root.
 # WHY : Assumptions: infra/envs/prod/main.tf must NOT declare a second
 #       `provider "aws"` block. Terraform treats two unaliased configurations
 #       for the same provider as a duplicate-configuration error at
@@ -137,7 +152,6 @@ terraform {
 #       configuration, region and default_tags included, which is exactly why
 #       none of them defines its own.
 provider "aws" {
-  # WHAT: region for every AWS API call this root makes.
   # WHY : Assumptions: the region is supplied by var.aws_region rather than
   #       written as a literal, so this file stays identical between the two
   #       environment roots and the region remains a terraform.tfvars decision.
@@ -145,8 +159,6 @@ provider "aws" {
   #       silently disagree with the backend's own region.
   region = var.aws_region
 
-  # WHAT: applies var.tags to every taggable resource this root creates,
-  #       including resources created inside every child module.
   # WHY : Trade-offs: this is the SOLE tagging mechanism for the production
   #       graph. The alternative -- threading a `tags` variable through every
   #       modules and merging it into a `tags` argument on every resource -- was

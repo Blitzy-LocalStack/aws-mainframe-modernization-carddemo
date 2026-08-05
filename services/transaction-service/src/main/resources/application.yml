@@ -34,18 +34,27 @@
 #   and it is why this document configures no session store and no sticky-session
 #   affinity: there is no server-side conversation to keep.
 #
-#   State at this checkpoint, stated once here rather than restated at every key
-#   that names one of them. This file is authored ahead of the module it
-#   configures, and the migration lands its artifacts in plan order, so four
-#   classes of artifact named below DO NOT EXIST YET and are authored at later
-#   indexes of the same plan:
+#   State of the artifacts this file's reasoning names. This file is authored
+#   ahead of the module it configures and the migration lands its artifacts in
+#   plan order, so the paragraph below distinguishes what HAS landed from what has
+#   not. It is stated once here rather than restated at every key, and it is
+#   deliberately re-derivable rather than a frozen list -- a reader confirms it
+#   with `ls -R services/transaction-service/src/main/resources`, because an
+#   inventory written into a comment is correct on the day it is written and
+#   misleading afterwards, which is what happened to the previous version of this
+#   paragraph.
+#   LANDED, so the statements about them are descriptions rather than contracts:
 #     - db/migration/V1__ledger.sql, the single Flyway migration this module owns
-#       and the file that creates the four `ledger` tables. Flyway does not fail
-#       on a migration location that resolves to nothing, so the service starts
-#       and reports zero migrations applied. spring.flyway.locations below is
-#       therefore the contract that migration will land at, not a description of
-#       DDL that runs today, and the four tables are the schema this module is to
-#       own rather than tables that currently exist.
+#       and the file that creates the four `ledger` tables. It EXISTS, so
+#       spring.flyway.locations below resolves to real DDL and a start-up applies
+#       it. Its four tables -- transactions, daily_transactions,
+#       transaction_rejects and transaction_category_balances -- are the schema
+#       this module owns.
+#     - application-dev.yml and application-prod.yml, the two profile overlays
+#       this document is written to be overridden by. Both EXIST, so the
+#       statements below about what an overlay may differ in are constraints those
+#       two files are held to rather than forward-looking ones.
+#   NOT YET AUTHORED, so the statements about them remain target contracts:
 #     - openapi/transaction-api.yaml, the hand-authored contract of record,
 #       together with the com.carddemo.transaction.config classes that bind these
 #       keys and the controllers a generated document would be derived from.
@@ -57,12 +66,6 @@
 #       that contract. It is named below as the reason the hand-authored document
 #       wins over a generated one; that reason holds as a target contract, not as
 #       a description of a client that is calling this service today.
-#     - application-dev.yml and application-prod.yml, the two profile overlays
-#       this document is written to be overridden by. They are authored at a
-#       later index of the same plan, so nothing currently overrides any value
-#       here and the paragraph above about what an overlay may differ in is the
-#       constraint those files will be written to, not a description of files
-#       that exist.
 #   Every key is nevertheless declared now, deliberately: these are the decisions
 #   a module author needs settled BEFORE writing the first class, and a schema
 #   search path or a migration location retrofitted afterwards is exactly how a
@@ -134,7 +137,6 @@ server:
   port: 8080
 
   ssl:
-    # WHAT: the listener above serves HTTPS rather than cleartext HTTP.
     # WHY : (1) Refactoring Rationale: this block did not exist, so the
     #       load-balancer-to-task hop was cleartext while the hop in front of it
     #       was encrypted under the TLS 1.2 floor the alb module pins on its
@@ -161,8 +163,8 @@ server:
     #       who can pull the image, and one key in one image is one key shared by
     #       dev and prod.
     #       (2) Assumptions: both values arrive from Secrets Manager, injected by
-    #       the task definition as SERVER_SSL_CERTIFICATE and
-    #       SERVER_SSL_CERTIFICATE_PRIVATE_KEY through the ECS container secrets
+    #       the task definition as CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through the ECS container secrets
     #       mechanism, so neither is stored in the task definition, in Terraform
     #       state or in plan output. They must be passed through the ecs-service
     #       module's secret_arns input rather than environment_variables, whose
@@ -177,8 +179,8 @@ server:
     #       datasource contract below. An absent certificate stops startup rather
     #       than falling back to cleartext, which would present as a healthy
     #       service that had stopped meeting the requirement this block exists for.
-    certificate: ${SERVER_SSL_CERTIFICATE}
-    certificate-private-key: ${SERVER_SSL_CERTIFICATE_PRIVATE_KEY}
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
 
     # WHY : (1) Assumptions: the two versions are named rather than left to the
     #       JDK default, which still negotiates the withdrawn TLS 1.1 and, on some
@@ -196,7 +198,6 @@ server:
     protocol: TLS
     enabled-protocols: TLSv1.2,TLSv1.3
 
-  # WHAT: let in-flight requests finish instead of cutting them at SIGTERM.
   # WHY : Assumptions: the image starts the JVM through an exec-form ENTRYPOINT,
   #       so the JVM is process 1 and receives the SIGTERM the platform sends
   #       when it replaces a task during a rolling deployment. Draining lets a
@@ -236,6 +237,31 @@ spring:
   #       service and log lines that could not be separated from a peer's.
   application:
     name: transaction-service
+
+  # WHY : (1) Refactoring Rationale: this import replaces values that were either
+  #       absent here or duplicated per service. The console log pattern naming the
+  #       correlation and edge-request context keys, and the two metric tag values
+  #       the shared meter filter reads, are identical in every bounded context, and
+  #       before this line most services carried neither -- so the correlation
+  #       identity the shared filter published reached no log line and the meters
+  #       carried the "unspecified" tag fallback. The file lives in common-lib, the
+  #       one module every service already depends on and cannot compile without.
+  #       (2) Assumptions: config-data imports are resolved BEFORE the logging
+  #       system initialises, so a pattern supplied this way is in force for the
+  #       first line this service logs. That ordering is the reason the pattern can
+  #       live in an imported property file at all rather than in a logging
+  #       configuration resource.
+  #       (3) Assumptions: an imported document sits BENEATH this file in
+  #       precedence, so any key below overrides the shared default rather than
+  #       colliding with it, and the override is visible in this service's own file.
+  #       (4) Trade-offs: NOT marked optional. An absent classpath resource would
+  #       then be silently ignored, leaving the same defect this import corrects and
+  #       no error to explain it; a hard failure at startup names the missing
+  #       resource instead. The resource ships inside a jar this module's compile
+  #       path already requires, so the only way it can be absent is a packaging
+  #       defect worth failing on.
+  config:
+    import: "classpath:/carddemo-common-defaults.yml"
 
   # WHY : Trade-offs: the platform allows 30 seconds between SIGTERM and SIGKILL
   #       by default, and the framework default for this key is also 30 seconds,
@@ -314,8 +340,6 @@ spring:
       idle-timeout: 300000
       max-lifetime: 900000
 
-      # WHAT: the transport-security terms every connection this pool opens is
-      #       made on, independent of whatever the injected URL happens to say.
       # WHY : Assumptions: the URL above arrives from the platform as an opaque
       #       string, so this file cannot inspect it and cannot rely on it
       #       carrying any TLS parameter. Driver properties set here are handed to
@@ -348,7 +372,6 @@ spring:
         sslmode: verify-full
         sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
 
-  # WHAT: schema migration for the four tables this context owns.
   # WHY : Assumptions: flyway-core on its own is not enough, and the way it fails
   #       is the reason this needs saying here rather than only in the POM.
   #       Flyway 10 moved database-specific support out of the core artifact into
@@ -363,14 +386,12 @@ spring:
   flyway:
     enabled: true
 
-    # WHAT: the only place this module keeps migrations.
-    # WHY : Assumptions: this module is to ship exactly one migration,
-    #       V1__ledger.sql, and to be the sole owner of the four `ledger` tables.
-    #       That migration is authored at a later index of the same plan, so this
-    #       location currently resolves to nothing and the service reports zero
-    #       migrations applied rather than failing; see State at this checkpoint
-    #       in the header. The schemas themselves and the per-service database
-    #       roles are created ahead of any service starting, by the migration
+    # WHY : Assumptions: this module ships exactly one migration,
+    #       V1__ledger.sql, and is the sole owner of the four `ledger` tables.
+    #       That migration now occupies this location and is the DDL Flyway
+    #       applies before JPA starts. The schemas themselves and the
+    #       per-service database roles are created ahead of any service
+    #       starting, by the migration
     #       bootstrap DDL under data-migration/sql; the seed rows for the shared
     #       reference tables are owned by reference-service. Neither is on this
     #       classpath and neither is named here, so this location cannot pick
@@ -392,13 +413,12 @@ spring:
     #       remedy when Flyway meets a populated schema. Rejected because it tells
     #       Flyway to treat whatever objects it finds as the baseline version when
     #       no history table is present, which would mark the ledger as already
-    #       migrated and skip V1__ledger.sql outright once that migration lands.
+    #       migrated and skip V1__ledger.sql outright.
     #       A genuinely missing migration would then look like a clean startup,
     #       and the absence of the four tables would surface at the first query
     #       from a user instead of at deployment.
     baseline-on-migrate: false
 
-    # WHAT: refuses to create the `ledger` schema, leaving that to the bootstrap.
     # WHY : Assumptions: data-migration/sql/V0__schemas_and_roles.sql is the
     #       EXCLUSIVE authority for schemas, roles and grants in this system. It
     #       creates all eight schemas together with the eight login roles, the
@@ -425,7 +445,6 @@ spring:
     #       rather than a production default that conceals a missing precondition.
     create-schemas: false
 
-    # WHAT: refuses to drop the objects in this schema.
     # WHY : Assumptions: a Flyway clean drops every object in the target schema,
     #       and these tables are the system of record for posted money movement -
     #       the VSAM file they replace is defined RECOVERY(NONE) at
@@ -588,8 +607,8 @@ spring:
 #       classpath folder holding it, and disable-swagger-default-url stops the
 #       view falling back to the generated one and presenting it as
 #       authoritative. Until that contract lands the pinned url resolves to a
-#       404, which is the intended staged state and not a misconfiguration; see
-#       State at this checkpoint in the header. The generated endpoint is left at
+#       404, which is the intended staged state and not a misconfiguration. The
+#       generated endpoint is left at
 #       its default rather than switched off, because it earns its keep as the
 #       thing to compare against when an implementation and the contract are
 #       suspected of having diverged.
@@ -662,10 +681,6 @@ logging:
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
 
-# WHAT: the three token properties every request's bearer token is checked
-#       against, over and above the issuer and expiry the resource server
-#       validates for itself. The only keys in this file with no standard
-#       property name, held under a namespace this project owns.
 # WHY : (1) Assumptions: validating the issuer is not validating the token. The
 #       issuer-uri above makes the filter chain verify the signature, the issuer
 #       and the time claims, and that is where its guarantees end. One user pool

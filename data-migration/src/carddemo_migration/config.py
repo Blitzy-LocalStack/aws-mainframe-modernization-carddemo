@@ -142,6 +142,7 @@ Trade-offs:
 import json
 import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -149,7 +150,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import Any
 
-# WHY : Trade-offs: an explicit ``__all__`` is declared here even though the package's own
+# Trade-offs: an explicit ``__all__`` is declared here even though the package's own
 # ``__init__.py`` deliberately declines to declare one. The two decisions are consistent
 # rather than contradictory, and the difference is the blast radius of a star import. At the
 # package root, an ``__all__`` naming subpackages would give ``from carddemo_migration import
@@ -162,7 +163,7 @@ from typing import Any
 # came from here. The accepted cost is that a new public name has to be added in two places,
 # which the ad-hoc export test for this module is what catches.
 #
-# WHY : Assumptions: the entries are grouped -- constants, then classes, then functions -- and
+# Assumptions: the entries are grouped -- constants, then classes, then functions -- and
 # each group is alphabetical, rather than the whole list being one alphabetical run. A single
 # run is what a sorting tool would produce and it reads worse here, because case-sensitive
 # ordering interleaves the groups: ``DEFAULT_PARAMETER_PREFIX`` would land between
@@ -172,6 +173,7 @@ __all__ = [
     "DEFAULT_PARAMETER_PREFIX",
     "DEFAULT_SSL_ROOT_CERT",
     "ENV_ALTERNATE_DB_USERS",
+    "ENV_DB_MASTER_SECRET",
     "ENV_ENVIRONMENT",
     "ENV_PARAMETER_PREFIX",
     "ENV_SSL_MODE",
@@ -183,17 +185,21 @@ __all__ = [
     "SCHEMA_ROLES",
     "AuroraConnectionSettings",
     "ConfigurationError",
+    "DatabaseUserAttributes",
     "DatasetStagingSettings",
+    "alternate_database_user_verification_sql",
     "database_secret_name",
     "owner_role_for_schema",
     "parameter_path",
     "quote_identifier",
     "quoted_schema",
+    "require_equivalent_database_user",
     "reset_resolution_cache",
     "resolve_alternate_database_users",
     "resolve_aurora_settings",
     "resolve_dataset_staging_settings",
     "resolve_environment_name",
+    "resolve_master_settings",
     "resolve_parameter_prefix",
     "resolve_ssl_root_cert",
     "role_for_schema",
@@ -236,7 +242,7 @@ class ConfigurationError(RuntimeError):
         Construction cannot fail; this type only adds a name to :class:`RuntimeError`.
     """
 
-    # WHY : Trade-offs: the class carries no structured attributes -- no error code, no
+    # Trade-offs: the class carries no structured attributes -- no error code, no
     # retryable flag. Adding them was considered and rejected: nothing in this package
     # branches on the *kind* of configuration failure, because a missing parameter and a
     # malformed one are equally terminal for a load that has not started yet, and a field
@@ -245,7 +251,7 @@ class ConfigurationError(RuntimeError):
     __slots__ = ()
 
 
-# WHY : Assumptions: the environment name has NO default and is required. It selects which
+# Assumptions: the environment name has NO default and is required. It selects which
 # deployment's parameters and credentials a command resolves, so a default would make the
 # most dangerous possible mistake -- a command intended for one environment quietly loading
 # another's data -- into the behaviour that happens when a variable is forgotten. Failing with
@@ -253,7 +259,7 @@ class ConfigurationError(RuntimeError):
 # cluster is not recoverable by restarting.
 ENV_ENVIRONMENT = "CARDDEMO_ENVIRONMENT"
 
-# WHY : Trade-offs: the parameter prefix is overridable but does have a default, which is the
+# Trade-offs: the parameter prefix is overridable but does have a default, which is the
 # opposite of the decision immediately above. The asymmetry is deliberate: a wrong prefix
 # resolves nothing and fails immediately with the path it looked for, whereas a wrong
 # environment resolves successfully against the wrong deployment. Only the second failure mode
@@ -262,7 +268,7 @@ ENV_ENVIRONMENT = "CARDDEMO_ENVIRONMENT"
 # one account, for instance -- needs no code change.
 ENV_PARAMETER_PREFIX = "CARDDEMO_PARAMETER_PREFIX"
 
-# WHY : Assumptions: the leading slash is part of the value, and its absence is rejected
+# Assumptions: the leading slash is part of the value, and its absence is rejected
 # rather than repaired. Parameter Store distinguishes a hierarchical name, which begins with a
 # slash and can be fetched by path, from a flat one, which cannot; silently prepending a slash
 # would hide that the caller asked for something else. No trailing slash is carried, because
@@ -270,7 +276,7 @@ ENV_PARAMETER_PREFIX = "CARDDEMO_PARAMETER_PREFIX"
 # segment that resolves to nothing.
 DEFAULT_PARAMETER_PREFIX = "/carddemo"
 
-# WHY : Refactoring Rationale: the transport mode is a CONSTANT rather than a setting, and that
+# Refactoring Rationale: the transport mode is a CONSTANT rather than a setting, and that
 # is the whole of the decision. This module previously emitted no TLS keyword at all, which is
 # not the same as emitting a weak one but has the same outcome: libpq's compiled-in default for
 # an unspecified ``sslmode`` is ``prefer``, and ``prefer`` negotiates TLS when the server offers
@@ -282,7 +288,7 @@ DEFAULT_PARAMETER_PREFIX = "/carddemo"
 # traffic; it does not make the traffic unreadable, and encryption in transit is about the
 # traffic.
 #
-# WHY : Alternatives Considered: ``require`` was considered and rejected. It guarantees
+# Alternatives Considered: ``require`` was considered and rejected. It guarantees
 # encryption but performs NO certificate or hostname verification, so it defends against a
 # passive observer and not against the endpoint being something else -- which is the failure
 # this module is positioned to prevent, because it is the component that decides what host to
@@ -293,7 +299,7 @@ DEFAULT_PARAMETER_PREFIX = "/carddemo"
 # fixed value.
 REQUIRED_SSL_MODE = "verify-full"
 
-# WHY : Trade-offs: an environment variable exists for the mode even though the mode is fixed,
+# Trade-offs: an environment variable exists for the mode even though the mode is fixed,
 # and it exists ONLY so that lowering it fails loudly. An operator debugging a TLS failure
 # reaches for ``sslmode`` first; with no variable to set, the next step is a local edit to this
 # file, which is invisible to review and ships. A variable whose only accepted value is
@@ -303,7 +309,7 @@ REQUIRED_SSL_MODE = "verify-full"
 # is what makes an inherited ``PGSSLMODE=disable`` inert rather than authoritative.
 ENV_SSL_MODE = "CARDDEMO_DB_SSL_MODE"
 
-# WHY : Assumptions: ``verify-full`` requires a trust anchor, and the anchor is pinned to the
+# Assumptions: ``verify-full`` requires a trust anchor, and the anchor is pinned to the
 # AWS-published Aurora certificate bundle rather than left to the operating system's trust
 # store. The system store was considered and rejected as too broad: it trusts every publicly
 # trusted authority, so a certificate issued by any one of them for this endpoint's name would
@@ -314,7 +320,7 @@ ENV_SSL_MODE = "CARDDEMO_DB_SSL_MODE"
 # a checkout is unaffected, because a checkout opens no connection.
 DEFAULT_SSL_ROOT_CERT = "/etc/ssl/certs/aws-rds-global-bundle.pem"
 
-# WHY : Trade-offs: the anchor's LOCATION is overridable while the mode is not, and the
+# Trade-offs: the anchor's LOCATION is overridable while the mode is not, and the
 # asymmetry is deliberate. An override of the path cannot weaken verification -- whatever it
 # names still has to certify the endpoint under ``verify-full`` -- and it is genuinely needed,
 # because the bundle sits at a different path when a command runs outside the container image,
@@ -323,7 +329,17 @@ DEFAULT_SSL_ROOT_CERT = "/etc/ssl/certs/aws-rds-global-bundle.pem"
 # resolved against whatever directory the process happens to have started in.
 ENV_SSL_ROOT_CERT = "CARDDEMO_DB_SSL_ROOT_CERT"
 
-# WHY : Refactoring Rationale: the credential's user name is now asserted against the role the
+# Trade-offs: the environments in which :data:`ENV_SSL_ROOT_CERT` may override the pinned
+# default are named explicitly, so the set is closed rather than derived by excluding the single
+# name ``prod``. Deriving it would admit an override under every name nobody thought to list --
+# ``production``, ``prod-dr``, a typo -- which is precisely the set an override should not reach.
+# The accepted cost is that adding a genuinely non-production environment means adding its name
+# here; that edit is visible in review, whereas a name that silently gained override rights is
+# not. ``local`` covers a command run outside any container, where the bundle is not at the
+# image path.
+NON_PRODUCTION_ENVIRONMENTS: frozenset[str] = frozenset({"dev", "test", "local"})
+
+# Refactoring Rationale: the credential's user name is now asserted against the role the
 # secret name was derived from, and this variable is the single, explicit escape hatch for the
 # one case where the two legitimately differ. The assertion was previously declined outright, on
 # the correct observation that a managed rotation using the alternating-users strategy hands back
@@ -334,7 +350,7 @@ ENV_SSL_ROOT_CERT = "CARDDEMO_DB_SSL_ROOT_CERT"
 # load would proceed. The secret's NAME being auditable does not help there, because the name was
 # right and the contents were not.
 #
-# WHY : Assumptions: the allowlist is keyed BY ROLE (``role=alternate``, comma separated) rather
+# Assumptions: the allowlist is keyed BY ROLE (``role=alternate``, comma separated) rather
 # than being a flat list of accepted user names. A flat list would be satisfied by any entry for
 # any schema, so allowlisting one role's rotation clone would simultaneously permit that clone --
 # or any other listed name -- as the credential for all eight. Keying by role keeps each
@@ -343,7 +359,30 @@ ENV_SSL_ROOT_CERT = "CARDDEMO_DB_SSL_ROOT_CERT"
 # cross-role substitution.
 ENV_ALTERNATE_DB_USERS = "CARDDEMO_DB_ALTERNATE_USERS"
 
-# WHY : Trade-offs: the redaction is a fixed constant that encodes nothing about the value it
+# Assumptions: the cluster's MASTER credential is named by an environment variable rather
+# than by a composed path, because it is the one credential this stack does not name. The other
+# eight live at ``<prefix>/<environment>/aurora/<role>``, composed by
+# :func:`database_secret_name` from the same convention the Terraform module that creates them
+# composes; the master credential is created by RDS itself -- ``infra/modules/aurora-postgresql``
+# sets ``manage_master_user_password`` -- and RDS chooses the entry's name, so there is no
+# convention to compose and nothing to derive it from. The cluster module publishes the ARN as
+# its ``master_user_secret_arn`` output, and the environment root passes that value to the
+# bootstrap task in this variable.
+#
+# Trade-offs: an ARN or a name is accepted, because ``GetSecretValue`` resolves either as
+# its ``SecretId`` and the value that arrives here is whichever one the caller was given. No
+# validation of shape is imposed for that reason: rejecting a name because it is not an ARN
+# would refuse an operator running the step by hand against an entry they can see in the
+# console, and a wrong value fails at resolution with a message naming the identifier that was
+# tried, which is what an operator needs.
+#
+# Assumptions: this is a LOCATOR, never a credential -- the same distinction
+# :data:`ENV_PARAMETER_PREFIX` draws -- so it is safe in a task definition's environment block,
+# in a runbook and in a shell history, and reading the secret it names still requires an IAM
+# grant this variable confers nothing towards.
+ENV_DB_MASTER_SECRET = "CARDDEMO_DB_MASTER_SECRET"
+
+# Trade-offs: the redaction is a fixed constant that encodes nothing about the value it
 # stands for -- deliberately weaker than the reference record codec under ``tests/helpers/``,
 # which masks a sensitive field to a short deterministic digest so that a masked diff still
 # reveals *which* field changed. That property is worth having for a card number inside a
@@ -354,7 +393,7 @@ ENV_ALTERNATE_DB_USERS = "CARDDEMO_DB_ALTERNATE_USERS"
 # identify a misconfiguration -- host, port, database, user -- are all rendered in clear.
 REDACTED = "***redacted***"
 
-# WHY : Assumptions: a path segment is restricted to the characters Parameter Store accepts in
+# Assumptions: a path segment is restricted to the characters Parameter Store accepts in
 # a name component, and must start with an alphanumeric. The pattern is applied to the
 # environment name, to each segment of the prefix, and to each segment appended to a path, so
 # a value carrying a slash cannot smuggle in an extra level of hierarchy and reach a parameter
@@ -362,7 +401,7 @@ REDACTED = "***redacted***"
 # lookup that succeeds against the wrong path.
 _PATH_SEGMENT_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
-# WHY : Assumptions: an object-storage prefix component may not be empty and may not contain a
+# Assumptions: an object-storage prefix component may not be empty and may not contain a
 # forward slash, because the slash is the separator that gives the staged layout its shape. A
 # domain or dataset carrying one would silently deepen the hierarchy, so a staged generation
 # would land somewhere a reader looking for it by convention would never find it. Every other
@@ -370,7 +409,7 @@ _PATH_SEGMENT_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 # narrowing them further here would reject a legitimate dataset name for no benefit.
 _PREFIX_COMPONENT_PATTERN = re.compile(r"\A[^/]+\Z")
 
-# WHY : Assumptions: an allowlisted alternate user name must be a plain, unquoted PostgreSQL
+# Assumptions: an allowlisted alternate user name must be a plain, unquoted PostgreSQL
 # role name -- it starts with a letter or underscore, continues with letters, digits, underscore
 # or dollar, and is at most the 63 bytes the server truncates at. The pattern is narrow on
 # purpose. A name needing quotes to be legal is not one this project creates: every role in
@@ -380,7 +419,7 @@ _PREFIX_COMPONENT_PATTERN = re.compile(r"\A[^/]+\Z")
 # and a comparison against an unquoted secret payload cannot settle that.
 _ROLE_NAME_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_$]{0,62}\Z")
 
-# WHY : Assumptions: the generation number is rendered in a fixed four digits so that staged
+# Assumptions: the generation number is rendered in a fixed four digits so that staged
 # generations under one date sort correctly as strings, which is the only ordering an
 # object-storage listing offers. The width is declared once and the accepted range is derived
 # from it, rather than both being written out, because the two are one fact: a value above the
@@ -389,7 +428,7 @@ _ROLE_NAME_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_$]{0,62}\Z")
 _GENERATION_DIGITS = 4
 _MAX_GENERATION = 10**_GENERATION_DIGITS - 1
 
-# WHY : Assumptions: these are the parameter-store error codes that mean "the caller named
+# Assumptions: these are the parameter-store error codes that mean "the caller named
 # something that is not there", as distinct from a permission or transport failure. They are
 # matched by code rather than by exception class so that no service exception type has to be
 # imported at module scope, which is what keeps this module importable with the SDK absent;
@@ -398,13 +437,13 @@ _MAX_GENERATION = 10**_GENERATION_DIGITS - 1
 # same actionable condition as one that was never created.
 _MISSING_PARAMETER_CODES = frozenset({"ParameterNotFound", "ParameterVersionNotFound"})
 
-# WHY : Assumptions: the secret store reports an absent secret under a single code, and a
+# Assumptions: the secret store reports an absent secret under a single code, and a
 # secret that is scheduled for deletion reports the same one, so both resolve to the same
 # actionable message. The distinction between them is not one this module can act on: neither
 # yields a credential, and both are fixed by provisioning rather than by retrying.
 _MISSING_SECRET_CODES = frozenset({"ResourceNotFoundException"})
 
-# WHY : Trade-offs: the two grouping segments are named once here because each is used from
+# Trade-offs: the two grouping segments are named once here because each is used from
 # more than one place -- ``aurora`` by the three parameter lookups and by the secret name,
 # ``datasets`` by the bucket lookup -- so a rename must not be able to move one and leave the
 # other pointing at a path infrastructure no longer writes. The leaf names (``host``, ``port``,
@@ -414,7 +453,7 @@ _MISSING_SECRET_CODES = frozenset({"ResourceNotFoundException"})
 _AURORA_SEGMENT = "aurora"
 _DATASETS_SEGMENT = "datasets"
 
-# WHY : Assumptions: these are the two keys the secret document is read by, and they match the
+# Assumptions: these are the two keys the secret document is read by, and they match the
 # field names a managed relational-database credential is written with. Naming them as
 # constants rather than inline is what lets the ad-hoc and unit tests build a payload from the
 # same two strings the resolver reads, so a test cannot pass against a spelling the resolver
@@ -424,7 +463,7 @@ _DATASETS_SEGMENT = "datasets"
 _SECRET_USERNAME_KEY = "username"
 _SECRET_PASSWORD_KEY = "password"
 
-# WHY : Trade-offs: the eight entries are declared as a plain dict wrapped in a read-only
+# Trade-offs: the eight entries are declared as a plain dict wrapped in a read-only
 # proxy rather than as an enum or a set of module constants. An enum was considered and
 # rejected: the values here are database identifiers that appear in composed SQL and in a
 # secret name, so every use site would have to unwrap ``.value``, and an enum member that
@@ -433,7 +472,7 @@ _SECRET_PASSWORD_KEY = "password"
 # importer could add a ninth schema at runtime and every consumer would silently believe it.
 # The accepted cost is that a proxy cannot be updated in place, which is the intent.
 #
-# WHY : Refactoring Rationale: this mapping answers "which role does the ETL CONNECT AS for
+# Refactoring Rationale: this mapping answers "which role does the ETL CONNECT AS for
 # work in this schema", and that question is deliberately separated from "which role OWNS this
 # schema" -- see :data:`OWNED_SCHEMA_ROLES` below. The two were previously conflated in one
 # eight-entry map documented as schema-to-owner, which made ``reporting`` look like an owned
@@ -450,7 +489,7 @@ _SCHEMA_ROLES: dict[str, str] = {
     # by side. Seven of the eight are also the schema's owner; ``reporting`` is not, and the
     # note on that entry records the difference at the point a reader meets it.
     #
-    # WHY : Assumptions: every schema name here is stored BARE, and the quoted form is obtained
+    # Assumptions: every schema name here is stored BARE, and the quoted form is obtained
     # only through :func:`quoted_schema`. This rests on a property of the server rather than a
     # preference: ``authorization`` is a keyword PostgreSQL classifies as reserved, so the bare
     # name is a syntax error in an identifier position, while the bare name is simultaneously
@@ -469,7 +508,7 @@ _SCHEMA_ROLES: dict[str, str] = {
     "reference": "carddemo_reference",
     "batch": "carddemo_batch",
     "authorization": "carddemo_authorization",
-    # WHY : Assumptions: this entry is the one that is NOT a schema owner. The reporting
+    # Assumptions: this entry is the one that is NOT a schema owner. The reporting
     # context owns no table: it reads the other contexts' data through the SELECT-only grants
     # the bootstrap script establishes, and the cross-schema views it reads through live in a
     # reporting schema owned by the dedicated ``NOLOGIN`` role ``carddemo_reporting_owner``
@@ -486,11 +525,11 @@ _SCHEMA_ROLES: dict[str, str] = {
 #: ``reporting`` does not -- use :data:`OWNED_SCHEMA_ROLES` when ownership is what matters.
 SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_SCHEMA_ROLES)
 
-# WHY : Assumptions: this is the subset of :data:`SCHEMA_ROLES` in which the role genuinely
+# Assumptions: this is the subset of :data:`SCHEMA_ROLES` in which the role genuinely
 # owns the schema, and it is derived rather than typed out a second time, so the two cannot
 # disagree about the seven they share. ``reporting`` is the single exclusion, named as a
 # constant beside the derivation so the exclusion is legible instead of arithmetic.
-# WHY : Trade-offs: a derived subset means adding a ninth owning context is one edit above and
+# Trade-offs: a derived subset means adding a ninth owning context is one edit above and
 # nothing here, while adding a second non-owned schema is one edit here. Two hand-maintained
 # lists of overlapping names was the alternative and is how one of them ends up with seven
 # entries and the other with eight.
@@ -507,7 +546,7 @@ _OWNED_SCHEMA_ROLES: dict[str, str] = {
 #: that role holds no credential, so no loader can ever connect as it.
 OWNED_SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_OWNED_SCHEMA_ROLES)
 
-# WHY : Assumptions: the tuple is derived from the mapping rather than typed out a second
+# Assumptions: the tuple is derived from the mapping rather than typed out a second
 # time. Two hand-maintained lists of the same eight names is how one of them ends up with
 # seven, and a dict preserves insertion order, so the tuple is already in the bootstrap
 # script's own order without that order having to be restated.
@@ -545,7 +584,7 @@ def _require_text(value: object, description: str) -> str:
     ConfigurationError
         If the value is not a string, or is empty or whitespace-only.
     """
-    # WHY : Assumptions: this is the module's first validation, and it establishes the form every
+    # Assumptions: this is the module's first validation, and it establishes the form every
     # later one follows -- a raise, never an ``assert``. The reason is the deployment target
     # rather than style: the ETL runs inside a container image, and an interpreter started with
     # ``-O``, or with PYTHONOPTIMIZE set (which is easy to inherit from a base image or an
@@ -556,7 +595,7 @@ def _require_text(value: object, description: str) -> str:
     # shared-kernel codecs decline assertions for the same reason, since ``assert`` there has no
     # effect without ``-ea``.
     #
-    # WHY : Assumptions: the type is checked rather than coerced with ``str()``. A JSON secret
+    # Assumptions: the type is checked rather than coerced with ``str()``. A JSON secret
     # payload whose ``password`` field arrived as a number or a nested object would otherwise
     # be accepted and stringified into something that cannot authenticate, and the resulting
     # failure would surface as a rejected login rather than as the malformed secret it is.
@@ -565,7 +604,7 @@ def _require_text(value: object, description: str) -> str:
     stripped = value.strip()
     if not stripped:
         raise ConfigurationError(f"{description} is empty")
-    # WHY : Trade-offs: surrounding whitespace is stripped rather than rejected. A trailing
+    # Trade-offs: surrounding whitespace is stripped rather than rejected. A trailing
     # newline is the single most common artefact of a value that was piped into the parameter
     # store by a shell, and it is unambiguously not part of a hostname, a database name or a
     # bucket name. The accepted cost is that a credential whose real value has leading or
@@ -605,7 +644,7 @@ def _validate_path_segment(segment: str, description: str) -> str:
         other than alphanumerics, underscore, period and hyphen.
     """
     if not _PATH_SEGMENT_PATTERN.match(segment):
-        # WHY : Assumptions: the rejected value is described but not echoed, and the accepted
+        # Assumptions: the rejected value is described but not echoed, and the accepted
         # shape is spelled out instead. A path segment is not itself sensitive, but this module
         # holds one rule about messages rather than two -- values are never interpolated -- so
         # that no future edit has to decide which of them a given field falls under. Naming the
@@ -645,7 +684,7 @@ def _validate_absolute_path(value: str, description: str) -> str:
     ConfigurationError
         If the path is not absolute, or contains a NUL byte.
     """
-    # WHY : Alternatives Considered: the path is checked and returned VERBATIM rather than
+    # Alternatives Considered: the path is checked and returned VERBATIM rather than
     # normalised with ``os.path.realpath`` or ``Path.resolve``. Resolving was written first and
     # rejected on two counts. It touches the filesystem to follow symlinks, so the value a
     # descriptor holds would depend on the state of the machine at construction time and two
@@ -658,7 +697,7 @@ def _validate_absolute_path(value: str, description: str) -> str:
         raise ConfigurationError(
             f"{description} must be an absolute path beginning with a forward slash"
         )
-    # WHY : Assumptions: an embedded NUL is rejected explicitly instead of being left to the
+    # Assumptions: an embedded NUL is rejected explicitly instead of being left to the
     # filesystem call that would eventually reject it. Python raises ``ValueError`` for a NUL in
     # a path, not this module's error type, so a caller that catches ``ConfigurationError`` --
     # which this module's contract says is the only exception it raises -- would see an
@@ -700,7 +739,7 @@ def quote_identifier(identifier: str) -> str:
         If the identifier is not text, is blank, or contains a NUL character.
     """
     text = _require_text(identifier, "SQL identifier")
-    # WHY : Assumptions: a NUL is rejected rather than escaped because PostgreSQL cannot carry
+    # Assumptions: a NUL is rejected rather than escaped because PostgreSQL cannot carry
     # one in an identifier at all -- there is no quoted form that would make it acceptable, and
     # the protocol terminates strings on it, so passing one through would truncate the statement
     # at that byte instead of failing. Doubling handles every other character, including the
@@ -746,7 +785,7 @@ def role_for_schema(schema: str) -> str:
     text = _require_text(schema, "schema name")
     role = _SCHEMA_ROLES.get(text)
     if role is None:
-        # WHY : Trade-offs: the message lists the eight accepted names. They are neither
+        # Trade-offs: the message lists the eight accepted names. They are neither
         # sensitive nor secret -- the bootstrap script publishes them and this module's own
         # documentation names them -- and a typo such as ``authorisation`` for
         # ``authorization`` is otherwise slow to spot from the rejected value alone. This is
@@ -789,7 +828,7 @@ def owner_role_for_schema(schema: str) -> str:
     text = _require_text(schema, "schema name")
     role = _OWNED_SCHEMA_ROLES.get(text)
     if role is None:
-        # WHY : Trade-offs: the two failures are reported with DIFFERENT messages rather than
+        # Trade-offs: the two failures are reported with DIFFERENT messages rather than
         # one shared "not an owned schema", because they call for different actions. A name
         # that is not a schema at all is a typo, and the accepted set is listed for the same
         # reason :func:`role_for_schema` lists it. ``reporting`` is not a typo: it is a real
@@ -865,12 +904,12 @@ def quoted_schema(schema: str) -> str:
     ConfigurationError
         If the schema is not text, is blank, or is not one of the eight known schemas.
     """
-    # WHY : Assumptions: membership is checked by resolving the owning role and discarding it,
+    # Assumptions: membership is checked by resolving the owning role and discarding it,
     # rather than by testing the mapping directly, so that this function and
     # :func:`role_for_schema` cannot drift on what counts as a known schema. The eight names
     # are validated against one declaration through one code path.
     role_for_schema(schema)
-    # WHY : Trade-offs: all eight names are quoted, not just the reserved one. Quoting only
+    # Trade-offs: all eight names are quoted, not just the reserved one. Quoting only
     # ``authorization`` would leave every call site needing to know which names are keywords --
     # a set that belongs to the server's grammar and grows between major versions, not to this
     # module -- and the special case would be invisible at the point a new schema is added.
@@ -879,7 +918,7 @@ def quoted_schema(schema: str) -> str:
     return quote_identifier(schema.strip())
 
 
-# WHY : Trade-offs: both descriptors are frozen and slotted. Frozen because a settings object
+# Trade-offs: both descriptors are frozen and slotted. Frozen because a settings object
 # is handed to several loaders in turn and an in-place edit by one of them would silently
 # change what the next one connects to, which is the hardest class of configuration bug to
 # reproduce; it also makes the objects hashable, which is what allows the resolvers below to be
@@ -926,14 +965,38 @@ class AuroraConnectionSettings:
         file is present is checked by :func:`resolve_ssl_root_cert`, for the reason recorded
         there.
 
+    Returns
+    -------
+    AuroraConnectionSettings
+        A frozen, fully validated instance. Construction is not a two-step affair: the
+        generated initialiser assigns the fields and :meth:`__post_init__` then normalises and
+        validates every one of them, so an instance either exists and is usable or was never
+        produced. There is no partially initialised state a caller can observe.
+
+    Raises
+    ------
+    ConfigurationError
+        From :meth:`__post_init__` during construction, if any text field is not text or is
+        blank after stripping, or if the port is not an integer within the range a TCP port can
+        express. Raised for direct construction and for construction by
+        :func:`resolve_aurora_settings` alike, because the invariants live on the class rather
+        than in the resolver.
+    TypeError
+        From the generated initialiser, if a required field is omitted or an unknown keyword is
+        supplied. The class is slotted, so a misspelled field name fails here rather than
+        attaching a stray attribute.
+
     Notes
     -----
-    There is deliberately no ``ssl_mode`` attribute. The mode is the module constant
-    :data:`REQUIRED_SSL_MODE` and :meth:`as_connection_params` emits it unconditionally, so no
-    instance of this class -- however it was constructed, including directly by a test -- can
-    describe a connection that would be made without full certificate and hostname
-    verification. Making it a field would make the strongest guarantee in this module a
-    per-instance choice.
+    Alternatives Considered: an ``ssl_mode`` field was rejected in favour of the module constant
+    :data:`REQUIRED_SSL_MODE`, which :meth:`as_connection_params` emits unconditionally. The
+    consequence of the alternative is specific: a field can be set, so an instance -- including
+    one a test builds directly -- could then describe a connection made without full certificate
+    and hostname verification, which turns the strongest guarantee in this module into a
+    per-instance choice. Keeping it a constant means no construction path can express the weaker
+    connection at all. The accepted cost is that a caller genuinely needing a different mode
+    cannot express it here and must change the constant, which is the visible, reviewed edit that
+    such a change should be.
     """
 
     host: str
@@ -942,7 +1005,7 @@ class AuroraConnectionSettings:
     user: str
     password: str
 
-    # WHY : Trade-offs: this field carries a default while the five above do not. The default is
+    # Trade-offs: this field carries a default while the five above do not. The default is
     # what keeps direct construction -- which the tests use, and which the class documents as
     # supported -- from having to restate a deployment path that is identical in every case; and
     # because the default is the secure value rather than a permissive one, a caller that omits
@@ -978,7 +1041,7 @@ class AuroraConnectionSettings:
             If any text field is not text or is blank, or if the port is not an integer in the
             range a TCP port can express.
         """
-        # WHY : Assumptions: normalisation goes through ``object.__setattr__`` because the
+        # Assumptions: normalisation goes through ``object.__setattr__`` because the
         # class is frozen and a plain assignment would raise. This is the documented idiom for
         # a frozen dataclass that needs to canonicalise its own input, and doing it here rather
         # than in the resolver is what makes the guarantee unconditional -- a test or a future
@@ -988,7 +1051,7 @@ class AuroraConnectionSettings:
         object.__setattr__(self, "database", _require_text(self.database, "database name"))
         object.__setattr__(self, "user", _require_text(self.user, "database user"))
 
-        # WHY : Assumptions: the password is checked for emptiness but is deliberately NOT
+        # Assumptions: the password is checked for emptiness but is deliberately NOT
         # stripped, unlike every other field above. A hostname or a database name cannot
         # meaningfully begin or end with a space, so stripping one there only ever removes an
         # artefact; a generated credential can legitimately contain any printable character,
@@ -998,7 +1061,7 @@ class AuroraConnectionSettings:
         if not isinstance(self.password, str) or not self.password:
             raise ConfigurationError("database password is empty")
 
-        # WHY : Assumptions: ``bool`` is excluded explicitly because it is a subclass of
+        # Assumptions: ``bool`` is excluded explicitly because it is a subclass of
         # ``int`` in Python, so a port passed as ``True`` would otherwise validate and connect
         # to port 1. The upper bound is the largest value a TCP port number can express, so a
         # parameter holding a year or a timestamp by mistake is rejected here rather than
@@ -1008,7 +1071,7 @@ class AuroraConnectionSettings:
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("database port is outside the range 1 to 65535")
 
-        # WHY : Assumptions: the trust anchor's path is validated HERE rather than only where it
+        # Assumptions: the trust anchor's path is validated HERE rather than only where it
         # is resolved, because ``verify-full`` is only as strong as the anchor it verifies
         # against and this is the one place every construction path passes through. A relative
         # path is rejected rather than resolved: it would be interpreted against whatever working
@@ -1051,7 +1114,7 @@ class AuroraConnectionSettings:
             Rendering cannot fail; every field was validated as text or an integer at
             construction.
         """
-        # WHY : Trade-offs: the generated ``repr`` is replaced rather than augmented, because
+        # Trade-offs: the generated ``repr`` is replaced rather than augmented, because
         # the dataclass default renders every field including the credential, and it is
         # reached implicitly -- an f-string, a ``print``, an unhandled exception's argument
         # list, a test assertion diff. Overriding it is the only way to make the safe
@@ -1061,7 +1124,7 @@ class AuroraConnectionSettings:
         # inspected through a rendering at all, which is the point: a caller that genuinely
         # needs it reads ``.password`` explicitly, and that is a line a reviewer can see.
         #
-        # WHY : Assumptions: the trust-anchor path is rendered in clear alongside the endpoint
+        # Assumptions: the trust-anchor path is rendered in clear alongside the endpoint
         # fields, because it belongs to the same question a reader has when a connection is
         # refused -- which host, as which user, verified against which bundle. A filesystem path
         # is not a credential, and the most likely TLS misconfiguration is an override pointing
@@ -1108,7 +1171,7 @@ class AuroraConnectionSettings:
         None
             Every value was validated at construction, so building the mapping cannot fail.
         """
-        # WHY : Trade-offs: this method returns connection PARAMETERS and this module never
+        # Trade-offs: this method returns connection PARAMETERS and this module never
         # opens a connection, so ``psycopg`` is imported nowhere in it. Returning a ready-made
         # connection would be more convenient at one call site and was rejected for two
         # consequences. It would put the driver on the import path of every consumer of this
@@ -1119,14 +1182,14 @@ class AuroraConnectionSettings:
         # ``carddemo_migration.loaders.aurora``, the one module that knows how long a load holds
         # a connection. The accepted cost is that a caller writes one connect call itself.
         #
-        # WHY : Trade-offs: a fresh dict is built on each call rather than a cached one being
+        # Trade-offs: a fresh dict is built on each call rather than a cached one being
         # returned. The dict is mutable and holds the credential, so sharing a single instance
         # would let one caller's edit reach another's connect call, and the cost of rebuilding
         # five entries is irrelevant beside opening a database connection. Returning an
         # immutable mapping instead was rejected because a client's connect call expects
         # keyword expansion, and a read-only proxy cannot be expanded with ``**``.
         #
-        # WHY : Assumptions: the two TLS keywords are emitted on EVERY call and are not
+        # Assumptions: the two TLS keywords are emitted on EVERY call and are not
         # conditional on anything. A conditional -- on the environment name, on whether the host
         # looks like a cluster endpoint, on a debug flag -- would create a code path that
         # connects without verification, and a path that exists is a path that gets taken. The
@@ -1190,7 +1253,7 @@ class DatasetStagingSettings:
     bucket: str
     environment: str
 
-    # WHY : Trade-offs: unlike :class:`AuroraConnectionSettings`, this class keeps the
+    # Trade-offs: unlike :class:`AuroraConnectionSettings`, this class keeps the
     # generated ``repr``. It holds a bucket name and an environment name, neither of which is a
     # credential, and both of which are exactly what an operator needs to see in a log line
     # while a staging step runs. The asymmetry between the two classes is therefore deliberate
@@ -1220,7 +1283,7 @@ class DatasetStagingSettings:
         ConfigurationError
             If either field is not text or is blank.
         """
-        # WHY : Assumptions: both fields are normalised, with none of the exemption
+        # Assumptions: both fields are normalised, with none of the exemption
         # :class:`AuroraConnectionSettings` makes for its password. Neither a bucket name nor an
         # environment name can meaningfully begin or end with a space -- object storage does not
         # accept such a bucket name, and the environment name has already been through a
@@ -1287,7 +1350,7 @@ class DatasetStagingSettings:
             if not _PREFIX_COMPONENT_PATTERN.match(value):
                 raise ConfigurationError(f"{description} must not contain a forward slash")
 
-        # WHY : Assumptions: a datetime is rejected even though it satisfies ``isinstance``
+        # Assumptions: a datetime is rejected even though it satisfies ``isinstance``
         # against ``date``, because it carries a time of day this partition cannot express.
         # Accepting one would silently discard that time, so two runs at different instants on
         # the same day would stage into the same prefix and the second would appear to be a
@@ -1300,7 +1363,7 @@ class DatasetStagingSettings:
         if not isinstance(business_date, date):
             raise ConfigurationError("business date is not a date")
 
-        # WHY : Assumptions: ``bool`` is excluded before the integer check for the same reason
+        # Assumptions: ``bool`` is excluded before the integer check for the same reason
         # as the database port -- it is a subclass of ``int``, so ``True`` would otherwise
         # render as ``gen=0001`` and stage a generation the caller never asked for.
         if isinstance(generation, bool) or not isinstance(generation, int):
@@ -1310,7 +1373,7 @@ class DatasetStagingSettings:
                 f"dataset generation is outside the range 0 to {_MAX_GENERATION}"
             )
 
-        # WHY : Assumptions: the date is rendered with ``isoformat`` rather than ``strftime``.
+        # Assumptions: the date is rendered with ``isoformat`` rather than ``strftime``.
         # For a date the standard library guarantees ``isoformat`` produces a zero-padded
         # ``YYYY-MM-DD``, whereas ``%Y`` under ``strftime`` is handed to the platform's C
         # library and is not guaranteed to zero-pad a year below 1000 -- a difference that
@@ -1356,7 +1419,7 @@ def _aws_error_types() -> tuple[type[BaseException], ...]:
         raise ConfigurationError(
             "the AWS SDK is not installed; install data-migration/requirements.txt"
         ) from exc
-    # WHY : Assumptions: the two are returned as a tuple because they are siblings in the SDK's
+    # Assumptions: the two are returned as a tuple because they are siblings in the SDK's
     # hierarchy rather than one inheriting from the other, so neither alone catches the other.
     # Naming only ``ClientError`` -- the intuitive choice, since it is the one carrying a service
     # error code -- would let a missing-credentials failure escape as a raw SDK exception from a
@@ -1392,7 +1455,7 @@ def _error_code(exc: BaseException) -> str:
         already being handled and raising here would replace the original failure with a less
         informative one.
     """
-    # WHY : Assumptions: the response document is navigated defensively rather than indexed,
+    # Assumptions: the response document is navigated defensively rather than indexed,
     # because the shape is only guaranteed for a client error. A transport failure carries no
     # ``response`` at all, and a client error can carry one whose ``Error`` member is missing,
     # so indexing would raise a ``KeyError`` or ``TypeError`` from inside an exception handler
@@ -1434,7 +1497,7 @@ def _aws_client(service_name: str) -> Any:
         If the AWS SDK is not installed, or if the client cannot be constructed because the
         environment names no region.
     """
-    # WHY : Alternatives Considered: the SDK is imported inside this function rather than at the
+    # Alternatives Considered: the SDK is imported inside this function rather than at the
     # top of the module. Importing it at module scope was written first and rejected, because the
     # package's own documentation states that importing ``config`` performs no configuration and
     # that only the loader and verification subpackages pull third-party clients in. A top-level
@@ -1449,7 +1512,7 @@ def _aws_client(service_name: str) -> Any:
             "the AWS SDK is not installed; install data-migration/requirements.txt"
         ) from exc
 
-    # WHY : Alternatives Considered: no ``endpoint_url``, no ``region_name`` and no credentials
+    # Alternatives Considered: no ``endpoint_url``, no ``region_name`` and no credentials
     # are passed. The SDK resolves all three from the environment on its own, and letting it do
     # so is what makes one code path correct everywhere: inside the batch staging task the
     # region and the task role's credentials arrive from the container environment, while
@@ -1495,7 +1558,7 @@ def _ssm_parameter(path: str) -> str:
     """
     client = _aws_client("ssm")
     try:
-        # WHY : Assumptions: decryption is explicitly not requested. Only the four non-secret
+        # Assumptions: decryption is explicitly not requested. Only the four non-secret
         # settings are read through this function, and the credential lives in the secret store,
         # so asking for decryption would require the task role to hold a key-usage grant it
         # otherwise needs for nothing -- widening a least-privilege role to read values that are
@@ -1511,7 +1574,7 @@ def _ssm_parameter(path: str) -> str:
             raise ConfigurationError(
                 f"the parameter {path} exists but this role is not permitted to read it"
             ) from exc
-        # WHY : Trade-offs: the service error code is included but the service message is not.
+        # Trade-offs: the service error code is included but the service message is not.
         # A code is a fixed vocabulary term and is safe to print; a message is free text
         # generated by the service and is the one field that could echo back part of a request.
         # Chaining with ``from exc`` keeps the full message and the request identifier in the
@@ -1520,7 +1583,7 @@ def _ssm_parameter(path: str) -> str:
         detail = code or type(exc).__name__
         raise ConfigurationError(f"the parameter {path} could not be read ({detail})") from exc
 
-    # WHY : Assumptions: the response is navigated defensively for the same reason the error
+    # Assumptions: the response is navigated defensively for the same reason the error
     # code is -- a stubbed or future client could answer without the nested member, and an
     # index error here would report a missing key rather than the missing parameter it means.
     parameter = response.get("Parameter") if isinstance(response, dict) else None
@@ -1560,7 +1623,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
     except _aws_error_types() as exc:
         code = _error_code(exc)
         if code in _MISSING_SECRET_CODES:
-            # WHY : Assumptions: a secret scheduled for deletion reports this same code, and it
+            # Assumptions: a secret scheduled for deletion reports this same code, and it
             # is reported the same way on purpose. Neither state yields a credential and both
             # are fixed by provisioning rather than by retrying, so distinguishing them would
             # add a message this package cannot act on differently.
@@ -1576,7 +1639,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
 
     document = response.get("SecretString") if isinstance(response, dict) else None
     if not isinstance(document, str):
-        # WHY : Assumptions: a secret holding only binary data is reported as the wrong KIND of
+        # Assumptions: a secret holding only binary data is reported as the wrong KIND of
         # secret rather than as a missing one. The distinction is what the operator needs: the
         # secret is there and readable, and what is wrong is that it was written as a binary
         # blob instead of as the JSON credential document this module reads.
@@ -1587,7 +1650,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
     try:
         payload = json.loads(document)
     except json.JSONDecodeError:
-        # WHY : Trade-offs: this is the one failure in the module raised with ``from None``,
+        # Trade-offs: this is the one failure in the module raised with ``from None``,
         # deliberately breaking the chain that every other handler here preserves. A
         # ``JSONDecodeError`` retains the ENTIRE document it failed to parse on its ``doc``
         # attribute, so the exception object itself carries the secret; any tooling that renders
@@ -1609,7 +1672,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
         payload.get(_SECRET_USERNAME_KEY), f"the {_SECRET_USERNAME_KEY} in secret {secret_name}"
     )
 
-    # WHY : Assumptions: the password is validated here rather than through the shared text
+    # Assumptions: the password is validated here rather than through the shared text
     # check, because that helper strips surrounding whitespace and a credential must be carried
     # byte for byte. A generated password can legitimately begin or end with a space, and
     # trimming one would produce a value that differs from the stored secret and fails
@@ -1620,7 +1683,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
             f"the {_SECRET_PASSWORD_KEY} in secret {secret_name} is missing or empty"
         )
 
-    # WHY : Trade-offs: an immutable tuple is returned rather than the decoded dictionary. This
+    # Trade-offs: an immutable tuple is returned rather than the decoded dictionary. This
     # function is cached, so returning the dictionary would hand every caller a reference to the
     # same mutable object -- one caller popping a key, or overwriting the password after use in
     # an attempt to scrub it, would silently change what the next caller receives. The accepted
@@ -1629,7 +1692,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
     return (username, password)
 
 
-# WHY : Trade-offs: every resolver below is cached for the lifetime of the process, and the
+# Trade-offs: every resolver below is cached for the lifetime of the process, and the
 # consequence accepted is precise: a credential rotated while a command is running is not
 # observed, so a load that outlives a rotation fails on the connection it opens next rather
 # than picking the new password up. That is acceptable here because of how these commands run
@@ -1641,7 +1704,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
 # of lookups into a per-dataset multiple, and making the staging step's cost scale with the
 # number of datasets for values that are identical across all of them.
 #
-# WHY : Assumptions: the environment-derived values are cached too, which saves nothing
+# Assumptions: the environment-derived values are cached too, which saves nothing
 # measurable -- reading a process environment variable is free -- and is done for coherence
 # instead. Anything that mutated one of these variables part way through a run would otherwise
 # let a single process resolve one setting under one environment and the next under another,
@@ -1675,7 +1738,7 @@ def resolve_environment_name() -> str:
     """
     raw = os.environ.get(ENV_ENVIRONMENT)
     if raw is None:
-        # WHY : Assumptions: an unset variable is reported separately from a blank one because
+        # Assumptions: an unset variable is reported separately from a blank one because
         # the two have different remedies -- one was never provided to the container, the other
         # was provided as an empty string, typically by a template that resolved to nothing --
         # and an operator reading only "is empty" would look in the wrong place for the cause.
@@ -1715,7 +1778,7 @@ def resolve_parameter_prefix() -> str:
     """
     raw = os.environ.get(ENV_PARAMETER_PREFIX)
     if raw is None or not raw.strip():
-        # WHY : Trade-offs: an empty or whitespace-only override falls back to the default
+        # Trade-offs: an empty or whitespace-only override falls back to the default
         # rather than being rejected. An orchestrator that renders an unset template variable
         # supplies exactly that, and treating it as "not configured" is what a reader of the
         # deployment intends; the accepted cost is that a genuinely empty prefix cannot be
@@ -1727,7 +1790,7 @@ def resolve_parameter_prefix() -> str:
     if not prefix.startswith("/"):
         raise ConfigurationError(f"{description} must begin with a forward slash")
     if prefix.endswith("/"):
-        # WHY : Assumptions: a trailing slash is rejected rather than trimmed. Parameter Store
+        # Assumptions: a trailing slash is rejected rather than trimmed. Parameter Store
         # treats a name with a trailing separator as a different name, so accepting both
         # spellings and normalising one into the other would let this module silently resolve a
         # path that no other consumer of the same configured prefix resolves. Refusing keeps one
@@ -1768,7 +1831,7 @@ def _require_supported_ssl_mode() -> None:
     raw = os.environ.get(ENV_SSL_MODE)
     if raw is None or not raw.strip():
         return
-    # WHY : Assumptions: the comparison is case-folded because libpq accepts the mode
+    # Assumptions: the comparison is case-folded because libpq accepts the mode
     # case-insensitively, so ``Verify-Full`` is the same request as ``verify-full`` and refusing
     # it would be a spelling complaint dressed as a security control. Everything else is
     # refused, including the two modes that do encrypt: ``require`` performs no certificate or
@@ -1818,7 +1881,7 @@ def resolve_ssl_root_cert() -> str:
         description = f"the environment variable {ENV_SSL_ROOT_CERT}"
         path = _validate_absolute_path(_require_text(raw, description), description)
 
-    # WHY : Refactoring Rationale: existence is checked HERE and not in
+    # Refactoring Rationale: existence is checked HERE and not in
     # ``AuroraConnectionSettings.__post_init__``, which checks only the path's shape. The split
     # follows what each place can promise. A descriptor is constructed directly by tests and is
     # frozen, hashable and cached, so making its validity depend on the filesystem would make
@@ -1826,7 +1889,7 @@ def resolve_ssl_root_cert() -> str:
     # certificate file. This function, by contrast, runs only on the resolution path that
     # precedes a real connection, which is exactly where an absent bundle is actionable.
     #
-    # WHY : Trade-offs: a missing bundle is refused rather than being left to libpq. Under
+    # Trade-offs: a missing bundle is refused rather than being left to libpq. Under
     # ``verify-full`` libpq reports an unreadable root certificate as a generic TLS failure, so
     # the actual defect -- the image did not carry the bundle, or an override points at a path
     # that no longer exists -- reads as though the server rejected the connection, and the
@@ -1841,7 +1904,140 @@ def resolve_ssl_root_cert() -> str:
         )
     if not os.access(path, os.R_OK):
         raise ConfigurationError(f"{description} names a file that cannot be read")
+
+    _require_trustworthy_anchor(path, description, overridden=raw is not None and bool(raw.strip()))
     return path
+
+
+def _require_trustworthy_anchor(path: str, description: str, *, overridden: bool) -> str:
+    """Confirm a trust anchor is one this process may rely on, not merely one it can read.
+
+    Purpose
+    -------
+    Establish that the file ``verify-full`` will trust cannot have been substituted by anything
+    other than the identity that owns the process, and that an override is not being used to
+    replace the anchor in an environment where the anchor is a fixed deliverable.
+
+    Parameters
+    ----------
+    path : str
+        The resolved absolute path, already known to be an existing readable file.
+    description : str
+        What the path is, for the failure message. Must not contain a resolved secret.
+    overridden : bool
+        Whether the path came from the environment override rather than from the pinned default.
+        Only an override is subject to the environment restriction, because the default IS the
+        pinned value.
+
+    Returns
+    -------
+    str
+        ``path`` unchanged, so this can be used in an assignment.
+
+    Raises
+    ------
+    ConfigurationError
+        If the anchor is a symbolic link, if it is writable by a group or by others, if it is not
+        owned by this process's user or by root, or if an override is attempted in an environment
+        whose name is not one of the non-production names.
+
+    Notes
+    -----
+    Refactoring Rationale: this function did not exist, and the resolution accepted ANY absolute
+    readable path, in any environment, with no constraint on who could write it. Verification is
+    exactly as strong as its anchor: a file an unprivileged co-tenant of the container can
+    replace, or a symlink whose target changes after this check, makes ``verify-full`` verify the
+    endpoint against an authority of that party's choosing -- and the connection still succeeds,
+    so nothing reports it. The checks below cost four calls to ``stat`` once per process.
+
+    Alternatives Considered: pinning a content digest of the bundle and refusing anything else.
+    Rejected as the primary control because AWS republishes the global bundle as authorities are
+    rotated, so a pinned digest would fail every legitimate refresh and the pressure would be to
+    remove the pin rather than to update it. The mode and symlink checks constrain WHO can supply
+    the file, which holds across a republication. Where a deployment does want a digest, it
+    belongs beside the image build that places the file, not here.
+
+    Alternatives Considered: requiring the file to be owned by root or by this process's user.
+    Rejected after measuring it against a real deployment: a correctly provisioned anchor is
+    frequently owned by the service account that generated it -- the local PostgreSQL certificate
+    directory in this project's own environment is owned by the database account, mode 0644 --
+    so that rule refuses legitimate files. It also answers the wrong question, because whether a
+    given uid is trustworthy cannot be read off the filesystem. The checks kept below instead
+    enforce the invariant that actually matters and IS decidable: no identity other than the
+    file's own owner and root can substitute it. A rule that breaks a valid deployment is a rule
+    that gets deleted at the first friction, which leaves nothing.
+
+    Assumptions: every directory on the path is checked, not just the file. A file that is itself
+    unwritable inside a group-writable directory can be unlinked and replaced wholesale by any
+    member of that group, so checking the file's mode alone would be decorative. This is the same
+    reasoning that makes OpenSSH refuse a key whose containing directory is group-writable.
+
+    Assumptions: an override is confined to the non-production environment names, because in
+    production the bundle is a deliverable of the container image and its path is fixed by the
+    same image. A production override could only come from an environment variable a caller set,
+    which is the shape of the attack this restriction removes; in development the override is
+    genuinely needed, since the bundle sits elsewhere when a command runs outside the image.
+    """
+    if overridden:
+        # Trade-offs: an unset or unrecognised environment name REFUSES the override rather
+        # than allowing it. Allowing it would mean the one case where the deployment's identity is
+        # unknown is also the case with the fewest constraints, which inverts the intent. Every
+        # real command already sets this variable, because :func:`resolve_environment_name` gives
+        # it no default; the cost is therefore borne only by a caller that overrode the anchor
+        # without saying which deployment it is overriding for.
+        environment = os.environ.get(ENV_ENVIRONMENT, "").strip()
+        if environment not in NON_PRODUCTION_ENVIRONMENTS:
+            raise ConfigurationError(
+                f"{description} may not be overridden when {ENV_ENVIRONMENT} is "
+                f"{environment or 'unset'!r}; the trust anchor is a deliverable of the container "
+                f"image and its path is fixed at {DEFAULT_SSL_ROOT_CERT}. Overrides are accepted "
+                f"only in: {', '.join(sorted(NON_PRODUCTION_ENVIRONMENTS))}"
+            )
+
+    # Assumptions: the link check uses lstat semantics, so it observes the path ITSELF and
+    # not its target. A symlink is refused rather than followed because the target can be
+    # repointed between this check and the connection that uses it, which makes every other check
+    # here decorative; refusing the link removes the window instead of narrowing it.
+    if os.path.islink(path):
+        raise ConfigurationError(
+            f"{description} is a symbolic link; a trust anchor must be a regular file, because a "
+            f"link target can be repointed after it is validated"
+        )
+
+    # Assumptions: group and other write permission is refused, not merely noted. Any
+    # identity that can write the anchor can replace the authority the endpoint is verified
+    # against, so a group-writable bundle makes the verification only as strong as the widest
+    # membership of that group. The same test is applied to every directory above it, because a
+    # writable directory permits unlink-and-replace and would make the file's own mode moot.
+    if os.stat(path).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ConfigurationError(
+            f"{description} is writable by its group or by others; a trust anchor must be "
+            f"writable only by the identity that owns it"
+        )
+
+    directory = os.path.dirname(path)
+    while True:
+        mode = os.stat(directory).st_mode
+        # Trade-offs: a group- or other-writable directory is tolerated when the sticky bit
+        # is set, and refused otherwise. The sticky bit is the mechanism that makes a shared
+        # directory safe for this purpose: it withholds unlink and rename from everyone except a
+        # file's own owner, so the substitution this check exists to prevent is already denied by
+        # the kernel. Omitting the exemption was tried first and refused ``/tmp`` (mode 1777),
+        # which would have failed every anchor staged by a test or by a local command -- friction
+        # with no security gain, since a co-tenant still cannot replace a file it does not own.
+        if mode & (stat.S_IWGRP | stat.S_IWOTH) and not mode & stat.S_ISVTX:
+            raise ConfigurationError(
+                f"{description} sits under directory {directory} which is writable by its group "
+                f"or by others without the sticky bit set; any member of that group could replace "
+                f"the trust anchor regardless of the file's own permissions"
+            )
+        parent = os.path.dirname(directory)
+        # Assumptions: the walk terminates when dirname stops shortening the path, which
+        # for an absolute path is exactly at the root. Comparing against a literal "/" was
+        # rejected because it hard-codes a separator the standard library already abstracts.
+        if parent == directory:
+            return path
+        directory = parent
 
 
 @lru_cache(maxsize=1)
@@ -1887,7 +2083,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
     owning_roles = frozenset(SCHEMA_ROLES.values())
     allowlist: dict[str, set[str]] = {}
 
-    # WHY : Trade-offs: an empty entry is refused rather than skipped, so a trailing comma or a
+    # Trade-offs: an empty entry is refused rather than skipped, so a trailing comma or a
     # doubled separator fails instead of being tolerated. Tolerating it is friendlier for the
     # common typo and wrong for this variable specifically: this is the one input that widens
     # what credential the ETL will authenticate as, and a value that was mis-split -- by a shell
@@ -1910,7 +2106,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
         role = role.strip()
         alternate = alternate.strip()
         if role not in owning_roles:
-            # WHY : Assumptions: an unrecognised role is refused rather than ignored. An ignored
+            # Assumptions: an unrecognised role is refused rather than ignored. An ignored
             # entry is the worst outcome available here, because the operator believes an
             # exception is in force, the misspelling means it is not, and the discovery comes as
             # a refused connection during a rotation window. The eight accepted roles are named
@@ -1926,7 +2122,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
                 f"PostgreSQL role name of at most 63 characters"
             )
         if alternate in owning_roles:
-            # WHY : Assumptions: allowlisting one owning role as another's alternate is refused
+            # Assumptions: allowlisting one owning role as another's alternate is refused
             # outright, and this is the guard that keeps the escape hatch from becoming a
             # privilege bridge. A rotation clone is a NEW user created for one role; a spelling
             # that names a different owning role is not a clone, and accepting it would let the
@@ -1938,7 +2134,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
             )
         allowlist.setdefault(role, set()).add(alternate)
 
-    # WHY : Assumptions: the returned mapping is wrapped in a read-only proxy over frozen sets
+    # Assumptions: the returned mapping is wrapped in a read-only proxy over frozen sets
     # for the same reason :data:`SCHEMA_ROLES` is. This function is cached, so every caller holds
     # the SAME object; a mutable result would let one caller widen the allowlist that every later
     # caller checks against, which is a privilege change made by accident and invisible at the
@@ -1978,12 +2174,31 @@ def _require_matching_database_user(schema: str, role: str, username: str) -> st
     ------
     ConfigurationError
         If the user name is neither the owning role nor an allowlisted alternate for it.
+
+    Notes
+    -----
+    Assumptions: acceptance here is by NAME and is deliberately provisional. A name proves which
+    identity the payload claims to be; it cannot prove what that identity is permitted to do,
+    because privileges live in the database's catalog and this module holds no connection. An
+    allowlisted alternate that had been granted ``SUPERUSER`` -- by a mis-scoped grant, or by a
+    rotation that recreated the role from a different template -- would satisfy this function and
+    then run the load with privileges nobody authorised.
+
+    Refactoring Rationale: rather than open a connection here, which would make every settings
+    resolution require a reachable database and turn a configuration error into a network error,
+    the privilege half of the check is published as a contract the connection layer applies once
+    it has a session: :func:`alternate_database_user_verification_sql` supplies the catalog query
+    and :func:`require_equivalent_database_user` adjudicates its result. That keeps this module
+    connection-free while making the verification obligation explicit and testable rather than
+    implied. Until a caller applies that contract, an allowlisted alternate is trusted on its
+    name alone, which is why the allowlist itself refuses to admit one owning role as another's
+    alternate.
     """
     if username == role:
         return username
     if username in resolve_alternate_database_users().get(role, frozenset()):
         return username
-    # WHY : Assumptions: the rejected user name is NOT interpolated into the message, while the
+    # Assumptions: the rejected user name is NOT interpolated into the message, while the
     # schema and the expected role are. The module holds one rule about messages -- a value
     # resolved from Parameter Store or Secrets Manager is never printed -- and this value came
     # out of a secret document, so it falls under that rule even though a user name is not itself
@@ -1996,6 +2211,188 @@ def _require_matching_database_user(schema: str, role: str, username: str) -> st
         f"role {role!r}; set {ENV_ALTERNATE_DB_USERS} to '{role}=<user>' if a rotation "
         f"legitimately alternates between two equivalently privileged users"
     )
+
+
+# Assumptions: these are the role attributes whose presence disqualifies an alternate,
+# named individually rather than checked as "not superuser". Each one independently defeats the
+# schema isolation the ETL relies on: SUPERUSER ignores every grant, BYPASSRLS ignores row
+# policies, CREATEROLE can grant itself anything a role could hold, CREATEDB can create a
+# database outside the audited set, and REPLICATION can stream the cluster's contents wholesale.
+# Alternatives Considered: comparing an alternate's privileges to the owning role's and requiring
+# equality. Rejected because two roles are almost never attribute-identical in practice -- a
+# rotation target legitimately differs in password expiry and connection limit -- so equality
+# would fail on differences that do not affect authority, and the pressure would be to drop the
+# check rather than narrow it.
+FORBIDDEN_DATABASE_ROLE_ATTRIBUTES: tuple[str, ...] = (
+    "is_superuser",
+    "can_create_db",
+    "can_create_role",
+    "bypasses_row_level_security",
+    "can_replicate",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseUserAttributes:
+    """One database user's catalog attributes, as observed in ``pg_roles``.
+
+    Purpose
+    -------
+    Carry the answer to :func:`alternate_database_user_verification_sql` in a shape that
+    :func:`require_equivalent_database_user` can adjudicate, so the query and the judgement are
+    separable: the caller owns the connection, this module owns the rule. Holding the observation
+    as data rather than passing a cursor keeps the rule testable without a database.
+
+    Attributes
+    ----------
+    username : str
+        The role name the row describes, echoed back so a caller cannot adjudicate one user's
+        attributes against another user's name.
+    can_login : bool
+        Whether the role may authenticate. An alternate that cannot log in is a configuration
+        mistake, not a usable credential.
+    is_member_of_owning_role : bool
+        Whether the role is a member of the schema's owning role, and therefore actually holds
+        the privileges the allowlist assumed when it admitted the name.
+    is_superuser : bool
+        Whether the role bypasses all permission checks.
+    can_create_db : bool
+        Whether the role may create databases.
+    can_create_role : bool
+        Whether the role may create or alter other roles.
+    bypasses_row_level_security : bool
+        Whether the role bypasses row-level security policies.
+    can_replicate : bool
+        Whether the role may initiate streaming replication.
+    """
+
+    username: str
+    can_login: bool
+    is_member_of_owning_role: bool
+    is_superuser: bool
+    can_create_db: bool
+    can_create_role: bool
+    bypasses_row_level_security: bool
+    can_replicate: bool
+
+
+def alternate_database_user_verification_sql() -> str:
+    """Return the catalog query that establishes what an allowlisted alternate may actually do.
+
+    Purpose
+    -------
+    Publish, as a single named contract, the query a caller must run once it holds a session in
+    order to convert the name-based acceptance of :func:`resolve_alternate_database_users` into a
+    privilege-based one. Returning the text rather than executing it keeps this module free of a
+    database dependency while removing the caller's freedom to invent its own weaker check.
+
+    Returns
+    -------
+    str
+        A query with two named parameters, ``owning_role`` and ``alternate_user``, selecting one
+        row whose columns match the field names of :class:`DatabaseUserAttributes`. The query
+        returns no row when the user does not exist, which the caller must treat as a refusal.
+
+    Notes
+    -----
+    Assumptions: the parameters are named, not positional, and the values are bound by the
+    caller's driver rather than interpolated here. A role name that reached this query through
+    string formatting would be an injection point in the one place that is supposed to be
+    establishing trust; naming the parameters makes the binding the only way to supply them.
+
+    Assumptions: membership is tested with ``pg_has_role(..., 'MEMBER')``, which follows the
+    grant chain transitively. A direct-grant test was rejected because a legitimate deployment
+    may interpose a group role between the alternate and the owning role, and an inherited grant
+    confers exactly the same authority as a direct one.
+    """
+    return (
+        "SELECT r.rolname AS username,\n"
+        "       r.rolcanlogin AS can_login,\n"
+        "       pg_catalog.pg_has_role(r.rolname, %(owning_role)s, 'MEMBER')\n"
+        "           AS is_member_of_owning_role,\n"
+        "       r.rolsuper AS is_superuser,\n"
+        "       r.rolcreatedb AS can_create_db,\n"
+        "       r.rolcreaterole AS can_create_role,\n"
+        "       r.rolbypassrls AS bypasses_row_level_security,\n"
+        "       r.rolreplication AS can_replicate\n"
+        "  FROM pg_catalog.pg_roles AS r\n"
+        " WHERE r.rolname = %(alternate_user)s"
+    )
+
+
+def require_equivalent_database_user(
+    role: str, observed: DatabaseUserAttributes | None
+) -> DatabaseUserAttributes:
+    """Confirm an allowlisted alternate holds the authority its allowlisting assumed, no more.
+
+    Purpose
+    -------
+    Complete the check :func:`_require_matching_database_user` can only start. That function
+    establishes that a credential names an identity the operator allowlisted; this one
+    establishes that the identity is confined to the owning role's authority, so an allowlist
+    entry cannot be turned into an escalation by a grant made elsewhere.
+
+    Parameters
+    ----------
+    role : str
+        The schema's owning role, as returned by :func:`role_for_schema`. Reported in failure
+        messages because it is derived from this module's own mapping and is not sensitive.
+    observed : DatabaseUserAttributes or None
+        The single row produced by :func:`alternate_database_user_verification_sql`, or ``None``
+        when the query returned no row because the user does not exist in the cluster.
+
+    Returns
+    -------
+    DatabaseUserAttributes
+        ``observed`` unchanged, so the call can be used in an assignment once it has passed.
+
+    Raises
+    ------
+    ConfigurationError
+        If ``observed`` is ``None``; if the role cannot log in; if it is not a member of the
+        owning role; or if it holds any attribute named in
+        :data:`FORBIDDEN_DATABASE_ROLE_ATTRIBUTES`.
+
+    Notes
+    -----
+    Trade-offs: a missing row is a refusal rather than a pass. Treating "no such role" as
+    acceptable was rejected because the query cannot distinguish a role that was never created
+    from one whose name was mistyped in the allowlist, and both mean the allowlist does not
+    describe the cluster it is being applied to.
+
+    Assumptions: every failing attribute is reported, not just the first. An operator repairing a
+    role that holds two disqualifying attributes should not have to run the load twice to learn
+    the second one; the message names the attributes rather than the role's password or any other
+    value read from a secret.
+    """
+    if observed is None:
+        raise ConfigurationError(
+            f"the alternate database user allowlisted for role {role!r} does not exist in the "
+            f"cluster; {ENV_ALTERNATE_DB_USERS} names a role that was never created, or names it "
+            f"differently from the cluster"
+        )
+
+    failures: list[str] = []
+    if not observed.can_login:
+        failures.append("it may not log in")
+    if not observed.is_member_of_owning_role:
+        failures.append(f"it is not a member of {role!r} and so lacks that role's privileges")
+    # Refactoring Rationale: the forbidden attributes are read through getattr over the
+    # declared tuple rather than as five hand-written conditions. Adding an attribute to the
+    # tuple then extends the check with no further edit, which is what keeps the constant and the
+    # enforcement from drifting apart -- the failure mode where a name is added to the list and
+    # nothing enforces it.
+    for attribute in FORBIDDEN_DATABASE_ROLE_ATTRIBUTES:
+        if getattr(observed, attribute):
+            failures.append(f"it holds {attribute}")
+
+    if failures:
+        raise ConfigurationError(
+            f"the alternate database user allowlisted for role {role!r} is not equivalent to it: "
+            + "; ".join(failures)
+            + f". Correct the role in the cluster or remove it from {ENV_ALTERNATE_DB_USERS}"
+        )
+    return observed
 
 
 def parameter_path(*segments: str) -> str:
@@ -2025,7 +2422,7 @@ def parameter_path(*segments: str) -> str:
         segment, or if the prefix or the environment name cannot be resolved.
     """
     if not segments:
-        # WHY : Assumptions: a call with no segments is rejected rather than returning the
+        # Assumptions: a call with no segments is rejected rather than returning the
         # environment root. The root is a path prefix rather than a parameter name, so returning
         # it would produce a value that reads like a path and cannot be fetched, and the caller
         # that forgot its segments would see a not-found error against a path it never wrote.
@@ -2036,7 +2433,7 @@ def parameter_path(*segments: str) -> str:
         _validate_path_segment(_require_text(segment, description), description)
         for segment in segments
     ]
-    # WHY : Assumptions: the prefix already carries its leading slash and carries no trailing
+    # Assumptions: the prefix already carries its leading slash and carries no trailing
     # one, so joining with a single separator yields exactly one separator between every
     # component. This is why both properties are enforced when the prefix is resolved rather
     # than being repaired here, where the repair would have to be repeated at each caller.
@@ -2063,7 +2460,8 @@ def database_secret_name(schema: str) -> str:
     Returns
     -------
     str
-        The full secret name, for example ``<prefix>/<environment>/aurora/<role>``.
+        The full secret name, for example ``carddemo/dev/aurora/carddemo_auth`` -- the parameter
+        path with its leading separator removed, for the reason recorded below.
 
     Raises
     ------
@@ -2071,7 +2469,7 @@ def database_secret_name(schema: str) -> str:
         If the schema is not one of the eight known schemas, or if the prefix or the environment
         name cannot be resolved.
     """
-    # WHY : Alternatives Considered: the secret sits under the SAME ``aurora`` grouping segment
+    # Alternatives Considered: the secret sits under the SAME ``aurora`` grouping segment
     # as the three non-secret parameters, rather than under a separate ``secrets`` grouping of
     # its own. A separate grouping was the tidier-looking option and was rejected because these
     # values are only ever read together: a credential authenticates against exactly the
@@ -2079,7 +2477,144 @@ def database_secret_name(schema: str) -> str:
     # change moves the endpoint and the credential as a unit, so they cannot come to describe
     # two different deployments. Nothing is weakened by the shared path, because the two stores
     # are separate services with separate permissions -- a path is a name, not an access grant.
-    return parameter_path(_AURORA_SEGMENT, role_for_schema(schema))
+    #
+    # Refactoring Rationale: the leading separator is STRIPPED, and its presence was a
+    # defect rather than a cosmetic difference. This function returned
+    # :func:`parameter_path` unchanged, which begins with the separator every Parameter Store
+    # path carries -- so every secret was looked up as ``/carddemo/<env>/aurora/<role>`` while
+    # ``infra/modules/secrets`` creates it as ``carddemo/<env>/aurora/<role>``. Its ``locals``
+    # block records why: Secrets Manager accepts a separator INSIDE a name but rejects a
+    # ``SecretId`` that BEGINS with one, and ``var.name_prefix``'s own charset validation refuses
+    # a leading separator, so the store side cannot move. Every credential read therefore failed
+    # with a not-found error naming a secret that had in fact been created, one character away.
+    # Stripping here rather than composing the name from scratch keeps the grouping convention
+    # single-sourced in :func:`parameter_path`: the two names stay identical except for the one
+    # character the two stores genuinely disagree about, so a prefix or environment change still
+    # moves both together.
+    return parameter_path(_AURORA_SEGMENT, role_for_schema(schema)).lstrip("/")
+
+
+@lru_cache(maxsize=1)
+def _aurora_endpoint() -> tuple[str, int, str]:
+    """Resolve the cluster endpoint every database connection shares.
+
+    Purpose
+    -------
+    Read the three non-secret connection settings -- host, port and database name -- from
+    Parameter Store once, so that the two resolvers below describe the same cluster by
+    construction rather than by both remembering the same three parameter paths.
+
+    Refactoring Rationale: these reads were inline in :func:`resolve_aurora_settings` and were
+    lifted here when :func:`resolve_master_settings` was added. Copying them would have put the
+    three paths in two places, and the failure that produces is silent: a copy that drifted
+    would resolve a credential for one cluster and an endpoint for another, so a load would
+    authenticate against the wrong deployment rather than fail.
+
+    Parameters
+    ----------
+    None
+        Reads the environment name and the parameter prefix through :func:`parameter_path`.
+
+    Returns
+    -------
+    tuple[str, int, str]
+        The host, the port as a whole number, and the database name, in that order.
+
+    Raises
+    ------
+    ConfigurationError
+        If the environment name or prefix cannot be resolved, if any of the three parameters is
+        absent or unreadable, or if the port parameter is not a whole number.
+    """
+    host_path = parameter_path(_AURORA_SEGMENT, "host")
+    port_path = parameter_path(_AURORA_SEGMENT, "port")
+    database_path = parameter_path(_AURORA_SEGMENT, "database")
+
+    host = _ssm_parameter(host_path)
+    port_text = _ssm_parameter(port_path)
+    database = _ssm_parameter(database_path)
+
+    try:
+        port = int(port_text)
+    except ValueError:
+        # Trade-offs: the chain is broken here for the same reason it is broken for a
+        # malformed secret. The message a failed integer conversion produces embeds the rejected
+        # text verbatim, and this module holds one rule about messages rather than two -- a
+        # resolved value is never printed -- so the position of the offending character is given
+        # up in exchange for that rule holding without exception. The path is named instead,
+        # which is what an operator needs in order to correct the parameter.
+        raise ConfigurationError(f"the parameter {port_path} is not a whole number") from None
+
+    return host, port, database
+
+
+@lru_cache(maxsize=1)
+def resolve_master_settings() -> AuroraConnectionSettings:
+    """Resolve the connection parameters for the cluster's master user.
+
+    Purpose
+    -------
+    Assemble a connection descriptor for the one identity that can administer the cluster,
+    combining the shared endpoint with the credential RDS generated for the master user. Used by
+    the database bootstrap step -- :mod:`carddemo_migration.credentials` -- which has to connect
+    as a role holding ``CREATEROLE`` or superuser authority in order to apply each service
+    role's credential, and by nothing else.
+
+    Assumptions: this is deliberately NOT keyed on a schema, unlike
+    :func:`resolve_aurora_settings`. The master user owns no schema and is not one of the eight
+    login roles; it exists to bootstrap and to break glass, so a schema argument would imply a
+    privilege boundary this identity does not have.
+
+    Trade-offs: no user-name assertion is made against the resolved credential, where
+    :func:`resolve_aurora_settings` asserts one. There is nothing to assert it against: the
+    master user's name is chosen by the cluster module's ``master_username`` input and is not
+    derivable from anything this module holds, so a check here could only compare the secret
+    with itself. The identity is instead confirmed by what the connection can do -- the
+    bootstrap step's first statement fails outright without the authority to alter a role.
+
+    Parameters
+    ----------
+    None
+        Reads :data:`ENV_DB_MASTER_SECRET` from the process environment and the endpoint from
+        Parameter Store.
+
+    Returns
+    -------
+    AuroraConnectionSettings
+        A frozen descriptor whose rendering masks the password. Pass
+        :meth:`AuroraConnectionSettings.as_connection_params` to a client to connect; the
+        parameters it yields require full certificate and hostname verification.
+
+    Raises
+    ------
+    ConfigurationError
+        If :data:`ENV_DB_MASTER_SECRET` is unset or blank; if the environment name or prefix
+        cannot be resolved; if any endpoint parameter or the secret is absent, unreadable or
+        malformed; if the port parameter is not a whole number; if :data:`ENV_SSL_MODE` asks for
+        a mode weaker than :data:`REQUIRED_SSL_MODE`; if the TLS trust anchor is absent or
+        unreadable; or if any resolved value fails the descriptor's own validation.
+    """
+    # Assumptions: the locator is read and checked for content BEFORE the first network
+    # call, for the same reason the schema is validated first in the resolver below -- an unset
+    # variable is by far the most likely misconfiguration here, and reporting it costs nothing
+    # when it is reported before three parameter lookups rather than after them.
+    secret_id = _require_text(
+        os.environ.get(ENV_DB_MASTER_SECRET),
+        f"the environment variable {ENV_DB_MASTER_SECRET}",
+    )
+
+    host, port, database = _aurora_endpoint()
+    username, password = _secret_credentials(secret_id)
+    _require_supported_ssl_mode()
+
+    return AuroraConnectionSettings(
+        host=host,
+        port=port,
+        database=database,
+        user=username,
+        password=password,
+        ssl_root_cert=resolve_ssl_root_cert(),
+    )
 
 
 @lru_cache(maxsize=None)
@@ -2130,27 +2665,10 @@ def resolve_aurora_settings(schema: str) -> AuroraConnectionSettings:
     # path composed from a bad name, which surfaces as an access-denied error naming a
     # resource that never existed.
     secret_name = database_secret_name(schema)
-    host_path = parameter_path(_AURORA_SEGMENT, "host")
-    port_path = parameter_path(_AURORA_SEGMENT, "port")
-    database_path = parameter_path(_AURORA_SEGMENT, "database")
-
-    host = _ssm_parameter(host_path)
-    port_text = _ssm_parameter(port_path)
-    database = _ssm_parameter(database_path)
+    host, port, database = _aurora_endpoint()
     username, password = _secret_credentials(secret_name)
 
-    try:
-        port = int(port_text)
-    except ValueError:
-        # WHY : Trade-offs: the chain is broken here for the same reason it is broken for a
-        # malformed secret. The message a failed integer conversion produces embeds the rejected
-        # text verbatim, and this module holds one rule about messages rather than two -- a
-        # resolved value is never printed -- so the position of the offending character is given
-        # up in exchange for that rule holding without exception. The path is named instead,
-        # which is what an operator needs in order to correct the parameter.
-        raise ConfigurationError(f"the parameter {port_path} is not a whole number") from None
-
-    # WHY : Refactoring Rationale: the username IS now asserted against the role the secret name
+    # Refactoring Rationale: the username IS now asserted against the role the secret name
     # was derived from. It previously was not, on the reasoning that a managed rotation using the
     # alternating-users strategy hands back a second user name, so an equality check would fail a
     # successful rotation. That reasoning was right about rotation and wrong about the default:
@@ -2163,7 +2681,7 @@ def resolve_aurora_settings(schema: str) -> AuroraConnectionSettings:
     # alternating rotation is still supported and everything else is refused.
     username = _require_matching_database_user(schema, role_for_schema(schema), username)
 
-    # WHY : Assumptions: the two transport checks run AFTER the parameters and the credential
+    # Assumptions: the two transport checks run AFTER the parameters and the credential
     # have resolved, not before. Ordering them last costs nothing -- neither reads AWS -- and
     # keeps the earlier, far more common failures (an unset environment name, an absent
     # parameter, a missing secret) reported first, so an operator sees the reason a command
@@ -2207,7 +2725,7 @@ def resolve_dataset_staging_settings() -> DatasetStagingSettings:
         If the environment name or prefix cannot be resolved, if the bucket parameter is absent,
         unreadable or blank, or if the resolved values fail the descriptor's own validation.
     """
-    # WHY : Alternatives Considered: the bucket name is read from Parameter Store, never
+    # Alternatives Considered: the bucket name is read from Parameter Store, never
     # reconstructed locally from the documented convention of a fixed stem plus the environment
     # name. Reconstructing it is tempting because the convention is known and would remove a
     # lookup, and it was rejected: infrastructure provisioning is the authority for that name,
@@ -2247,7 +2765,7 @@ def reset_resolution_cache() -> None:
     None
         Clearing a cache cannot fail.
     """
-    # WHY : Alternatives Considered: the caches are found by scanning this module's own globals
+    # Alternatives Considered: the caches are found by scanning this module's own globals
     # for the cache protocol, rather than being listed explicitly. An explicit list was written
     # first and rejected on a specific failure mode: a resolver added later would not be in it,
     # so a test would silently keep observing the previous case's value and would pass for the

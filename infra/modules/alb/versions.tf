@@ -83,7 +83,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: a floor on the Terraform CLI rather than an exact pin.
   # WHY : Assumptions: the infra/ package is authored and validated on Terraform
   #       1.15.8, and 1.15.0 is the earliest release that validation covers.
   #       Alternatives Considered: an exact `= 1.15.8` pin was rejected because
@@ -94,7 +93,6 @@ terraform {
   required_version = ">= 1.15.0"
 
   required_providers {
-    # WHAT: the AWS provider, addressed explicitly and bounded to the 6.x line.
     # WHY : Assumptions: hashicorp/aws 6.56.0 is published, so `~> 6.56`
     #       resolves; it admits >= 6.56.0 and < 7.0.0, taking provider bug
     #       fixes and newly exposed resource attributes while refusing a major

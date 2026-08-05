@@ -48,7 +48,7 @@
 #     comparing a cleartext eight-character field -- app/cpy/CSUSR01Y.cpy L21,
 #     compared at app/cbl/COSGN00C.cbl L223 -- and shipped its seed passwords
 #     as committed in-stream JCL data. main.tf instead generates every initial
-#     password with random_password during apply and hands it straight to
+#     password inside an apply-time bootstrap process and hands it straight to
 #     Secrets Manager; this file publishes the ARN and the NAME of each of
 #     those entries and never their contents, so a credential is retrieved out
 #     of band under the reader's own secretsmanager:GetSecretValue and
@@ -109,7 +109,6 @@
 # Pool identity
 # -----------------------------------------------------------------------------
 
-# WHAT: the pool's own identifier, and the identifier embedded in issuer_uri.
 # WHY : Assumptions: this is published even though issuer_uri already contains
 #       it, because the two are consumed by different callers for different
 #       reasons. A JWT authorizer wants the issuer as one opaque string, while
@@ -126,7 +125,6 @@ output "user_pool_arn" {
   value       = aws_cognito_user_pool.this.arn
 }
 
-# WHAT: the pool's host-and-path form, carrying no URI scheme.
 # WHY : Assumptions: this is published in addition to issuer_uri, not instead
 #       of it, because the scheme-less form is an interface in its own right --
 #       it is the host a caller needs to reach the pool's JWKS document
@@ -143,8 +141,6 @@ output "user_pool_endpoint" {
 # OIDC issuer
 # -----------------------------------------------------------------------------
 
-# WHAT: the pool's OpenID Connect issuer, composed by prefixing the scheme onto
-#       the pool's own endpoint attribute.
 # WHY : Alternatives Considered: composing the issuer from a discovered region
 #       instead, joining a data.aws_region attribute and the pool identifier
 #       around a literal service prefix and partition suffix. Rejected on four
@@ -178,8 +174,6 @@ output "issuer_uri" {
 # App client, and a reference to its credential
 # -----------------------------------------------------------------------------
 
-# WHAT: the app client identifier every issued token names in its audience
-#       claim.
 # WHY : Assumptions: this client is CONFIDENTIAL rather than public -- main.tf
 #       sets generate_secret = true -- so the identifier published here is one
 #       half of a credential pair, and it is still safe to publish because a
@@ -196,12 +190,9 @@ output "issuer_uri" {
 #       sign-in page.
 output "user_pool_client_id" {
   description = "Identifier of the app client the auth service authenticates through. infra/modules/api-gateway-http takes it in cognito_app_client_ids and makes it the JWT authorizer's jwt_configuration.audience, so a token whose audience claim falls outside that set is rejected at the edge before any integration runs; services/auth-service sends it as ClientId on every authentication call; and the calling root writes it to Parameter Store for both. Without it the edge cannot pin which client's tokens it accepts."
-  value       = aws_cognito_user_pool_client.this.id
+  value       = aws_cloudformation_stack.app_client.outputs["ClientId"]
 }
 
-# WHAT: the ARN and the name of the Secrets Manager entry that holds this app
-#       client's identifier and its generated secret -- the reference to the
-#       credential, never the credential.
 # WHY : Alternatives Considered: publishing the client secret itself, so the
 #       calling root could inject it directly into the service's task
 #       definition. Rejected in main.tf and rejected again here, because a
@@ -220,19 +211,19 @@ output "user_pool_client_id" {
 output "app_client_secret_arn" {
   description = "Secrets Manager ARN of the entry holding the app client's identifier and generated secret. Consumed by the IAM policy statement in the calling root that scopes secretsmanager:GetSecretValue for the auth service's task role to this one entry rather than to every secret in the account. NO SECRET VALUE IS PUBLISHED -- this is the reference through which one is resolved at run time. Without it that statement can only be written against a wildcard resource."
   value       = aws_secretsmanager_secret.app_client.arn
+  depends_on  = [terraform_data.app_client_secret_rotation]
 }
 
 output "app_client_secret_name" {
   description = "Secrets Manager name of the same entry. Published alongside the ARN because the two are used at different points: an IAM statement scopes to the ARN, while `aws secretsmanager get-secret-value --secret-id` takes the name, which is the form docs/runbooks/deploy.md uses. NO SECRET VALUE IS PUBLISHED. Without it the runbook would have to recover a name from an ARN by string surgery."
   value       = aws_secretsmanager_secret.app_client.name
+  depends_on  = [terraform_data.app_client_secret_rotation]
 }
 
 # -----------------------------------------------------------------------------
 # API resource server
 # -----------------------------------------------------------------------------
 
-# WHAT: the resource server's identifier, and the fully-qualified names of the
-#       scopes declared beneath it.
 # WHY : Assumptions: the scope identifiers are published exactly as the
 #       provider computes them rather than rebuilt by a caller. A scope's wire
 #       form is the resource-server identifier and the scope name joined by a
@@ -246,16 +237,31 @@ output "resource_server_identifier" {
   value       = aws_cognito_resource_server.this.identifier
 }
 
+# WHY : Assumptions: the built-in `aws.cognito.signin.user.admin` value is the
+#       only scope a USER_PASSWORD_AUTH access token actually carries, so it is
+#       the only value a route can require without rejecting every interactive
+#       sign-on. Requiring it at the authorizer is what makes an ID token
+#       unusable as a bearer credential -- an ID token carries no scope claim at
+#       all, so a route with any scope requirement refuses it.
+#       Alternatives Considered: requiring one of the custom resource-server
+#       scopes published above. Rejected because those are issued only to a
+#       client that completed an OAuth flow and requested them; the interactive
+#       flow this system uses never receives one, so every protected route would
+#       return 401 for a correctly authenticated operator.
+output "interactive_route_authorization_scopes" {
+  description = "Scope list carried by Cognito access tokens obtained through the direct interactive authentication API and required by api-gateway-http routes. The built-in aws.cognito.signin.user.admin value rejects ID tokens, which have no scope claim, without requiring a custom resource-server scope that USER_PASSWORD_AUTH never issues."
+  value       = ["aws.cognito.signin.user.admin"]
+}
+
 output "resource_server_scope_identifiers" {
   description = "Fully-qualified scope strings the resource server declares, as the provider composes them from the identifier and each scope name. infra/modules/api-gateway-http consumes them in route_authorization_scopes, where they become the scopes a route requires of a presented token. Without them the calling root would have to rebuild each string by hand, and any divergence would appear only as an authorization failure in production."
   value       = aws_cognito_resource_server.this.scope_identifiers
 }
 
 # -----------------------------------------------------------------------------
-# Group names -- the cross-language authorization contract
+# Group names -- the invariant cross-language authorization contract
 # -----------------------------------------------------------------------------
 
-# WHAT: the two group names that appear in a token's group claim.
 # WHY : Assumptions: these are outputs even though they are effectively
 #       constants, because they are a contract spanning three languages rather
 #       than a value any one of them owns.
@@ -267,11 +273,12 @@ output "resource_server_scope_identifiers" {
 #       to Parameter Store, instead of the same literal being maintained
 #       independently in HCL, Java and TypeScript and drifting in whichever one
 #       is edited last.
-#       Refactoring Rationale: both read the group resource's own `name`
-#       attribute rather than restating the string or re-reading the local that
-#       composed it, so an output cannot drift from the group that was actually
-#       created -- if a later change alters how main.tf builds these names,
-#       these outputs follow it without being touched.
+#       Refactoring Rationale: main.tf fixes both values independently of
+#       name_prefix, and both outputs read the group resources' own names rather
+#       than restating the literals. JwtRoleConverter requires these configured
+#       values in its constructor and refuses startup if either differs from
+#       its compiled authority contract, so drift fails before a request is
+#       authorized.
 output "admin_group_name" {
   description = "Name of the group carrying the baseline's administrator user type: SEC-USR-TYPE 'A' (app/cpy/CSUSR01Y.cpy L22), whose condition name is 88 CDEMO-USRTYP-ADMIN VALUE 'A' at app/cpy/COCOM01Y.cpy L27. It appears in a token's group claim, where common-lib's JwtRoleConverter turns it into a Spring Security authority, and it is what routes a signed-in administrator to the admin screens -- the client-side equivalent of the transfer to COADM01C at app/cbl/COSGN00C.cbl L232. Without it no component can name the group it must test for."
   value       = aws_cognito_user_group.admin.name
@@ -286,8 +293,6 @@ output "user_group_name" {
 # Optional hosted-UI domain
 # -----------------------------------------------------------------------------
 
-# WHAT: the hosted-UI domain prefix when one was created, and null when none
-#       was.
 # WHY : Assumptions: null is the ordinary result here rather than an error
 #       state, and a consumer has to handle it. var.domain_prefix defaults to
 #       null because the browser authenticates through services/auth-service
@@ -309,9 +314,6 @@ output "hosted_ui_domain" {
 # Seed-user credential references
 # -----------------------------------------------------------------------------
 
-# WHAT: one Secrets Manager ARN and one Secrets Manager name per seed user,
-#       each keyed by that user's identifier -- references to the generated
-#       initial passwords, never the passwords.
 # WHY : Refactoring Rationale: the retrieval path is deliberately out of band.
 #       An operator following docs/runbooks/deploy.md reads a seed user's
 #       initial password with `aws secretsmanager get-secret-value --secret-id`
@@ -322,22 +324,28 @@ output "hosted_ui_domain" {
 #       legible to anyone holding the repository, and a Terraform output would
 #       make these legible to anyone holding the state, which is the same
 #       defect relocated rather than fixed.
-#       Alternatives Considered: a list of objects, or two parallel lists,
-#       rather than two maps. Rejected because a list re-indexes when a user is
-#       added to or removed from var.seed_users, so an operator who looked up a
-#       user by position would afterwards read another user's entry with no
-#       indication anything had changed. A map keyed by the identifier is
-#       stable under insertion and removal, and the key is the eight-character
-#       SEC-USR-ID from app/cpy/CSUSR01Y.cpy L18 -- the same key main.tf uses
-#       in local.seed_users_by_id to drive every per-user resource, so the two
-#       views cannot disagree.
+#       Alternatives Considered: keying these maps by the eight-character
+#       SEC-USR-ID from app/cpy/CSUSR01Y.cpy L18, which would make operator
+#       lookup convenient. Rejected because Terraform outputs are metadata too:
+#       pairing a username with a secret ARN would recreate the identity leak
+#       removed from Secrets Manager names and descriptions. The opaque random
+#       handle is stable under insertion and removal, while the privileged
+#       secret value still carries the username for an operator authorized to
+#       retrieve it.
 output "seed_user_secret_arns" {
-  description = "Secrets Manager ARNs of the generated initial passwords, as a map keyed by the eight-character user identifier (SEC-USR-ID, app/cpy/CSUSR01Y.cpy L18). Consumed by the IAM policy statements in the calling root that scope secretsmanager:GetSecretValue to exactly these entries rather than to every secret in the account. NO PASSWORD VALUE IS PUBLISHED -- this is the reference through which one is retrieved. Without it a least-privilege policy for seed-credential retrieval cannot be expressed."
-  value       = { for user_id, secret in aws_secretsmanager_secret.seed_user : user_id => secret.arn }
+  description = "Secrets Manager ARNs of generated initial passwords, as a map keyed by an opaque 128-bit handle rather than a user id. Consumed by IAM policy statements in the calling root that scope secretsmanager:GetSecretValue to exactly these entries. No password or identity value is published; the username remains inside the encrypted secret value for authorized retrieval."
+  value = {
+    for user_id, secret in aws_secretsmanager_secret.seed_user :
+    random_id.seed_user_secret[user_id].hex => secret.arn
+  }
+  depends_on = [terraform_data.seed_user]
 }
 
 output "seed_user_secret_names" {
-  description = "Secrets Manager names of the same entries, keyed the same way. Published alongside the ARNs because the two serve different steps: an IAM statement scopes to an ARN, while the `aws secretsmanager get-secret-value --secret-id` call in docs/runbooks/deploy.md takes a name. NO PASSWORD VALUE IS PUBLISHED. Without it the runbook would have to recover each name from an ARN by string surgery."
-  value       = { for user_id, secret in aws_secretsmanager_secret.seed_user : user_id => secret.name }
+  description = "Secrets Manager names of the same entries, keyed by the same opaque handle. Published alongside the ARNs because an IAM statement scopes to an ARN while the retrieval command in docs/runbooks/deploy.md takes a name. No password, user id or personal name is exposed through this output."
+  value = {
+    for user_id, secret in aws_secretsmanager_secret.seed_user :
+    random_id.seed_user_secret[user_id].hex => secret.name
+  }
+  depends_on = [terraform_data.seed_user]
 }
-

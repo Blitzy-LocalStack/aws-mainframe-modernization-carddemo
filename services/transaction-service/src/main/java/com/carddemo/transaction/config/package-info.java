@@ -65,10 +65,21 @@
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain that
- *       validates a signed Cognito token on every request. It reads the issuer
- *       from {@code spring.security.oauth2.resourceserver.jwt.issuer-uri},
- *       which the module configuration resolves from an injected environment
- *       variable rather than from a committed value, and it registers
+ *       validates a signed Cognito token on every business request, permits only
+ *       {@code /actuator/health} without one, and keeps every other actuator
+ *       endpoint behind authentication. Trade-offs: the load balancer target
+ *       group and the container health check poll that endpoint before any
+ *       credential exists, so requiring a token there would fail every probe and
+ *       remove a healthy task from service; the accepted cost is one read-only
+ *       health route reachable without a credential, and it exposes neither
+ *       business data nor the wider actuator surface. Alternatives Considered:
+ *       permitting all of {@code /actuator/**} was rejected because the probes
+ *       need only health status, while the other actuator endpoints can disclose
+ *       operational detail to a caller with no identity. {@code SecurityConfig}
+ *       reads the issuer from
+ *       {@code spring.security.oauth2.resourceserver.jwt.issuer-uri}, which the
+ *       module configuration resolves from an injected environment variable
+ *       rather than from a committed value, and it registers
  *       {@code com.carddemo.common.security.JwtRoleConverter} to turn the
  *       {@code cognito:groups} claim carried by that token into Spring Security
  *       authorities. It also places

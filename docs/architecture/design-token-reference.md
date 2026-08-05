@@ -60,17 +60,10 @@
 > [`tests/README.md`](../../tests/README.md) §12, which already requires the same
 > four justification categories of every test, helper and runner routine.
 >
-> **Sibling documents not yet authored are named, not linked.** Two of the nine
-> documents in this folder are cited below —
-> `docs/architecture/observability.md` and
-> `docs/architecture/cobol-to-service-traceability.md` — and neither exists at this
-> checkpoint; both are authored at later indexes of the same plan. Per the same
-> convention, each appears as a plain code span rather than as a link, because a link
-> resolving to nothing is a defect a reader finds by clicking. Each becomes a link
-> when the file it names exists. The same applies to this document's declared
-> downstream consumers, `ui/src/theme/tokens.ts` and `ui/src/theme/antdTheme.ts`,
-> which are likewise not yet authored: this document is upstream of both, and is
-> written first so that they can encode it.
+> **Current state.** The observability and traceability documents are present,
+> as are `ui/src/theme/tokens.ts` and `ui/src/theme/antdTheme.ts`. Links and
+> source paths below therefore refer to authored consumers rather than future
+> contracts.
 
 **WHY (non-obvious design decisions):**
 
@@ -752,8 +745,9 @@ on, and each stated with the reason the superseded version cannot be right. Two 
 citations that point at the wrong file or the wrong lines
 ([§9.1](#91-the-75-character-message-line-contract),
 [§9.2](#92-the-structured-abend-fields)); the third is a correction to the *claim*
-rather than the citation — the width this document previously said governs the
-message band is the one width in its own list that governs no region of a screen
+rather than the citation — the earlier three-width description omitted two
+composition/display regimes and incorrectly treated a shared work-area width as the
+screen width
 ([§9.3](#93-the-message-width-regimes)).
 
 ### 9.1 The 75-character message-line contract
@@ -804,13 +798,35 @@ produces the more damaging error of treating **75** as the width a message band
 renders at.
 
 The **message band** — the single-line error and status region every screen carries
-— is governed by these five, in the order a message passes through them:
+— is governed by the following five values. They are listed in the same contract
+order as `MESSAGE_BAND` in
+[`ui/src/messages/messages.ts`](../../ui/src/messages/messages.ts); they are not five
+serial buffers. A concrete path selects one composition-buffer regime and one
+display-field regime, and only paths crossing a pseudo-conversational turn traverse
+the shared work area.
 
-**Only the 75-character screen contract survives as a rendering constraint in the
-user interface**, because it is the only one of the three that describes a region
-of a screen. The other two describe strings that are composed into a message or
-into a log record, and the way they collapse on the log side is owned by
-`docs/architecture/observability.md`, not by this document.
+1. **75-byte shared work area.** `CCARD-ERROR-MSG` and
+   `CCARD-RETURN-MSG` are `PIC X(75)` in
+   [`CVCRD01Y.cpy`](../../app/cpy/CVCRD01Y.cpy) L28–L30. This is the
+   cross-turn content ceiling and carries the `LOW-VALUES` empty sentinel; it is not
+   a screen region.
+2. **80-byte wide composition buffer.** Fourteen online programs declare
+   `WS-MESSAGE PIC X(80)`, including
+   [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) L38. A message composed here and
+   moved directly to a map can use the destination field's full 78 or 80 characters.
+3. **75-byte narrow composition buffer.** The other seven online programs compose
+   into `WS-RETURN-MSG PIC X(75)`, except `COCRDLIC`, which names the equivalent
+   field `WS-ERROR-MSG`; [`COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) L479 is the
+   representative declaration. This is a program-local buffer, not the shared work
+   area in item 1.
+4. **78-character standard display field.** Nineteen mapsets declare one
+   `ERRMSGI` and one `ERRMSGO` as `PIC X(78)`: **38 declarations** in total.
+   [`COSGN00.CPY`](../../app/cpy-bms/COSGN00.CPY) L84 and L152 are a
+   representative pair.
+5. **80-character card-detail display field.** `COCRDSL` and `COCRDUP` declare the
+   input and output fields as `PIC X(80)`: **4 declarations** across 2 mapsets.
+   [`COCRDSL.CPY`](../../app/cpy-bms/COCRDSL.CPY) L102 and L194 are a
+   representative pair.
 
 Measured: **38** `PIC X(78)` declarations across 19 mapsets and **4** `PIC X(80)`
 declarations across 2, totalling 42 — one input and one output field per mapset, and

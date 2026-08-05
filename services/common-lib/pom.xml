@@ -100,12 +100,12 @@
      this project's Explainability rule.
    * A missing or unresolvable parent fails before any goal runs, since
      every version used here is inherited rather than declared.
-   * `LayeringRulesTest` is to fail the `test` phase when an architectural
-     boundary is crossed, using the ArchUnit engine this descriptor puts on
-     the test classpath. That class is authored at a later index of the same
-     plan and does not exist yet, so this exception is the contract the
-     engine declaration below prepares for rather than a failure mode the
-     build can currently produce.
+   * The layering rules, authored in this module's architecture test package
+     under the simple name `LayeringRulesTest`, fail the `test` phase when an
+     architectural boundary is crossed, using the ArchUnit engine this
+     descriptor puts on the test classpath. That simple name is the one the
+     `architecture-rules` include pattern in `services/pom.xml` selects, so the
+     name is a contract rather than a local choice.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  Assumptions: every dependency version is owned by `services/pom.xml` and,
@@ -321,6 +321,36 @@
     </dependency>
 
     <!--
+     `spring-boot-starter-opentelemetry` supplies the OpenTelemetry SDK,
+     Micrometer tracing bridge and OTLP exporter that every service uses to send
+     spans to the collector sidecar in its ECS task.
+
+     Refactoring Rationale: each service already exposes Prometheus metrics, but
+     no dependency previously created or exported a trace. An infrastructure
+     collector cannot recover spans an application never emits, so the tracing
+     bridge belongs on the shared runtime classpath while the AWS-specific
+     exporter destination remains task configuration.
+
+     Assumptions: this dependency is deliberately NOT optional. All eight
+     services depend on common-lib, and the tracing contract is cross-cutting;
+     making it optional would require eight duplicate declarations and would let
+     one bounded context silently disappear from a distributed trace. Spring
+     Boot 4.1.0 manages the starter and its OpenTelemetry versions, so no
+     independent version is declared here.
+
+     Trade-offs: the shared kernel now carries one runtime integration rather
+     than only vendor-neutral tracing types. The alternative was the Java agent,
+     which would require every service image to download and copy a second
+     executable artifact. The starter keeps the same application JAR runnable
+     locally because carddemo-common-defaults.yml disables OTLP export by
+     default, while ECS activates it explicitly through environment variables.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-opentelemetry</artifactId>
+    </dependency>
+
+    <!--
      Assumptions: `CorrelationIdFilter` writes the correlation id into the
      SLF4J mapped diagnostic context, and the SLF4J API arrives transitively
      through the logging starter that sits inside every starter declared
@@ -333,13 +363,12 @@
     -->
 
     <!--
-     Assumptions: all seven test classes this module's plan assigns to it are
-     to end in `Test`, so Surefire will run them in the `test` phase and no
-     Failsafe execution or include pattern override is needed. None of the
-     seven exists yet; each is authored at a later index of the same plan,
-     and this declaration is what lets the first one run without a further
-     build change. This module is to have no integration test and needs
-     none: it touches no database, no queue and no container, which is a
+     Assumptions: every test class in this module ends in `Test`, so Surefire
+     runs them all in the `test` phase and no Failsafe execution or include
+     pattern override is needed. That naming is the whole of the selection
+     contract, which is why it is stated here rather than configured. This
+     module has no integration test and needs none: it touches no database,
+     no queue and no container, which is a
      direct consequence of it owning no schema and no transport. Report
      output stays at the default location the services pipeline collects
      from; relocating it would silently empty the pipeline's test report
@@ -424,10 +453,6 @@
     <plugins>
 
       <!--
-       WHAT: publishes `src/test/java/com/carddemo/common/architecture/` as
-       this module's test artifact, `common-lib-1.0.0-SNAPSHOT-tests.jar`,
-       alongside the ordinary jar of main classes.
-
        Refactoring Rationale: the descriptors in this reactor previously
        stated that the eight service modules INHERITED the layering rules
        from this module. They did not and could not. Maven resolution passes
@@ -486,9 +511,6 @@
       </plugin>
 
       <!--
-       WHAT: switches off the inherited `architecture-rules` Surefire
-       execution in THIS module, and only in this module.
-
        Assumptions: that execution exists in `services/pom.xml` to scan the
        test artifact above into a module that would otherwise never see the
        rule class. This module is where the class lives, so its own ordinary

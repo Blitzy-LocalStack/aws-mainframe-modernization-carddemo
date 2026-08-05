@@ -130,7 +130,7 @@ import org.hibernate.annotations.Immutable;
 //       kernel, so no other service module is on its compile classpath to import from. The
 //       database half is authored elsewhere and is cited by path:
 //       data-migration/sql/V0__schemas_and_roles.sql establishes the schemas, the roles and the
-//       read-only privileges reaching ledger at its L816, and the view named here is declared by
+//       read-only privileges reaching ledger at its L841, and the view named here is declared by
 //       data-migration/sql/V1__reporting_views.sql, ordered after the per-service migrations
 //       because a view cannot precede the table it reads. A view missing at run time is a defect
 //       to report against those two artifacts and never one to work around from inside this
@@ -338,7 +338,7 @@ public class ReportTransactionView {
     //       predicate belongs to the query in the repository layer, so it is not declared here.
     // WHY : Assumptions: no index is declared on this type, and that is ownership rather than
     //       oversight. The two indexes over these rows belong to the context that owns the table,
-    //       declared in V1__ledger.sql at L275 and L299 as idx_transactions_card_num and
+    //       declared in V1__ledger.sql at L269 and L291 as idx_transactions_card_num and
     //       idx_transactions_proc_ts; the baseline equivalent is the alternate index
     //       app/jcl/TRANIDX.jcl declares at L27 with KEYS(26 304), zero-based position 304 being
     //       one-based 305 and therefore exactly this member. The BLDINDEX step that job runs at

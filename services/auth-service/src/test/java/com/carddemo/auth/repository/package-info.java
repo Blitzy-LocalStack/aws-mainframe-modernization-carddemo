@@ -151,16 +151,20 @@
  * class, every test method and every private helper in {@code UserRepositoryIT} carries full
  * Javadoc.</p>
  *
- * <p>Two places exist where the machine is looser than the rule, recorded here so that a later
- * reader does not mistake a passing build for compliance. First, the Checkstyle
- * {@code MissingJavadocMethod} module runs at {@code scope="package"}, and Checkstyle orders its
- * scopes PUBLIC, then PROTECTED, then PACKAGE, then PRIVATE, so a package-level scope cannot reach a
- * {@code private} method at all; its sibling {@code JavadocMethod} does list {@code private} among
- * its {@code accessModifiers}, and the rule's own lines 15 and 43 are written without any visibility
- * qualifier, so a private helper here carries full Javadoc irrespective of which module can see it.
- * Second, {@code allowedAnnotations} is left at its default of {@code Override}, so the machine
- * tolerates a wholly missing Javadoc block on an overriding method; the rule does not, and an
- * {@code inheritDoc} tag on its own satisfies none of the rule's lines 18 through 21.</p>
+ * <p>Two places where the machine was looser than the rule have since been closed in
+ * {@code config/checkstyle/checkstyle.xml}, and the correction is recorded here rather than
+ * overwritten, because the earlier wording invited a reader to treat both as review-only. First,
+ * {@code MissingJavadocMethod} now runs at {@code scope="private"}; Checkstyle orders its scopes
+ * PUBLIC, then PROTECTED, then PACKAGE, then PRIVATE and admits every narrower visibility, so that
+ * setting reaches a {@code private} method directly instead of stopping short of it. Its sibling
+ * {@code JavadocMethod} already listed {@code private} among its {@code accessModifiers}, so
+ * presence and completeness are now enforced by the same pair at the same visibility, which is what
+ * the rule's own lines 15 and 43 always required by carrying no visibility qualifier. Second,
+ * {@code allowedAnnotations} is now the empty list rather than its {@code Override} default, so a
+ * wholly missing Javadoc block on an overriding method fails the build; an {@code inheritDoc} tag on
+ * its own still satisfies none of the rule's lines 18 through 21. Neither correction relaxes what
+ * this package does: the test class, every test method and every private helper in
+ * {@code UserRepositoryIT} carried full Javadoc before the gate could see them and still does.</p>
  *
  * <p>The limit of mechanical enforcement is worth stating plainly rather than leaving implied. The
  * {@code SummaryJavadoc} module's {@code forbiddenSummaryFragments} pattern scans Javadoc summaries

@@ -2,24 +2,6 @@
  * Persistence-mapped projections of the read-only cross-schema views this bounded context
  * queries.
  *
- * <h2>A target contract, not a listing of this directory</h2>
- *
- * <p>Alternatives Considered: this charter is authored ahead of the seven projections it
- * governs, so every class name, count and inventory below states the package's <b>target
- * contract</b> as the migration plan assigns it rather than measuring the files that sit
- * beside it. Withholding the charter until each projection existed was evaluated and
- * rejected, because the charter is precisely what the author of a projection needs -- which
- * type belongs here, which does not, what the closed set is, and which copybook line each
- * declared width comes from -- so writing it last would leave the package with no stated
- * contract exactly where one is load-bearing. Nothing here is speculative on that account:
- * every geometry figure below names the copybook line it was read from, spanning
- * {@code app/cpy/COSTM01.CPY} L20 through {@code app/cpy/CVTRA04Y.cpy} L9, and each of the
- * seven record lengths was re-derived by summing declared widths rather than copied, so the
- * charter is checkable against reference material that never changes. The cost accepted is
- * that an inventory reads as present tense unless the distinction is declared, which this
- * paragraph is for: a projection named below that has no file beside this one is
- * <b>planned</b>, never missing.
- *
  * <h2>The closed set of types</h2>
  *
  * <p>This package holds exactly seven projection types plus this charter, eight {@code .java}
@@ -34,7 +16,37 @@
  * <p>Every type in this package maps a <b>view</b>, never a base table. This context is the
  * one entry in the migration plan's schema-ownership table recorded with no owned tables: it
  * declares no table, no index, no constraint, no DDL of its own, and no schema-migration
- * artifact on its classpath. The wider statement of what the context owns and does not own,
+ * artifact on its classpath.
+ *
+ * <p>The projection-to-relation mapping is written out here because it is the one fact a reader
+ * cannot get from either side alone, and because a projection pointed at the wrong relation is
+ * the defect this section exists to prevent. Every relation is a view in the {@code reporting}
+ * schema and every name carries the {@code v_} prefix, so a mapping that names a relation
+ * without it is pointing at a base table and is wrong by inspection:
+ *
+ * <pre>
+ * projection                  relation                              declared by
+ * ReportTransactionView       reporting.v_report_transactions       V1__reporting_views.sql
+ * StatementTransactionView    reporting.v_statement_transactions    V1__reporting_views.sql
+ * TransactionTypeView         reporting.v_transaction_types         V1__reporting_views.sql
+ * TransactionCategoryView     reporting.v_transaction_categories    V1__reporting_views.sql
+ * AccountView                 reporting.v_accounts                  planned, see below
+ * CustomerView                reporting.v_customers                 planned, see below
+ * CardXrefView                reporting.v_card_xref                 planned, see below
+ * </pre>
+ *
+ * <p>Assumptions: the last three rows are <b>planned</b> in the sense this charter's opening
+ * paragraph defines, and the reason they are not yet declared is mechanical rather than a matter
+ * of sequencing preference. {@code CREATE VIEW} resolves its base references when it runs, and
+ * the three relations they read -- {@code account.accounts}, {@code account.customers} and
+ * {@code account.card_xref} -- are created by an account-service migration that does not exist
+ * yet, so a view over them cannot be created and would take the four that can down with it.
+ * {@code data-migration/sql/V1__reporting_views.sql} records the same obligation from its own
+ * side. Refactoring Rationale: {@code TransactionTypeView} previously mapped the base relation
+ * {@code reference.transaction_types} directly, which broke the invariant this paragraph opens
+ * with; it now maps {@code reporting.v_transaction_types}, which also resolves the column name --
+ * the base relation declares {@code description} and the view aliases it to {@code type_desc} so
+ * the type description stays distinguishable from the equally-wide category description. The wider statement of what the context owns and does not own,
  * including the register of indexes belonging to other contexts, is held once at
  * {@code services/reporting-service/src/main/java/com/carddemo/reporting/package-info.java}
  * and is referenced from here rather than repeated, so the two cannot drift apart.
@@ -220,42 +232,25 @@
  *       declared at L112, and not a competing declaration of the field's type. </li>
  * </ul>
  *
- * <h2>Documentation contract</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>This file exists because user-specified Rule 1 (Explainability) L15 requires a docstring
- * on every module entry point, and a Java package declaration is one; a
- * {@code package-info.java} is the only construct able to carry Javadoc for a package, which
- * is why the obligation lands in this file and nowhere else. Of the four content elements
- * L18-L21 enumerates, only Purpose at L18 applies: a package declaration accepts no
- * parameters, yields no value and raises nothing, so the Parameters, Return values and
- * Exceptions elements at L19, L20 and L21 are inapplicable here rather than omitted, and no
- * at-clause is written to stand in for one of them. The block form used here is what L22
- * requires for Java. The written convention this file conforms to is stated once at
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and owned elsewhere.
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <p>Two Checkstyle checks act on this file and neither is redundant.
- * {@code JavadocPackage} runs at Checker level and requires the file to be present in a
- * package holding a processed {@code .java} file; {@code MissingJavadocPackage} runs inside
- * the tree walker and requires the file to carry Javadoc. A {@code package-info.java} holding
- * nothing but a package statement satisfies the first and fails the second, which is exactly
- * why both are wired rather than one. Both fire from the {@code maven-checkstyle-plugin}
- * execution bound to the {@code validate} phase in {@code services/pom.xml}, which precedes
- * compilation on every build, the image build included, and no in-code suppression filter is
- * wired anywhere in the ruleset, so a finding here cannot be waived from inside a source file.
- *
- * <p>Trade-offs: a green Checkstyle run is not evidence that Rule 1 is satisfied, and the
- * sibling projections in this package must not lean on the linter as though it were. The
- * ruleset is deliberately strict about presence and structural completeness -- its
- * {@code MissingJavadocMethod} entry empties the allowed-annotation list, so not even an
- * overriding method escapes the presence audit by carrying an annotation, and its
- * {@code JavadocMethod} entry validates declared thrown types -- but no module in it can read
- * whether a labelled sentence explains a decision or merely restates the code, which is what
- * L38 forbids, nor whether a rationale is specific, which is what L41 forbids. L43 makes those
- * two halves conjunctive. The enforced half is presence and shape; the unenforced half is
- * rationale, and only a reader supplies the second. The compromise is accepted because the
- * alternative, a pattern asserting that a rationale is genuine, would either pass every
- * labelled sentence or fail honest ones.
- *
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>Decisions</h2>
  *
  * <p>What follows discharges the obligation user-specified Rule 1 (Explainability) states at
@@ -297,9 +292,10 @@
  *
  * <p>Assumptions: agreement with the contexts that own these rows runs through the physical
  * views and the narrowly-scoped grants behind them, and never through code. Two independent
- * mechanisms hold that line. The ArchUnit layering test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * forbids one context's domain package importing another's, and being a test it cannot rot;
+ * mechanisms hold that line. The shared kernel's layering rules, which the
+ * {@code architecture-rules} Surefire execution in {@code services/pom.xml} selects by the simple
+ * name {@code LayeringRulesTest} and evaluates against this module's own compiled classes, forbid one
+ * context's domain package importing another's, and being a build rule they cannot decay unnoticed;
  * and this module's POM declares exactly one dependency inside the reactor, the shared kernel,
  * so no other service module is on its compile classpath to be imported from in the first
  * place. That is the same discipline the baseline read under, where the two consuming programs
@@ -307,12 +303,28 @@
  * {@code app/jcl/TRANREPT.jcl} L65-L74 and {@code app/jcl/CREASTMT.JCL} L83-L86, and never
  * through a compile-time bond between them. The database half is authored elsewhere and is
  * cited here by path: {@code data-migration/sql/V0__schemas_and_roles.sql} establishes the
- * schema, the roles and, at its L816 and the default-privilege statements following it, the
- * {@code SELECT}-only grants reaching {@code ledger}, {@code account}, {@code card} and
- * {@code reference}; and {@code data-migration/sql/V1__reporting_views.sql} declares the views
- * themselves, ordered after every per-service migration because a view cannot precede the
- * table it reads. A view absent at run time is a defect to report against those artifacts and
- * never one to work around from inside this package.
+ * schema and the roles; and {@code data-migration/sql/V1__reporting_views.sql} declares the
+ * views themselves, ordered after every per-service migration because a view cannot precede
+ * the table it reads. A view absent at run time is a defect to report against those artifacts
+ * and never one to work around from inside this package.
+ *
+ * <p>Assumptions: the privilege graph behind those views has two roles rather than one, and
+ * which role holds what is the whole reason the views work, so it is stated exactly here
+ * instead of being summarised. At its L865 and the default-privilege statements following it,
+ * through L885, V0 conveys {@code USAGE} and {@code SELECT} on {@code ledger},
+ * {@code account}, {@code card} and {@code reference} to {@code carddemo_reporting_owner},
+ * which cannot log in; at its L929 through L942 it then revokes all four from
+ * {@code carddemo_reporting}, which is the role this package's datasource connects as. That
+ * service role therefore holds {@code USAGE} on the {@code reporting} schema, granted at L944,
+ * and {@code SELECT} on the relations inside it, granted at L963 through L966, and no privilege
+ * at all on any base table. Every
+ * view is created in the default owner-checked mode and reassigned to the owner role, so a
+ * read resolves its base tables under the owner's privileges rather than the reader's. Reading
+ * the L865 grants as though they reached the service role would make the views look like a
+ * convenience over access the reader already had, when they are in fact the entirety of the
+ * access: an entity here mapped onto a base table instead of onto its view names a relation
+ * this role cannot read, and the query fails with permission denied on a request path rather
+ * than at start-up.
  *
  * <p>Assumptions: the read path this package sits on names four schemas while the baseline job
  * control exercises only three of them, and the gap is recorded here rather than smoothed

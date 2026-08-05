@@ -44,11 +44,10 @@
     3. spring-boot-starter-flyway without flyway-database-postgresql does not
        fail the build. It fails at application
        startup instead. See the note on flyway-database-postgresql below.
-    4. CardRepositoryIT is to run under Failsafe against a real database started
-       by Testcontainers, so a host with no working container runtime will fail
-       the integration phase even when every unit test passes. That class is
-       authored at a later index of the same plan and does not exist yet; the
-       Failsafe binding below is what will make it run when it lands.
+    4. CardRepositoryIT runs under Failsafe against a real database started by
+       Testcontainers, so a host with no working container runtime fails the
+       integration phase even when every unit test passes. The Failsafe binding
+       below is what selects it, by its IT suffix.
 
   Provenance (all paths below are REFERENCE ONLY and are never modified):
     app/cbl/COCRDLIC.cbl   1459 lines  card list, the canonical CICS browse
@@ -298,18 +297,14 @@
       one.
     -->
     <!--
-      WHAT: the Spring Boot module that ACTIVATES Flyway, which is a separate
-      concern from the two engine artifacts immediately below it.
-
-      Spring Boot 4 broke the single spring-boot-autoconfigure artifact into one
-      autoconfiguration module per technology, so FlywayAutoConfiguration no
-      longer travels with the framework core. It ships in
-      org.springframework.boot:spring-boot-flyway, and this starter is what puts
-      that module and spring-boot-jdbc on the classpath.
-
-      Assumptions: the two org.flywaydb coordinates below supply the migration
-      engine and the PostgreSQL dialect and activate nothing on their own. With
-      this starter absent, every spring.flyway.* key in
+      Assumptions: Spring Boot 4 broke the single spring-boot-autoconfigure
+      artifact into one autoconfiguration module per technology, so
+      FlywayAutoConfiguration no longer travels with the framework core; it ships
+      in org.springframework.boot:spring-boot-flyway, which is what this starter
+      contributes together with spring-boot-jdbc. The two org.flywaydb
+      coordinates below supply the migration engine and the PostgreSQL dialect
+      and activate nothing on their own. With this starter absent, every
+      spring.flyway.* key in
       src/main/resources/application.yml is inert, V1__card.sql never runs, and
       the service starts and reports healthy against a database with no cards
       table at all. That is the same build-green, runtime-broken asymmetry the
@@ -452,13 +447,13 @@
       com.carddemo.card was never analysed by anything; the engine sat here with
       no rules to run. This artifact is the shared kernel's test jar, narrowed to
       the architecture package, and the architecture-rules Surefire execution in
-      services/pom.xml is what scans it into this module's test run.
+      services/pom.xml scans it and selects rules by the reserved simple name
+      LayeringRulesTest.
 
-      Assumptions: the rules remain authored exactly once, at
-      services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java.
-      This declaration delivers that one class and adds no copy of it. Version
-      and scope come from the aggregator's managed set, so neither is written
-      here and neither can drift away from the other seven services.
+      Assumptions: the rules must be authored once in the shared architecture
+      package. This dependency delivers that artifact and adds no duplicate; the
+      configuration does not itself claim that a rules class is present. Version
+      and scope come from the aggregator's managed set.
     -->
     <dependency>
       <groupId>com.carddemo</groupId>
@@ -577,8 +572,7 @@
     entry, an IT-suffixed class is never executed, no failsafe report directory is
     produced, and the build still reports success, which is worse than having no
     integration test because it looks like coverage that does not exist. That is
-    exactly the failure this entry exists to prevent for CardRepositoryIT, which
-    is authored at a later index of the same plan.
+    exactly the failure this entry exists to prevent for CardRepositoryIT.
   -->
   <build>
     <!--

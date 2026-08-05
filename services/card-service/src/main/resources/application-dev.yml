@@ -6,16 +6,18 @@
 #   the active profile is dev, and it changes VALUES ONLY: every key below is
 #   already declared and shaped by
 #   services/card-service/src/main/resources/application.yml, which remains the
-#   property-key contract for this module. This file adds no key, removes no
-#   key, and changes the shape of none.
+#   property-key contract for this module. This file adds no key, removes no key,
+#   and changes the shape of none.
 #
-#   Eight values are overridden, on three of the four axes along which the base
-#   file permits a profile to differ, and on no others:
+#   Eight keys are restated and seven values differ, on three of the four axes
+#   along which the base file permits a profile to differ, and on no others. The
+#   eighth key is the bind-logger floor, repeated at WARN beside a raised sibling
+#   so a future parent-logger edit cannot lift it implicitly:
 #     - Connection-pool sizing: a lower ceiling, no idle floor, and a
 #       first-connect budget that tolerates a database instance resuming from
 #       zero capacity.
-#     - Log levels: this module's own package, the migration engine, and the two
-#       statement-level diagnostics the base file deliberately holds at warn.
+#     - Log levels: this module's own package, the migration engine, and SQL
+#       statement text are raised; bind-parameter values remain at warn.
 #     - Actuator exposure breadth: three additional read-only endpoints, for
 #       diagnosis from inside the private network.
 #   The fourth permitted axis is the Flyway clean flag. It is declared in
@@ -28,14 +30,16 @@
 #   capability, and each carries a cost that is recorded adjacent to it rather
 #   than summarised away here.
 #
-#   State at this checkpoint. The migration lands its artifacts in plan order,
-#   and two artifacts this file's reasoning refers to are authored at later
-#   indexes of the same plan: services/card-service/Dockerfile, whose
-#   HEALTHCHECK is to be one of the two consumers of the health endpoint named
-#   below, and application-prod.yml, the counterpart overlay that narrows what
-#   this one widens. Neither exists yet. Nothing below is to be read as a claim
-#   that either has been inspected, nor that any value here has been deployed,
-#   benchmarked or measured against a running cluster.
+#   State of the artifacts this file's reasoning refers to, re-derivable with
+#   `ls services/card-service services/card-service/src/main/resources` rather
+#   than frozen here -- the previous version of this paragraph listed the
+#   production overlay as absent after it had landed. application-prod.yml, the
+#   counterpart overlay that narrows what this one widens, EXISTS.
+#   services/card-service/Dockerfile, whose HEALTHCHECK is to be one of the two
+#   consumers of the health endpoint named below, is NOT YET AUTHORED, so every
+#   statement about that consumer is a target contract. Nothing below is to be
+#   read as a claim that any value here has been deployed, benchmarked or
+#   measured against a running cluster.
 #
 # Parameters:
 #   Environment variables. They are named and never valued: no value for any of
@@ -71,42 +75,36 @@
 #
 # Return values:
 #   The effective Environment the Spring application context resolves when the
-#   dev profile is active: the base configuration in full, with eight values
-#   replaced and nothing else altered. Concretely that yields a pool of at most
+#   dev profile is active: the base configuration in full, with seven values
+#   changed, one safety floor restated and nothing else altered. Concretely that
+#   yields a pool of at most
 #   three connections that drains to none while idle and waits up to forty-five
 #   seconds for its first connection; debug-level output for this module, for
 #   the migration engine and for generated SQL, with statement parameter binding
-#   at trace; and an actuator surface of six read-only endpoints. Every other
+#   held at warn; and an actuator surface of six read-only endpoints. Every other
 #   property resolves exactly as the base file declares it -- the listen port,
 #   the single schema this context owns, the component that owns DDL, the
 #   identity mechanism, transport security, and the served contract.
 #
 # Exceptions or errors:
-#   Startup failure modes specific to this profile, in the order the context
-#   reaches them. All four modes the base file documents still apply unchanged.
-#
+#   All four modes the base file documents still apply unchanged. Two are
+#   specific to this profile:
 #   1. The first connection times out against a paused instance. A development
 #      cluster whose minimum capacity is zero pauses once it has held no
 #      connections for its configured interval, and resumes only when a
 #      connection is requested. The resume is not instant, so the first attempt
 #      after an idle period can exhaust the connect budget and abort context
-#      refresh with a pool initialisation failure while NOTHING is
-#      misconfigured. This is the failure this profile is most likely to
-#      produce, and it is the reason the connect budget below is raised rather
-#      than inherited. A task that fails this way succeeds on the attempt its
-#      own restart makes, because the failed attempt is itself what began the
-#      resume.
-#   2. Pool exhaustion at a lower concurrency than production reaches. The
-#      ceiling below is three rather than the base file's ten, so a burst of
-#      more than three concurrent database operations waits for a connection,
-#      and waits longer than production would before abandoning it. It surfaces
-#      as a connection-timeout error that no slow query explains; in this
-#      profile that is a sizing consequence and not a defect.
-#   3. No new failure mode arises from the widened actuator list or the raised
-#      log levels. Both are additive: an endpoint that cannot contribute is
-#      omitted from its own response rather than failing startup, and a log
-#      level cannot abort a context. Their costs are volume and exposure, and
-#      both are recorded adjacent to the values that incur them.
+#      refresh with a pool initialisation failure while NOTHING is misconfigured.
+#      This is the failure this profile is most likely to produce, and the reason
+#      the connect budget below is raised rather than inherited. A task that fails
+#      this way succeeds on its own restart, because the failed attempt is itself
+#      what began the resume.
+#   2. Pool exhaustion at a lower concurrency than production reaches, surfacing
+#      as a connection-timeout error that no slow query explains. In this profile
+#      that is a sizing consequence and not a defect.
+#   The widened actuator list and raised log levels add no failure mode: an
+#   endpoint that cannot contribute is omitted from its own response rather than
+#   failing startup, and a log level cannot abort a context.
 #
 # WHY (non-obvious design decisions):
 #   1. Pool sizing has no baseline number to preserve, because the baseline
@@ -118,9 +116,9 @@
 #   3. The connect budget is raised past the documented resume time instead of
 #      being inherited, because the inherited value sits inside it. Recorded on
 #      spring.datasource.hikari.connection-timeout.
-#   4. Statement and bind logging are raised here and must not be raised in
-#      production, and the reason is cardholder data reaching log storage rather
-#      than log volume. Recorded on logging.level.
+#   4. SQL statement text is raised here while bind logging remains at warn, and
+#      the split is driven by cardholder data reaching log storage rather than log
+#      volume. Recorded on logging.level.
 #   5. The exposure list gains three endpoints and still refuses the wildcard.
 #      Recorded on management.endpoints.web.exposure.include.
 #   6. Only three of the four permitted axes appear, and the six forbidden axes
@@ -129,9 +127,7 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# WHAT: the three pool-sizing values this profile replaces, and none of the rest
-#       of the base file's connection-pool block.
-# WHY : (1) the pool name, the connection lifetime, the isolation level, the
+# Assumptions: (1) the pool name, the connection lifetime, the isolation level, the
 #       schema pin and the transport-security properties are all declared in the
 #       base file and none of them is sizing, so restating any of them here
 #       would duplicate a contract and create a second place for the two files
@@ -142,163 +138,161 @@ spring:
   datasource:
     hikari:
 
-      # Refactoring Rationale: what this value replaces is not a larger number
-      #   -- it is the absence of the choice. The baseline declared its card
-      #   files with STRINGS(1), at app/csd/CARDDEMO.CSD:16 for CARDAIX and :28
-      #   for CARDDAT, so every online read and every update of the card data
-      #   was served through exactly one string and the concurrency ceiling was
-      #   one. There is therefore no baseline number to carry across and no
-      #   baseline behaviour this value changes. Concurrent pooled access is a
-      #   capability the relational engine provides and the indexed-file
-      #   platform did not, so pool sizing is a degree of freedom the migration
-      #   introduces rather than a tunable it ports. A single-string definition
-      #   is the right shape when many programs share one region, and it has no
-      #   per-container equivalent to preserve; the baseline behaves one way,
-      #   this service behaves the other, and the divergence is recorded in
+      # Refactoring Rationale: what this value replaces is not a larger number --
+      #   it is the absence of the choice. The baseline declared its card files
+      #   with STRINGS(1), at app/csd/CARDDEMO.CSD:16 for CARDAIX and :28 for
+      #   CARDDAT, so every online read and update of the card data was served
+      #   through exactly one string and the concurrency ceiling was one. There is
+      #   therefore no baseline number to carry across and no baseline behaviour
+      #   this value changes: concurrent pooled access is a capability the
+      #   relational engine provides and the indexed-file platform did not. The
+      #   divergence is recorded in
       #   docs/architecture/cobol-to-service-traceability.md.
       #
       # Trade-offs: three rather than the base file's ten. A development
-      #   environment runs a single task against a cluster whose minimum
-      #   capacity may be zero, so the compromise is stated plainly: sustained
-      #   concurrency in dev is lower than in production, and a burst beyond
-      #   three concurrent database operations waits for a connection instead of
-      #   opening one. What that buys is that this profile does not hold compute
-      #   the environment is deliberately configured to release, and does not
-      #   spend from one service an allowance the whole cluster shares.
+      #   environment runs a single task against a cluster whose minimum capacity
+      #   may be zero, so sustained concurrency in dev is lower than in
+      #   production and a burst beyond three concurrent database operations waits
+      #   instead of opening a connection. What that buys is that this profile
+      #   does not hold compute the environment is deliberately configured to
+      #   release, and does not spend from one service an allowance the whole
+      #   cluster shares.
       maximum-pool-size: 3
 
       # Assumptions: a connection left open is what holds a zero-capacity
       #   instance awake. Such an instance pauses only after an interval during
       #   which it has had no connections initiated by user activity, so any
       #   session still established across that interval prevents the pause
-      #   outright. An idle floor of two -- which is what the base file declares
-      #   -- would therefore hold two sessions open overnight and the instance
-      #   would never reach the state the dev environment is sized to reach.
-      #   Zero lets the pool drain completely, which is the only condition in
-      #   which that pause can happen at all.
+      #   outright. The base file's idle floor of two would hold two sessions open
+      #   overnight and the instance would never reach the state the dev
+      #   environment is sized to reach; zero lets the pool drain completely,
+      #   which is the only condition in which that pause can happen at all.
       #
       # Assumptions: this does not disable the startup connection check. With no
-      #   idle floor the pool still opens one connection while starting, to
-      #   prove the configuration works, and then closes it immediately instead
-      #   of retaining it -- so failure mode 1 above is still reached at startup
-      #   rather than being deferred to the first request.
+      #   idle floor the pool still opens one connection while starting, to prove
+      #   the configuration works, and then closes it immediately instead of
+      #   retaining it -- so failure mode 1 above is still reached at startup
+      #   rather than deferred to the first request.
       #
       # Trade-offs: with no floor, the first request after a quiet period pays
-      #   connection establishment inside the request, and if the instance has
-      #   paused it pays the resume as well. That is the accepted compromise: a
-      #   slower first request in exchange for an environment that can actually
-      #   reach zero capacity. Production keeps a floor, because there the first
-      #   request is a user's and the instance is not expected to pause.
+      #   connection establishment inside the request, and the resume too if the
+      #   instance has paused. That is the accepted compromise: a slower first
+      #   request in exchange for an environment that can actually reach zero
+      #   capacity. Production keeps a floor, because there the first request is a
+      #   user's and the instance is not expected to pause.
       minimum-idle: 0
 
-      # Assumptions: this value has to clear the resume, not the steady state.
-      #   The documented resume for an instance that has paused at zero capacity
-      #   is under fifteen seconds, and an instance left paused for an extended
-      #   period resumes more slowly again. The base file's ten seconds sits
-      #   INSIDE even the shorter of those figures, so on this profile it would
-      #   not report a slow database -- it would abandon the first connection of
-      #   the morning while the instance was still coming back, abort context
-      #   refresh, and name a pool initialisation failure for a cluster that was
-      #   working. Forty-five seconds carries headroom over both figures instead
-      #   of sitting on the boundary of the smaller one.
+      # Assumptions: this value has to clear the resume, not the steady state. The
+      #   documented resume for an instance paused at zero capacity is under
+      #   fifteen seconds, and one left paused for an extended period resumes more
+      #   slowly again. The base file's ten seconds sits INSIDE even the shorter
+      #   figure, so on this profile it would not report a slow database -- it
+      #   would abandon the first connection of the morning while the instance was
+      #   still coming back, abort context refresh, and name a pool initialisation
+      #   failure for a cluster that was working. Forty-five seconds carries
+      #   headroom over both figures instead of sitting on the boundary.
       #
-      # Trade-offs: a genuinely unreachable database now takes forty-five
-      #   seconds to say so rather than ten, which lengthens the feedback loop
-      #   on a real misconfiguration. That cost is accepted only because this
-      #   profile's expected first-connect case is a resume and not a failure.
-      #   The base file's reason for the shorter value is unchanged and is
-      #   exactly why production does not inherit this one: under pool
-      #   exhaustion a long wait occupies each waiting request's servlet thread,
-      #   the thread pool saturates, and the health endpoint served by that same
-      #   pool stops answering.
+      # Trade-offs: a genuinely unreachable database now takes forty-five seconds
+      #   to say so rather than ten, lengthening the feedback loop on a real
+      #   misconfiguration. Accepted only because this profile's expected
+      #   first-connect case is a resume and not a failure. The base file's reason
+      #   for the shorter value is unchanged and is exactly why production does
+      #   not inherit this one: under pool exhaustion a long wait occupies each
+      #   waiting request's servlet thread, the thread pool saturates, and the
+      #   health endpoint served by that same pool stops answering.
       connection-timeout: 45000
 
 # -----------------------------------------------------------------------------
-# WHAT: the four log levels this profile raises above the base file's floor.
-# WHY : (1) they are raised together because between them they answer one
+# Alternatives Considered: (1) they are raised together because between them they answer one
 #       question -- what this module decided, and what SQL it issued to act on
 #       that decision -- and raising only some of them leaves the answer
 #       incomplete; (2) the root level is deliberately NOT among them, so that
 #       framework internals do not bury this module's own output at the moment
-#       it becomes readable.
+#       it becomes readable; (3) the fourth entry, the bind-parameter logger, is
+#       restated at the base file's WARN rather than raised, because in this
+#       module a bound parameter is a primary account number. Its reasoning is
+#       written out at the level itself, because that is the one value in this
+#       file whose being wrong is a disclosure rather than a cost.
 # -----------------------------------------------------------------------------
 logging:
   level:
 
     # Trade-offs: debug on this module's own package emits the validation chain
-    #   transcribed from app/cbl/COCRDUPC.cbl for every field of every update,
-    #   and the paging decision taken on every list request. That is what makes
-    #   a parity question answerable from a log instead of from a debugger,
-    #   which is the capability this profile exists to provide. The accepted
-    #   cost is that the output is produced on every request whether or not
-    #   anyone is reading it, and that it is the bulk of this profile's log
-    #   volume.
+    #   transcribed from app/cbl/COCRDUPC.cbl for every field of every update, and
+    #   the paging decision taken on every list request. That is what makes a
+    #   parity question answerable from a log instead of a debugger, which is the
+    #   capability this profile exists to provide. The accepted cost is that the
+    #   output is produced on every request whether or not anyone is reading it,
+    #   and that it is the bulk of this profile's log volume.
     com.carddemo: DEBUG
 
-    # Trade-offs: the base file holds this at info, where the engine reports
-    #   which migration it applied but not what that migration did. Debug adds
-    #   the statements themselves, which is what separates the three startup
-    #   failures the base file lists but which a single message cannot
-    #   distinguish -- a checksum mismatch on an already-applied migration, a
-    #   missing privilege on the schema, and a schema that already holds objects
-    #   with no history table. The accepted cost is a burst of output at every
-    #   start, including every start that had nothing to apply.
+    # Trade-offs: the base file holds this at info, where the engine reports which
+    #   migration it applied but not what that migration did. Debug adds the
+    #   statements themselves, which is what separates the three startup failures
+    #   the base file lists but which a single message cannot distinguish -- a
+    #   checksum mismatch on an already-applied migration, a missing privilege on
+    #   the schema, and a schema that already holds objects with no history table.
+    #   The accepted cost is a burst of output at every start, including every
+    #   start that had nothing to apply.
     org.flywaydb: DEBUG
 
-    # Trade-offs: these two are both the reason this profile is useful and the
-    #   reason it is confined to development. Raised, they print the generated
-    #   SQL and then the values bound into it, which is what makes the card
-    #   list's keyset query readable at all: the predicate over the composite
-    #   cursor of card number and account id, the ordering that cursor depends
-    #   on, and the limit of page size plus one from which the next-page
-    #   indicator is derived. Without the bound values a keyset predicate cannot
-    #   be read, because every part of it that decides the page boundary is a
-    #   parameter. The accepted cost is at least two log lines per statement --
-    #   substantially higher volume, and correspondingly higher CloudWatch Logs
-    #   ingestion -- plus slower request handling, since every statement is
-    #   formatted and written before it is executed. These two levels are dev
-    #   ONLY, and application-prod.yml must not carry them.
+    # Trade-offs: the statement logger is both the reason this profile is useful
+    #   and the reason it is confined to development. Raised, it prints the
+    #   generated SQL, which is what makes the card list's keyset query readable:
+    #   the predicate over the composite cursor of card number and account id,
+    #   the ordering that cursor depends on, and the limit of page size plus one
+    #   from which the next-page indicator is derived. Its SHAPE is therefore
+    #   readable here; the VALUES are not, deliberately, and the entry below says
+    #   why. The accepted cost is one log line per statement -- higher volume and
+    #   correspondingly higher CloudWatch Logs ingestion -- plus slower request
+    #   handling, since every statement is formatted before it is executed. This
+    #   level is dev ONLY, and application-prod.yml must not carry it.
     #
-    # Assumptions: what makes this acceptable is a property of the data this
-    #   profile runs against, and it is an assumption rather than a guarantee
-    #   this file can enforce, so it is stated as the condition of activating
-    #   the profile at all. Two things are true of this module regardless of
-    #   environment. The card verification value CANNOT appear: it is held
-    #   encrypted as BYTEA, no read path selects it, and it therefore has no
-    #   serialised form to bind -- its source field is CARD-CVV-CD PIC 9(03) at
-    #   app/cpy/CVACT02Y.cpy:7, and the migration deliberately gives it no
-    #   readable representation. The account number is masked to its last four
-    #   digits on every response except the administrative card-detail endpoint.
-    #   What NEITHER property covers is the card number as a bound parameter: it
-    #   is the key of app/cpy/CVACT02Y.cpy:5, so it appears in the predicate of
-    #   every keyed read and every page of the list, and the masking applied at
-    #   the API edge does not reach log storage. The base file says exactly this
-    #   and concludes that the dev profile may raise these levels and production
-    #   must not. The assumption this profile therefore depends on is that the
-    #   environment activating it is loaded from the seed extract under
-    #   app/data, not from live cardholder data. This is the one place in this
-    #   file where a wrong value has a data-exposure consequence rather than a
-    #   cost, which is why it is documented here and not left to be inferred
-    #   from the level names.
+    # Assumptions: what makes the STATEMENT logger acceptable is that statement
+    #   text carries no parameter VALUES. It shows the predicate, the ordering
+    #   and a bind marker per bound value, which is exactly what verifying a
+    #   keyset query needs and is not cardholder data. Two further properties of
+    #   this module hold regardless of environment and are worth stating because
+    #   they bound what could ever appear: the card verification value CANNOT
+    #   appear at all, being held encrypted as BYTEA with no read path selecting
+    #   it and therefore no serialised form to bind -- its source field is
+    #   CARD-CVV-CD PIC 9(03) at app/cpy/CVACT02Y.cpy:7 -- and the account number
+    #   is masked to its last four digits on every response except the
+    #   administrative card-detail endpoint.
     org.hibernate.SQL: DEBUG
 
-    # Assumptions: this one is TRACE and not DEBUG, and the difference is not
-    #   stylistic -- at DEBUG this category emits NOTHING. The values bound into
-    #   a statement are written by a single logger in the persistence provider,
-    #   and that logger guards every one of its calls on a trace-level check, so
-    #   DEBUG would leave the level looking deliberately set while producing no
-    #   output at all and no error to say why. Verified against the provider
-    #   release this module resolves rather than assumed: the only class
-    #   carrying this category name guards its emission solely with a
-    #   trace-enabled test and has no debug-level path. Raising the line above
-    #   without raising this one to TRACE yields SQL text with every parameter
-    #   shown as a placeholder, which for a keyset predicate is the half that
-    #   carries no information.
-    org.hibernate.orm.jdbc.bind: TRACE
+    # Refactoring Rationale: this category was set to TRACE and is now pinned at
+    #   WARN, and the reversal is the whole point of the entry. At TRACE the
+    #   persistence provider writes every value bound into every statement, and in
+    #   THIS context the bound values are primary account numbers: the card number
+    #   is the key of app/cpy/CVACT02Y.cpy:5, so it appears in the predicate of
+    #   every keyed read and every page of the list. The card verification value is
+    #   bound on an update. Log storage is the one destination the masking applied
+    #   at the API edge does not reach and the one an operator, a log-shipping
+    #   pipeline and a retention policy all touch, so raising this category wrote
+    #   unmasked cardholder data into the least-controlled place in the system.
+    # Refactoring Rationale: the reasoning it replaces was that a dev environment
+    #   is seeded from the extract under app/data rather than from live cardholder
+    #   data. That is true of a correctly-seeded environment and it is not a
+    #   control: nothing enforces it, the seed extract is itself realistic card
+    #   data, and a profile is a runtime choice that can be activated against any
+    #   database. A property whose safety depends on which data happens to be
+    #   loaded is not safe.
+    # Trade-offs: the diagnostic this gives up is the parameter half of a keyset
+    #   predicate, and org.hibernate.SQL above still yields the statement text with
+    #   its parameters shown as placeholders. That is genuinely less informative
+    #   for debugging a page boundary, and the compensating diagnostic is the
+    #   page envelope the response itself carries -- firstKey, lastKey and hasNext
+    #   are returned to the caller on every page, so the values the predicate used
+    #   are observable without being logged.
+    # Assumptions: WARN is stated explicitly rather than simply omitted, so that
+    #   raising a broader category cannot raise this one by inheritance. An omitted
+    #   entry inherits, and the entry above it is DEBUG; pinning it means the only
+    #   way to turn it up is to edit this line, which is a reviewable change.
+    org.hibernate.orm.jdbc.bind: WARN
 
 # -----------------------------------------------------------------------------
-# WHAT: the one actuator value this profile replaces -- the exposure list.
-# WHY : (1) the base path, the probe groups and the two health-detail
+# Assumptions: (1) the base path, the probe groups and the two health-detail
 #       suppressions are left exactly as the base file sets them, so the health
 #       contract this widening sits beside is untouched; (2) breadth is a
 #       permitted axis and this list is the only expression of it.
@@ -308,95 +302,72 @@ management:
     web:
       exposure:
 
-        # Assumptions: three of the six names below are not diagnostics at all
-        #   and are present because an exposure list REPLACES rather than
-        #   extends, so omitting one drops it. health is a deployment contract:
-        #   the load balancer target group polls GET /actuator/health to decide
-        #   whether a task receives traffic, and the HEALTHCHECK instruction in
-        #   services/card-service/Dockerfile is to poll that same path to decide
-        #   whether the container is alive. NEITHER of those two can present a
-        #   token, so the path has to stay exactly where it is and stay
+        # Assumptions: three of the six names below are not diagnostics at all and
+        #   are present because an exposure list REPLACES rather than extends, so
+        #   omitting one drops it. health is a deployment contract: the load
+        #   balancer target group polls GET /actuator/health to decide whether a
+        #   task receives traffic, and the HEALTHCHECK instruction in
+        #   services/card-service/Dockerfile is required to poll that same path to
+        #   decide whether the container is alive. NEITHER of those two can present
+        #   a token, so the path has to stay exactly where it is and stay
         #   reachable. prometheus is the scrape path, and
-        #   micrometer-registry-prometheus is a runtime dependency of this
-        #   module precisely so that path exists: the dashboards and alarms the
-        #   Terraform observability module provisions read it, and dropping it
-        #   would not make them fail -- it would make them report healthy
-        #   silence, which is the worse outcome because nothing raises it. info
-        #   identifies which build a task is running.
+        #   micrometer-registry-prometheus is a runtime dependency of this module
+        #   precisely so that path exists: the dashboards and alarms the Terraform
+        #   observability module provisions read it, and dropping it would not make
+        #   them fail -- it would make them report healthy silence, which is worse
+        #   because nothing raises it. info identifies which build a task is
+        #   running.
         #
-        # Assumptions: the three added names are acceptable because of where
-        #   this service sits, not because of what they return. The dev service
-        #   is reached the same way production is, through an HTTP API in front
-        #   of an internal load balancer with the tasks in private application
-        #   subnets, so it has no route from the internet -- and that is the
-        #   property being relied on rather than any claim that these endpoints
-        #   are harmless. configprops and env describe the resolved
-        #   configuration of a service whose configuration names a database and
-        #   the role it connects as, and mappings enumerates every route the
-        #   service answers. On an internet-reachable service that combination
-        #   is a map for someone else; here it is a map for whoever is
-        #   diagnosing the service.
+        # Assumptions: the three added names are acceptable because of where this
+        #   service sits, not because of what they return. The dev service is
+        #   reached the same way production is, through an HTTP API in front of an
+        #   internal load balancer with the tasks in private application subnets,
+        #   so it has no route from the internet -- and that is the property being
+        #   relied on rather than any claim these endpoints are harmless.
+        #   configprops and env describe the resolved configuration of a service
+        #   whose configuration names a database and the role it connects as, and
+        #   mappings enumerates every route the service answers. On an
+        #   internet-reachable service that combination is a map for someone else;
+        #   here it is a map for whoever is diagnosing the service.
         #
-        # Alternatives Considered: the wildcard, which is the obvious way to
-        #   open a development surface. Refused for the reason the base file
-        #   gives, made sharper by what this module holds: the wildcard also
-        #   publishes heapdump, whose response is an image of the entire JVM
-        #   heap, and that heap at any instant holds the unmasked account
-        #   numbers the administrative card-detail path returns, the bearer
-        #   tokens that authorised the requests in flight, and the credential
-        #   the pool authenticated with. Naming six endpoints costs an edit when
-        #   a seventh is wanted; the wildcard would make the most sensitive
-        #   object this service can produce downloadable from inside the
-        #   network.
-        #
-        # Alternatives Considered: widening the two health-detail suppressions
-        #   as well, which the base file describes as part of this same axis.
-        #   Deliberately not done. Those two are what hold the response of the
-        #   one UNAUTHENTICATED endpoint down to a status word, and this
+        # Alternatives Considered: the wildcard, the conventional way to open a
+        #   development surface. Refused because it also publishes heapdump, whose
+        #   response is an image of the entire JVM heap -- and that heap at any
+        #   instant holds the unmasked account numbers the administrative
+        #   card-detail path returns, the bearer tokens that authorised the
+        #   requests in flight, and the credential the pool authenticated with.
+        #   Naming six endpoints costs an edit when a seventh is wanted; the
+        #   wildcard would make the most sensitive object this service can produce
+        #   downloadable from inside the network. Widening the two health-detail
+        #   suppressions was rejected on the same ground: they hold the response of
+        #   the one UNAUTHENTICATED endpoint down to a status word, and this
         #   module's health contributors are its database and that database's
         #   validation query, so widening them would describe this service's
         #   dependencies to anything that reached the port -- including the
         #   probes that cannot authenticate. loggers is likewise not added: it
         #   can change a level at run time, and the point of confining the
-        #   statement and bind levels above to this file is that a reader can
-        #   tell from the file which environments emit them.
+        #   raised statement level and explicit bind floor above to this file is
+        #   that a reader can tell from the file which environments emit values.
         #
         # Trade-offs: what is given up is a broader read-only surface inside the
-        #   private network. What is bought is being able to establish what a
-        #   task actually resolved and what it serves, without building an image
-        #   and redeploying to find out. application-prod.yml narrows this list
-        #   back to the base file's three.
+        #   private network. What is bought is establishing what a task actually
+        #   resolved and what it serves, without building an image and redeploying
+        #   to find out. application-prod.yml narrows this list back to three.
         include: health,info,prometheus,configprops,env,mappings
 
 # =============================================================================
 # Closing notes
 # -----------------------------------------------------------------------------
-# Assumptions: this file is an overlay, not a configuration in its own right. It
-#   is read only together with the base file, and it is written against that
-#   file's own statement that the two profiles override VALUES only. All eight
-#   keys above are already declared there, so this file introduces no property
-#   the base did not shape: a reader diffing the two sees eight changed values
-#   and no additions.
+# Assumptions: this file is an overlay, not a configuration in its own right. All
+#   eight keys above are already declared in the base file, so a reader diffing
+#   the two sees eight changed values and no additions.
 #
-# Assumptions: three of the four permitted axes appear here -- log levels, pool
-#   sizing, and actuator breadth. The fourth, the Flyway clean flag, is declared
-#   in application-prod.yml alone and is absent here in either polarity, because
-#   the environment that needs it is not this one and any value here would
-#   pre-empt it.
-#
-# Trade-offs: the six forbidden axes -- service topology, route structure,
-#   schema ownership, identity mechanism, use of a message transport, and
-#   datastore type -- are not restated in this file at all, not even at their
-#   base values. Repeating a value for clarity reads like documentation and
-#   behaves like a second source of truth: the two files would then be free to
-#   drift, and the drift would stay invisible until an environment behaved
-#   differently for a reason no diff explained. The accepted cost is that this
-#   file cannot be read alone to learn what those settings are; the base file is
-#   where they are stated, once.
-#
-# Assumptions: nothing here has been deployed. This overlay is authored and
-#   statically validated -- it parses, its key set is a strict subset of the
-#   base file's, and every key it carries lies on a permitted axis. No claim is
-#   made that it has been run against a cluster, that a resume was observed, or
-#   that any log volume was measured.
+# Trade-offs: the six forbidden axes -- service topology, route structure, schema
+#   ownership, identity mechanism, use of a message transport, and datastore type
+#   -- are not restated here at all, not even at their base values. Repeating a
+#   value for clarity reads like documentation and behaves like a second source
+#   of truth: the two files would then be free to drift, and the drift would stay
+#   invisible until an environment behaved differently for a reason no diff
+#   explained. The accepted cost is that this file cannot be read alone to learn
+#   what those settings are.
 # =============================================================================

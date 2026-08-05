@@ -1,24 +1,6 @@
 /**
  * Anti-corruption boundary of the pending credit-card authorization bounded context.
  *
- * <h2>Target contract, not a census of this directory</h2>
- *
- * <p>Assumptions: every type name, byte width and component count below describes this package's
- * target contract as the migration plan assigns it, and not the set of files sitting beside this
- * one. The migration lands its artifacts in plan order and this charter is authored first, so at
- * the checkpoint that authored it this directory holds this charter and nothing else. A mapper
- * named below that has no file yet is therefore planned rather than missing, and a count below is
- * a target total rather than a measurement of the directory. The parent charter at
- * {@code com/carddemo/authorization/package-info.java} L17 to L23 declares the same convention for
- * the same reason, so the two files are to be read the same way.
- *
- * <p>Alternatives Considered: withholding this charter until the four mappers exist. Rejected,
- * because this charter is what the authors of those four work from -- which concern belongs in this
- * package, which may not, and what may never be relaxed here -- so writing it last would leave the
- * package with no stated contract during exactly the interval in which one is needed. The cost
- * accepted is that the inventory reads as present tense unless the distinction is declared, which
- * is what the paragraph above is for.
- *
  * <h2>Purpose</h2>
  *
  * <p>This package is the hand-written anti-corruption layer of the pending-authorization bounded
@@ -209,44 +191,25 @@
  * {@code record} types with explicit constructors give the same brevity with members that can be
  * documented, so the brevity is available without trading the gate away for it.
  *
- * <h2>Why this file exists</h2>
+ * <h2>Why this charter exists, and the form it takes</h2>
  *
- * <p>Two independent grounds require this file, and either one alone would be sufficient.
+ * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
+ * and in Java the entry point of a package is its package declaration, which only
+ * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
+ * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
+ * inspects the file set and requires this file to exist in any directory holding an audited source
+ * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
+ * A charter reduced to a bare package statement satisfies the first and fails the second, which is
+ * why prose is the deliverable and the file's mere existence is not.
  *
- * <p>The first is user-specified Rule 1 (Explainability) L15, which requires a docstring on every
- * module entry point. A Java package declaration is such an entry point, and a
- * {@code package-info.java} is the only construct that can carry Javadoc for one, so the obligation
- * lands in this file and can land nowhere else. This file is accordingly forced by that rule rather
- * than by the migration itself: no row of the plan's file-by-file transformation mapping names it
- * and no COBOL construct maps to it, which is why it appears under the plan's rule-mandated files
- * at section 0.2.1.6 and under the mechanical-gates paragraph at section 0.8.1. Of the four content
- * elements that rule enumerates at L18 to L21, only Purpose applies here: a package declaration
- * accepts no parameters, yields no value and raises nothing, so the Parameters, Return values and
- * Exceptions elements are inapplicable rather than omitted, and no at-clause is written to stand in
- * for one of them. The block form used here is what L22 requires for Java, which names Javadoc
- * explicitly.
- *
- * <p>Assumptions: the second ground is mechanical, and it depends on an external contract this file
- * does not own, namely {@code config/checkstyle/checkstyle.xml} together with its binding in
- * {@code services/pom.xml}. Two of the ten checks that rule set enables act on this file and they
- * are not redundant. {@code JavadocPackage}, declared at Checker level because it inspects files
- * rather than syntax trees, requires this file to be PRESENT in a directory that holds a processed
- * Java source. {@code MissingJavadocPackage}, declared inside the tree walker, requires the file to
- * CARRY Javadoc. An empty {@code package-info.java} satisfies the first and fails the second, so
- * deleting the Javadoc below is as much a build failure as deleting the file. Both fire from the
- * {@code checkstyle-documentation-gate} execution of {@code maven-checkstyle-plugin} bound to the
- * Maven {@code validate} phase in {@code services/pom.xml} L729 to L730, with
- * {@code failOnViolation} true at L819 and {@code violationSeverity} at warning at L820, and that
- * phase runs ahead of compilation on every build rather than in continuous integration alone. The
- * companion suppressions file is loaded with its optional flag false, so it fails closed: were it
- * absent, the build would stop rather than proceed having suppressed nothing and verified nothing.
- * User-specified Rule 1 (Explainability) L43 states the consequence of a missing docstring as a
- * failed review; turning that same omission into a failed build before compilation is the migration
- * plan's own mechanisation at section 0.8.1, and is not something L43 itself asks for. This build's
- * exit status is binary. The graded condition-code rubric under which the COBOL parity oracle treats
- * a warning-level aggregate as its green state belongs to that suite alone and is never carried into
- * a Maven, Checkstyle, Surefire or Failsafe result on this side.
- *
+ * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
+ * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
+ * this block under the four canonical labels -- the only placement a package makes available. No
+ * parameter, return or exception at-clause appears, because a package declaration accepts no
+ * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
+ * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
+ * rather than a departure from it. The written convention every block here follows is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>Where no charter is written, and why that is deliberate</h2>
  *
  * <p>Assumptions: {@code JavadocPackage} audits only a directory that actually holds a processed
@@ -288,51 +251,5 @@
  * a successful root-segment read. They are dead scaffolding in the loader, they are not part of the
  * loader's behaviour, and they are not carried into this package. This is an inventory entry and it
  * is not a finding about the baseline.
- *
- * <h2>Decisions about this charter itself</h2>
- *
- * <p>Trade-offs: every justification above sits inside this Javadoc block rather than beside a
- * statement, which departs from the letter of user-specified Rule 1 (Explainability) L27 and is
- * nevertheless the only placement this file admits. L27 asks that a comment sit adjacent to the code
- * it explains; a package declaration has no statements, so there is no code for a comment to be
- * adjacent to, and the adjacency requirement is satisfied vacuously rather than waived. The
- * alternative of writing the entries as line comments above the declaration was available, and the
- * parent charter takes it for the one decision it has something to sit beside. It was not taken here
- * because these entries are the substance of the charter rather than asides to it, and splitting
- * them across two comment forms in one file would leave a reader unsure which form to search. The
- * cost accepted is that each entry sits further from the behaviour it describes than an inline
- * comment would, and the compensation is that every one of them names its evidence by path and line.
- *
- * <p>Assumptions: each rationale above is tagged with one of exactly four labels, written plural,
- * unparenthesised, colon-terminated and without emphasis markup, as
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} L222 to L225 sets out and as user-specified Rule 1
- * (Explainability) L31 to L34 words them. That spelling is data rather than presentation, because a
- * reviewer auditing this tree against the rule's validation gate at L43 has to find every rationale
- * across seven languages and a literal string search is the only mechanism that works in all seven.
- * A second accepted spelling would read as documented to a person and as absent to the search, so
- * the singular and parenthesised variants used by the reference test suite are deliberately not
- * reproduced here even though that suite is the older idiom in this repository.
- *
- * <p>Refactoring Rationale: the differences between baseline and target recorded above are stated as
- * differences and never as verdicts. That framing is the house rule for this migration: the COBOL is
- * the behavioural oracle, it is read and never modified, and a comment calling it defective would
- * invite exactly the edit the migration forbids. What each entry records instead is what the
- * baseline does, what the target does, and the line numbers that let a reader check both. The
- * register in {@code docs/architecture/cobol-to-service-traceability.md} is the single place those
- * differences are enumerated, so a difference documented only here would be invisible to anyone
- * auditing the set.
- *
- * <p>Assumptions: the package name {@code com.carddemo.authorization.mapper} is an external
- * contract and not a local naming choice. The ArchUnit layering test at
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * matches on the nine package roots to assert that no bounded context reaches another's
- * {@code domain} package, that a {@code domain} package holds no web or cloud client type, and that
- * no binary approximation type appears in the money path, since such a type cannot hold a decimal
- * cent exactly and the error it introduces is silent rather than loud. Renaming or
- * abbreviating this package would not be a cosmetic edit: the test would stop matching this tree and
- * would then pass while asserting nothing about it, which is worse than failing, because a rule that
- * silently stops applying looks identical to a rule that is satisfied. {@code ImportControl} is
- * deliberately absent from {@code config/checkstyle/checkstyle.xml} so that the boundary keeps that
- * single owner, and it is not restated here.
  */
 package com.carddemo.authorization.mapper;

@@ -133,16 +133,32 @@ import tools.jackson.databind.module.SimpleModule;
  *
  * <h2>How a consumer registers this module</h2>
  *
- * <p>Trade-offs: each consumer registers this module explicitly, and the alternative was not
- * available rather than merely less attractive. Jackson can discover a module through the platform
- * service-provider mechanism, which reads a provider-configuration file from the jar's own metadata
- * directory; that would make registration automatic for every consumer on the classpath. This module
- * publishes no such file, because it is a library and this project's plan gives it no resource
- * directory of any kind -- the same rule that gives it no container image, no configuration profile
- * and no schema migration. The compromise accepted is one line of explicit wiring per consumer,
- * either a call to the mapper's own registration method or a bean of the module type, which a Spring
- * context detects and applies to the mapper it builds. What is bought is a library that stays a
- * library.</p>
+ * <p>Refactoring Rationale: no consumer registers this module explicitly, and none has to. This
+ * module publishes a provider-configuration file for the platform service-provider mechanism, named
+ * for the Jackson module interface and holding this class's binary name; the file lives under this
+ * module's own resource tree at {@code src/main/resources} and carries its own commentary. Jackson
+ * resolves modules through the platform service loader, so a mapper built with its
+ * find-and-add-modules step discovers this one and registers both handlers with no wiring at the call
+ * site, and the framework's own Jackson configuration performs that step by default. The earlier
+ * shape of this module relied on one line of explicit wiring per consumer and, measurably, got none:
+ * the failure described immediately above -- three sign predicates rendered and the amount absent
+ * altogether -- is what a forgotten registration produces, and it is silent in every build and
+ * startup log. Discovery removes the per-consumer step that was the single point of failure.</p>
+ *
+ * <p>Trade-offs: the compromise accepted is that registration is no longer visible in the Java source
+ * of a consumer, so a reader of a controller cannot see why an amount is quoted. What is bought is
+ * that no consumer can forget it. Two properties bound the cost. The registration identifier this
+ * class supplies makes registration idempotent, so a consumer that additionally registers the module
+ * by hand -- which remains supported, since the public no-argument constructor is unchanged --
+ * replaces one map entry rather than adding a second. And the handlers are bound to {@link Money}
+ * alone, so discovery cannot alter the rendering of any other type in any consumer that merely has
+ * this library on its classpath.</p>
+ *
+ * <p>Alternatives Considered: a framework auto-configuration class declaring a bean of this module
+ * type was evaluated and rejected. It would take effect only inside an application context, so a
+ * batch step or a test that builds a bare mapper would still render the broken form, and it would
+ * make this library depend on the framework's auto-configuration artifact for a concern that is not
+ * framework-specific. The platform mechanism is neutral and is the one Jackson documents.</p>
  *
  * <p>Trade-offs: the class therefore offers a public no-argument constructor and requires no
  * framework at all, so it works against a bare mapper. The web starter that would supply framework
@@ -168,14 +184,15 @@ import tools.jackson.databind.module.SimpleModule;
  * {@link Money} renders its own text form as the wire form, so an amount used as a key would still be
  * written as plain decimal text.</p>
  *
- * <p>Trade-offs: two identifiers are described in this file rather than spelled, and the omission is
- * deliberate so that a later reader does not supply them. The first is the pair of IEEE-754 binary
- * primitive type names and their wrapper types, excluded from the money path; the second is the name
- * of the jar metadata directory that holds a service-provider configuration file. Both are audited by
- * a search of this tree for those exact tokens, so writing either one produces a hit that has to be
- * explained away on every audit. The descriptions above are unambiguous, the cost is paid in reading
- * effort, and the convention is not invented here: {@link Money} and the package descriptor beside it
- * describe the numeric type names the same way.</p>
+ * <p>Trade-offs: one identifier is described in this file rather than spelled, and the omission is
+ * deliberate so that a later reader does not supply it: the pair of IEEE-754 binary primitive type
+ * names and their wrapper types, excluded from the money path. Those tokens are audited by a search of
+ * this tree, so writing either one produces a hit that has to be explained away on every audit. The
+ * description above is unambiguous, the cost is paid in reading effort, and the convention is not
+ * invented here: {@link Money} and the package descriptor beside it describe the numeric type names
+ * the same way. The service-provider path is the deliberate exception -- it is spelled out in the
+ * provider-configuration file itself, because there the interface name is not prose but the lookup key
+ * the platform matches on.</p>
  *
  * <h2>Documentation of the overriding members</h2>
  *
@@ -358,6 +375,27 @@ public final class MoneyModule extends SimpleModule {
     private static final class MoneyDeserializer extends ValueDeserializer<Money> {
 
         /**
+         * The stable reason recorded when the submitted characters are not plain decimal text.
+         *
+         * <p>Assumptions: a short upper-case token rather than a sentence, so a consumer matches on it
+         * and an operator greps for it, and neither has to parse prose that may be reworded. The two
+         * tokens below are the only reasons this deserialiser can report, because the factory it
+         * delegates to has exactly two failure modes.</p>
+         */
+        private static final String REASON_MALFORMED = "MONEY_MALFORMED";
+
+        /**
+         * The stable reason recorded when the submitted amount exceeds the reference picture's domain.
+         *
+         * <p>Assumptions: kept distinct from {@link #REASON_MALFORMED} because the two mean different
+         * things to whoever sent the payload -- one is a value that is not a number, the other a number
+         * that is too large for the field it was sent for -- and a single token would leave a producer
+         * unable to tell which correction to make.</p>
+         */
+        private static final String REASON_OUT_OF_DOMAIN = "MONEY_OUT_OF_DOMAIN";
+
+
+        /**
          * Reads the amount from the current token, which must be a JSON string of plain decimal text.
          *
          * @param parser the parser positioned on the value to read
@@ -444,9 +482,27 @@ public final class MoneyModule extends SimpleModule {
                 // WHY : Assumptions: the two failure modes of the factory are caught separately
                 //       because they mean different things to whoever sent the payload. This one is
                 //       a syntax failure: the characters are not a decimal number at all.
+                // WHY : Refactoring Rationale: neither the submitted value nor the factory's own
+                //       message reaches this diagnostic, where an earlier revision quoted both. The
+                //       value is a monetary amount, so quoting it wrote the very content the money
+                //       path exists to carry exactly into a message that travels to a mapper caller
+                //       and from there into whatever that caller logs -- the one destination the
+                //       masking applied at the API edge does not reach. The nested message added a
+                //       second disclosure of its own: the platform's decimal parser reports the
+                //       offending character sequence, so forwarding it re-quoted a fragment of the
+                //       value even where the value itself had been withheld. What replaces both is a
+                //       stable reason code plus the expected form. The document location the context
+                //       attaches already names WHERE the value was, and the field being deserialised
+                //       names WHICH value it was, so a producer has everything needed to find it in
+                //       its own payload without this message carrying a copy of it.
+                //       Trade-offs: a reader of the log can no longer see the offending characters,
+                //       which is a real loss of immediacy when the defect is a stray currency symbol.
+                //       It is accepted because the alternative is a monetary value in a log line, and
+                //       because the producer holds the payload it sent.
                 return ctxt.reportInputMismatch(this,
-                        "Cannot read a monetary amount from JSON string \"%s\": the value is not"
-                                + " plain decimal text. %s", text, malformed.getMessage());
+                        "Cannot read a monetary amount: the value is not plain decimal text"
+                                + " [reason %s]. An amount is carried as a JSON string of plain"
+                                + " decimal text, such as \"-2065.00\".", REASON_MALFORMED);
             } catch (ArithmeticException outOfDomain) {
                 // WHY : Assumptions: this one is a domain failure: the characters parse, but the
                 //       amount is wider than the reference money picture can hold. The bound is
@@ -455,10 +511,14 @@ public final class MoneyModule extends SimpleModule {
                 //       be stored or re-encoded even if it were accepted here. Reporting it through
                 //       the context names the field and the document position, whereas letting the
                 //       factory's own failure escape the mapper would name neither.
+                // WHY : the value and the nested message are withheld here for the reason
+                //       recorded on the syntax branch above. The BOUND is stated instead, because it
+                //       is a property of the reference picture rather than of the submitted payload
+                //       and it is the one fact a producer needs in order to correct the request.
                 return ctxt.reportInputMismatch(this,
-                        "Cannot read a monetary amount from JSON string \"%s\": the value lies"
-                                + " outside the domain of the reference money field. %s", text,
-                        outOfDomain.getMessage());
+                        "Cannot read a monetary amount: the value lies outside the domain of the"
+                                + " reference money field [reason %s]. The magnitude may not exceed"
+                                + " %s.", REASON_OUT_OF_DOMAIN, Money.MAX_MAGNITUDE.toPlainString());
             }
         }
 

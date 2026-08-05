@@ -17,18 +17,6 @@
 #   tree -- the three roots (infra/bootstrap, infra/envs/dev, infra/envs/prod)
 #   and every module under infra/modules/.
 #
-#   Inventory -- the planned catalogue and the measured present state, kept
-#   distinct because conflating them is how a false count spreads:
-#     - The module catalogue this migration plans is SIXTEEN modules, which with
-#       the three roots gives nineteen Terraform directories.
-#     - FIFTEEN module directories exist at this checkpoint, giving EIGHTEEN
-#       Terraform directories. The sixteenth, infra/modules/step-functions-batch,
-#       is authored at a later index of the same plan.
-#     - Nothing here has to change when it lands. The traversal is `--recursive`
-#       over the tree, so the directory list is derived from the filesystem and
-#       never enumerated in this file; the counts above are documentation, not
-#       configuration.
-#
 # Parameters -- the blocks below, and what each one controls:
 #   config             Traversal and failure behaviour: whether a finding fails
 #                      the run, and whether a root's `module` calls are followed
@@ -43,27 +31,9 @@
 #
 # Return values:
 #   A run over this configuration exits 0 when it finds nothing and 2 when it
-#   finds one or more violations, which reddens the gating lint step in
-#   .github/workflows/infra-ci.yml -- a workflow authored at a later index of the
-#   same plan, so at this checkpoint the run is invoked by hand rather than by
-#   CI. There is no tolerated-finding tier and no return-code band: the outcome
-#   is binary, clean or failed. Exit 1 means TFLint itself could not run -- see
-#   Errors.
-#
-#   State at this checkpoint, stated because a "gating" description otherwise
-#   reads as a claim that the gate is currently green: a recursive run exits 2
-#   with 257 findings, and every one of them belongs to one of exactly two rule
-#   families -- 217 terraform_unused_declarations and 40
-#   terraform_standard_module_structure. Both are consequences of the tree being
-#   incomplete rather than of a defect in the HCL authored so far: no directory
-#   has its main.tf or outputs.tf yet, so no variable is consumed and no
-#   directory satisfies the standard file set. Both families clear as those two
-#   files land per directory, and the trade-off note on
-#   terraform_standard_module_structure below records that the transient state is
-#   accepted deliberately. What DOES pass today, and is the whole of what a
-#   provider-constraint-and-input-surface foundation can pass: HCL parse of every
-#   .tf file, `terraform fmt -check -recursive infra/`, and a type plus a
-#   description on every declared variable.
+#   finds one or more violations. There is no tolerated-finding tier: current
+#   findings are determined by the recursive run and are not frozen as counts in
+#   this configuration. Exit 1 means TFLint itself could not run -- see Errors.
 #
 # Errors / Exceptions -- the three ways this gate can MISREPORT, every one of
 # them a property of the invocation rather than of this file:
@@ -92,12 +62,11 @@
 #     - generated module docs and
 #       their freshness / drift ... infra/.terraform-docs.yml
 #     - security policy scanning .. the separate, severity-thresholded policy
-#                                   scan step in infra-ci.yml
+#                                   scan contract
 #   None of the three is therefore absent by oversight.
 #
-# WHY this file exists at all, stated once here because nothing in the
-# migration requirements themselves calls for it:
-#   - Alternatives Considered: treating the documentation obligation as silent
+# Refactoring Rationale: this file exists because HCL has no docstring parser.
+#   Alternatives Considered: treating the documentation obligation as silent
 #     on languages that have no docstring construct. Rejected. infra/** is the
 #     largest body of net-new non-obvious decisions in the repository -- three
 #     roots and a sixteen-module catalogue covering networking, key management,
@@ -115,19 +84,14 @@
 #     why-comment at all -- terraform_comment_syntax below checks comment SYNTAX,
 #     never comment CONTENT. The file-header block and the per-argument
 #     why-comment are therefore human-review obligations with no machine backing
-#     anywhere, which is precisely why the per-directory README is required as
-#     the prose half rather than offered as a courtesy. No README exists in any
-#     directory at this checkpoint; they are a later deliverable of the same plan.
+#     anywhere, which is precisely why a per-directory README is required as the
+#     prose half rather than offered as a courtesy.
 # =============================================================================
 
 config {
-  # WHAT: a finding is a failure.
-  # WHY : Assumptions: the lint step in .github/workflows/infra-ci.yml is
-  #       GATING -- it carries no `|| true`, no `continue-on-error` and no
-  #       return-code tolerance -- and this attribute is what makes that true
-  #       rather than decorative. `force = true` returns zero even with
-  #       findings, which is the single setting that would reduce this whole
-  #       file to a description of a check nobody enforces.
+  # Assumptions: force=false makes every finding produce the nonzero result
+  #       required by the repository's gating lint contract. `force = true`
+  #       would reduce the configuration to a non-enforcing report.
   #       This is deliberately NOT the condition-code rubric the COBOL suite
   #       uses (0 pass / 4 warn / 8 fail / 16 fatal, where 4 is that suite's
   #       documented green state). That band exists only to accommodate one
@@ -136,8 +100,7 @@ config {
   #       findings while still reporting green.
   force = false
 
-  # WHAT: follow a root's `module` calls into the child directories they name.
-  # WHY : Trade-offs: measured rather than assumed. Under `none` each directory
+  # Trade-offs: under `none` each directory
   #       is judged only on what it literally contains, so a value-dependent
   #       defect that exists only once a caller supplies a value is invisible:
   #       a module taking a capacity or an instance type as an input cannot
@@ -162,10 +125,7 @@ config {
   #       reaching the network, for no gain.
   call_module_type = "local"
 
-  # WHAT: no recursion setting, even though recursion is what makes ONE
-  #       invocation cover every governed directory rather than only the one it
-  #       was launched from.
-  # WHY : Assumptions: TFLint accepts no `recursive` attribute -- traversal is a
+  # Assumptions: TFLint accepts no `recursive` attribute -- traversal is a
   #       property of the command rather than of the configuration, so it can
   #       only be supplied as `--recursive`. The invocation contract that
   #       follows from that is recorded here rather than expressed above, and it
@@ -183,15 +143,18 @@ config {
   #       per module, each of which would be free to use a relative path.
   #       Rejected -- it multiplies the CI surface by the number of directories
   #       and, more seriously, turns the directory list into something a human
-  #       maintains, so the next module added would silently go unlinted with the
-  #       gate still reporting green. That is not hypothetical here: the module
-  #       catalogue is not complete, so a hand-maintained list would be wrong the
-  #       day step-functions-batch lands. `--recursive` derives the list from the
-  #       tree itself and cannot be wrong.
+  #       maintains, so the next directory added would silently go unlinted with
+  #       the gate still reporting green. That was not hypothetical here, and it
+  #       has already been demonstrated once: the sixteenth module directory,
+  #       infra/modules/step-functions-batch, landed after this file was written,
+  #       and the recursive traversal picked it up with no edit here -- whereas a
+  #       hand-maintained list would have omitted it and reported clean. Every
+  #       remaining main.tf and outputs.tf will land the same way.
+  #       `--recursive` derives the list from the tree itself and cannot be wrong.
 }
 
-# WHY : Alternatives Considered: `preset = "recommended"`, which is the obvious
-#       choice and is wrong for this repository. `recommended` omits precisely
+# Alternatives Considered: `preset = "recommended"`, the default alternative,
+#       is wrong for this repository because it omits precisely
 #       the rules this file exists to run -- terraform_documented_variables and
 #       terraform_documented_outputs, which ARE the HCL half of the
 #       documentation obligation, plus terraform_comment_syntax and
@@ -210,9 +173,7 @@ plugin "terraform" {
   preset  = "all"
 }
 
-# WHAT: the AWS-resource ruleset, which checks provider-specific arguments and
-#       values that the language ruleset knows nothing about.
-# WHY : Assumptions: this tree provisions Aurora, KMS, Cognito, SQS, Step
+# Assumptions: this tree provisions Aurora, KMS, Cognito, SQS, Step
 #       Functions, ECS, an ALB, an HTTP API, CloudFront and S3, so most of what
 #       can be wrong in it is an AWS argument rather than an HCL construct --
 #       an invalid capacity value or an unrecognised resource argument is
@@ -246,7 +207,7 @@ plugin "aws" {
 # obligation itself, expressed mechanically.
 # -----------------------------------------------------------------------------
 
-# WHY : Assumptions: this rule and terraform_documented_outputs immediately
+# Assumptions: this rule and terraform_documented_outputs immediately
 #       below ARE the HCL half of the project's docstring requirement. A
 #       `variable` block is a module's public input contract, and HCL gives it
 #       no place to carry a docstring except `description`; a variable without
@@ -268,7 +229,7 @@ rule "terraform_documented_variables" {
   enabled = true
 }
 
-# WHY : Assumptions: the other half of the same clause. An `output` is a
+# Assumptions: the other half of the same clause. An `output` is a
 #       module's public return value, and it is consumed across a directory
 #       boundary by a caller that cannot see the resource it came from, so its
 #       `description` is the only thing standing between the caller and reading
@@ -285,7 +246,7 @@ rule "terraform_documented_outputs" {
 # Toolchain-contract checks.
 # -----------------------------------------------------------------------------
 
-# WHY : Assumptions: every governed directory is required to state a Terraform
+# Assumptions: every governed directory is required to state a Terraform
 #       CLI floor, and this rule is what detects a directory that forgot. The
 #       values themselves are owned by the per-directory versions.tf files and
 #       are deliberately not repeated here -- this rule asserts only
@@ -297,7 +258,7 @@ rule "terraform_required_version" {
   enabled = true
 }
 
-# WHY : Assumptions: the companion check, that every provider a directory uses
+# Assumptions: the companion check, that every provider a directory uses
 #       is version-constrained in `required_providers`. In this tree an
 #       unconstrained provider is a genuine defect rather than untidiness: the
 #       AWS provider constraint carries a real floor, because the zero-minimum
@@ -316,7 +277,7 @@ rule "terraform_required_providers" {
 # Contract-clarity checks.
 # -----------------------------------------------------------------------------
 
-# WHY : Assumptions: a variable with no `type` accepts anything, so its contract
+# Assumptions: a variable with no `type` accepts anything, so its contract
 #       is undocumented in the strongest sense available -- a reader, and the
 #       generated README, can see that an input exists but not what shape it
 #       takes, and a caller passing a string where a list was intended fails
@@ -327,7 +288,7 @@ rule "terraform_typed_variables" {
   enabled = true
 }
 
-# WHY : Trade-offs: this rule reports variables, locals and data sources that
+# Trade-offs: this rule reports variables, locals and data sources that
 #       are declared and never used, and the reason to accept its noise is that
 #       a stale declaration is a FALSE contract rather than dead weight.
 #       infra/.terraform-docs.yml generates each module's README from its
@@ -346,7 +307,7 @@ rule "terraform_unused_declarations" {
   enabled = true
 }
 
-# WHY : Assumptions: the governed directories are authored independently, so the
+# Assumptions: the governed directories are authored independently, so the
 #       naming convention cannot be held by anyone remembering it. The rule's
 #       default is snake_case for every identifier, which is what the Terraform
 #       language documentation recommends and what the tree already uses; its
@@ -357,7 +318,7 @@ rule "terraform_naming_convention" {
   enabled = true
 }
 
-# WHY : Assumptions: `"${var.name}"` wrapping a single reference is 0.11-era
+# Assumptions: `"${var.name}"` wrapping a single reference is 0.11-era
 #       syntax that still parses, still works, and is therefore invisible to
 #       everything except a rule that looks for it -- `terraform validate`
 #       accepts it and `terraform fmt` does not rewrite it, so nothing else in
@@ -370,7 +331,7 @@ rule "terraform_deprecated_interpolation" {
   enabled = true
 }
 
-# WHY : Assumptions: this rule is load-bearing for the documentation convention
+# Assumptions: this rule is load-bearing for the documentation convention
 #       itself, not merely for uniformity. It rejects `//` in favour of `#`, and
 #       `#` is the form every why-comment in this tree is written in -- the
 #       existing test-suite documentation and used by this file's own comments.
@@ -384,7 +345,7 @@ rule "terraform_comment_syntax" {
   enabled = true
 }
 
-# WHY : Assumptions: the per-directory file set is prescribed -- versions.tf,
+# Assumptions: the per-directory file set is prescribed -- versions.tf,
 #       main.tf, variables.tf and outputs.tf in every governed directory, plus
 #       backend.tf and terraform.tfvars in the two environment roots and a
 #       README.md throughout -- and this rule is what enforces the main.tf,
@@ -412,8 +373,8 @@ rule "terraform_standard_module_structure" {
 # and its single legitimate exception is suppressed locally instead.
 # -----------------------------------------------------------------------------
 
-# WHY : the rule reports a provider that is declared in `required_providers`
-#       but used by no resource in the SAME directory, and it cannot follow a
+# Assumptions: the rule reports a provider that is declared in
+#       `required_providers` but used by no resource in the SAME directory, and it cannot follow a
 #       `module` call to see the resources one level down. It is kept ON so that
 #       a module declaring -- and so publishing a constraint on -- a provider it
 #       does not consume is still reported, which is the case the rule exists
@@ -429,14 +390,9 @@ rule "terraform_standard_module_structure" {
 #       are called, because the resources the rule is looking for are never in
 #       the file it is reading, so each of those two declarations carries a
 #       `# tflint-ignore: terraform_unused_required_providers` annotation at the
-#       point of use, with the reason recorded beside it. Every other finding
-#       this rule currently raises is transient: the module directories declare
-#       their providers before their `main.tf` exists, so the rule has no
-#       resources to match yet and each finding clears when that file lands.
-#       Transient findings are deliberately left unannotated -- annotating them
-#       would leave a permanent suppression behind for a condition that resolves
-#       itself, which is how a gate quietly stops covering the case it was
-#       written for.
+#       point of use, with the reason recorded beside it. Any other finding
+#       remains actionable and is deliberately left unsuppressed rather than
+#       rationalized as a transient staging condition.
 #       Alternatives Considered: disabling the rule tree-wide, which is the one
 #       global exception this file previously carried. Rejected because it buys
 #       silence on two known declarations at the price of never again reporting
@@ -444,8 +400,7 @@ rule "terraform_standard_module_structure" {
 #       because a suppression written at the point of use states which
 #       declaration is excused and why, where a disabled rule states neither.
 #       Trade-offs: the accepted cost is that the two annotations must be kept
-#       in step with the roots that carry them, and that this gate reports the
-#       module directories until their `main.tf` files exist.
+#       in step with the roots that carry them.
 #       terraform_unused_declarations above still covers unused variables,
 #       locals, data sources and provider aliases, and
 #       terraform_required_providers still requires every provider that IS used

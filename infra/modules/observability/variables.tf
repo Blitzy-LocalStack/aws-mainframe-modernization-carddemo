@@ -23,19 +23,32 @@
 #   infra/envs/prod/main.tf, which is what keeps the only differences between the
 #   two environments visible in their own terraform.tfvars files.
 #
-# Parameters -- two required, twelve optional:
+# Parameters -- twelve required, fifteen optional:
 #   environment                     string       REQUIRED. Names every resource.
 #   kms_key_arn                     string       REQUIRED. Encrypts the log
 #                                                groups and the topic.
+#   ecs_cluster_name                string       REQUIRED. ECS metric dimension.
+#   alb_arn_suffix                  string       REQUIRED. ALB metric dimension.
+#   service_target_group_arn_suffixes
+#                                   map(string)  REQUIRED. Per-service target
+#                                                group metric dimensions.
+#   api_gateway_id                  string       REQUIRED. API metric dimension.
+#   api_gateway_stage_name          string       REQUIRED. Stage metric dimension.
+#   aurora_cluster_identifier       string       REQUIRED. RDS metric dimension.
+#   aurora_max_capacity             number       REQUIRED. Configured ACU ceiling.
+#   queue_names                     map(string)  REQUIRED. SQS metric dimensions.
+#   daily_state_machine_arn         string       REQUIRED. Batch metric dimension.
+#   vpc_flow_log_group_name         string       REQUIRED. Flow-log query source.
 #   name_prefix                     string       Common resource-name prefix.
 #   tags                            map(string)  Module-specific tags.
 #   log_retention_days              number       Retention for the log groups
 #                                                this module owns.
-#   log_group_names                 list(string) Log groups this module creates,
-#                                                for producers that do not
-#                                                create their own.
+#   log_group_names                 map(string)  Exact log-group names this
+#                                                module creates for producers
+#                                                that do not create their own.
 #   dashboard_service_names         list(string) Services the dashboard renders
 #                                                a row of widgets for.
+#   cloudfront_distribution_id      string|null  Optional dashboard dimension.
 #   alarm_email_endpoints           list(string) Subscribers on the topic.
 #   alarm_evaluation_periods        number       Consecutive breaching periods
 #                                                needed to raise an alarm.
@@ -48,6 +61,10 @@
 #                                                that raise a messaging alarm.
 #   batch_failure_threshold         number       Failed executions per period
 #                                                that raise a batch alarm.
+#   reply_queue_age_threshold_seconds
+#                                   number       Stale-reply alarm threshold.
+#   access_log_bucket_force_destroy bool         Teardown behavior for the
+#                                                shared access-log destination.
 #
 #   Each block below carries the full `type` and `description` that tflint's
 #   terraform_typed_variables and terraform_documented_variables rules require;
@@ -59,12 +76,12 @@
 #   are declared in infra/modules/observability/outputs.tf.
 #
 # Errors / Exceptions:
-#   `environment` and `kms_key_arn` have no default, so omitting either stops the
-#   calling root at `plan` with a missing-required-argument error. For the key
-#   that is the mechanism which makes encryption of the log groups and the topic
-#   unskippable rather than merely intended. Every other input carries a
-#   `validation` block rejecting an out-of-domain value at `plan` time rather
-#   than letting the service reject it partway through an apply.
+#   The twelve required identifiers have no default, so omitting a producer
+#   contract stops the calling root at `plan` rather than creating alarms that
+#   can never receive a datapoint. The key is required specifically to keep
+#   encryption of the log groups and topic unskippable. Every other bounded
+#   input carries a validation block rejecting an out-of-domain value at plan
+#   time rather than letting a service reject it partway through an apply.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: this module does NOT own every log group in the stack, and the
@@ -158,11 +175,142 @@ variable "tags" {
 }
 
 # -----------------------------------------------------------------------------
+# Producer identifiers and metric dimensions
+# -----------------------------------------------------------------------------
+#
+# WHY : Alternatives Considered: deriving these values from name_prefix and
+#       environment would shorten every module call, but it would duplicate the
+#       naming rules owned by the producer modules. A rename would then leave a
+#       syntactically valid alarm pointed at a dimension that no metric uses,
+#       which CloudWatch reports as silence rather than as a wiring error.
+#       Requiring the producer outputs at the environment root keeps the
+#       dependency visible and passes the exact provider-returned identifier.
+
+variable "ecs_cluster_name" {
+  description = "Exact ECS cluster name used as the ClusterName dimension for Container Insights widgets. Required from the ecs-cluster module output so a cluster rename cannot leave this dashboard querying a derived, obsolete name."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", var.ecs_cluster_name))
+    error_message = "ecs_cluster_name must be 1 to 255 letters, digits, underscores or hyphens, matching the ECS cluster-name contract."
+  }
+}
+
+variable "alb_arn_suffix" {
+  description = "Provider-returned ARN suffix of the internal Application Load Balancer, used as the LoadBalancer dimension in AWS/ApplicationELB metrics. A full ARN is invalid for this dimension and produces a permanently empty alarm."
+  type        = string
+
+  validation {
+    condition     = can(regex("^app/[^/]+/[A-Za-z0-9]+$", var.alb_arn_suffix))
+    error_message = "alb_arn_suffix must have the Application Load Balancer suffix form app/<name>/<id>, not a full ARN."
+  }
+}
+
+variable "service_target_group_arn_suffixes" {
+  description = "Map of service name to provider-returned target-group ARN suffix for the seven online services. The map key labels dashboard and alarm outputs; an empty map deliberately creates no per-service load-balancer alarm."
+  type        = map(string)
+
+  validation {
+    condition = alltrue([
+      for service, suffix in var.service_target_group_arn_suffixes :
+      can(regex("^[a-z][a-z0-9-]*$", service)) &&
+      can(regex("^targetgroup/[^/]+/[A-Za-z0-9]+$", suffix))
+    ])
+    error_message = "service_target_group_arn_suffixes must map lower-case service names to targetgroup/<name>/<id> suffixes."
+  }
+}
+
+variable "api_gateway_id" {
+  description = "HTTP API identifier used as the ApiId dimension for edge 5xx widgets and alarms. It comes from api-gateway-http rather than being reconstructed from the endpoint URL."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]+$", var.api_gateway_id))
+    error_message = "api_gateway_id must contain only the lower-case letters and digits used by API Gateway identifiers."
+  }
+}
+
+variable "api_gateway_stage_name" {
+  description = "Created HTTP API stage name used as the Stage dimension beside api_gateway_id. The reserved $default stage is valid and must be passed literally when that is what the producer module created."
+  type        = string
+
+  validation {
+    condition     = length(var.api_gateway_stage_name) > 0 && length(var.api_gateway_stage_name) <= 128
+    error_message = "api_gateway_stage_name must be a non-empty API Gateway stage name no longer than 128 characters."
+  }
+}
+
+variable "aurora_cluster_identifier" {
+  description = "Provider-returned Aurora cluster identifier used as the DBClusterIdentifier dimension for processor, connection and serverless-capacity metrics."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,62}$", var.aurora_cluster_identifier))
+    error_message = "aurora_cluster_identifier must begin with a lower-case letter and contain at most 63 lower-case letters, digits or hyphens."
+  }
+}
+
+variable "aurora_max_capacity" {
+  description = "Maximum Aurora Serverless capacity units configured by the environment root. The capacity-ceiling alarm compares against this declared configuration fact rather than inventing an independent target."
+  type        = number
+
+  validation {
+    condition     = var.aurora_max_capacity >= 1 && var.aurora_max_capacity <= 256 && var.aurora_max_capacity * 2 == floor(var.aurora_max_capacity * 2)
+    error_message = "aurora_max_capacity must be from 1 through 256 ACUs in half-unit increments."
+  }
+}
+
+variable "queue_names" {
+  description = "Map of logical queue key to the exact SQS QueueName dimension. Keys ending in _dlq receive dead-letter alarms, while keys ending in _reply receive stale-reply alarms; an empty map creates no queue alarm."
+  type        = map(string)
+
+  validation {
+    condition = alltrue([
+      for key, name in var.queue_names :
+      can(regex("^[a-z][a-z0-9_]*$", key)) &&
+      can(regex("^[A-Za-z0-9_-]{1,75}(\\.fifo)?$", name))
+    ])
+    error_message = "queue_names must map snake_case logical keys to valid standard or .fifo SQS queue names."
+  }
+}
+
+variable "daily_state_machine_arn" {
+  description = "ARN of the daily batch state machine used as the StateMachineArn dimension for failed and timed-out execution alarms."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:states:[a-z0-9-]+:[0-9]{12}:stateMachine:[A-Za-z0-9_-]+$", var.daily_state_machine_arn))
+    error_message = "daily_state_machine_arn must be a revision-independent Step Functions state-machine ARN."
+  }
+}
+
+variable "vpc_flow_log_group_name" {
+  description = "Exact CloudWatch log-group name created by the network module for VPC flow logs. It feeds the dashboard Logs Insights query and is never recreated here, preserving the network module's ownership of the flow-log lifecycle."
+  type        = string
+
+  validation {
+    condition     = can(regex("^/[A-Za-z0-9_./#-]+$", var.vpc_flow_log_group_name))
+    error_message = "vpc_flow_log_group_name must be an absolute CloudWatch log-group name beginning with /."
+  }
+}
+
+variable "cloudfront_distribution_id" {
+  description = "Optional CloudFront distribution identifier shown on the dashboard. Null omits the widget; no CloudFront alarm is created because global distribution metrics require a different provider region."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.cloudfront_distribution_id == null || can(regex("^[A-Z0-9]+$", var.cloudfront_distribution_id))
+    error_message = "cloudfront_distribution_id must be null or an upper-case alphanumeric CloudFront distribution identifier."
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Encryption
 # -----------------------------------------------------------------------------
 
 variable "kms_key_arn" {
-  description = "ARN of the customer-managed key the log groups and the notification topic are encrypted with. Required rather than optional, because the baseline recorded neither recovery nor journalling on any file and encryption at rest is one of the properties this migration adds; making the key mandatory is what keeps that addition from being skippable."
+  description = "ARN of the customer-managed key the log groups and notification topic are encrypted with. Required rather than optional because all eight CICS VSAM FILE resources are configured without recovery or journalling, so customer-controlled encryption is a target property that must not become skippable."
 
   type = string
 
@@ -201,9 +349,9 @@ variable "log_retention_days" {
 }
 
 variable "log_group_names" {
-  description = "Log group name suffixes this module creates, for producers that do not create a group of their own. Each entry becomes one group under this module's prefixed and environment-suffixed path, encrypted with the key above and held for the retention above."
+  description = "Map of logical producer key to the exact CloudWatch log-group name this module creates for producers that do not own a group resource. Empty means no additional group is created; full names are required because Lambda and other managed producers write only to their service-defined paths."
 
-  type = list(string)
+  type = map(string)
 
   # Assumptions: the default is EMPTY on purpose, and the emptiness is the
   # decision rather than an unfinished thought. Every producer in this stack that
@@ -219,20 +367,22 @@ variable "log_group_names" {
   # operational script run from a task -- otherwise causes its log group to be
   # created implicitly on first write, with the service's default of unlimited
   # retention and no customer-managed key. That is the failure this input exists
-  # to let a root avoid, and it is why the entries are suffixes rather than full
-  # paths: the path must match what the producer writes to, and composing it here
-  # keeps the prefix and environment segments identical to every other group.
-  default = []
+  # to let a root avoid. Exact names rather than suffixes are accepted because a
+  # Lambda writes to `/aws/lambda/<function-name>` and cannot be redirected to a
+  # module-composed path; accepting suffixes would create a second, empty group.
+  default = {}
 
   validation {
-    # WHY : Assumptions: the characters permitted are those a log group name
-    #       accepts -- letters, digits, underscore, hyphen, forward slash, period
-    #       and hash. A leading slash is rejected because main.tf prepends the
-    #       prefixed path, and a suffix beginning with a separator would compose
-    #       a doubled one, producing a group whose name differs from the one the
-    #       producer writes to by a single character.
-    condition     = alltrue([for n in var.log_group_names : can(regex("^[A-Za-z0-9][A-Za-z0-9_./#-]*$", n))])
-    error_message = "Each log_group_names entry must be a path suffix of letters, digits, underscores, hyphens, forward slashes, periods and hashes, not beginning with a separator, because main.tf prepends the prefixed and environment-suffixed path."
+    # WHY : Assumptions: the map key is a Terraform identity and the value is
+    #       the exact service path. Keeping the two separate makes a path change
+    #       an in-place update rather than a destroy-and-create caused by a
+    #       `for_each` key change.
+    condition = alltrue([
+      for key, name in var.log_group_names :
+      can(regex("^[a-z][a-z0-9_-]*$", key)) &&
+      can(regex("^/[A-Za-z0-9_./#-]+$", name))
+    ])
+    error_message = "Each log_group_names key must be snake_case and each value must be an absolute CloudWatch log-group name beginning with / and containing only supported path characters."
   }
 }
 
@@ -350,7 +500,7 @@ variable "alarm_evaluation_periods" {
 }
 
 variable "alarm_period_seconds" {
-  description = "Length of one evaluation period, in seconds. The alarm's total detection latency is this value multiplied by the evaluation period count, so the two inputs are read together."
+  description = "Length of one evaluation period, in seconds. The alarm's complete detection window is this value multiplied by the evaluation period count, so the two inputs are read together."
   type        = number
   default     = 300
 
@@ -439,4 +589,42 @@ variable "batch_failure_threshold" {
     condition     = var.batch_failure_threshold >= 1 && floor(var.batch_failure_threshold) == var.batch_failure_threshold
     error_message = "batch_failure_threshold must be a whole number of 1 or more; the nightly chain runs once, so a threshold above 1 would leave a failed night unreported."
   }
+}
+
+variable "reply_queue_age_threshold_seconds" {
+  description = "Oldest-message age that raises a reply-queue alarm. Five seconds is derived from the baseline request/reply expiry contract rather than an invented service objective; the consumer still enforces expiresAt because SQS has no per-message expiry."
+  type        = number
+  default     = 5
+
+  validation {
+    # WHY : Assumptions: whole seconds are required because the SQS metric is
+    #       published in seconds. Zero would keep the alarm permanently
+    #       breached and a fractional threshold would claim precision the
+    #       source metric does not expose.
+    condition     = var.reply_queue_age_threshold_seconds >= 1 && floor(var.reply_queue_age_threshold_seconds) == var.reply_queue_age_threshold_seconds
+    error_message = "reply_queue_age_threshold_seconds must be a whole number of one second or more."
+  }
+}
+
+variable "access_log_bucket_force_destroy" {
+  description = "Whether Terraform may remove the shared ALB and S3 access-log destination while it still contains current or noncurrent objects. False preserves the audit trail and makes an operator purge it explicitly before teardown."
+  type        = bool
+  default     = false
+}
+
+# -----------------------------------------------------------------------------
+# Credential-rotation functions to watch
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: the names arrive from the composing root rather than being
+#       discovered here, because this module deliberately reads no data source and
+#       references no sibling module -- the same reason every other identifier it
+#       alarms on is an input. infra/modules/secrets publishes
+#       rotation_lambda_name for exactly this wiring.
+#       Trade-offs: a set rather than one string, so a root that grows a second
+#       rotation function gains an alarm by extending a list instead of by editing
+#       this module.
+variable "rotation_lambda_function_names" {
+  description = "Set of Secrets Manager rotation Lambda function names that receive a non-zero Errors alarm. Empty creates no rotation alarm and is appropriate only when rotation is not provisioned in the composed root."
+  type        = set(string)
+  default     = []
 }

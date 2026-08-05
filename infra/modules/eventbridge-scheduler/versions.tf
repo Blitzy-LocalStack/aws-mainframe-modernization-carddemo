@@ -47,9 +47,6 @@
 # =============================================================================
 
 terraform {
-  # WHAT: a constraint on this module's callers rather than on this directory --
-  #       a module is never initialised on its own, so the version actually
-  #       checked is that of whichever CLI runs the root.
   # WHY : Trade-offs: a reusable module is loaded by separate roots, and
   #       Terraform intersects every `required_version` constraint it
   #       encounters. A `~>` or `=` constraint here would therefore let this

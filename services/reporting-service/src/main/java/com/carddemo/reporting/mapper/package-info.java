@@ -150,14 +150,15 @@
  * <p>Assumptions: none of these seven regimes is owned by the shared kernel, so no caller
  * should go looking for a mask helper there. The codec package owns exactly three numeric and
  * wire contracts -- sign-overpunch display in {@code ZonedDecimalCodec}, packed
- * {@code COMP-3} and binary {@code COMP} in {@code PackedDecimalCodec}, and the
- * fourteen-character edited form of the authorization payloads in {@code CsvAuthCodec} -- and
- * each of the three is scoped to a named corpus that excludes print formatting. Regimes 1, 2
+ * {@code COMP-3} and binary {@code COMP} in {@code PackedDecimalCodec}, and the two edited
+ * forms of the authorization payloads in {@code CsvAuthCodec} -- the fourteen-character reply
+ * mask {@code PIC -zzzzzzzzz9.99} and the thirteen-character request token its receiver holds
+ * -- and each of the three is scoped to a named corpus that excludes print formatting. Regimes 1, 2
  * and 4 are enumerated in that package's own rendering table for lineage, and claimed by none
  * of its classes. Regimes 3, 5, 6 and 7 are named by no codec at all: four of the seven have no
  * counterpart anywhere outside this package. Regime 5 is worth distinguishing by hand from the
- * codec's edited form, because the two look alike and are not the same width -- the codec's
- * form carries ten integer digits, while the regime declared at line 77 of
+ * codec's reply mask, because the two look alike and are not the same width -- the codec's
+ * mask carries ten integer digit positions, while the regime declared at line 77 of
  * {@code app/cbl/CORPT00C.cbl} carries eight. This package therefore implements all seven
  * itself.</p>
  *
@@ -192,15 +193,24 @@
  * field after it with it.</p>
  *
  * <p>Assumptions: the descriptor registry does not contain either band family, which is the
- * whole reason this package declares its own. The registry holds eleven layouts --
- * {@code ACCOUNT}, {@code DALYTRAN}, {@code DISGROUP}, {@code XREF}, {@code TCATBAL},
- * {@code CARD}, {@code CUSTOMER}, {@code TRAN}, {@code TRNX}, {@code REJECT} and
- * {@code INTTRAN} -- mirroring the reference registry at lines 1349 to 1360 of
- * {@code tests/helpers/record_codec.py}. Those eleven are record layouts read from and written
- * to data sets. The seven report bands and the seventeen statement bands are print bands
- * assembled into a line, so they were never registry entries, and the public
- * {@code FieldSpec} and {@code RecordSpec} types exist precisely so that a caller can declare
- * a layout the registry does not carry.</p>
+ * whole reason this package declares its own. The registry holds <b>fourteen</b> layouts in two
+ * labelled populations, and the count is stated as fourteen rather than eleven because eleven is
+ * the answer to a different question and an earlier revision of this file gave it to this one.
+ * The eleven BASE MASTERS, each transcribed from a copybook that defines a persistent data set,
+ * are {@code ACCOUNT}, {@code CARD}, {@code CUSTOMER}, {@code XREF}, {@code DALYTRAN},
+ * {@code TRAN}, {@code DISGROUP}, {@code TCATBAL}, {@code SECUSER}, {@code TRANCAT} and
+ * {@code TRANTYPE}. The three DERIVED layouts, built from a base master rather than transcribed
+ * from a data-set copybook, are {@code TRNX}, {@code REJECT} and {@code INTTRAN}. Both
+ * {@code CopybookLayout} in the shared kernel and
+ * {@code data-migration/src/carddemo_migration/copybook/layouts.py} register the same fourteen
+ * names with the same two labels, and each records why: the reference codec at
+ * {@code tests/helpers/record_codec.py} lines 1349 to 1361 registers ELEVEN entries, the
+ * migration has ELEVEN base masters, and only EIGHT names appear in both -- so treating the two
+ * elevens as one population drops three records with nothing reporting the loss. All fourteen
+ * are record layouts read from or written to data sets. The seven report bands and the seventeen
+ * statement bands are print bands assembled into a line, so they were never registry entries,
+ * and the public {@code FieldSpec} and {@code RecordSpec} types exist precisely so that a caller
+ * can declare a layout the registry does not carry.</p>
  *
  * <p>Assumptions: {@code FixedWidthCodec.encodeRecord} returns a {@code byte[]} whose length
  * is exactly {@code spec.reclen()}, padding a short band out to the declared length and

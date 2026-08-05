@@ -24,16 +24,16 @@
 #
 #   Dependency direction is one-way. This file CONSUMES identifiers produced
 #   elsewhere -- by the network module, by the seven load-balanced ecs-service
-#   instantiations, by ACM and by the module owning the logging bucket -- and
-#   calls no module itself. What it deliberately does not create is enumerated
-#   in the block below the header, each omission with the module that owns it.
+#   instantiations and by ACM/DNS -- and calls no module itself. It also owns the
+#   access-log bucket and delivery policy required by its load balancer, so that
+#   logging cannot be enabled against an ownerless bucket name.
 #
 # Parameters:
 #   Declared in variables.tf with their types, defaults, descriptions and
 #   plan-time validation, and not restated here: the Inputs table generated
 #   into README.md is produced from those same declarations, so a copy in this
-#   file would be a third place to keep in step. This file reads twelve of the
-#   thirteen inputs; `health_check_path` is consumed by outputs.tf alone, for
+#   file would be a third place to keep in step. This file reads thirteen of the
+#   fourteen inputs; `health_check_path` is consumed by outputs.tf alone, for
 #   the reason recorded against it in the omissions block.
 #
 #   FOUR of them are wired from another module's output rather than authored by
@@ -45,15 +45,12 @@
 #       created and owned by the network module and only attached here.
 #     - `target_group_arn` (string) inside each `service_routes` entry -- from
 #       the seven load-balanced ecs-service instantiations.
-#     - `certificate_arn` (string) -- from ACM, provisioned and validated
-#       outside this package.
-#   `access_logs_bucket` (string) is wired the same way, from the module that
-#   owns the logging bucket, and is named apart because it carries a bucket
-#   NAME rather than an identifier or an ARN.
+#     - `certificate_arn` and `certificate_domain_name` -- the regional ACM
+#       identity and the DNS name API Gateway verifies against it.
 #
 # Returns:
 #   HCL has no return value, so the analogue is what outputs.tf publishes from
-#   the three resources declared here. Those outputs are declared and described
+#   the resources declared here. Those outputs are declared and described
 #   there, not here; what downstream consumers take is:
 #     - the load-balancer ARN, DNS name and hosted-zone id, from aws_lb.this.
 #       The DNS name is PUBLISHED rather than written into a DNS record, for
@@ -65,6 +62,8 @@
 #     - the listener-rule set, from aws_lb_listener_rule.service, keyed by
 #       service name so a caller can assert WHICH contexts are routed rather
 #       than only how many.
+#     - the access-log bucket name and ARN, and the certificate DNS name the
+#       private integration must verify.
 #     - `health_check_path`, republished unchanged -- again, see the omissions
 #       block for why a module that creates no target group publishes it.
 #
@@ -85,9 +84,9 @@
 #       `service_routes` is checked at plan time; a collision with a rule
 #       created on the same listener from outside this module is not visible
 #       to it.
-#     - an access-log bucket whose policy does not admit the regional ELB
-#       log-delivery principal. The load balancer cannot grant itself that
-#       write, so creation fails on the delivery test.
+#     - a legacy region that still requires its ELB service-account root while
+#       `legacy_elb_log_delivery_account_arn` is null. The modern service
+#       principal is always present; the exceptional legacy grant is explicit.
 #     - a certificate that is not ISSUED, or not in the load balancer's own
 #       region. A listener cannot present a certificate from another region,
 #       and both cases are rejected when the listener is created.
@@ -102,11 +101,11 @@
 #     additionally stop either root from calling this module with `count`,
 #     `for_each` or `depends_on`, which versions.tf records against the same
 #     omission and reproduced against CLI 1.15.8.
-#   - Alternatives Considered: THREE resources and no more. A target group per
-#     service is the obvious fourth and belongs to ecs-service instead. The
-#     omissions are gathered into one block below rather than scattered as
-#     asides, because the failure mode is a later reader adding one back
-#     helpfully, and an omission with no owner named reads as an oversight.
+#   - Refactoring Rationale: the module now owns the S3 resources its mandatory
+#     access_logs block depends on. Delegating the bucket to an unspecified
+#     caller left no IaC resource responsible for the ELB delivery policy, so a
+#     syntactically valid ALB failed while enabling logs. Target groups remain
+#     outside this module and belong to ecs-service.
 #   - Alternatives Considered: ONE listener carrying path rules, rather than a
 #     listener per service or host-based conditions. All seven contexts sit
 #     behind one internal name and one certificate, so the path is the only
@@ -135,23 +134,16 @@
 #     owning the resource, and it is why the variable is not dead and must not
 #     be deleted as unused.
 #
-#   aws_security_group and aws_security_group_rule -- owned by network. The
-#     permitted matrix is fixed for the whole package (load balancer to
-#     application on 8080, application to Aurora on 5432, application to
-#     interface endpoint on 443) and expressed once, in the module that creates
-#     the group. This module only attaches it by id, takes no port, protocol or
-#     CIDR input, and names no unrestricted range anywhere, so there is no path
-#     through this file by which that matrix could be widened.
+#   aws_security_group -- owned by network. This module only attaches the ALB
+#     group by id. api-gateway-http owns the one cross-module ingress rule on
+#     that existing group because it alone can reference both its dedicated VPC
+#     Link group and this destination without a dependency cycle. No CIDR-based
+#     or unrestricted rule is created here.
 #
 #   aws_acm_certificate -- provisioned and DNS-validated outside this package;
 #     only `certificate_arn` crosses the boundary. A certificate ARN embeds an
 #     account identifier and a region, neither of which may appear anywhere in
 #     this tree, so an input is the only admissible form.
-#
-#   aws_s3_bucket and its bucket policy -- owned by the module that creates the
-#     logging bucket. A load balancer cannot grant itself the write it needs,
-#     so the policy admitting the regional log-delivery principal is a property
-#     of the bucket rather than of the producer writing to it.
 #
 #   aws_route53_record -- created by nobody, at any layer, deliberately.
 #     api-gateway-http reaches this load balancer through a VPC Link private
@@ -171,10 +163,14 @@
 #     against the absent create_http_listener input.
 # -----------------------------------------------------------------------------
 
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
+
+data "aws_partition" "current" {}
+
 locals {
-  # WHAT: the load-balancer name, composed from the prefix and the environment
-  #       around a fixed "-alb" infix rather than accepted whole as an input.
-  # WHY : Assumptions: an `aws_lb` name is capped at 32 characters and may
+  # Assumptions: an `aws_lb` name is capped at 32 characters and may
   #       neither begin nor end with a hyphen, and the cap binds on the PAIR of
   #       values rather than on either alone. variables.tf enforces that budget
   #       at plan time -- `name_prefix` at most 20 characters, and the two
@@ -188,7 +184,31 @@ locals {
   #       building it here makes the discriminator structural.
   alb_name = "${var.name_prefix}-alb-${var.environment}"
 
-  # WHAT: the module's own tag contribution, with the caller's map applied last.
+  # WHY : Assumptions: account and region make parallel environment deployments
+  #       distinguishable in S3's global namespace. Prefix/environment are
+  #       bounded before composition so the result remains under 63 characters.
+  access_logs_bucket_name = "${substr(var.name_prefix, 0, 12)}-${substr(var.environment, 0, 8)}-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}-alb-logs"
+
+  # WHY : Assumptions: a caller that already owns a terminal access-log bucket --
+  #       infra/modules/observability publishes one, shared with the dataset bucket's
+  #       server-access logs -- passes its name in, and this module then creates no
+  #       bucket of its own. A caller that passes nothing gets a bucket here, with the
+  #       same encryption, public-access block, TLS-only policy and ELB delivery grant.
+  #       Either way logging is enabled against a bucket this package owns, which is
+  #       the property that matters; what varies is only which module owns it.
+  # WHY : Alternatives Considered: always creating the bucket here. Rejected because a
+  #       root wiring the shared bucket would then end up with two log destinations and
+  #       two lifecycle policies for one stack, and a reader could not tell which one
+  #       the load balancer was writing to without reading the module.
+  create_access_logs_bucket = var.access_logs_bucket == null
+  access_logs_target_bucket = var.access_logs_bucket != null ? var.access_logs_bucket : aws_s3_bucket.access_logs[0].id
+
+  # WHY : Assumptions: ELB inserts `AWSLogs/<account-id>` after the configured
+  #       access_logs prefix. Handling the empty-prefix case avoids a doubled
+  #       separator that would make the policy resource differ from the key ELB
+  #       actually writes.
+  access_logs_object_prefix = var.access_logs_prefix == "" ? "AWSLogs/${data.aws_caller_identity.current.account_id}" : "${var.access_logs_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}"
+
   # WHY : Assumptions: the calling root's provider `default_tags` block already
   #       carries the account-wide keys, and resource-level tags MERGE with
   #       those rather than replacing them. This map therefore adds only what a
@@ -204,12 +224,145 @@ locals {
   tags = merge({ Component = "alb" }, var.tags)
 }
 
+data "aws_iam_policy_document" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  # WHY : Refactoring Rationale: transport encryption is enforced on the bucket
+  #       itself so every caller, including a mistaken manual one, is denied
+  #       when aws:SecureTransport is false.
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.access_logs[0].arn, "${aws_s3_bucket.access_logs[0].arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid       = "AllowModernElbLogDeliveryWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.access_logs[0].arn}/${local.access_logs_object_prefix}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+
+    # WHY : Assumptions: the object path already fixes the account id; the
+    #       SourceArn condition additionally restricts the service principal to
+    #       load balancers from this account and provider region.
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values = [
+        "arn:${data.aws_partition.current.partition}:elasticloadbalancing:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:loadbalancer/*",
+      ]
+    }
+  }
+
+  # WHY : Alternatives Considered: the deprecated aws_elb_service_account data
+  #       source was rejected. Modern regions use the service principal above;
+  #       a legacy regional account root is accepted only as an explicit input
+  #       so its exceptional grant is visible in the environment root.
+  dynamic "statement" {
+    for_each = var.legacy_elb_log_delivery_account_arn == null ? [] : [var.legacy_elb_log_delivery_account_arn]
+    iterator = legacy_principal
+
+    content {
+      sid       = "AllowLegacyRegionalElbLogDeliveryWrite"
+      effect    = "Allow"
+      actions   = ["s3:PutObject"]
+      resources = ["${aws_s3_bucket.access_logs[0].arn}/${local.access_logs_object_prefix}/*"]
+
+      principals {
+        type        = "AWS"
+        identifiers = [legacy_principal.value]
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Access-log storage -- owned with the producer so delivery is deployable.
+# -----------------------------------------------------------------------------
+
+resource "aws_s3_bucket" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = local.access_logs_bucket_name
+
+  # WHY : Trade-offs: development disables ALB deletion protection so teardown
+  #       can also remove delivered log objects. Protected environments retain
+  #       the bucket unless an operator deliberately empties it.
+  force_destroy = !var.enable_deletion_protection
+
+  tags = local.tags
+}
+
+resource "aws_s3_bucket_ownership_controls" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  # WHY : Assumptions: ELB log delivery supports S3-managed AES-256 encryption
+  #       without granting the delivery service use of another KMS key. The
+  #       objects are encrypted at rest while the policy remains limited to S3.
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+  policy = data.aws_iam_policy_document.access_logs[0].json
+
+  depends_on = [
+    aws_s3_bucket_ownership_controls.access_logs,
+    aws_s3_bucket_public_access_block.access_logs,
+  ]
+}
+
 resource "aws_lb" "this" {
-  # WHY : Assumptions: the composed name and the 32-character limit it is built
+  # Assumptions: the composed name and the 32-character limit it is built
   #       to respect are decided once in `locals` above.
   name = local.alb_name
 
-  # WHAT: internal, written as a literal and reachable from no input.
   # WHY : Alternatives Considered: an internet-facing load balancer was
   #       rejected because it would BYPASS THE COGNITO JWT AUTHORIZER THAT API
   #       GATEWAY ENFORCES AT THE EDGE, moving authentication out of a single
@@ -241,7 +394,6 @@ resource "aws_lb" "this" {
   #       suppression is written anywhere in this module.
   internal = true
 
-  # WHAT: an application load balancer rather than a network load balancer.
   # WHY : Assumptions: routing here is decided per REQUEST PATH, and a path
   #       condition is a layer-7 construct. A network load balancer forwards by
   #       listener port alone and can express no path or host condition at all,
@@ -251,7 +403,6 @@ resource "aws_lb" "this" {
   #       terminate TLS under the negotiated-policy floor the listener pins.
   load_balancer_type = "application"
 
-  # WHAT: the load-balancer-role subnets, exactly as the caller supplies them.
   # WHY : Assumptions: in this package the caller passes the PUBLIC subnets --
   #       the tier that carries only the load balancer and the NAT gateways --
   #       and that is NOT in tension with `internal = true` above. Subnet
@@ -263,20 +414,15 @@ resource "aws_lb" "this" {
   #       reconciliation is recorded at both ends -- here and on the input.
   subnets = var.subnet_ids
 
-  # WHAT: the group created by the network module, attached by id.
   # WHY : Assumptions: the permitted traffic matrix is fixed for the whole
-  #       package -- load balancer to application on 8080, application to Aurora
-  #       on 5432, application to interface endpoint on 443 -- and it is
-  #       expressed once, in the module that creates this group. This module
-  #       only ATTACHES it: it declares no aws_security_group and no
-  #       aws_security_group_rule, accepts no port, protocol or CIDR input, and
-  #       names no unrestricted range anywhere. There is consequently no path
-  #       through this file by which that matrix could be widened, which is the
-  #       property that owning the group in exactly one module exists to buy.
+  #       package -- VPC Link to ALB on 443, load balancer to application on
+  #       8080, application to Aurora on 5432 and application to interface
+  #       endpoint on 443. The network module owns the group; api-gateway-http
+  #       owns the exact SG-referenced VPC Link ingress because it can see both
+  #       endpoints. This module only ATTACHES the id and accepts no port,
+  #       protocol or CIDR input, so it cannot widen either owner's rules.
   security_groups = [var.alb_security_group_id]
 
-  # WHAT: HTTP headers that are not RFC-compliant are discarded here rather
-  #       than forwarded to a service.
   # WHY : Assumptions: without this, a header the load balancer itself will not
   #       parse is passed through verbatim, and the load balancer and the
   #       service can then disagree about where one request ends -- which is
@@ -288,7 +434,6 @@ resource "aws_lb" "this" {
   #       argument is also what keeps that scan clean by configuration.
   drop_invalid_header_fields = true
 
-  # WHAT: deletion protection taken from an input rather than fixed here.
   # WHY : Trade-offs: protection flags are one of the very few axes the two
   #       environments are permitted to differ on -- they differ in sizing,
   #       retention and protection, never in topology -- and the reason is
@@ -309,8 +454,6 @@ resource "aws_lb" "this" {
   #       the value looks first.
   idle_timeout = var.idle_timeout
 
-  # WHAT: access logging, enabled unconditionally -- no argument, input or
-  #       branch in this module can turn it off.
   # WHY : Trade-offs: a caller-controlled `enabled` flag was considered and
   #       rejected. The policy scan gates load-balancer access logging at HIGH
   #       severity (checkov CKV_AWS_91), so a switchable path would let a caller
@@ -323,27 +466,32 @@ resource "aws_lb" "this" {
   #       RECOVERY(NONE) JOURNAL(NO), so no access record existed and none could
   #       be reconstructed after the fact. These logs are the only record of
   #       which caller reached which service.
-  #       Assumptions: the bucket already carries the policy admitting the
-  #       regional ELB log-delivery principal to write to it. That is a property
-  #       of the bucket and belongs to the module that creates it -- a load
-  #       balancer cannot grant itself the write -- so an absent policy fails
-  #       the delivery test at apply rather than anything declared here.
+  #       Refactoring Rationale: the bucket and its delivery policy are created
+  #       above in this same module. That ownership closes the former gap where
+  #       logging was mandatory but no IaC resource was responsible for the
+  #       bucket or the principal grant ALB validates while enabling it.
   access_logs {
-    bucket  = var.access_logs_bucket
+    bucket  = local.access_logs_target_bucket
     prefix  = var.access_logs_prefix
     enabled = true
   }
 
-  # WHY : Assumptions: the merge and its precedence are decided once in `locals`
-  #       above, and all three resources read the same map so their tag sets
-  #       cannot drift apart.
+  # WHY : Assumptions: the merge and its precedence are decided once in
+  #       `locals` above, and every taggable resource reads the same map so the
+  #       load balancer, listener, rules and log bucket cannot drift apart.
   tags = local.tags
+
+  # WHY : Assumptions: ELB validates log-delivery authorization while enabling
+  #       access logs. The load balancer references the bucket name but not its
+  #       policy, so this explicit edge prevents a race in which ALB is created
+  #       before the required delivery grant exists.
+  depends_on = [aws_s3_bucket_policy.access_logs]
 }
 
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
 
-  # WHY : Assumptions: the port is fixed rather than accepted as an input. The
+  # Assumptions: the port is fixed rather than accepted as an input. The
   #       only client is the API Gateway private integration over the VPC Link,
   #       which targets this listener directly, so a non-default port would
   #       reach the same listener while additionally having to be mirrored in
@@ -352,32 +500,13 @@ resource "aws_lb_listener" "https" {
   #       buy here except a second place for the two to disagree.
   port = 443
 
-  # WHAT: HTTPS, and this is the ONLY listener the module creates.
-  # WHY : Assumptions: encryption in transit is required end to end, and this is
-  #       the hop at which it would most easily be dropped. A plaintext listener
-  #       is a HIGH-severity finding on both counts the policy scan makes --
-  #       checkov CKV_AWS_2 on a listener that is not HTTPS, and CKV_AWS_378 on
-  #       a load balancer using the HTTP protocol. CKV_AWS_378 is a GRAPH check
-  #       spanning a listener and the target group behind it, so it returns no
-  #       result when this module is scanned alone: the target groups belong to
-  #       ecs-service, so the relationship it walks is not present here. It is
-  #       named anyway because it does cover aws_lb_listener, and it is the
-  #       check that would fire once the two are scanned together.
-  #       Alternatives Considered: an additional HTTP listener performing an
-  #       HTTP-to-HTTPS redirect, which is the usual way those checks are
-  #       satisfied while a plaintext port stays open. Rejected because the sole
-  #       client is the API Gateway private integration reaching this load
-  #       balancer over its VPC Link, and that integration is configured for
-  #       HTTPS -- so a plaintext listener would carry no traffic while still
-  #       accepting connections, which is unused attack surface rather than
-  #       compatibility. Declining to create one satisfies the
-  #       plaintext-listener checks BY CONSTRUCTION rather than by a suppression
-  #       a reviewer would have to adjudicate. variables.tf records the same
-  #       decision against the absent create_http_listener input; the two are
-  #       one decision stated at both of its ends, not two that happen to agree.
+  # Alternatives Considered: an HTTP redirect listener would accept unused
+  #   plaintext traffic because the only client is the HTTPS VPC Link. A single
+  #   HTTPS listener satisfies the encryption checks without a suppression or
+  #   additional attack surface.
   protocol = "HTTPS"
 
-  # WHY : Assumptions: the negotiated floor is knowable only from this argument.
+  # Assumptions: the negotiated floor is knowable only from this argument.
   #       Omitting it would not leave the choice to AWS neutrally -- for every
   #       method other than the console the service default is the 2016-vintage
   #       policy, which still accepts TLS 1.0 and 1.1. The value, and why the
@@ -386,7 +515,7 @@ resource "aws_lb_listener" "https" {
   #       negotiation at TLS 1.2 and so satisfies checkov CKV_AWS_103.
   ssl_policy = var.ssl_policy
 
-  # WHY : Assumptions: the certificate is issued and its domain validated
+  # Assumptions: the certificate is issued and its domain validated
   #       outside this module, in the load balancer's OWN REGION -- a listener
   #       cannot present a certificate from another region -- and only the ARN
   #       crosses the boundary, so the private key never leaves ACM and nothing
@@ -394,10 +523,12 @@ resource "aws_lb_listener" "https" {
   #       about reuse: a certificate ARN embeds an account identifier and a
   #       region, and no ARN literal, account identifier or region name appears
   #       anywhere in this module.
+  # WHY : Assumptions: var.certificate_domain_name is the separate client-side
+  #       half of this contract. outputs.tf republishes it for API Gateway's
+  #       server_name_to_verify setting because an ACM ARN does not reveal the
+  #       DNS identity a TLS client must check.
   certificate_arn = var.certificate_arn
 
-  # WHAT: a request matching no listener rule is answered 404 by the load
-  #       balancer itself, without reaching any service.
   # WHY : Alternatives Considered: forwarding unmatched requests to a default
   #       service. Rejected because it makes the routing table's coverage
   #       invisible -- a typo in one path pattern would still be served, with a
@@ -408,13 +539,42 @@ resource "aws_lb_listener" "https" {
   #       invented. CICS rejected an unrecognised four-character transaction
   #       identifier instead of dispatching it to an arbitrary program, so "no
   #       such route" is the baseline's own answer to the same question.
-  #       Assumptions: the body is JSON because every route behind this listener
-  #       is a JSON API, so a client parses this response with the same reader
-  #       it already uses for a service's own error payload instead of failing
-  #       on unexpected HTML. It is built with `jsonencode` rather than written
-  #       as an escaped string literal so the quoting cannot be got wrong.
+  #       Assumptions: the body is JSON, and specifically the SAME SHAPE the
+  #       services' own error payload uses -- a numeric `status`, a
+  #       human-readable `message`, and a `fieldErrors` array -- so a client
+  #       parses this response with the reader it already has rather than needing
+  #       a second one for the one error this layer composes itself. An ad-hoc
+  #       body such as a lone `error` member was the alternative and is rejected:
+  #       it is valid JSON that no service ever emits, so every client would have
+  #       to special-case the shape of a 404 arriving from here, and the special
+  #       case would stay invisible until the first unrouted request. The array
+  #       is present and empty rather than omitted so a consumer that reads
+  #       `fieldErrors` unconditionally need not distinguish absent from empty.
+  #       It is built with `jsonencode` rather than as an escaped string literal
+  #       so the quoting cannot be got wrong.
+  #       Trade-offs: the shape is deliberately INCOMPLETE -- it carries no
+  #       correlation identifier, where every service-composed error does. A
+  #       listener fixed response is a static string fixed at apply time and
+  #       returned with no access to the request, so there is no mechanism here
+  #       to interpolate a per-request value at all. Two ways to gain one were
+  #       considered and rejected: forwarding unmatched requests to a service
+  #       that could compose it, which is the arrangement already rejected above
+  #       for making the routing table's coverage invisible; and a function
+  #       target behind a catch-all rule, which would add a function, its role
+  #       and its cold start to this module solely to decorate the answer to a
+  #       path that does not exist. The identity for an unrouted request lives in
+  #       this load balancer's access log instead, which is where an operator
+  #       investigating a 404 that reached no service has to look regardless.
+  #       Assumptions: the message text names nothing internal -- no service, no
+  #       path pattern, no target group -- because a 404 is reachable by anyone
+  #       and must not enumerate the routing table. It is newly authored rather
+  #       than carried over from a baseline message constant because the baseline
+  #       has no analogue at this layer: CICS rejected an unknown transaction
+  #       identifier at the terminal, not behind an HTTP router, so there is no
+  #       verbatim string to preserve and borrowing one would assert a lineage
+  #       that does not exist.
   default_action {
-    # WHY : Assumptions: the action TYPE is spelled with a hyphen while the
+    # Assumptions: the action TYPE is spelled with a hyphen while the
     #       nested block that configures it is spelled with an underscore. That
     #       asymmetry is the provider's, not a typo: `type` is validated against
     #       an enum of API values, and `terraform validate` rejects
@@ -425,34 +585,29 @@ resource "aws_lb_listener" "https" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ error = "not_found" })
-      status_code  = "404"
+      message_body = jsonencode({
+        status      = 404
+        message     = "The requested resource does not exist."
+        fieldErrors = []
+      })
+      status_code = "404"
     }
   }
 
-  # WHY : Assumptions: the same map every resource in this file tags with, for
+  # Assumptions: the same map every resource in this file tags with, for
   #       the reason recorded once on `locals` above.
   tags = local.tags
 }
 
 resource "aws_lb_listener_rule" "service" {
-  # WHAT: one rule per entry in the routing map, keyed by the service name.
-  # WHY : Alternatives Considered: `count` over a list of route objects.
-  #       Rejected because `count` keys each rule by its INDEX, so inserting or
-  #       reordering an entry shifts every later index and Terraform then plans
-  #       to destroy and recreate rules whose configuration did not change --
-  #       briefly removing routing for services nobody touched. A map key is
-  #       derived from the service name and is stable, so a routing edit plans
-  #       against exactly the one rule it changes, and that key is also what
-  #       appears in plan output and in the resource address a reader debugs by.
-  #       Assumptions: variables.tf fixes the key SET at the seven online
-  #       bounded contexts and rejects any other key, so the number of rules is
-  #       a property of the module rather than of whatever map a caller passes.
+  # Alternatives Considered: count over a list would make rule identity depend
+  #   on position and recreate unaffected routes after insertion or reordering.
+  #   Service-name keys keep plans and resource addresses stable.
   for_each = var.service_routes
 
   listener_arn = aws_lb_listener.https.arn
 
-  # WHY : Assumptions: priorities must be unique on a listener and are evaluated
+  # Assumptions: priorities must be unique on a listener and are evaluated
   #       lowest-first, so they ARE the routing precedence between two patterns
   #       that could both match a request. The caller supplies them rather than
   #       the module deriving them from map ordering: a derived priority would
@@ -463,7 +618,7 @@ resource "aws_lb_listener_rule" "service" {
   #       time, so a collision is named before any rule exists.
   priority = each.value.priority
 
-  # WHY : Assumptions: the target group is created by this context's ecs-service
+  # Assumptions: the target group is created by this context's ecs-service
   #       instantiation, beside the task definition and task role it scales
   #       with, and only its ARN crosses the boundary -- this module creates no
   #       aws_lb_target_group, for the reason given in the omissions block
@@ -475,7 +630,7 @@ resource "aws_lb_listener_rule" "service" {
     target_group_arn = each.value.target_group_arn
   }
 
-  # WHY : Alternatives Considered: host-based conditions instead of path-based.
+  # Alternatives Considered: host-based conditions instead of path-based.
   #       Rejected because all seven contexts sit behind ONE internal name and
   #       ONE certificate, so the path is the only discriminator that needs no
   #       further infrastructure -- host-based routing would require seven names
@@ -490,7 +645,7 @@ resource "aws_lb_listener_rule" "service" {
     }
   }
 
-  # WHY : Assumptions: the same map every resource in this file tags with, for
+  # Assumptions: the same map every resource in this file tags with, for
   #       the reason recorded once on `locals` above. Every rule carries the
   #       identical set, so a tag-based cost or access query returns the whole
   #       routing table rather than a subset of it.

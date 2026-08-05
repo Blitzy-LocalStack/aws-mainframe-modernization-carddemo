@@ -26,16 +26,17 @@
 #   should be added.
 #
 # Parameters:
-#   The twelve `variable` blocks below ARE this file's parameters, so the
+#   The thirteen `variable` blocks below ARE this file's parameters, so the
 #   name, type and description obligation is discharged on each block directly
 #   rather than duplicated into a list here that could drift from it. In
 #   declaration order: name_prefix, environment, kms_key_arn,
 #   dataset_families, non_generation_prefixes, noncurrent_version_retention,
 #   noncurrent_version_transition_days,
 #   noncurrent_version_transition_storage_class,
-#   abort_incomplete_multipart_upload_days, access_log_bucket_name,
-#   force_destroy and tags. Exactly two of them -- `environment` and
-#   `kms_key_arn` -- have no default and are therefore required of the caller.
+#   abort_incomplete_multipart_upload_days, object_created_lambda_arn,
+#   access_log_bucket_name, force_destroy and tags. Exactly three of them --
+#   `environment`, `kms_key_arn` and `object_created_lambda_arn` -- have no
+#   default and are therefore required of the caller.
 #
 # Return values:
 #   None. This file returns nothing: it IS the module's input contract. The
@@ -46,7 +47,8 @@
 #
 # Errors:
 #   `terraform validate` fails before any plan is produced when a caller omits
-#   `environment` or `kms_key_arn`, because neither has a default. Four
+#   `environment`, `kms_key_arn` or `object_created_lambda_arn`, because none
+#   has a default. Five
 #   variables carry `validation` blocks that reject a value at plan time with
 #   a stated message: `name_prefix` and `environment` on charset and length,
 #   which together guarantee the composed bucket name cannot exceed the S3
@@ -421,7 +423,7 @@ variable "non_generation_prefixes" {
 # -----------------------------------------------------------------------------
 
 variable "noncurrent_version_retention" {
-  description = "Number of noncurrent object versions retained per prefix before the oldest is expired. This is the S3 expression of the baseline's LIMIT(5) SCRATCH generation limit, so the default of five reproduces mainframe generation retention exactly; a root may raise it to keep more history."
+  description = "Default retention count shared by two mechanisms: data-migration's staging writer keeps this many logical dt=/gen= generation prefixes per family, reproducing LIMIT(5) SCRATCH; S3 lifecycle also keeps this many newer noncurrent versions of any one object key as repeat-write recovery. Distinct gen= prefixes are not noncurrent versions of each other."
   type        = number
   default     = 5
 
@@ -430,15 +432,14 @@ variable "noncurrent_version_retention" {
   # L52 and L75; and app/jcl/DALYREJS.jcl:L26. The two keywords carry separate
   # meanings and both are needed to justify this default. LIMIT(5) caps the
   # group at five generations, and SCRATCH makes the generation that rolls off
-  # physically deleted rather than merely uncatalogued -- without SCRATCH the
-  # rolled-off dataset would survive on disk unnamed, which is not what the
-  # baseline does. Bucket versioning plus a noncurrent-version expiry that
-  # keeps exactly five is the pair's joint equivalent: versioning supplies the
-  # generation stack, and the expiry supplies both the cap and the deletion.
+  # physically deleted rather than merely uncatalogued. The staging writer
+  # supplies that exact behaviour by sorting the distinct dt=/gen= prefixes and
+  # deleting every version and delete marker under prefixes older than the
+  # newest five. The lifecycle rule uses the same number for a DIFFERENT layer:
+  # repeat writes to one object key inside a retained generation.
   #
-  # Assumptions: a value of zero would expire every version the moment it
-  # stopped being current, collapsing a five-generation group to a single
-  # object and destroying the retained history that LIMIT(5) exists to provide.
+  # Assumptions: a value of zero would tell the writer to delete every logical
+  # generation after staging and would make noncurrent object history useless.
   # That history is load-bearing rather than decorative, because the batch
   # chain addresses generations RELATIVELY rather than by absolute name --
   # app/jcl/COMBTRAN.jcl:L24 and L26 read (0), the current generation, while
@@ -448,7 +449,7 @@ variable "noncurrent_version_retention" {
   # correctness bound, not a style preference.
   validation {
     condition     = var.noncurrent_version_retention >= 1
-    error_message = "noncurrent_version_retention must be at least 1; zero would expire every noncurrent version immediately and destroy the generation history the batch chain reads."
+    error_message = "noncurrent_version_retention must be at least 1; zero would leave no logical generation after staging and no usable repeat-write recovery."
   }
 }
 
@@ -569,6 +570,24 @@ variable "abort_incomplete_multipart_upload_days" {
   }
 }
 
+# WHY : Refactoring Rationale: lifecycle version retention cannot enforce a
+#       count across distinct dt=/gen= object keys. This hook invokes the
+#       generation-retention Lambda for every completed object write so it can
+#       list generation prefixes and delete all but the newest five.
+# WHY : Alternatives Considered: a twelfth Step Functions state. Rejected
+#       because the batch contract fixes exactly eleven states and ad-hoc
+#       writers would bypass a state-machine-only cleanup path.
+variable "object_created_lambda_arn" {
+  description = "ARN of the Lambda function invoked for S3 ObjectCreated events to enforce five-generation retention across distinct dt=/gen= keys. Required because lifecycle version retention cannot enforce a count across different object keys."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+)?$", var.object_created_lambda_arn))
+    error_message = "object_created_lambda_arn must be a Lambda function ARN, optionally qualified by version or alias."
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Auditing, teardown and tagging.
 # -----------------------------------------------------------------------------
@@ -582,8 +601,7 @@ variable "access_log_bucket_name" {
   # reusable module that required a log destination could not be instantiated
   # until the caller had provisioned one, which would make a logging bucket a
   # precondition of every consumer including a throwaway test root. The
-  # consequence is stated rather than glossed: the policy scan in
-  # .github/workflows/infra-ci.yml gates at HIGH and CRITICAL and expects
+  # consequence is stated rather than glossed: the complete Checkov scan reports
   # access logging on a bucket holding financial datasets, so the environment
   # roots are expected to supply a target here and leaving it null in dev or
   # prod is not the intended end state. If the scanner flags this bucket, the
@@ -597,6 +615,18 @@ variable "access_log_bucket_name" {
   # without bound from its own logging. Nothing in the type system prevents a
   # caller passing this bucket's own name, so the constraint is recorded here
   # where a caller reading the input will see it.
+}
+
+variable "audit_log_retention_days" {
+  description = "Finite lifecycle horizon for validated CloudTrail dataset object-access logs."
+  type        = number
+  nullable    = false
+  default     = 2557
+
+  validation {
+    condition     = floor(var.audit_log_retention_days) == var.audit_log_retention_days && var.audit_log_retention_days >= 365 && var.audit_log_retention_days <= 3653
+    error_message = "audit_log_retention_days must be a whole number from 365 through 3653."
+  }
 }
 
 variable "force_destroy" {

@@ -3,16 +3,15 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the `step-functions-batch` module -- the
-#   module that provisions the `carddemo-daily-batch` state machine, its
-#   execution role and its log group. That state machine is the migrated form of
-#   the nightly job chain under app/jcl/: eleven states, of which the seven that
-#   do record processing each run a Fargate task through the synchronous
-#   run-task integration and wait for it, two bracket the window by setting and
-#   clearing an online read-only flag, one refreshes table statistics, and one
-#   stages the seed datasets. Every value a calling environment root can
-#   configure is declared here, and nothing else is configurable: anything
-#   absent from the list below is a property of the state machine fixed in
-#   main.tf, not a per-environment choice.
+#   module that provisions the `carddemo-daily-batch` state machine, the
+#   ad-hoc-report state machine, their shared execution role and two log groups.
+#   The daily machine is the migrated form of the nightly job chain under
+#   app/jcl/: eleven work states, of which state 2 runs the data-migration image,
+#   states 3 through 7 run batch-service, states 8 and 9 run reporting-service,
+#   two bracket the window by setting and clearing an online read-only flag and
+#   one refreshes table statistics. Every value a calling environment root can
+#   configure is declared here, and anything absent from the list below is a
+#   property of the state machines fixed in main.tf, not an environment choice.
 #
 #   Nothing here is read from the ambient environment and nothing is generated
 #   inside the module. Every input arrives from infra/envs/dev/main.tf or
@@ -20,7 +19,7 @@
 #   the two environments visible in their own terraform.tfvars files rather than
 #   hidden in this module.
 #
-# Parameters -- thirteen required, fifteen optional:
+# Parameters -- fourteen required, seventeen optional:
 #   environment                       string       REQUIRED. Names the machine.
 #   ecs_cluster_arn                   string       REQUIRED. Cluster every task
 #                                                  state runs in.
@@ -28,6 +27,8 @@
 #                                                  task the job states run.
 #   data_migration_task_definition_arn string      REQUIRED. The ETL task the
 #                                                  staging state runs.
+#   reporting_task_definition_arn      string       REQUIRED. The reporting
+#                                                  task states 8 and 9 run.
 #   private_app_subnet_ids            list(string) REQUIRED. Task placement.
 #   security_group_ids                list(string) REQUIRED. Task network.
 #   task_role_arns                    list(string) REQUIRED. Roles the machine
@@ -43,7 +44,11 @@
 #   batch_container_name              string       Override target in the batch
 #                                                  task definition.
 #   data_migration_container_name     string       The same, for the ETL task.
-#   seed_dataset_names                list(string) Branches of the staging map.
+#   reporting_container_name          string       The same, for reporting.
+#   seed_dataset_names                list(string) Ten branches of the staging
+#                                                  map.
+#   stage_datasets_max_concurrency    number       Maximum parallel load
+#                                                  branches.
 #   default_state_timeout_seconds     number       Per-state timeout floor.
 #   state_timeout_seconds_overrides   map(number)  Per-state exceptions.
 #   retry_max_attempts                number       Retries per state.
@@ -63,14 +68,12 @@
 #   the summary above is a map of the surface, not a second copy of it.
 #
 # Return values:
-#   None. A variables.tf declares no output, so the state machine ARN this
-#   module publishes -- the value infra/modules/eventbridge-scheduler consumes
-#   as its own `state_machine_arn` input, and the value
-#   services/reporting-service starts an execution against for an on-demand
-#   report -- is declared in infra/modules/step-functions-batch/outputs.tf.
+#   None. A variables.tf declares no output. outputs.tf publishes separate
+#   daily and ad-hoc state-machine ARNs: eventbridge-scheduler consumes the
+#   first, while reporting-service starts the second.
 #
 # Errors / Exceptions:
-#   Thirteen inputs have no default, so omitting any one of them stops the
+#   Fourteen inputs have no default, so omitting any one of them stops the
 #   calling root at `plan` with a missing-required-argument error rather than
 #   provisioning a state machine that would fail on its first invocation. Every
 #   input that names an AWS resource additionally carries a `validation` block
@@ -183,9 +186,10 @@ variable "tags" {
 # -----------------------------------------------------------------------------
 # Container task wiring -- what each work-performing state actually runs
 #
-# The four inputs in this section describe the two container tasks the state
-# machine invokes. Seven states run the batch task with different command
-# arguments; one state, the seed-dataset staging map, runs the ETL task. Each
+# The six inputs in this section describe the three container tasks the state
+# machine invokes. Five states run the batch task with different command
+# arguments; one state, the seed-dataset staging map, runs the ETL task; and two
+# states plus the ad-hoc machine run reporting-service. Each
 # invocation uses the SYNCHRONOUS run-task integration, which starts the task
 # and holds the state open until the task stops, so that the next state observes
 # a completed step exactly as a JCL step observed its predecessor's completion.
@@ -222,7 +226,7 @@ variable "ecs_cluster_arn" {
 }
 
 variable "batch_task_definition_arn" {
-  description = "ARN of the task definition the seven job states run, which is the batch-service image. Each state overrides only that task's container command, so one task definition serves the whole chain and the per-step arguments stay in the state machine where the step order is also expressed."
+  description = "ARN of the task definition states 3 through 7 run, which is the batch-service image. Each state overrides only that task's container command, so one task definition serves all five jobs and the per-step arguments stay in the state machine where the step order is also expressed."
 
   type = string
 
@@ -254,6 +258,21 @@ variable "data_migration_task_definition_arn" {
   }
 }
 
+variable "reporting_task_definition_arn" {
+  description = "ARN of the reporting-service task definition used by daily statement/report states and the ad-hoc report machine. Published by the reporting ecs-service module and wired by the environment root; it is separate from batch_task_definition_arn because BatchApplication's verified job list contains no statement or report job."
+
+  type = string
+
+  validation {
+    # WHY : Assumptions: the same task-definition shape accepted for the other
+    #       two images is required here. Validating separately keeps a malformed
+    #       reporting ARN attributed to the input that feeds states 8 and 9
+    #       rather than to a generic task-definition collection.
+    condition     = can(regex("^arn:[a-z0-9-]+:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/", var.reporting_task_definition_arn))
+    error_message = "reporting_task_definition_arn must be an ECS task-definition ARN of the form arn:<partition>:ecs:<region>:<account-id>:task-definition/<family>[:<revision>]."
+  }
+}
+
 variable "batch_container_name" {
   description = "Name of the container inside the batch task definition whose command each job state overrides. The synchronous run-task integration matches an override to a container by name, so a value that does not appear in the definition is rejected by the service at invocation rather than at apply."
   type        = string
@@ -279,6 +298,21 @@ variable "data_migration_container_name" {
   validation {
     condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]*$", var.data_migration_container_name))
     error_message = "data_migration_container_name must be a container name of letters, digits, hyphens and underscores, beginning with a letter or digit."
+  }
+}
+
+variable "reporting_container_name" {
+  description = "Name of the container inside the reporting-service task definition whose command the two daily output states and the ad-hoc report state override. ContainerOverrides matches this name exactly, so the environment root passes the name exported by the reporting ecs-service module rather than relying on an assumed literal."
+  type        = string
+  default     = "reporting"
+
+  validation {
+    # WHY : Trade-offs: existence cannot be checked from an ARN at plan time,
+    #       but the legal character set can. Rejecting blank or whitespace-
+    #       bearing names here prevents an override from being ignored while
+    #       the task starts with its ordinary server command.
+    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]*$", var.reporting_container_name))
+    error_message = "reporting_container_name must be a container name of letters, digits, hyphens and underscores, beginning with a letter or digit."
   }
 }
 
@@ -321,7 +355,7 @@ variable "security_group_ids" {
 }
 
 variable "task_role_arns" {
-  description = "IAM role ARNs the state machine's execution role is permitted to pass to a task it starts, which is the task role and the task execution role of both task definitions. Starting a task requires iam:PassRole on exactly the roles the definition names, so this list is the least-privilege boundary of what the nightly chain can run as."
+  description = "IAM role ARNs the state-machine execution role is permitted to pass to ECS: the task role and task execution role used by each of the batch, data-migration and reporting task definitions. The environment root assembles the list from ecs-service outputs; enumerating it is the least-privilege boundary of what either machine may run as."
 
   type = list(string)
 
@@ -430,19 +464,15 @@ variable "dataset_bucket_name" {
 }
 
 variable "seed_dataset_names" {
-  description = "Dataset names the seed-staging state iterates over, one parallel branch per name, each branch running the ETL task for that dataset. The default lists the eleven datasets the migration's readers are written against, so a caller that stages the standard set supplies nothing."
+  description = "Dataset names the seed-staging state iterates over, one branch per IDCAMS master-refresh load job and one data-migration task per branch. The default is the ten loaded masters; DALYTRAN is absent because posting reads it directly as sequential input rather than loading it into a master table."
 
   type = list(string)
 
-  # Assumptions: the eleven default entries are not an arbitrary selection. They
-  # are the datasets for which a fixed-width reader exists, each pinned to one
-  # copybook layout and one record length: usrsec at 80 bytes, acctdata at 300,
-  # carddata at 150, custdata at 500, cardxref at 50, dalytran at 350, transact
-  # at 350, discgrp at 50, trancatg at 60, trantype at 60 and tcatbalf at 50.
-  # Staging a dataset with no reader would start a branch that fails on an
-  # unknown layout; omitting one that HAS a reader would leave a master table
-  # empty and the failure would surface much later, as a posting reject rather
-  # than as a load error.
+  # Assumptions: the ten entries correspond one-to-one to ACCTFILE, CARDFILE,
+  # CUSTFILE, XREFFILE, TRANFILE, DISCGRP, TCATBALF, TRANTYPE, TRANCATG and
+  # DUSRSECJ. DALYTRAN.PS deliberately is not an eleventh entry:
+  # POSTTRAN.jcl reads it directly with DISP=SHR, so staging it as a master
+  # would invent a load step the baseline has no contract for.
   #
   # WHY the list is an input at all when the readers fix it. Trade-offs: a caller
   # occasionally needs to stage a subset -- reloading one master after a
@@ -451,27 +481,42 @@ variable "seed_dataset_names" {
   # a name no reader supports, which the validation below cannot detect because
   # the reader set lives in the ETL package rather than in Terraform.
   default = [
-    "usrsec",
-    "acctdata",
-    "carddata",
-    "custdata",
-    "cardxref",
-    "dalytran",
-    "transact",
-    "discgrp",
-    "trancatg",
-    "trantype",
-    "tcatbalf",
+    "accounts",
+    "cards",
+    "customers",
+    "card_xref",
+    "transactions",
+    "disclosure_groups",
+    "transaction_category_balances",
+    "transaction_types",
+    "transaction_categories",
+    "users",
   ]
 
   validation {
     # WHY : Assumptions: each name becomes a path segment in the dataset
     #       prefix and a branch name in the map state, so it is restricted to
-    #       characters legal in both. An empty list is rejected because a map
-    #       state with no branches succeeds instantly, which would report a
-    #       staging step as complete having loaded nothing.
-    condition     = length(var.seed_dataset_names) >= 1 && alltrue([for d in var.seed_dataset_names : can(regex("^[a-z0-9][a-z0-9-]*$", d))])
-    error_message = "seed_dataset_names must list at least one name, each of lowercase letters, digits and hyphens, beginning with a letter or digit."
+    #       lowercase letters, digits and separators the CLI accepts. An empty
+    #       list is rejected because a Map with no items succeeds while loading
+    #       nothing.
+    condition     = length(var.seed_dataset_names) >= 1 && alltrue([for d in var.seed_dataset_names : can(regex("^[a-z0-9][a-z0-9_-]*$", d))])
+    error_message = "seed_dataset_names must list at least one name, each of lowercase letters, digits, hyphens and underscores, beginning with a letter or digit."
+  }
+}
+
+variable "stage_datasets_max_concurrency" {
+  description = "Maximum number of StageSeedDatasets Map branches allowed to run at once. The environment root may lower it to fit Aurora and Fargate quotas; the default permits parallel loads without starting all ten task branches simultaneously."
+  type        = number
+  default     = 3
+
+  validation {
+    # WHY : Trade-offs: one would serialise ten independent loads, while ten
+    #       would make the Map burst every branch against the same database and
+    #       task quota. Three keeps useful parallelism and bounds connection
+    #       pressure; the range permits a root to tune that sizing value without
+    #       changing the state-machine topology.
+    condition     = var.stage_datasets_max_concurrency == floor(var.stage_datasets_max_concurrency) && var.stage_datasets_max_concurrency >= 1 && var.stage_datasets_max_concurrency <= 10
+    error_message = "stage_datasets_max_concurrency must be a whole number from 1 to 10."
   }
 }
 
@@ -623,7 +668,7 @@ variable "log_retention_days" {
 }
 
 variable "log_level" {
-  description = "Which execution events reach the log group. `ERROR` records only failures, `FATAL` only terminal ones, `ALL` records every state transition and `OFF` records nothing."
+  description = "Which execution events reach both state-machine log groups. ERROR records failures, FATAL only terminal failures and ALL every transition; logging cannot be disabled because execution history is the target analogue of the baseline job log."
   type        = string
   default     = "ALL"
 
@@ -632,12 +677,12 @@ variable "log_level" {
     #       cheapest. A nightly chain runs once, so the volume is bounded by
     #       eleven states rather than by request rate, and the first question
     #       asked after a failure is which state failed and what it received --
-    #       which only the full transition history answers. `OFF` remains
-    #       available and is deliberately left in the accepted set, because
-    #       forcing logging on would be a policy this module has no standing to
-    #       impose.
-    condition     = contains(["ALL", "ERROR", "FATAL", "OFF"], var.log_level)
-    error_message = "log_level must be one of ALL, ERROR, FATAL or OFF."
+    #       which only the full transition history answers. OFF is deliberately
+    #       excluded: both machines are required to emit execution logs, and a
+    #       caller disabling them would remove the only cross-state record of a
+    #       failed chain while still producing a valid plan.
+    condition     = contains(["ALL", "ERROR", "FATAL"], var.log_level)
+    error_message = "log_level must be one of ALL, ERROR or FATAL; execution logging cannot be disabled."
   }
 }
 
@@ -657,7 +702,7 @@ variable "include_execution_data" {
 }
 
 variable "tracing_enabled" {
-  description = "Whether executions are traced end to end, so a nightly run appears as one trace spanning its task and function invocations rather than as eleven unrelated ones."
+  description = "Whether both workflows are traced end to end. The target observability contract requires one trace spanning task and function invocations, so environment roots must leave this true."
   type        = bool
   default     = true
 
@@ -666,6 +711,14 @@ variable "tracing_enabled" {
   # module's failures raise is almost always where in the chain time went or
   # where a call failed, and a per-execution trace answers it without
   # reconstructing a timeline from log timestamps across three services.
+  validation {
+    # WHY : Assumptions: dev and prod may differ in sizing and retention, not
+    #       in whether the topology emits traces. Requiring true turns an
+    #       observability regression into a plan-time error rather than a
+    #       workflow that silently disappears from the trace view.
+    condition     = var.tracing_enabled
+    error_message = "tracing_enabled must be true for both CardDemo state machines."
+  }
 }
 
 # -----------------------------------------------------------------------------

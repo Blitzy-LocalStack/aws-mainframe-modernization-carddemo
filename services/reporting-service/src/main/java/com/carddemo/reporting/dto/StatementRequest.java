@@ -10,90 +10,72 @@ import jakarta.validation.constraints.Size;
  * <h2>What a statement request selects</h2>
  *
  * <p>This is the request body of the statement retrieval surface that
- * {@code com.carddemo.reporting.api} exposes in place of the batch statement flow. That flow is a
- * job driving two programs, and it takes no selector whatsoever:
- * {@code app/cbl/CBSTM03A.CBL} produces its output from a control break on the card number it last
- * saw, held in {@code WS-SAVE-CARD PIC X(16)} at L69, and {@code app/jcl/CREASTMT.JCL} runs that
- * program over the entire prepared file at L79, so one statement is emitted per distinct card
- * present. This record is the selector the migrated surface adds in front of it, and it carries
- * two components and nothing else.
+ * {@code com.carddemo.reporting.api} exposes in place of the batch statement flow. That flow takes no
+ * selector whatsoever: {@code app/cbl/CBSTM03A.CBL} produces its output from a control break on the
+ * card number it last saw, held in {@code WS-SAVE-CARD PIC X(16)} at L69, and
+ * {@code app/jcl/CREASTMT.JCL} runs that program over the entire prepared file at L79, so one
+ * statement is emitted per distinct card present. This record is the selector the migrated surface
+ * adds in front of it, and it carries two components and nothing else.
  *
- * <p>Assumptions: each of the three states the two components can be in means something specific,
- * and the third of them is what makes both of them optional rather than merely lenient. A card
- * number present narrows the run to that one card, which is the unit the control break at
- * {@code app/cbl/CBSTM03A.CBL} L69 already works in. An account identifier present names the
- * alternative scope, reached by resolving the account to its cards through the cross-reference
- * that {@code app/cbl/CBSTM03B.CBL} opens as its {@code XREF-FILE} at L65. Neither present means
- * every card the prepared input holds, which is exactly the whole-file behaviour of
- * {@code app/jcl/CREASTMT.JCL} L79 and therefore a state this record has to be able to express
+ * <p>Assumptions: each of the three states the two components can be in means something specific, and
+ * the third is what makes both optional rather than merely lenient. A card number present narrows the
+ * run to that one card, the unit the control break at {@code app/cbl/CBSTM03A.CBL} L69 already works
+ * in. An account identifier present names the alternative scope, reached by resolving the account to
+ * its cards through the cross-reference {@code app/cbl/CBSTM03B.CBL} opens as its {@code XREF-FILE} at
+ * L65. Neither present means every card the prepared input holds, which is exactly the whole-file
+ * behaviour of {@code app/jcl/CREASTMT.JCL} L79 and therefore a state this record has to express
  * rather than an incomplete request.
  *
  * <p>Assumptions: whether the two components may be supplied together is deliberately not settled
  * here. A rule relating one component to another decides how a run is composed, which is business
- * logic, and the charter at {@code com.carddemo.reporting.dto} closes this package to business
- * logic entirely; {@code com.carddemo.reporting.service} is where such a rule belongs and the only
- * place it may be enforced. What this record guarantees is narrower and unconditional: each
- * component, taken on its own, is either absent or a value of the shape its copybook field
- * declares.
+ * logic, and the charter at {@code com.carddemo.reporting.dto} closes this package to business logic
+ * entirely. What this record guarantees is narrower and unconditional: each component, taken on its
+ * own, is either absent or a value of the shape its copybook field declares.
  *
  * <h2>Two things this record deliberately does not carry</h2>
  *
- * <p>Alternatives Considered: a start-date and end-date pair, mirroring the {@code ReportRequest}
- * type in this same package, was evaluated and rejected. The contrast between the two jobs is the
- * whole of the reason, so it is named rather than summarised. The report path plainly injects a
- * range: {@code app/jcl/TRANREPT.jcl} declares {@code PARM-START-DATE,C'2022-01-01'} at L43 and
- * {@code PARM-END-DATE,C'2022-07-06'} at L44 as sort symbols under the symbol declaration at L40,
- * and {@code app/cbl/CBTRN03C.cbl} receives them over the {@code DATEPARM} data-definition
- * channel. The statement path injects nothing of the kind: across all 98 lines of
- * {@code app/jcl/CREASTMT.JCL} there is no parameter field, no date symbol and no such channel at
- * all. A range here would therefore let a caller ask for a statement bounded in a way the baseline
- * cannot produce, and a bound the baseline never applied changes observable output rather than
- * adding a convenience. Functional parity is what forbids it.
+ * <p>Alternatives Considered: a start-date and end-date pair, mirroring the {@code ReportRequest} type
+ * in this same package, was evaluated and rejected. The contrast between the two jobs is the whole of
+ * the reason. The report path plainly injects a range -- {@code app/jcl/TRANREPT.jcl} declares
+ * {@code PARM-START-DATE} and {@code PARM-END-DATE} as sort symbols at L43 and L44 and
+ * {@code app/cbl/CBTRN03C.cbl} receives them over the {@code DATEPARM} channel -- while the statement
+ * path injects nothing of the kind: across all 98 lines of {@code app/jcl/CREASTMT.JCL} there is no
+ * parameter field, no date symbol and no such channel. A range here would let a caller ask for a
+ * statement bounded in a way the baseline cannot produce, and a bound the baseline never applied
+ * changes observable output rather than adding a convenience. Functional parity is what forbids it.
  *
  * <p>Alternatives Considered: a format component choosing between the plain-text artifact and the
- * hypertext one was evaluated and rejected, because a run produces both and offers no choice
- * between them. {@code app/jcl/CREASTMT.JCL} creates the plain-text dataset at L87 to L91 with
+ * hypertext one was evaluated and rejected, because a run produces both and offers no choice between
+ * them. {@code app/jcl/CREASTMT.JCL} creates the plain-text dataset at L87 to L91 with
  * {@code DCB=(LRECL=80,...)} and the hypertext dataset at L92 to L96 with
  * {@code DCB=(LRECL=100,...)}, and the program agrees from the inside, declaring
  * {@code FD-STMTFILE-REC PIC X(80)} at {@code app/cbl/CBSTM03A.CBL} L45 and
  * {@code FD-HTMLFILE-REC PIC X(100)} at L46. A selector would let a caller request less than a run
- * produces, which narrows observable output rather than parameterising it.
- *
- * <p>Assumptions: one observation supports that second decision and is set down because it reads
- * as a conflict until it is followed through. The earlier stanza that clears the previous run's
- * output declares the hypertext dataset with {@code LRECL=80} at {@code app/jcl/CREASTMT.JCL} L69
- * rather than with the 100 the creating stanza uses. That stanza belongs to a deletion step
- * running {@code IEFBR14} at L66, which writes no data at all, so the record length attached to it
- * never describes any bytes; the authoritative hypertext width is the {@code LRECL=100} at L94,
- * corroborated by the program's own file description at {@code app/cbl/CBSTM03A.CBL} L46. This is
- * an observation about reference material that stays byte-identical, and nothing here proposes an
- * alteration to it.
+ * produces, which narrows observable output rather than parameterising it. One reading that looks
+ * like a conflict is followed through here so it is not mistaken for one: the earlier stanza that
+ * clears the previous run's output declares the hypertext dataset with {@code LRECL=80} at L69, but
+ * that stanza belongs to a deletion step running {@code IEFBR14} at L66 which writes no data at all,
+ * so the authoritative hypertext width is the {@code LRECL=100} at L94.
  *
  * <h2>Shape, and where the contracts behind it come from</h2>
  *
- * <p>Assumptions: both components are strings of digits rather than numbers, on the strength of
- * the baseline declaring each identifier twice over the same bytes -- once as characters and once
- * as a number -- at {@code app/cpy/CVCRD01Y.cpy}: {@code CC-ACCT-ID PIC X(11)} at L34 with
- * {@code CC-ACCT-ID-N PIC 9(11)} redefining it at L36, {@code CC-CARD-NUM PIC X(16)} at L37 with
- * its numeric redefinition at L39, and {@code CC-CUST-ID PIC X(09)} at L40 with its numeric
- * redefinition at L42. The character declaration is what the wire carries and the numeric one
- * exists so that arithmetic can reach the same bytes, so a string is the representation that
- * survives the move: a numeric component would discard a leading zero the declared width
- * preserves, and a 16-digit card number does not fit a 32-bit integer at all. The charter at
- * {@code com.carddemo.reporting.dto} records the same reading for every type in this package, and
- * this record follows it rather than restating it.
+ * <p>Assumptions: both components are strings of digits rather than numbers, on the strength of the
+ * baseline declaring each identifier twice over the same bytes -- once as characters and once as a
+ * number -- at {@code app/cpy/CVCRD01Y.cpy}, where {@code CC-ACCT-ID PIC X(11)} at L34 is redefined
+ * as {@code CC-ACCT-ID-N PIC 9(11)} at L36 and {@code CC-CARD-NUM PIC X(16)} at L37 is redefined
+ * numerically at L39. The character declaration is what the wire carries and the numeric one exists
+ * so that arithmetic can reach the same bytes, so a string is the representation that survives the
+ * move: a numeric component would discard a leading zero the declared width preserves, and a 16-digit
+ * card number does not fit a 32-bit integer at all.
  *
  * <p>Assumptions: this record declares no page envelope, no problem shape and no per-field error
  * carrier of its own, because {@code com.carddemo.common.web.PageResponse},
  * {@code com.carddemo.common.error.ApiError} and
- * {@code com.carddemo.common.validation.FieldValidationFlag} are consumed from the shared kernel
- * under transformation rule T2, which turns one former copybook inclusion into one import from the
- * single package owning the contract. It carries no monetary and no timestamp component either, so
- * it reaches nothing in the kernel's money or time packages; a statement request selects a scope
- * and reports no amounts. The written convention every block here follows is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, and any difference between this migration and the
- * baseline belongs to {@code docs/architecture/cobol-to-service-traceability.md}, which this
- * package cites and never extends.
+ * {@code com.carddemo.common.validation.FieldValidationFlag} are consumed from the shared kernel under
+ * transformation rule T2, which turns one former copybook inclusion into one import from the single
+ * package owning the contract. It carries no monetary and no timestamp component either, so it reaches
+ * nothing in the kernel's money or time packages; a statement request selects a scope and reports no
+ * amounts.
  *
  * @param cardNumber the card number a run is narrowed to, as a string of at most 16 digits, or
  *     {@code null} to leave the run unnarrowed by card; 16 is the width
@@ -112,20 +94,24 @@ public record StatementRequest(
      * The number of positions the baseline declares for a card number.
      *
      * <p>Assumptions: 16 is read from {@code TRNX-CARD-NUM PIC X(16)} at
-     * {@code app/cpy/COSTM01.CPY} L22, the leading field of the 32-byte {@code TRNX-KEY} group
-     * that L21 to L23 declare, and it is corroborated by {@code CC-CARD-NUM PIC X(16)} at
+     * {@code app/cpy/COSTM01.CPY} L22, and is corroborated by {@code CC-CARD-NUM PIC X(16)} at
      * {@code app/cpy/CVCRD01Y.cpy} L37 and by the control-break field
      * {@code WS-SAVE-CARD PIC X(16)} at {@code app/cbl/CBSTM03A.CBL} L69. Three independent
      * declarations agree, so the width is a contract rather than a reading.
      *
-     * <p>Alternatives Considered: writing the literal straight into the constraint annotation and
-     * again into the constructor guard below was the obvious alternative and is rejected. It puts
-     * one declared width in two executable positions -- the constraint a caller is published and
-     * the guard a caller is held to -- which is what lets those two drift apart silently. Naming
-     * it once means they cannot disagree, and it leaves exactly one line to compare against
-     * {@code app/cpy/COSTM01.CPY} L22. The width is quoted in the prose of this file as well, in
-     * the component descriptions and in the refusal contract, and that is documentation rather
+     * <p>Alternatives Considered: writing the literal straight into the constraint annotation was
+     * the obvious alternative and is rejected. A named constant leaves exactly one line to compare
+     * against {@code app/cpy/COSTM01.CPY} L22, whereas a literal inside an annotation is a number
+     * with no stated provenance sitting where nobody looks for one. The width is quoted in the
+     * prose of this file as well, in the component descriptions, and that is documentation rather
      * than a second executable source: nothing reads those sentences to decide anything.
+     *
+     * <p>Refactoring Rationale: this width now has exactly ONE executable position, the
+     * {@code @Size} constraint in the header above. It formerly had two, because the constructor
+     * also held a throwing guard against the same number, and two executable positions for one
+     * declared width is what lets a caller be published one contract and held to another -- the
+     * guard fired first and answered with a body the constraint would have described per field. The
+     * guard is gone and the constraint is the single authority.
      */
     private static final int CARD_NUMBER_WIDTH = 16;
 
@@ -133,11 +119,10 @@ public record StatementRequest(
      * The number of positions the baseline declares for an account identifier.
      *
      * <p>Assumptions: 11 is read from {@code ACCT-ID PIC 9(11)} at {@code app/cpy/CVACT01Y.cpy}
-     * L5, the leading field of the 300-byte account record, and it is corroborated by
-     * {@code CC-ACCT-ID PIC X(11)} at {@code app/cpy/CVCRD01Y.cpy} L34 and by
-     * {@code FD-ACCT-ID PIC 9(11)} at {@code app/cbl/CBSTM03B.CBL} L77, the key of the account
-     * file the statement flow reads. The numeric picture at L5 and the character picture at L34
-     * describe the same 11 positions, which is the overlay discipline recorded on this type.
+     * L5 and corroborated by {@code FD-ACCT-ID PIC 9(11)} at {@code app/cbl/CBSTM03B.CBL} L77, the
+     * key of the account file the statement flow reads. The numeric picture at L5 and the character
+     * picture {@code CC-ACCT-ID PIC X(11)} at {@code app/cpy/CVCRD01Y.cpy} L34 describe the same 11
+     * positions, which is the overlay discipline recorded on this type.
      */
     private static final int ACCOUNT_ID_WIDTH = 11;
 
@@ -145,51 +130,57 @@ public record StatementRequest(
      * The expression a present component value has to match in full.
      *
      * <p>Assumptions: the character class is written out as an explicit range rather than as the
-     * shorthand digit class, because a zoned-decimal field holds exactly the ten characters this
-     * range names and nothing else, so the range states the contract instead of describing it
-     * indirectly. That the values are digits at all is the overlay discipline at
-     * {@code app/cpy/CVCRD01Y.cpy}, where {@code CC-CARD-NUM PIC X(16)} at L37 is redefined
-     * numerically at L39. The shorthand would additionally be interpretation-dependent: it
-     * broadens to every decimal digit in Unicode when Unicode character-class mode is turned on by
-     * an embedded flag expression, so a value carrying a non-Latin digit would then satisfy a
-     * constraint the copybook field cannot hold.
+     * shorthand digit class. The shorthand is interpretation-dependent -- it broadens to every
+     * decimal digit in Unicode when Unicode character-class mode is turned on by an embedded flag
+     * expression -- so a value carrying a non-Latin digit would then satisfy a constraint the
+     * copybook field cannot hold.
      *
-     * <p>Assumptions: the quantifier requires at least one digit rather than allowing none,
-     * because the constructor below already reports a value carrying no content as absent, so a
-     * present value always has content by the time this expression is applied. Constraint
-     * evaluation treats an absent value as satisfied, which is what keeps an unsupplied component
-     * from being reported as malformed.
+     * <p>Assumptions: the quantifier requires at least one digit rather than allowing none, because
+     * the constructor below already reports a value carrying no content as absent, so a present
+     * value always has content by the time this expression is applied. Constraint evaluation treats
+     * an absent value as satisfied, which is what keeps an unsupplied component from being reported
+     * as malformed.
      */
     private static final String DIGITS_ONLY = "[0-9]+";
 
     /**
-     * Normalises both components onto this record's absence contract, then refuses a value no
-     * declared field could carry.
+     * Normalises both components onto this record's absence contract.
      *
      * <p>Assumptions: normalisation belongs at construction rather than at each accessor, so the
      * stored state and the returned state are the same state and no caller has to know which of
      * the two it holds. An instance cannot come into being without passing through here, which is
      * what makes the contract hold by construction rather than by every caller remembering it.
      *
-     * <p>Alternatives Considered: leaving the width to the constraint annotations alone was
-     * evaluated and rejected. Those annotations are evaluated only when something asks a validator
-     * to evaluate them, which the transport boundary does and a caller constructing this record
-     * directly does not, so the width would hold for one caller and not for another. The guard is
-     * kept because a value longer than its field is a question of representability rather than of
-     * content: a 17-character card number is not a card number this system can carry at all, since
-     * {@code app/cpy/COSTM01.CPY} L22 gives it 16 positions, so the record refuses to exist in
-     * that state.
+     * <p>Refactoring Rationale: this constructor previously also refused an over-width component by
+     * throwing, and that guard has been removed. It defeated the one outcome the charter at
+     * {@code com.carddemo.reporting.dto} requires: a rejection has to name the component it
+     * concerns. An exception raised while a request body is being bound does not arrive as a
+     * per-field entry -- it surfaces as a generic malformed-body failure -- so a caller that sent a
+     * 17-character card number was told the body was unreadable rather than which of its two fields
+     * was too long. Width is now asserted by the {@code @Size} constraint on each component in the
+     * header above, exactly as the digits-only shape already was, so both kinds of malformed input
+     * take the same route and both name their field.
      *
-     * <p>Alternatives Considered: extending that guard to cover the digits-only shape as well was
-     * evaluated and deliberately rejected, and the asymmetry is the point. A value of legal length
-     * carrying something other than a digit fits its field perfectly -- an {@code X(16)} picture
-     * holds any 16 characters -- and what rejects it is the numeric overlay discipline that
-     * {@code app/cpy/CVCRD01Y.cpy} L37 and L39 declare, which is a rule about content. A caller
-     * has to be told which component was wrong and why, so that shape is asserted by the
-     * constraint annotation above and surfaces as a per-field entry through
-     * {@code com.carddemo.common.error.ApiError}. Raising here instead would collapse it into a
-     * body that could not be read, and a rejection that cannot name its field is the one outcome
-     * the charter at {@code com.carddemo.reporting.dto} rules out.
+     * <p>Alternatives Considered: keeping the guard alongside the constraint, on the reasoning that
+     * the annotations are evaluated only when something asks a validator to evaluate them -- which
+     * the transport boundary does and a caller constructing this record directly does not.
+     * Rejected, because the two mechanisms answer to different consumers and cannot be made to
+     * agree on an outcome: for a request arriving over HTTP the guard fires first and replaces the
+     * structured per-field response with an unstructured one, so keeping it does not add a check to
+     * that path, it degrades the check already there. A caller constructing the record in process is
+     * a caller inside this service, and the charter's obligation to name the failing field is owed
+     * to the client across the boundary.
+     *
+     * <p>Assumptions: width and shape are therefore now enforced identically and in one place. A
+     * value of legal length carrying something other than a digit fits its field perfectly -- an
+     * {@code X(16)} picture holds any 16 characters -- and what rejects it is the numeric overlay
+     * discipline that {@code app/cpy/CVCRD01Y.cpy} L37 and L39 declare. A value longer than its
+     * field is refused by the width the same copybook lineage declares, 16 positions at
+     * {@code app/cpy/COSTM01.CPY} L22 and 11 at {@code app/cpy/CVACT01Y.cpy} L5. Both surface as a
+     * per-field entry through {@code com.carddemo.common.error.ApiError}, naming the component and
+     * never reproducing the value -- which also preserves the masking rule this context applies to
+     * a primary account number, since a constraint violation reports the field and not its
+     * content.
      *
      * @param cardNumber the card number as it arrived, which may be {@code null}, may carry
      *     trailing padding and may be entirely padding; it is stored with the padding removed, or
@@ -197,18 +188,69 @@ public record StatementRequest(
      * @param accountId the account identifier as it arrived, on the same three terms as the card
      *     number above; it is stored with the padding removed, or as {@code null} when it carries
      *     no content
-     * @throws IllegalArgumentException if either component, once its trailing padding has been
-     *     removed, is longer than the number of positions its copybook field declares, namely 16
-     *     for the card number and 11 for the account identifier; the length and the width are
-     *     reported and the value itself never is
      */
     public StatementRequest {
-        // Assumptions: the two components are normalised and guarded independently and in the
-        //   order the header declares them, because neither one's treatment depends on the other.
-        //   A rule relating them would be a scope rule, and this record holds none, so nothing
-        //   here inspects one component while handling the other.
-        cardNumber = requireDeclaredWidth(normalise(cardNumber), CARD_NUMBER_WIDTH, "cardNumber");
-        accountId = requireDeclaredWidth(normalise(accountId), ACCOUNT_ID_WIDTH, "accountId");
+        // Assumptions: the two components are normalised independently and in the order the header
+        //   declares them, because neither one's treatment depends on the other. A rule relating
+        //   them would be a scope rule, and this record holds none, so nothing here inspects one
+        //   component while handling the other.
+        cardNumber = normalise(cardNumber);
+        accountId = normalise(accountId);
+    }
+
+    /**
+     * Renders this request for a log or a diagnostic with the primary account number masked.
+     *
+     * <p>Refactoring Rationale: the rendering a record generates for itself names every component
+     * verbatim, and one of this record's two components is a primary account number. Every refusal
+     * message in this file was already written to withhold that value, but the generated rendering
+     * defeated all of that care through one path nobody has to write on purpose: a request object
+     * interpolated into a log statement, an assertion message or a framework's own request trace. This
+     * override closes that path, so the masking is a property of the type rather than of every place
+     * the type is mentioned.</p>
+     *
+     * <p>Assumptions: the mask reveals the trailing four digits and no more, which is the same
+     * concession the migration's mapping layer makes on every response except the administrative
+     * card-detail endpoint. Four digits is what lets an operator match a log line to a support call
+     * without the line carrying a usable card number.</p>
+     *
+     * <p>Alternatives Considered: withholding the card number entirely, rendering only its length.
+     * Rejected because the length is fixed at the 16 positions {@code app/cpy/COSTM01.CPY} L22
+     * declares, so it distinguishes nothing, and a diagnostic that cannot tell two statement runs apart
+     * is of no use in the one situation it exists for. Alternatives Considered: masking the account
+     * identifier too. Rejected because that identifier is a system key rather than protected data: it
+     * addresses the resource in a request path and in the correlation of a run, so masking it would
+     * make a log unusable while withholding nothing the path had not already carried.</p>
+     *
+     * @return the request with its card number reduced to a mask and its last four digits, and its
+     *     account identifier unchanged; an absent component renders as {@code null}
+     */
+    @Override
+    public String toString() {
+        return "StatementRequest[cardNumber=" + maskCardNumber(cardNumber)
+                + ", accountId=" + accountId + ']';
+    }
+
+    /**
+     * Reduces a card number to a fixed mask and its trailing four digits.
+     *
+     * @param cardNumber the normalised card number, or {@code null} for an unnarrowed run
+     * @return {@code null} when {@code cardNumber} is {@code null}; otherwise the string
+     *     {@code "****"} followed by at most the last four characters, so a value shorter than four
+     *     characters is rendered whole rather than padded into something it is not
+     */
+    private static String maskCardNumber(String cardNumber) {
+        if (cardNumber == null) {
+            return null;
+        }
+
+        // WHY : Assumptions: the tail is taken with a bounded start index rather than by subtracting
+        //       four, because a value shorter than four characters is reachable here -- the constraint
+        //       on this component bounds its maximum and not its minimum -- and subtracting would raise
+        //       out of a rendering method, replacing a log line with an unrelated failure at exactly
+        //       the moment the log line was wanted.
+        int tailStart = Math.max(0, cardNumber.length() - 4);
+        return "****" + cardNumber.substring(tailStart);
     }
 
     /**
@@ -268,40 +310,5 @@ public record StatementRequest(
         //   present. Trimming first reduces it to low-value bytes alone, which the test does read
         //   as absent. Testing first would let that one value through as content.
         return FieldValidationFlag.isNeverSupplied(stripped) ? null : stripped;
-    }
-
-    /**
-     * Returns a normalised value that its declared field can carry, and refuses one that it
-     * cannot.
-     *
-     * <p>Assumptions: the refusal reports the component name, the length that arrived and the
-     * width that was available, and never the value. One of the two components is a primary account
-     * number of the 16 positions {@code app/cpy/COSTM01.CPY} L22 declares, and this context masks
-     * that value to its last four digits everywhere it is rendered, so reproducing a whole one
-     * inside an exception message would put it into a log by the shortest available route. The
-     * three facts reported are what identifies the offending component, which is what a caller
-     * needs in order to act.
-     *
-     * @param value the normalised component value, or {@code null} for a component that carries
-     *     no content and therefore has no width to check
-     * @param declaredWidth the number of positions the copybook field behind this component
-     *     declares
-     * @param component the component name as the request body spells it, reproduced in the refusal
-     *     so that the rejection names the field it concerns
-     * @return {@code value} unchanged, so that a guarded assignment reads as one expression rather
-     *     than as a check followed by a store
-     * @throws IllegalArgumentException if {@code value} is present and longer than
-     *     {@code declaredWidth}, because a value that overruns its field cannot be carried at any
-     *     point further along this system either
-     */
-    private static String requireDeclaredWidth(String value, int declaredWidth, String component) {
-        if (value != null && value.length() > declaredWidth) {
-            throw new IllegalArgumentException(
-                    component + " arrived " + value.length() + " characters long once padding was "
-                            + "removed, and the field carrying it declares " + declaredWidth
-                            + " positions");
-        }
-
-        return value;
     }
 }

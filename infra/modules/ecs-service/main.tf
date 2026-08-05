@@ -2,27 +2,18 @@
 # infra/modules/ecs-service/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Carries exactly one CardDemo service onto ECS Fargate. One instantiation
-#   provisions a CloudWatch log group, a task execution role, an application
-#   task role, a task definition, a load-balancer target group, the service
-#   itself, and a target-tracking autoscaling policy. Each of the two
-#   environment roots, infra/envs/dev and infra/envs/prod, instantiates the
-#   module eight times -- once per bounded context: auth, account, card,
-#   transaction, reference, batch, authorization and reporting -- so the
-#   resources declared once below materialise as sixteen independent sets.
-#   This is the CICS region's role, decomposed. app/csd/CARDDEMO.CSD ran all
-#   eighteen transactions inside a single address space; here each bounded
-#   context becomes an independently deployable, independently scaled service,
-#   and the region's other responsibilities move to sibling modules --
-#   ecs-cluster holds the capacity, alb holds the listener, cognito holds
-#   sign-on, observability holds the dashboards and alarms.
+#   Carries one CardDemo bounded context onto ECS Fargate with its log group,
+#   roles, task definition, optional target group and service, and optional
+#   autoscaling policy. Environment roots are required to instantiate this
+#   reusable module once per bounded context, with batch using the task-only
+#   shape defined by its conditional resources.
 #
 # Parameters:
 #   None are declared here. Every input this file reads is declared in the
 #   sibling variables.tf, which is the one place a caller's arguments are
-#   accepted, typed and validated. Forty-eight variables are declared there
-#   and every one of them is consumed by this file, because the module has no
-#   other consumer of them. That reconciliation is a standing constraint
+#   accepted, typed and validated. Fifty-six variables are declared there
+#   and every one of them is consumed inside this module, which has no other
+#   consumer of them. That reconciliation is a standing constraint
 #   rather than tidiness: this directory is never applied directly, so
 #   .github/workflows/infra-ci.yml validates it only transitively, through
 #   `init -backend=false` and `validate` on infra/bootstrap, infra/envs/dev
@@ -78,29 +69,34 @@
 # Composed names, tags and container-definition fragments.
 # -----------------------------------------------------------------------------
 
-# WHAT: every name, tag set and container-definition fragment the resources
-#       below share, resolved once so that no two of them can derive the same
-#       value differently.
 locals {
   # WHY : Assumptions: variables.tf bounds name_prefix at twelve characters and
   #       service_name at fourteen, and environment is dev or prod, so this
-  #       composed name is at most 12 + 1 + 14 + 1 + 4 = 32 characters. That is
-  #       exactly the ceiling an Elastic Load Balancing target-group name may
-  #       not exceed, and it is why those two bounds exist at all. The
-  #       arithmetic is recorded here because a reader relaxing either bound
-  #       needs to know what it was buying.
+  #       composed name is at most 12 + 1 + 14 + 1 + 4 = 32 characters. The
+  #       target-group name below reserves nine characters for its separator and
+  #       replacement hash, so this full name is a readable source stem rather
+  #       than the final ELB name. The arithmetic remains explicit because the
+  #       same value names the ECS service and task family without truncation.
   resource_name = "${var.name_prefix}-${var.service_name}-${var.environment}"
 
-  # WHY : Trade-offs: substr is a structural guard rather than active
-  #       truncation -- it is a no-op for every input variables.tf admits, and
-  #       it takes effect only if a later edit relaxes one of those two length
-  #       bounds. trimsuffix then removes a hyphen the truncation could leave
-  #       trailing, which a target-group name may not carry. The accepted cost
-  #       is that two relaxed names could truncate to the same string and
-  #       collide instead of failing loudly; the bounds in variables.tf are
-  #       what actually prevent that, and this only keeps the failure from
-  #       being an opaque rejection from the load-balancing API.
-  target_group_name = trimsuffix(substr(local.resource_name, 0, 32), "-")
+  # WHY : Refactoring Rationale: create_before_destroy cannot create a
+  #       replacement target group under the old group's name. The former
+  #       deterministic name therefore made every replacement fail before the
+  #       listener rule could move. A stable hash of the configured
+  #       replacement-forcing attributes gives a changed VPC/protocol/port a
+  #       different name while leaving an unchanged plan stable.
+  # WHY : Trade-offs: eight hexadecimal characters make accidental collision
+  #       negligible without consuming the 32-character target-group budget.
+  #       The readable stem is capped at 23 characters, with a trailing hyphen
+  #       removed before the separator and hash are appended.
+  target_group_replacement_hash = substr(sha1(join("|", [
+    var.vpc_id,
+    tostring(var.container_port),
+    var.target_protocol,
+    "ip",
+  ])), 0, 8)
+  target_group_name_stem = trimsuffix(substr(local.resource_name, 0, 23), "-")
+  target_group_name      = "${local.target_group_name_stem}-${local.target_group_replacement_hash}"
 
   # WHY : Trade-offs: coalesce resolves the null default here rather than in
   #       variables.tf, because a variable default cannot reference another
@@ -136,6 +132,163 @@ locals {
     Service     = var.service_name
   }, var.tags)
 
+  # WHY : Refactoring Rationale: every online service already exposes
+  #       `/actuator/prometheus`, but without a scraper those meters stay inside
+  #       the task. A sidecar shares the task network namespace, so it can scrape
+  #       loopback and receive OTLP traces without exposing either endpoint
+  #       through a security group or a load-balancer route.
+  telemetry_receivers = merge(
+    {
+      otlp = {
+        protocols = {
+          grpc = {
+            endpoint = "0.0.0.0:4317"
+          }
+          http = {
+            endpoint = "0.0.0.0:4318"
+          }
+        }
+      }
+    },
+    var.create_service ? {
+      prometheus = {
+        config = {
+          scrape_configs = [{
+            job_name        = local.resource_name
+            scrape_interval = "60s"
+            metrics_path    = "/actuator/prometheus"
+            scheme          = "https"
+            static_configs = [{
+              targets = ["127.0.0.1:${var.container_port}"]
+            }]
+            tls_config = {
+              # WHY : Assumptions: the application certificate names the
+              #       internal service hostname, while the task-local scrape
+              #       deliberately uses loopback so the metrics endpoint is
+              #       never exposed through a security-group rule. The TLS
+              #       channel still protects bytes inside the task namespace;
+              #       hostname verification cannot succeed against 127.0.0.1.
+              insecure_skip_verify = true
+            }
+          }]
+        }
+      }
+    } : {},
+  )
+
+  telemetry_processors = {
+    memory_limiter = {
+      check_interval  = "5s"
+      limit_mib       = 128
+      spike_limit_mib = 32
+    }
+    resource = {
+      attributes = [
+        {
+          key    = "service.name"
+          action = "upsert"
+          value  = var.service_name
+        },
+        {
+          key    = "deployment.environment.name"
+          action = "upsert"
+          value  = var.environment
+        },
+        {
+          key    = "service.version"
+          action = "upsert"
+          value  = lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")
+        },
+      ]
+    }
+    tail_sampling = {
+      decision_wait = "10s"
+      policies = [
+        {
+          name = "errors"
+          type = "status_code"
+          status_code = {
+            status_codes = ["ERROR"]
+          }
+        },
+        {
+          name = "successful-sample"
+          type = "probabilistic"
+          probabilistic = {
+            sampling_percentage = var.telemetry_success_sample_percentage
+          }
+        },
+      ]
+    }
+    batch = {}
+  }
+
+  telemetry_exporters = {
+    awsxray = {}
+    awsemf = {
+      namespace               = "CardDemo"
+      log_group_name          = local.log_group_name
+      log_stream_name         = "${var.service_name}-telemetry"
+      dimension_rollup_option = "NoDimensionRollup"
+      resource_to_telemetry_conversion = {
+        enabled = true
+      }
+    }
+  }
+
+  telemetry_pipelines = merge(
+    {
+      traces = {
+        receivers  = ["otlp"]
+        processors = ["memory_limiter", "resource", "tail_sampling", "batch"]
+        exporters  = ["awsxray"]
+      }
+    },
+    var.create_service ? {
+      metrics = {
+        receivers  = ["prometheus"]
+        processors = ["memory_limiter", "resource", "batch"]
+        exporters  = ["awsemf"]
+      }
+    } : {},
+  )
+
+  telemetry_collector_configuration = yamlencode({
+    receivers  = local.telemetry_receivers
+    processors = local.telemetry_processors
+    exporters  = local.telemetry_exporters
+    service = {
+      telemetry = {
+        logs = {
+          level = "warn"
+        }
+      }
+      pipelines = local.telemetry_pipelines
+    }
+  })
+
+  # WHY : Assumptions: the OpenTelemetry starter is on every service classpath
+  #       through common-lib, but common defaults leave export disabled for
+  #       local runs. These task-only variables activate OTLP explicitly and
+  #       point it at loopback; no collector endpoint is exposed outside the
+  #       task. Metrics remain Prometheus-scraped to avoid exporting the same
+  #       meter through both OTLP and the collector's Prometheus receiver.
+  telemetry_environment_variables = var.enable_telemetry_collector ? {
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
+    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/protobuf"
+    OTEL_LOGS_EXPORTER                 = "none"
+    OTEL_METRICS_EXPORTER              = "none"
+    OTEL_RESOURCE_ATTRIBUTES           = "deployment.environment.name=${var.environment},service.version=${lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")}"
+    OTEL_SERVICE_NAME                  = var.service_name
+    OTEL_TRACES_EXPORTER               = "otlp"
+    OTEL_TRACES_SAMPLER                = "always-on"
+  } : {}
+
+  effective_environment_variables = merge(
+    var.environment_variables,
+    local.telemetry_environment_variables,
+  )
+
   # WHY : Assumptions: ECS stores the environment array in the order supplied,
   #       and the provider compares the rendered container definitions as a
   #       string, so the order has to be stable across plans or every plan
@@ -144,9 +297,9 @@ locals {
   #       that dependence visible, so a later edit that iterates something
   #       other than a map cannot lose the property silently.
   container_environment = [
-    for key in sort(keys(var.environment_variables)) : {
+    for key in sort(keys(local.effective_environment_variables)) : {
       name  = key
-      value = var.environment_variables[key]
+      value = local.effective_environment_variables[key]
     }
   ]
 
@@ -162,14 +315,267 @@ locals {
   #       instead would need a precondition, and the precedence is
   #       deterministic and documented, so the ambiguity is resolved rather
   #       than merely permitted.
-  secret_sources = merge(var.ssm_parameter_arns, var.secret_arns)
+  ssm_secret_sources = {
+    for name, arn in var.ssm_parameter_arns : name => {
+      value_from   = arn
+      resource_arn = arn
+    }
+  }
+
+  secret_sources = merge(local.ssm_secret_sources, var.secret_arns)
+
+  # WHY : Assumptions: these names are a property of the SERVICE IMAGES, not of the
+  #       calling root: each one is read by a placeholder in that service's
+  #       application.yml. Stating them here lets the precondition at the task
+  #       definition refuse two failures that otherwise surface only at run time --
+  #       a name no image reads (which silently does nothing) and a name an image
+  #       requires but the root omitted (which starts a task that cannot serve).
+  #       Trade-offs: the inventory has to be extended whenever a service learns a
+  #       new setting, which is deliberate friction: the alternative is an open
+  #       schema in which a typo in a root is indistinguishable from a setting.
+  # WHY : Refactoring Rationale: configuration names are enumerated here rather
+  #       than admitted by namespace. A namespace check can reject an obvious
+  #       typo and still accepts a new CARDDEMO_* key that nobody reviewed,
+  #       including one that carries protected material in the clear-text
+  #       environment array. The exact inventories below are derived from the
+  #       committed Spring configuration files and the ETL mask contract; adding
+  #       a setting therefore requires a module diff beside the application diff.
+  plain_environment_names = toset([
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "CARDDEMO_DB_ALTERNATE_USERS",
+    "CARDDEMO_DB_SSL_MODE",
+    "CARDDEMO_DB_SSL_ROOT_CERT",
+    "CARDDEMO_ENVIRONMENT",
+
+    # WHY : Assumptions: this carries the NAME of the Parameter Store entry the
+    #       quiesce and resume steps toggle around the batch window, not a value. It
+    #       is a plain variable rather than a parameter injection precisely because
+    #       an online service must read that entry at request time to decide whether
+    #       writes are currently accepted; injecting the value once at task start
+    #       would freeze the answer for the life of the task.
+    "CARDDEMO_ONLINE_WRITES_PARAMETER",
+    "CARDDEMO_PARAMETER_PREFIX",
+    "CARDDEMO_SERVER_TLS_ENABLED",
+    "CARDDEMO_TRUSTED_PROXY_PATTERN",
+    "CARDDEMO_VERSION",
+    "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "LOGGING_LEVEL_ROOT",
+    "MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE",
+    "SERVER_PORT",
+    "SPRING_PROFILES_ACTIVE",
+    "TZ",
+  ])
+
+  parameter_environment_names = toset([
+    # WHY : Assumptions: the three CARDDEMO_ACCOUNT_INQUIRY_* names and
+    #       CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE are admitted here because both
+    #       environment roots publish them as runtime parameters -- account-service
+    #       owns the COACCT01 inquiry request, reply and error queues, and
+    #       authorization-service reads the pending-authorization request queue at
+    #       its application.yml. A name a root supplies but this set omits is
+    #       refused by the task-definition precondition below, and that refusal
+    #       surfaces only at plan time against a real account, because
+    #       `terraform validate` does not evaluate a lifecycle precondition.
+    #       Admitting a name is not requiring it: the required_* maps below decide
+    #       which services must carry which, and none of these four is required,
+    #       so a root that publishes no queue parameter still plans.
+    "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
+    "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
+    "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
+    "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
+    "CARDDEMO_AUTH_COGNITO_USER_POOL_ID",
+    "CARDDEMO_COGNITO_APP_CLIENT_ID",
+    "CARDDEMO_CONFIG_PREFIX",
+    "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
+    "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
+    "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
+    "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
+    "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET",
+    "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN",
+    "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+    "SPRING_DATASOURCE_URL",
+    "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+  ])
+
+  secret_environment_names = toset([
+    # WHY : Assumptions: the client IDENTIFIER is injected from the same Secrets
+    #       Manager document as the client secret rather than from Parameter Store,
+    #       because both are JSON keys of the one entry Cognito's app client
+    #       produces. Splitting them across two stores would mean two things to keep
+    #       in step through a client-secret rotation.
+    "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
+    "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
+    "CARDDEMO_MASK_HMAC_KEY",
+    "CARDDEMO_SERVER_TLS_CERTIFICATE",
+    "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+    "SPRING_DATASOURCE_PASSWORD",
+    "SPRING_DATASOURCE_USERNAME",
+  ])
+
+  # WHY : Assumptions: the reporting service is the only HTTP service whose
+  #       trusted-proxy expression, Cognito audience and PEM pair use the
+  #       canonical CARDDEMO_* names below. Batch is the only service that may
+  #       launch the ETL image and therefore the only task allowed to receive
+  #       the mask HMAC key. Binding these names to one service prevents a root
+  #       from accidentally distributing either capability to every task.
+  required_plain_environment_names = {
+    auth        = toset([])
+    account     = toset([])
+    card        = toset([])
+    transaction = toset([])
+    reference   = toset([])
+    # WHY : Refactoring Rationale: batch was listed as requiring
+    #       CARDDEMO_DB_ALTERNATE_USERS and CARDDEMO_PARAMETER_PREFIX, and reporting
+    #       as requiring CARDDEMO_TRUSTED_PROXY_PATTERN. Verified against the
+    #       integrated tree: the first two are read only by
+    #       carddemo_migration.config, which runs in the data-migration image and
+    #       still requires them below, and the third resolves from a default in
+    #       reporting-service's application.yml. A name belongs here only when the
+    #       image cannot behave correctly without it, because requiring a value the
+    #       image already knows forces every root to restate it.
+    batch         = toset([])
+    authorization = toset([])
+    reporting     = toset([])
+    data-migration = toset([
+      "CARDDEMO_DB_ALTERNATE_USERS",
+      "CARDDEMO_DB_SSL_MODE",
+      "CARDDEMO_PARAMETER_PREFIX",
+    ])
+  }
+
+  required_parameter_environment_names = {
+    # WHY : Refactoring Rationale: CARDDEMO_AUTH_COGNITO_CLIENT_ID was required
+    #       here, in the Parameter Store channel, and is now required in the
+    #       Secrets Manager channel below instead. Both channels admit the name,
+    #       and the deciding fact is how the value exists: the app client's
+    #       identifier and its secret are two JSON keys of ONE Secrets Manager
+    #       entry, so both roots inject them from that single entry through
+    #       secret_arns. Requiring the identifier as a parameter obliged a root to
+    #       publish a second copy of a value it already delivers, and made auth
+    #       fail the required-name precondition at plan time -- which
+    #       `terraform validate` cannot report, because it does not evaluate a
+    #       lifecycle block. The pool identifier stays here: it is not a secret and
+    #       both roots do publish it as a parameter.
+    auth = toset([
+      "CARDDEMO_AUTH_COGNITO_USER_POOL_ID",
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    account = toset([
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    card = toset([
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    transaction = toset([
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    reference = toset([
+      "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
+      "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
+      "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    batch = toset(["SPRING_DATASOURCE_URL"])
+    authorization = toset([
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    # WHY : Refactoring Rationale: this set named CARDDEMO_COGNITO_APP_CLIENT_ID
+    #       and now names CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID instead. The
+    #       former is the name the precondition below already records as one "no
+    #       root injects", and requiring it made the reporting workload fail that
+    #       precondition at plan time -- a failure `terraform validate` cannot
+    #       report, because it does not evaluate a lifecycle block. The latter is
+    #       the name reporting-service actually binds with no fallback, at its
+    #       application.yml carddemo.security.jwt.expected-client-id, and both
+    #       roots publish it for every database workload, so requiring it matches
+    #       what the service needs and what the roots supply. The app-client name
+    #       stays ADMISSIBLE in parameter_environment_names above, because
+    #       JwtDecoderConfig reads it as an optional override.
+    reporting = toset([
+      "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET",
+      "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
+      "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN",
+      "SPRING_DATASOURCE_URL",
+      "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
+    ])
+    data-migration = toset([])
+  }
+
+  required_secret_environment_names = {
+    auth = toset([
+      "CARDDEMO_AUTH_COGNITO_CLIENT_ID",
+      "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET",
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    account = toset([
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    card = toset([
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    transaction = toset([
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    reference = toset([
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    # WHY : Refactoring Rationale: batch was listed as also requiring
+    #       CARDDEMO_MASK_HMAC_KEY. Verified against the integrated tree: the keyed
+    #       tag that variable names is derived in
+    #       carddemo_migration.copybook.layouts, which runs in the data-migration
+    #       image and still requires it below; no Java module reads it.
+    batch = toset(["SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_PASSWORD"])
+    authorization = toset([
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+    ])
+    reporting = toset([
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+      "CARDDEMO_SERVER_TLS_CERTIFICATE",
+      "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+    ])
+    data-migration = toset(["CARDDEMO_MASK_HMAC_KEY"])
+  }
 
   container_secrets = [
     for key in sort(keys(local.secret_sources)) : {
       name      = key
-      valueFrom = local.secret_sources[key]
+      valueFrom = local.secret_sources[key].value_from
     }
   ]
+
 
   # WHY : Assumptions: a volume name cannot contain a separator, so each path
   #       becomes a name by dropping the leading slash and replacing the rest
@@ -209,15 +615,18 @@ locals {
 # Discovered account and region context.
 # -----------------------------------------------------------------------------
 
-# WHAT: the region the calling root's provider is configured for.
-# WHY : Assumptions: the awslogs driver needs the region as a literal string
+# Assumptions: the awslogs driver needs the region as a literal string
 #       inside the container definition, and this module must not carry one.
 #       Reading it from the provider is what lets the same module text run in
 #       whatever region the root chooses. The region attribute is read rather
 #       than name, which hashicorp/aws marks deprecated.
 data "aws_region" "current" {}
 
-# WHAT: the account the calling root's credentials belong to.
+# Assumptions: task-definition family ARNs include the active partition. Reading
+# it from the provider keeps the module portable without committing a partition
+# literal or parsing it out of another identifier.
+data "aws_partition" "current" {}
+
 # WHY : Assumptions: the account identifier is needed for the source-account
 #       condition on the trust policy below, and discovering it is the only way
 #       to have that condition without writing a twelve-digit account number
@@ -228,9 +637,7 @@ data "aws_caller_identity" "current" {}
 # IAM policy documents.
 # -----------------------------------------------------------------------------
 
-# WHAT: the trust policy both roles below share -- who is allowed to assume
-#       them, as distinct from what they may then do.
-# WHY : Assumptions: ecs-tasks.amazonaws.com is the principal for both roles.
+# Assumptions: ecs-tasks.amazonaws.com is the principal for both roles.
 #       ECS assumes the execution role to start the task, before the container
 #       exists, and assumes the task role on the application's behalf once it
 #       is running. One trust policy for two roles is correct precisely because
@@ -263,9 +670,7 @@ data "aws_iam_policy_document" "task_assume_role" {
   }
 }
 
-# WHAT: the execution role's permissions -- everything ECS itself needs to do
-#       on this task's behalf in order to start it and keep its logs flowing.
-# WHY : Alternatives Considered: attaching the AWS-managed
+# Alternatives Considered: attaching the AWS-managed
 #       AmazonECSTaskExecutionRolePolicy was rejected. That policy grants ECR
 #       pull and log write against every resource in the account, so each of
 #       the eight services would be able to pull every other service's image
@@ -355,27 +760,77 @@ data "aws_iam_policy_document" "execution" {
     for_each = length(var.secret_arns) > 0 ? [true] : []
 
     content {
-      sid       = "AllowSecretRead"
-      effect    = "Allow"
-      actions   = ["secretsmanager:GetSecretValue"]
-      resources = values(var.secret_arns)
+      sid     = "AllowSecretRead"
+      effect  = "Allow"
+      actions = ["secretsmanager:GetSecretValue"]
+      resources = distinct([
+        for source in values(var.secret_arns) : source.resource_arn
+      ])
     }
   }
 
-  # WHY : Assumptions: kms:Decrypt is needed only where a parameter or a secret
-  #       is encrypted with a customer-managed key from infra/modules/kms.
-  #       Anything encrypted with an AWS-managed key is decrypted through the
-  #       owning service's own grant, so an empty kms_key_arns is the ordinary
-  #       case rather than a gap, and granting decrypt unconditionally would
-  #       hand every service the ability to use keys it was never given.
+  # WHY : Assumptions: every Secrets Manager entry injected into a task is
+  #       protected by a project CMK. Decrypt is therefore constrained both to
+  #       exact keys and to calls arriving through Secrets Manager for one of
+  #       this task's exact secret ARNs; the execution role cannot use the same
+  #       key directly against an unrelated ciphertext.
   dynamic "statement" {
-    for_each = length(var.kms_key_arns) > 0 ? [true] : []
+    for_each = length(var.execution_secret_kms_key_arns) > 0 && length(var.secret_arns) > 0 ? [true] : []
 
     content {
       sid       = "AllowKmsDecrypt"
       effect    = "Allow"
       actions   = ["kms:Decrypt"]
-      resources = var.kms_key_arns
+      resources = var.execution_secret_kms_key_arns
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringLike"
+        variable = "kms:EncryptionContext:SecretARN"
+        values   = distinct([for source in values(var.secret_arns) : source.policy_arn])
+      }
+    }
+  }
+}
+
+# WHY : Refactoring Rationale: a request/reply consumer may read a
+#       replyToQueueUrl attribute, but that input is routing data and never an
+#       authorization decision. The caller passes the queues this one service is
+#       allowed to use; IAM then denies any attempted send, receive or delete
+#       outside those lists even if application validation regresses.
+data "aws_iam_policy_document" "task_sqs" {
+  count = length(var.sqs_send_queue_arns) > 0 || length(var.sqs_receive_queue_arns) > 0 ? 1 : 0
+
+  dynamic "statement" {
+    for_each = length(var.sqs_send_queue_arns) > 0 ? [true] : []
+
+    content {
+      sid       = "AllowExactQueueSend"
+      effect    = "Allow"
+      actions   = ["sqs:SendMessage"]
+      resources = sort(tolist(var.sqs_send_queue_arns))
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(var.sqs_receive_queue_arns) > 0 ? [true] : []
+
+    content {
+      sid    = "AllowExactQueueConsume"
+      effect = "Allow"
+      actions = [
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "sqs:ReceiveMessage",
+      ]
+      resources = sort(tolist(var.sqs_receive_queue_arns))
     }
   }
 }
@@ -385,9 +840,7 @@ data "aws_iam_policy_document" "execution" {
 # Log destination.
 # -----------------------------------------------------------------------------
 
-# WHAT: the single log destination for every task this service runs, in both
-#       the long-running and the batch shape.
-# WHY : Refactoring Rationale: the baseline wrote job and console output to the
+# Refactoring Rationale: the baseline wrote job and console output to the
 #       JES spool through SYSOUT and SYSPRINT DD statements, which meant the
 #       output was readable only from the system the job ran on. One CloudWatch
 #       log group per service is the equivalent destination, and
@@ -421,25 +874,27 @@ resource "aws_cloudwatch_log_group" "this" {
 # Task execution role and application task role.
 # -----------------------------------------------------------------------------
 
-# WHAT: the role ECS assumes in order to start a task -- to pull the image,
-#       resolve the configured parameters and secrets, and open the log stream.
-# WHY : Assumptions: this is deliberately a different role from the task role
+# Assumptions: this is deliberately a different role from the task role
 #       below, and the split is not ceremonial. ECS uses this one before the
 #       container exists, so what it needs is fully determined by this module's
 #       own resources and is therefore this module's to compose. What the
 #       application needs once it is running is not.
 resource "aws_iam_role" "execution" {
-  name               = "${local.resource_name}-execution"
-  description        = "ECS task execution role for ${local.resource_name}."
-  assume_role_policy = data.aws_iam_policy_document.task_assume_role.json
-  tags               = local.tags
+  name                 = "${local.resource_name}-execution"
+  description          = "ECS task execution role for ${local.resource_name}."
+  assume_role_policy   = data.aws_iam_policy_document.task_assume_role.json
+  permissions_boundary = var.permissions_boundary_arn
+  tags                 = local.tags
+
+  lifecycle {
+    precondition {
+      condition     = split(":", var.permissions_boundary_arn)[4] == data.aws_caller_identity.current.account_id
+      error_message = "permissions_boundary_arn must belong to the same AWS account as the ECS roles."
+    }
+  }
 }
 
-# WHAT: the sole grant the execution role ever receives. Nothing else in this
-#       module or reachable from it adds a permission to that role, so the
-#       document generated above is the complete, auditable list of what ECS
-#       may do on this task's behalf.
-# WHY : Alternatives Considered: a standalone aws_iam_policy plus an attachment
+# Alternatives Considered: a standalone aws_iam_policy plus an attachment
 #       was rejected. The document is generated from this instantiation's own
 #       ARNs and is meaningful for no other role, so a managed policy would add
 #       an independently addressable object that outlives the role and could be
@@ -451,37 +906,50 @@ resource "aws_iam_role_policy" "execution" {
   policy = data.aws_iam_policy_document.execution.json
 }
 
-# WHAT: the role the application itself assumes at run time. It starts with no
-#       permissions at all and gains only what the calling root attaches.
-# WHY : Alternatives Considered: composing a union of every service's needs
+# Alternatives Considered: composing a union of every service's needs
 #       inside this module was rejected outright. Because one module body has
 #       to satisfy all eight instantiations, that union would grant the
 #       reporting service the authorization service's queues and the auth
 #       service's secrets -- every service every other service's access, which
 #       is the exact opposite of the per-service least privilege that stands in
-#       for RACF here. The consequence of composing nothing is stronger than a
-#       convention: no wildcard action can reach the task role from this
-#       module, because this module writes no task-role statement whatsoever.
-#       The caller passes what its own service needs -- its own queues, its own
-#       secrets, its own key usage -- and nothing else is reachable.
+#       for RACF here. The caller passes what its own service needs -- its own
+#       queues, secrets and key usage -- while the telemetry statement below is
+#       invariant across all services and contains no business resource. No
+#       wildcard action reaches this role; the sole wildcard Resource is on the
+#       two X-Ray ingestion actions, which do not support resource scoping.
 resource "aws_iam_role" "task" {
-  name               = "${local.resource_name}-task"
-  description        = "Application task role for ${local.resource_name}."
-  assume_role_policy = data.aws_iam_policy_document.task_assume_role.json
-  tags               = local.tags
+  name                 = "${local.resource_name}-task"
+  description          = "Application task role for ${local.resource_name}."
+  assume_role_policy   = data.aws_iam_policy_document.task_assume_role.json
+  permissions_boundary = var.permissions_boundary_arn
+  tags                 = local.tags
 }
 
-# WHY : Assumptions: count rather than an unconditional resource, because a
-#       null policy document is not the same as an empty one -- an inline
-#       policy resource with a null body is invalid, not permissive. A service
-#       whose permissions are entirely managed-policy shaped therefore carries
-#       no inline policy resource at all rather than an empty one.
+# WHY : Refactoring Rationale: the task policy is assembled from typed
+#       capability inputs above instead of accepting arbitrary JSON or managed
+#       policy ARNs. The previous generic channels let a caller grant wildcard
+#       actions and resources while still satisfying this module's validation;
+#       a typed queue, bucket, state-machine, user-pool or key ARN now selects a
+#       fixed minimum action set and no caller can widen it from a tfvars file.
 resource "aws_iam_role_policy" "task" {
-  count = var.task_role_policy_json != null ? 1 : 0
+  count = var.create_task_role_policy ? 1 : 0
 
   name   = "${local.resource_name}-task"
   role   = aws_iam_role.task.id
   policy = var.task_role_policy_json
+}
+
+# WHY : Assumptions: absent when both queue sets are empty, because an inline
+#       policy with no statements is invalid rather than harmless. Kept separate
+#       from task_role_policy_json so a caller cannot accidentally widen or
+#       replace the confused-deputy boundary while supplying unrelated
+#       service-specific permissions.
+resource "aws_iam_role_policy" "task_sqs" {
+  count = length(var.sqs_send_queue_arns) > 0 || length(var.sqs_receive_queue_arns) > 0 ? 1 : 0
+
+  name   = "${local.resource_name}-task-sqs"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_sqs[0].json
 }
 
 # WHY : Assumptions: for_each over a set here rather than count over the list,
@@ -498,16 +966,60 @@ resource "aws_iam_role_policy_attachment" "task" {
   policy_arn = each.value
 }
 
+data "aws_iam_policy_document" "task_telemetry" {
+  statement {
+    sid    = "AllowTelemetryLogExport"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents",
+    ]
+
+    resources = [
+      local.log_group_arn,
+      "${local.log_group_arn}:*",
+    ]
+  }
+
+  statement {
+    sid    = "AllowXrayTraceExport"
+    effect = "Allow"
+
+    # WHY : Assumptions: X-Ray ingestion actions do not support resource-level
+    #       permissions, so the Resource wildcard is imposed by the API while
+    #       the action set remains limited to writing trace segments and
+    #       telemetry records. Sampling happens in the task-local collector and
+    #       requires no X-Ray rule-read permission.
+    actions = [
+      "xray:PutTelemetryRecords",
+      "xray:PutTraceSegments",
+    ]
+
+    resources = ["*"]
+  }
+}
+
+# WHY : Alternatives Considered: requiring every one of the eight callers to
+#       repeat these statements was rejected because the permissions are a
+#       property of this module-created sidecar, not of any bounded context.
+#       Keeping them here means disabling the sidecar removes the policy too,
+#       while each service's queue, database and secret grants stay root-owned.
+resource "aws_iam_role_policy" "task_telemetry" {
+  count = var.enable_telemetry_collector ? 1 : 0
+
+  name   = "${local.resource_name}-telemetry"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_telemetry.json
+}
+
 
 # -----------------------------------------------------------------------------
 # Task definition.
 # -----------------------------------------------------------------------------
 
-# WHAT: the immutable description of one running container -- its image, size,
-#       identity, configuration, writable storage and log destination. A new
-#       revision is registered on every change, and the service below rolls
-#       onto it.
-# WHY : Assumptions: created unconditionally, including for the one
+# Assumptions: created unconditionally, including for the one
 #       instantiation that has no service. ADR-002 puts batch on
 #       Step-Functions-invoked Fargate tasks rather than on a long-running
 #       service, and the state machine's synchronous run-task integration needs
@@ -567,16 +1079,36 @@ resource "aws_ecs_task_definition" "this" {
     }
   }
 
-  container_definitions = jsonencode([
+  dynamic "volume" {
+    for_each = var.enable_telemetry_collector ? [true] : []
+
+    content {
+      # WHY : Assumptions: the collector runs with a read-only root filesystem
+      #       and receives its own ephemeral /tmp rather than sharing an
+      #       application scratch volume that may contain business data.
+      name = "telemetry-tmp"
+    }
+  }
+
+  container_definitions = jsonencode(concat([
     {
       name  = local.container_name
       image = var.image_uri
 
-      # WHY : Assumptions: a single-container task, so the container has to be
-      #       essential. A lone non-essential container would let the task sit
-      #       in RUNNING with nothing actually serving, and ECS would not
-      #       replace it.
+      # WHY : Assumptions: the application remains essential even when the
+      #       telemetry sidecar is present. Otherwise the task could remain in
+      #       RUNNING after the only container serving business traffic exited.
       essential = true
+
+      # WHY : Assumptions: START waits only for the collector process to begin,
+      #       not for an external health endpoint. OTLP exporters buffer and
+      #       retry during the short interval before its receivers are ready,
+      #       while omitting the dependency can lose the first startup spans
+      #       before the sidecar process exists at all.
+      dependsOn = var.enable_telemetry_collector ? [{
+        containerName = "aws-otel-collector"
+        condition     = "START"
+      }] : []
 
       # WHY : Assumptions: container_user carries a numeric uid, which must
       #       match the non-root user the service's own Dockerfile creates -- a
@@ -673,9 +1205,155 @@ resource "aws_ecs_task_definition" "this" {
       #       image it never sees, would add a failure mode without adding a
       #       signal.
     }
-  ])
+    ],
+    var.enable_telemetry_collector ? [
+      {
+        name      = "aws-otel-collector"
+        image     = var.telemetry_collector_image
+        essential = true
+
+        # WHY : Assumptions: the image supports an environment-backed config
+        #       URI. Supplying the complete typed configuration through the
+        #       task definition avoids an S3 config object, its read policy and
+        #       a second deployment artifact that could drift from this revision.
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        cpu               = 128
+        memoryReservation = 128
+
+        # WHY : Assumptions: tail sampling waits up to ten seconds before a
+        #       decision. A thirty-second stop window lets the collector make
+        #       that decision and flush its final batch after the application
+        #       exits, which is load-bearing for short-lived batch tasks.
+        stopTimeout = 30
+
+        readonlyRootFilesystem = true
+        mountPoints = [{
+          containerPath = "/tmp"
+          readOnly      = false
+          sourceVolume  = "telemetry-tmp"
+        }]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.telemetry_collector_configuration
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.region
+          },
+        ]
+
+        portMappings = [
+          {
+            containerPort = 4317
+            protocol      = "tcp"
+          },
+          {
+            containerPort = 4318
+            protocol      = "tcp"
+          },
+        ]
+
+        # WHY : Assumptions: application and collector share the task network
+        #       namespace, while the task security group admits only the
+        #       application port. Declaring the OTLP ports documents the
+        #       listeners without exposing them outside the task.
+        logConfiguration = {
+          logDriver = "awslogs"
+          options = {
+            "awslogs-group"         = aws_cloudwatch_log_group.this.name
+            "awslogs-region"        = data.aws_region.current.region
+            "awslogs-stream-prefix" = "telemetry"
+          }
+        }
+      },
+    ] : [],
+  ))
 
   tags = local.tags
+
+  lifecycle {
+    precondition {
+      condition = (
+        length(setsubtract(toset(keys(var.environment_variables)), local.plain_environment_names)) == 0 &&
+        length(setsubtract(toset(keys(var.ssm_parameter_arns)), local.parameter_environment_names)) == 0 &&
+        length(setsubtract(toset(keys(var.secret_arns)), local.secret_environment_names)) == 0
+      )
+      error_message = "container configuration includes a name outside the exact CardDemo environment, Parameter Store or Secrets Manager schema."
+    }
+
+    precondition {
+      condition = (
+        length(setintersection(toset(keys(var.environment_variables)), toset(keys(var.ssm_parameter_arns)))) == 0 &&
+        length(setintersection(toset(keys(var.environment_variables)), toset(keys(var.secret_arns)))) == 0 &&
+        length(setintersection(toset(keys(var.ssm_parameter_arns)), toset(keys(var.secret_arns)))) == 0
+      )
+      error_message = "an environment-variable name may be supplied through exactly one configuration channel."
+    }
+
+    precondition {
+      condition = (
+        lookup(var.environment_variables, "CARDDEMO_ENVIRONMENT", null) == var.environment &&
+        length(setsubtract(local.required_plain_environment_names[var.service_name], toset(keys(var.environment_variables)))) == 0 &&
+        length(setsubtract(local.required_parameter_environment_names[var.service_name], toset(keys(var.ssm_parameter_arns)))) == 0 &&
+        length(setsubtract(local.required_secret_environment_names[var.service_name], toset(keys(var.secret_arns)))) == 0
+      )
+      error_message = "the service is missing a required configuration name, or CARDDEMO_ENVIRONMENT does not exactly match the module environment."
+    }
+
+    precondition {
+      # WHY : Refactoring Rationale: a second precondition stood here and forbade
+      #       CARDDEMO_DB_SSL_ROOT_CERT outright whenever the environment was
+      #       `prod`, on the same premise the block below withdraws -- that a
+      #       production task should inherit its image's own default. The two could
+      #       not both hold: one demanded the name in every environment and the
+      #       other refused it in one, so no production configuration satisfied
+      #       both and `terraform plan` would fail for prod while
+      #       `terraform validate` reported nothing, because it does not evaluate a
+      #       lifecycle block. The forbidding clause is removed rather than
+      #       narrowed: both roots set the path in every environment, and the
+      #       reason below is why they must.
+      # WHY : Refactoring Rationale: this required the anchor path in dev only, on the
+      #       reasoning that production should inherit the image's own default. That is
+      #       withdrawn: the two images install the bundle at DIFFERENT paths --
+      #       data-migration's Dockerfile at aws-rds-global-bundle.pem, the service
+      #       images at carddemo-rds-ca-bundle.pem -- so an inherited default is a
+      #       different file per image and invisible in the task definition. Every
+      #       environment now states the path, and this asserts that it did.
+      condition = lookup(
+        var.environment_variables,
+        "CARDDEMO_DB_SSL_ROOT_CERT",
+        null,
+      ) != null
+      error_message = "every task must set CARDDEMO_DB_SSL_ROOT_CERT to the image-local trust-anchor path, because the service images and the data-migration image install the Aurora certificate bundle at different locations and verify-full needs the right one."
+    }
+
+    precondition {
+      # WHY : Refactoring Rationale: two clauses named the wrong owner and are
+      #       corrected here. The mask key was required of batch as well as
+      #       data-migration, but the keyed tag is derived in
+      #       carddemo_migration.copybook.layouts, which runs only in the ETL image.
+      #       Reporting was identified by CARDDEMO_COGNITO_APP_CLIENT_ID, which no root
+      #       injects; its actual exclusive parameters are the report output bucket and
+      #       the on-demand state machine it starts. Every clause is biconditional on
+      #       purpose: a name reaching the wrong service is as much a defect as a name
+      #       missing from the right one.
+      condition = (
+        (var.service_name == "data-migration") == contains(keys(var.secret_arns), "CARDDEMO_MASK_HMAC_KEY") &&
+        (var.service_name == "reporting") == contains(keys(var.environment_variables), "CARDDEMO_TRUSTED_PROXY_PATTERN") &&
+        (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET") &&
+        (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_SECRET")
+      )
+      error_message = "service-specific secret and trust configuration was distributed to the wrong bounded context."
+    }
+
+    precondition {
+      condition     = (length(var.secret_arns) == 0) == (length(var.execution_secret_kms_key_arns) == 0)
+      error_message = "secret_sources and execution_secret_kms_key_arns must either both be empty or both be non-empty, so every injected secret has a constrained decrypt grant and no unused decrypt grant is created."
+    }
+  }
 }
 
 
@@ -683,10 +1361,7 @@ resource "aws_ecs_task_definition" "this" {
 # Load-balancer target group.
 # -----------------------------------------------------------------------------
 
-# WHAT: the pool of task addresses the shared internal load balancer forwards
-#       this service's traffic to, together with the health check that decides
-#       which of those addresses is currently eligible.
-# WHY : Assumptions: the module boundary is worth stating here because this is
+# Assumptions: the module boundary is worth stating here because this is
 #       the one point at which two modules meet. infra/modules/alb owns the
 #       load balancer, its listener and the per-service listener rules; this
 #       module owns the target group and publishes its ARN, which alb attaches
@@ -798,11 +1473,11 @@ resource "aws_lb_target_group" "this" {
   #       fails the apply with a resource-in-use error naming the listener
   #       unless the replacement exists first and the rule can be repointed
   #       onto it.
-  #       Trade-offs: because the name is deterministic rather than a generated
-  #       prefix, a replacement that kept the same name would collide on it. A
-  #       forced replacement therefore has to arrive with a changed name --
-  #       which is the case that actually matters, since name is itself the
-  #       attribute most likely to force one.
+  #       Refactoring Rationale: local.target_group_name includes a stable hash
+  #       of every configured replacement-forcing attribute. A replacement
+  #       therefore arrives under a distinct name before this resource is
+  #       destroyed, while an unchanged configuration keeps the same name and
+  #       produces no churn.
   lifecycle {
     create_before_destroy = true
   }
@@ -813,9 +1488,7 @@ resource "aws_lb_target_group" "this" {
 # The service.
 # -----------------------------------------------------------------------------
 
-# WHAT: the running service -- how many copies of the task definition ECS keeps
-#       alive, where it places them, and how a new revision replaces the old.
-# WHY : Assumptions: absent for the batch instantiation, gated on the same
+# Assumptions: absent for the batch instantiation, gated on the same
 #       create_service input explained at the target group above. ADR-002 runs
 #       batch as Step-Functions-invoked tasks, so batch needs the task
 #       definition and no long-running service holding a desired count.
@@ -827,15 +1500,24 @@ resource "aws_ecs_service" "this" {
   task_definition = aws_ecs_task_definition.this.arn
   desired_count   = var.desired_count
 
-  # WHY : Alternatives Considered: a FARGATE_SPOT capacity-provider strategy
-  #       was rejected. A spot interruption replaces tasks on two minutes'
-  #       notice regardless of what they are serving, and the acceptance
-  #       criterion for this migration is that the candidate business flows --
-  #       sign-on, account view and update, card list and update, transaction
-  #       add and list, bill pay -- work end to end. Interrupting one of those
-  #       mid-request to reduce capacity cost is the wrong trade against the
-  #       thing the migration is actually judged on.
-  launch_type = "FARGATE"
+  # WHY : Refactoring Rationale: launch_type = "FARGATE" was removed because it
+  #       bypasses the cluster's capacity-provider model and is mutually
+  #       exclusive with the strategy blocks below. The default input still
+  #       selects on-demand FARGATE only, preserving the availability decision:
+  #       a Spot interruption replaces tasks on two minutes' notice regardless
+  #       of what they are serving, and interrupting sign-on, account, card or
+  #       transaction work mid-request is the wrong cost trade. A caller may opt
+  #       into FARGATE_SPOT explicitly, and the resulting plan shows that choice
+  #       instead of inheriting it invisibly from the cluster.
+  dynamic "capacity_provider_strategy" {
+    for_each = var.capacity_provider_strategy
+
+    content {
+      capacity_provider = capacity_provider_strategy.value.capacity_provider
+      weight            = capacity_provider_strategy.value.weight
+      base              = capacity_provider_strategy.value.base
+    }
+  }
 
   # WHY : Trade-offs: the platform version is pinned rather than left at
   #       LATEST, so a platform change arrives as a reviewed edit instead of on
@@ -959,13 +1641,10 @@ resource "aws_ecs_service" "this" {
   #       time, so Terraform has to stop reconciling it -- otherwise every plan
   #       after a scaling event shows a diff and every apply fights the scaler
   #       back to the configured number. var.desired_count therefore sets the
-  #       INITIAL count only. The residual cost is worth stating rather than
-  #       glossing: ignore_changes cannot be made conditional in HCL, so when
-  #       enable_autoscaling is false a manual desired-count change also stops
-  #       being reverted. The unconditional form is chosen anyway, because the
-  #       alternative -- two nearly identical service resources differing only
-  #       in a lifecycle block -- would duplicate every other argument here and
-  #       split the deployment configuration across both copies.
+  #       INITIAL count only. variables.tf now rejects the long-running service
+  #       shape when autoscaling is false, so every resource that reaches this
+  #       lifecycle has one runtime owner for desired_count and there is no
+  #       unsupported fixed-size exception for Terraform to reconcile.
   lifecycle {
     ignore_changes = [desired_count]
   }
@@ -975,9 +1654,7 @@ resource "aws_ecs_service" "this" {
 # Autoscaling.
 # -----------------------------------------------------------------------------
 
-# WHAT: registers the service as a scalable target, which is what allows its
-#       desired count to be changed by anything other than Terraform.
-# WHY : Assumptions: gated on create_service as well as enable_autoscaling,
+# Assumptions: gated on create_service as well as enable_autoscaling,
 #       because a scalable target addresses a service by name and there is no
 #       service to address in the batch shape.
 resource "aws_appautoscaling_target" "this" {
@@ -1010,9 +1687,7 @@ resource "aws_appautoscaling_target" "this" {
   tags = local.tags
 }
 
-# WHAT: the single scaling policy -- how the scalable target above decides to
-#       add or remove tasks.
-# WHY : Assumptions: gated identically to the scalable target it attaches to,
+# Assumptions: gated identically to the scalable target it attaches to,
 #       so the two can never exist apart.
 resource "aws_appautoscaling_policy" "cpu" {
   count = var.create_service && var.enable_autoscaling ? 1 : 0
@@ -1061,4 +1736,3 @@ resource "aws_appautoscaling_policy" "cpu" {
     scale_out_cooldown = var.autoscaling_scale_out_cooldown
   }
 }
-

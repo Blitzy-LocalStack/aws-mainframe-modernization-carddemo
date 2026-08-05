@@ -53,14 +53,21 @@
  * closed set assigned to it rather than a listing of the directory.</p>
  *
  * <ul>
- *   <li>{@code SecurityConfig} builds the resource server filter chain. Every request carries a
- *       Cognito-issued token that the chain validates before anything else runs; the
+ *   <li>{@code SecurityConfig} builds the resource server filter chain. Every business request
+ *       carries a Cognito-issued token that the chain validates before anything else runs; the
  *       {@code cognito:groups} claim on that token becomes the caller's Spring Security
  *       authorities; and fraud marking is guarded so that only the {@code carddemo-admin} group
- *       reaches it. Assumptions: authorization is decided from the signed claim and never from a
- *       field the caller supplies about itself. That is a property the baseline could not have,
- *       because it carried its one-character user type in a storage area the terminal echoed back
- *       between screen turns, so the value arrived from the client rather than from an issuer.</li>
+ *       reaches it. Only {@code /actuator/health} is permitted before authentication; every
+ *       business endpoint and every other actuator endpoint stays protected. Trade-offs: the load
+ *       balancer target group and the container health check both poll that endpoint before any
+ *       credential exists, so requiring a token there would fail every probe and remove a healthy
+ *       task from service; the accepted cost is one read-only health route reachable without a
+ *       credential. Alternatives Considered: opening all of {@code /actuator/**} was rejected
+ *       because the probes need no operational endpoint beyond health. Assumptions: authorization
+ *       is decided from the signed claim and never from a field the caller supplies about itself.
+ *       That is a property the baseline could not have, because it carried its one-character user
+ *       type in a storage area the terminal echoed back between screen turns, so the value arrived
+ *       from the client rather than from an issuer.</li>
  *   <li>{@code OpenApiConfig} supplies the OpenAPI 3.1 metadata this service publishes, aligned to
  *       the contract committed at {@code src/main/resources/openapi/authorization-api.yaml}.
  *       Assumptions: that contract has a real consumer, because the browser application's typed

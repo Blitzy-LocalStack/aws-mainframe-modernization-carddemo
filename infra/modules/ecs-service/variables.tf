@@ -33,17 +33,13 @@
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Nine variables carry fourteen `validation` blocks between them, so a
-#     bad value is rejected before the AWS API sees it: name_prefix and
-#     service_name (charset and length, bounding the composed target-group
-#     name), environment (dev or prod only), task_cpu (the Fargate CPU set),
-#     autoscaling_target_cpu_utilization (a usable percentage band),
-#     log_retention_in_days (the CloudWatch Logs retention set),
-#     environment_variables (three rules: key shape, an allowlist of the
-#     namespaces the images read, and a refusal of secret-bearing names),
-#     writable_mount_paths (four rules: absolute paths, no "/", no
-#     duplicates, and non-empty whenever the root filesystem is read-only)
-#     and target_protocol (HTTPS only).
+#   - Forty-three variables carry fifty `validation` blocks between them, so a
+#     bad value is rejected before the AWS API sees it. The checks cover
+#     identifiers and ARN shapes, Fargate CPU/memory and network contracts,
+#     HTTPS health checks, deployment/autoscaling bounds, CloudWatch retention,
+#     the pinned telemetry image and sampling percentage, non-secret
+#     environment-variable namespaces, store-specific references and IAM policy
+#     document syntax.
 #   - WHEN a rule is checked is not uniform. A `validation` reading only its
 #     own variable is evaluated by `terraform validate`; one reading ANOTHER
 #     variable is deferred to `terraform plan`, because the context that lets
@@ -53,12 +49,11 @@
 #     report a read-only root paired with an empty mount list, and `plan`
 #     does. Both precede any resource, so no task definition is created from
 #     the broken pairing either way.
-#   - Three variables select the module's SHAPE rather than one of its
-#     values -- create_service, attach_load_balancer and enable_autoscaling.
-#     Disabling one is not an error and raises no message; it produces fewer
-#     resources and turns the matching outputs null. Each of the three
-#     states its own coupling, because none of it is inferable from the
-#     type.
+#   - Four variables select the module's SHAPE rather than one of its values:
+#     create_service, attach_load_balancer, enable_autoscaling and
+#     enable_telemetry_collector. Disabling one is not an error; it removes the
+#     corresponding service/target/scaler or collector/policy resources. Each
+#     states its own coupling because none is inferable from the boolean type.
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: eight per-service module copies, one per
@@ -99,7 +94,7 @@
 #         have crossed the private application subnets in the clear.
 #     (c) environment_variables is now gated by an allowlist of the key
 #         namespaces the images read plus a refusal of secret-bearing names,
-#         so the documented split with ssm_parameter_arns and secret_arns is
+#         so the documented split with ssm_parameter_arns and secret_sources is
 #         enforced rather than merely described. A literal placed here is
 #         durably readable in the task definition, in plan output and in
 #         state, by a wider audience than the secret store's read policy.
@@ -112,7 +107,7 @@
 # -----------------------------------------------------------------------------
 # TIER 1 -- REQUIRED INPUTS. Every variable in this tier omits `default`.
 #
-# WHY : Alternatives Considered: ordering all forty-eight variables strictly
+# WHY : Alternatives Considered: ordering all fifty-one variables strictly
 #       alphabetically, which is the obvious scheme and does help a reader
 #       hunting for one name already known. Rejected because it interleaves
 #       the nine inputs a caller MUST supply with the thirty-nine it may
@@ -126,22 +121,20 @@
 #       injected configuration, its IAM and finally its tags.
 # -----------------------------------------------------------------------------
 
-# WHAT: the bounded-context short name that distinguishes one instantiation
-#       from the other seven inside the same root.
 # WHY : Assumptions: no `default` deliberately. This is the only input that
 #       tells the eight instantiations apart, so a default would let two
 #       `module` blocks in one root compose the same ECS service name, log
 #       group and target-group name and then collide during apply. The
-#       charset bound is not cosmetic either -- the value is concatenated
-#       into an ALB target-group name, which AWS accepts only as
-#       alphanumerics and hyphens, so an underscore or a capital letter
-#       would pass unnoticed here and fail mid-apply. The 14-character
-#       ceiling is derived from the same AWS limit; the arithmetic is
-#       recorded on name_prefix.
+#       charset bound is not cosmetic either -- the value is composed into the
+#       readable stem of an ALB target-group name, which accepts only
+#       alphanumerics and hyphens. The 14-character ceiling keeps the shared
+#       resource name compact and leaves a meaningful stem before the
+#       replacement hash main.tf appends.
 variable "service_name" {
   description = <<-EOT
-    Bounded-context short name for this instance: one of auth, account,
-    card, transaction, reference, batch, authorization or reporting.
+    Bounded-context or task-only workload short name for this instance: one of
+    auth, account, card, transaction, reference, batch, authorization,
+    reporting or data-migration.
     Composed with name_prefix and environment into the ECS service name, the
     task-definition family, the CloudWatch log-group name, both IAM role
     names and the ALB target-group name, and used as the service segment of
@@ -158,13 +151,12 @@ variable "service_name" {
     error_message = join(" ", [
       "service_name must start with a lowercase letter, contain only",
       "lowercase letters, digits and single interior hyphens, and be at",
-      "most 14 characters so the composed target-group name stays within",
-      "its 32-character ceiling.",
+      "most 14 characters so the shared resource name and the readable",
+      "target-group stem remain compact.",
     ])
   }
 }
 
-# WHAT: which of the two provisioned environments this instance belongs to.
 # WHY : Assumptions: the accepted set is closed at exactly two because the
 #       package provisions exactly two roots, infra/envs/dev and
 #       infra/envs/prod, and those two differ only in sizing and retention
@@ -188,7 +180,6 @@ variable "environment" {
   }
 }
 
-# WHAT: the ECS cluster this service is created in.
 # WHY : Assumptions: the ARN form rather than the name, because that is what
 #       the `cluster` argument of aws_ecs_service takes. It is one of a PAIR
 #       of cluster inputs -- see cluster_name immediately below for why both
@@ -209,12 +200,11 @@ variable "cluster_arn" {
   #       resource reads it, in an error naming the AWS argument rather than the
   #       wiring mistake. Checking the shape here names the input.
   validation {
-    condition     = can(regex("^arn:[a-z0-9-]+:ecs:[a-z0-9-]+:[0-9]{12}:cluster/", var.cluster_arn))
+    condition     = can(regex("^arn:[a-z0-9-]+:ecs:[a-z0-9-]+:[0-9]{12}:cluster/[A-Za-z0-9_-]+$", var.cluster_arn))
     error_message = "cluster_arn must be an ECS cluster ARN of the form arn:<partition>:ecs:<region>:<account>:cluster/<name>, not a cluster name: the name belongs in cluster_name, and both are strings so a swap plans cleanly."
   }
 }
 
-# WHAT: the same cluster as cluster_arn, in its bare-name form.
 # WHY : Assumptions: Application Auto Scaling identifies an ECS service by a
 #       composite string, service/<cluster-name>/<service-name>, and that is
 #       a documented AWS API contract rather than a naming preference, so
@@ -240,7 +230,6 @@ variable "cluster_name" {
   type        = string
 }
 
-# WHAT: the VPC the load-balancer target group is registered in.
 # WHY : Assumptions: aws_lb_target_group requires vpc_id whenever its target
 #       type is `ip`, and `ip` is the only target type Fargate's awsvpc
 #       networking supports, so this input is unavoidable even though the
@@ -255,7 +244,6 @@ variable "vpc_id" {
   type        = string
 }
 
-# WHAT: the subnets the Fargate tasks are placed in.
 # WHY : Assumptions: these must be the PRIVATE-APPLICATION tier
 #       specifically, which is why the tier is named in the variable instead
 #       of a neutral `subnet_ids`. The network module builds three tiers with
@@ -292,7 +280,6 @@ variable "private_app_subnet_ids" {
   }
 }
 
-# WHAT: the security groups attached to each task's network interface.
 # WHY : Trade-offs: a list rather than a single id. One group -- the
 #       application group published by the network module, which admits the
 #       load balancer on the container port and permits egress to the
@@ -326,7 +313,6 @@ variable "security_group_ids" {
   }
 }
 
-# WHAT: the container image this task runs.
 # WHY : Assumptions: the value arrives already complete -- registry host,
 #       repository path, and a tag or digest -- and this module composes none
 #       of it. That is deliberate: composing a registry hostname would
@@ -360,6 +346,20 @@ variable "image_uri" {
   validation {
     condition     = can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.image_uri))
     error_message = "image_uri must be a full ECR image reference ending in an explicit :tag or @sha256:<digest> -- for example 111122223333.dkr.ecr.eu-west-1.amazonaws.com/carddemo-dev/auth-service:1.2.3. An untagged reference resolves to latest at task launch, so one task definition can run two different builds."
+  }
+
+  # WHY : Assumptions: a tag is mutable and a digest is not, and the difference
+  #       matters only where a redeploy must be reproducible. In production a task
+  #       definition pinned to a tag can silently run a different build after the
+  #       tag is moved -- including on an unrelated scale-out event, which makes
+  #       two tasks of one service run two builds. A digest cannot move.
+  #       Trade-offs: dev keeps mutable tags on purpose, because iterating there
+  #       means pushing over a tag and restarting; requiring a digest in dev would
+  #       add a lookup step to every iteration for a reproducibility guarantee dev
+  #       does not need.
+  validation {
+    condition     = var.environment != "prod" || can(regex("@sha256:[a-f0-9]{64}$", var.image_uri))
+    error_message = "production image_uri values must end in an immutable @sha256:<64 lowercase hex characters> digest; mutable tags are accepted only in dev."
   }
 }
 
@@ -395,7 +395,7 @@ variable "ecr_repository_arn" {
   #       anything pointing at this input. A repository NAME and a repository URI
   #       are both plausible things to pass here and both type-check.
   validation {
-    condition     = can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/", var.ecr_repository_arn))
+    condition     = can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.ecr_repository_arn))
     error_message = "ecr_repository_arn must be an ECR repository ARN of the form arn:<partition>:ecr:<region>:<account>:repository/<name>. A repository name or an image URI produces an IAM statement matching no repository, so the task fails to pull its image."
   }
 }
@@ -413,17 +413,13 @@ variable "ecr_repository_arn" {
 #       without being routine.
 # -----------------------------------------------------------------------------
 
-# WHAT: the common leading token in every resource name this module composes.
-# WHY : Assumptions: the binding constraint on this value is an AWS naming
-#       ceiling, and it comes from the shortest limit among the names built
-#       out of it -- an ALB target-group name, capped at 32 characters, well
-#       below the ceiling on an ECS service name or an IAM role name. The
-#       arithmetic that fixes the 12-character bound is
-#       len(prefix) + 1 + len(service_name) + 1 + len("prod") <= 32, and with
-#       service_name bounded at 14 that leaves exactly 12. The pattern
-#       additionally forbids a leading digit, a trailing hyphen and doubled
-#       hyphens, because a target-group name may not begin or end with a
-#       hyphen and concatenation is what would otherwise produce one.
+# WHY : Assumptions: the 12-character ceiling keeps the common resource name at
+#       or below 32 characters with the longest service and environment names.
+#       The target group now reserves nine of its own 32 characters for a
+#       separator plus replacement hash and truncates only its readable stem,
+#       so this bound preserves legibility across every resource rather than
+#       being the sole collision control. The pattern additionally forbids a
+#       leading digit, trailing hyphen and doubled hyphens.
 #       Trade-offs: the default matches the same-named variable in the
 #       bootstrap root so one prefix identifies every resource in the
 #       package; the cost is that the two must be changed together to stay
@@ -432,10 +428,10 @@ variable "name_prefix" {
   description = <<-EOT
     Leading token shared by every resource name this module composes -- the
     ECS service, the task-definition family, the log group, both IAM roles
-    and the ALB target group. Kept short because the target-group name is the
-    tightest AWS ceiling those names have to clear. Defaulted rather than
-    required so a root states it only when it wants something other than the
-    package-wide prefix.
+    and the readable stem of the ALB target group. Kept short so the common
+    resource name remains legible before main.tf appends the target group's
+    replacement hash. Defaulted rather than required so a root states it only
+    when it wants something other than the package-wide prefix.
   EOT
   type        = string
   default     = "carddemo"
@@ -448,8 +444,8 @@ variable "name_prefix" {
     error_message = join(" ", [
       "name_prefix must start with a lowercase letter, contain only",
       "lowercase letters, digits and single interior hyphens, and be at",
-      "most 12 characters so the composed target-group name stays within",
-      "its 32-character ceiling.",
+      "most 12 characters so the shared resource name and the readable",
+      "target-group stem remain compact.",
     ])
   }
 }
@@ -458,8 +454,6 @@ variable "name_prefix" {
 # Container runtime.
 # -----------------------------------------------------------------------------
 
-# WHAT: an explicit override for the name of the container inside the task
-#       definition.
 # WHY : Assumptions: this matters far beyond cosmetics, for one instantiation
 #       in particular. Step Functions starts each batch step through the
 #       synchronous run-task integration and passes that step's arguments as
@@ -487,8 +481,6 @@ variable "container_name" {
   default     = null
 }
 
-# WHAT: the TCP port the container listens on and the target group forwards
-#       to.
 # WHY : Assumptions: 8080 is not an arbitrary preference but the one port the
 #       network tiering admits -- the application security group permits
 #       load-balancer-to-application traffic on 8080 and nothing else
@@ -498,30 +490,42 @@ variable "container_name" {
 #       two failures to diagnose. It remains a variable rather than a
 #       hard-coded literal only so a root changing the security group can
 #       change both together.
+# WHY : Refactoring Rationale: "both together" now names a mechanism rather
+#       than an intention. infra/modules/network/variables.tf declares
+#       app_container_port as the single settable source of that port, and the
+#       environment root is expected to wire this input to it --
+#       `container_port = module.network.app_container_port` -- so one
+#       assignment reaches the security-group rule and the container it admits
+#       traffic to. For a period this module's counterpart input did not exist
+#       in the network module at all, which left the two halves of one flow
+#       independently settable with nothing able to notice a disagreement; the
+#       shared input was restored for that reason, and this comment records the
+#       wiring so a root author does not have to infer it. Assumptions: the
+#       validation domain below is deliberately IDENTICAL to the one that input
+#       applies, whole numbers 1024 to 65535, so no value the network module
+#       admits can be refused here -- a mismatch would fail the plan with a
+#       message naming this task definition rather than the input the value
+#       came from.
 variable "container_port" {
   description = <<-EOT
     Container port exposed by the task, also used as the target-group port
     and the health-check port. Must match both the port the service's Spring
     Boot process binds and the port the application security group admits
-    from the load balancer.
+    from the load balancer, so the environment root passes the network
+    module's app_container_port here rather than a second literal.
   EOT
   type        = number
   default     = 8080
 
-  # WHY : Assumptions: the port is the one the network design admits between the
-  #       load balancer and the application, and the same number appears in each
-  #       image's EXPOSE, in the security-group rule pair and in the target group
-  #       this module creates. A value outside the TCP port range is rejected by
-  #       the task-definition API at apply; a privileged port below 1024 would be
-  #       refused at container start instead, because the containers run as the
-  #       unprivileged user named by container_user, and that failure appears as a
-  #       task that starts and immediately stops with no port bound.
-  #       Trade-offs: the whole ephemeral range stays permitted rather than pinning
-  #       8080, because a module reused for a service listening elsewhere is a
-  #       legitimate case; what is refused is the range that cannot work.
+  # WHY : Refactoring Rationale: the network module admits ALB-to-application
+  #       traffic on 8080 and on no other port. The previous range validation
+  #       accepted values that ECS and the container could use but the security
+  #       group would drop, producing an unreachable service whose plan looked
+  #       valid. Pinning the input makes both halves of the network contract
+  #       agree at plan time.
   validation {
-    condition     = var.container_port >= 1024 && var.container_port <= 65535 && floor(var.container_port) == var.container_port
-    error_message = "container_port must be a whole number between 1024 and 65535. Ports below 1024 are privileged and cannot be bound by the unprivileged container user, which presents as a task that starts and stops with nothing listening."
+    condition     = var.container_port == 8080
+    error_message = "container_port must be 8080, the only application port admitted by the network module's ALB-to-service security-group contract."
   }
 }
 
@@ -567,7 +571,6 @@ variable "container_user" {
   }
 }
 
-# WHAT: the CPU units reserved for the whole task.
 # WHY : Assumptions: Fargate accepts only a fixed set of task CPU sizes, and
 #       only certain memory sizes alongside each one, so an arbitrary integer
 #       is rejected by the API during apply. The validation restates that set
@@ -603,7 +606,6 @@ variable "task_cpu" {
   }
 }
 
-# WHAT: the memory reserved for the whole task, in MiB.
 # WHY : Assumptions: Fargate constrains this to a set that DEPENDS ON
 #       task_cpu -- the same API contract task_cpu depends on -- so no
 #       standalone condition can bound it correctly and none is written here;
@@ -659,7 +661,6 @@ variable "task_memory" {
   }
 }
 
-# WHAT: whether the container's root filesystem is mounted read-only.
 # WHY : Refactoring Rationale: this defaulted to false, and the reasoning given
 #       for that -- a JVM writes to a temporary directory, and this module
 #       mounts no writable volume -- was accurate about the obstacle and drew
@@ -685,22 +686,28 @@ variable "task_memory" {
 #       configuration. Also considered: keeping it false for the batch
 #       instantiation specifically, on the theory that a batch step writes more
 #       than a service does. Rejected as unfounded -- batch output goes to the
-#       database and to object storage, not to the container filesystem -- and
-#       the input remains available if a specific step ever proves otherwise.
+#       database and to object storage, not to the container filesystem.
+#       Refactoring Rationale: the earlier shape still allowed any caller to
+#       lower the invariant after all this reasoning. The validation below
+#       closes that fail-open path; a new writable path is named explicitly
+#       instead of making the whole root writable.
 variable "readonly_root_filesystem" {
   description = <<-EOT
     Sets readonlyRootFilesystem on the container definition. Defaults to true,
     which is the intended posture for all eight instantiations: writable paths
     the JVM needs are supplied as Fargate ephemeral volumes through
     writable_mount_paths rather than by leaving the whole root filesystem
-    writable. Setting this false is a deliberate weakening and needs a reason.
+    writable. The module rejects false because this is a fleet-wide invariant.
   EOT
   type        = bool
   default     = true
+
+  validation {
+    condition     = var.readonly_root_filesystem
+    error_message = "readonly_root_filesystem must be true. Add an exact writable_mount_paths entry for a required scratch path rather than making the whole container filesystem writable."
+  }
 }
 
-# WHAT: the container paths that stay writable while the root filesystem does
-#       not, each backed by a Fargate ephemeral volume.
 # WHY : Assumptions: /tmp is the whole of the default because it is the whole of
 #       what the images need. A JVM writes to java.io.tmpdir -- heap dumps, JAR
 #       extraction, the hsperfdata performance file, Tomcat's upload staging
@@ -841,7 +848,6 @@ variable "attach_load_balancer" {
   }
 }
 
-# WHAT: the HTTP path the target group probes.
 # WHY : Assumptions: the services expose Spring Boot Actuator, whose health
 #       endpoint is the one path guaranteed to answer without touching
 #       business data or requiring a token, and the same endpoint backs both
@@ -878,7 +884,6 @@ variable "health_check_path" {
   }
 }
 
-# WHAT: the protocol the target group and its health check use to reach the task.
 # WHY : Refactoring Rationale: this module said nothing about the protocol, and
 #       silence here is not neutral -- an aws_lb_target_group needs one, so main.tf
 #       would have supplied HTTP and the load-balancer-to-task hop would have been
@@ -934,7 +939,6 @@ variable "target_protocol" {
   }
 }
 
-# WHAT: the HTTP status codes the probe treats as healthy.
 # WHY : Assumptions: the Actuator health endpoint answers 200 when its status
 #       is UP and a server error when it is not, so a single code is the
 #       whole contract and a range would widen it to include responses that
@@ -965,7 +969,6 @@ variable "health_check_matcher" {
   }
 }
 
-# WHAT: how often the target group probes each registered task, in seconds.
 # WHY : Trade-offs: a deliberately bounded compromise rather than a tuned
 #       value. Probing less often lets a wedged task keep receiving requests
 #       for more consecutive probes before unhealthy_threshold is reached;
@@ -996,7 +999,6 @@ variable "health_check_interval" {
   }
 }
 
-# WHAT: how long a single probe may take before it counts as a failure.
 # WHY : Assumptions: AWS requires this to be strictly less than
 #       health_check_interval, so the two cannot be set independently -- a
 #       timeout at or above the interval is rejected when the target group is
@@ -1027,7 +1029,6 @@ variable "health_check_timeout" {
   }
 }
 
-# WHAT: consecutive successful probes before a task starts receiving traffic.
 # WHY : Trade-offs: set higher than unhealthy_threshold on purpose, and the
 #       asymmetry is the whole point. Admitting a task that is not genuinely
 #       ready sends real requests to a process that will fail them, whereas
@@ -1081,8 +1082,6 @@ variable "unhealthy_threshold" {
   }
 }
 
-# WHAT: how long the load balancer keeps draining a task after it is
-#       deregistered.
 # WHY : Assumptions: a short delay is safe here specifically because the
 #       services hold no session state. The migrated system carried
 #       continuity between screen turns in one passed structure --
@@ -1115,7 +1114,6 @@ variable "deregistration_delay" {
   }
 }
 
-# WHAT: how long ECS ignores load-balancer health for a freshly started task.
 # WHY : Assumptions: without a grace period a JVM service cannot start at all
 #       under a load balancer. The container is registered as soon as it is
 #       running, but the Actuator health endpoint does not report UP until the
@@ -1184,8 +1182,6 @@ variable "create_service" {
   type        = bool
   default     = true
 }
-
-# WHAT: the task count the service is created with.
 # WHY : Assumptions: this is the INITIAL count only. main.tf stops tracking it
 #       afterwards, because Application Auto Scaling owns the running count
 #       once the target is registered; without that exclusion every plan
@@ -1231,7 +1227,76 @@ variable "desired_count" {
   }
 }
 
-# WHAT: the Fargate platform version the tasks run on.
+# WHY : Refactoring Rationale: main.tf previously set launch_type = "FARGATE",
+#       which is mutually exclusive with a capacity-provider strategy and
+#       bypassed the cluster's capacity-provider model entirely. Expressing the
+#       same on-demand choice as a one-entry FARGATE strategy keeps today's
+#       non-interruptible posture while making the placement mechanism
+#       consistent with the cluster and allowing an environment to opt into
+#       FARGATE_SPOT explicitly instead of editing the module.
+# WHY : Trade-offs: the default deliberately does NOT inherit the cluster's
+#       mixed FARGATE/FARGATE_SPOT default. Interactive sign-on, account, card
+#       and transaction requests must not be terminated on a Spot reclaim
+#       notice, so this service overrides the cluster with on-demand Fargate.
+#       Step-Functions RunTask callers that name no strategy still inherit the
+#       cluster default; a caller that wants Spot here must state it in this
+#       input, making the availability trade visible in the environment root.
+variable "capacity_provider_strategy" {
+  description = <<-EOT
+    Per-service ECS capacity-provider strategy. Defaults to one on-demand
+    FARGATE entry, replacing the former launch_type = "FARGATE" with the
+    capacity-provider mechanism. A supplied strategy replaces the cluster
+    default; use FARGATE_SPOT only as an explicit availability/cost decision.
+  EOT
+
+  type = list(object({
+    capacity_provider = string
+    weight            = optional(number, 1)
+    base              = optional(number, 0)
+  }))
+
+  default = [{
+    capacity_provider = "FARGATE"
+    weight            = 1
+    base              = 1
+  }]
+
+  validation {
+    condition = length(var.capacity_provider_strategy) >= 1 && length(var.capacity_provider_strategy) <= 2 && alltrue([
+      for entry in var.capacity_provider_strategy :
+      contains(["FARGATE", "FARGATE_SPOT"], entry.capacity_provider)
+    ])
+    error_message = "capacity_provider_strategy must contain one or two entries and may name only FARGATE or FARGATE_SPOT, the two providers associated by ecs-cluster."
+  }
+
+  validation {
+    condition = length(distinct([
+      for entry in var.capacity_provider_strategy : entry.capacity_provider
+    ])) == length(var.capacity_provider_strategy)
+    error_message = "capacity_provider_strategy must not repeat a capacity provider; duplicate entries make the effective weight ambiguous and ECS rejects them."
+  }
+
+  validation {
+    condition = alltrue([
+      for entry in var.capacity_provider_strategy :
+      entry.weight >= 0 && entry.weight <= 1000 &&
+      floor(entry.weight) == entry.weight &&
+      entry.base >= 0 && entry.base <= 100000 &&
+      floor(entry.base) == entry.base
+    ])
+    error_message = "Each capacity-provider weight must be a whole number from 0 to 1000 and each base a whole number from 0 to 100000, matching the ECS service API ranges."
+  }
+
+  validation {
+    condition = anytrue([
+      for entry in var.capacity_provider_strategy : entry.weight > 0
+      ]) && length([
+      for entry in var.capacity_provider_strategy : entry if entry.base > 0
+    ]) <= 1
+    error_message = "At least one capacity-provider entry must have weight greater than zero, and at most one entry may carry a non-zero base."
+  }
+}
+
 # WHY : Refactoring Rationale: this defaulted to LATEST, and the reasoning for
 #       that -- a pin would go stale in sixteen places and a stale pin is how a
 #       platform reaches end of support while every plan reports no changes --
@@ -1347,8 +1412,6 @@ variable "deployment_maximum_percent" {
   }
 }
 
-# WHAT: whether a failing deployment is detected and rolled back
-#       automatically.
 # WHY : Assumptions: this is a property of the ROLLING deployment controller,
 #       and it needs saying plainly because the word rollback invites a
 #       reader to look for the blue-green setup that is deliberately absent.
@@ -1391,9 +1454,9 @@ variable "enable_deployment_circuit_breaker" {
 variable "enable_autoscaling" {
   description = <<-EOT
     Whether to register an Application Auto Scaling target for the service
-    and attach a CPU target-tracking policy to it. Effective only when
-    create_service is also true, since a scaling target must name an existing
-    service. The batch instance leaves both false.
+    and attach a CPU target-tracking policy to it. Required whenever
+    create_service is true so Application Auto Scaling is the sole runtime
+    owner of desired_count; the batch instance leaves both false.
   EOT
   type        = bool
   default     = true
@@ -1409,9 +1472,18 @@ variable "enable_autoscaling" {
     condition     = !var.enable_autoscaling || var.create_service
     error_message = "enable_autoscaling requires create_service: without a service there is nothing for a scalable target to register against, so the scaling policy would be dropped silently. The batch shape sets both to false."
   }
+
+  # WHY : Refactoring Rationale: aws_ecs_service ignores desired_count drift
+  #       unconditionally so the scaler can own it. A long-running service with
+  #       autoscaling disabled would therefore have no owner reconciling that
+  #       value. Refusing that shape keeps the lifecycle rule truthful instead
+  #       of preserving an unsupported fixed-size mode.
+  validation {
+    condition     = !var.create_service || var.enable_autoscaling
+    error_message = "create_service requires enable_autoscaling: the service lifecycle ignores desired_count so Application Auto Scaling must be its runtime owner. The batch shape sets both flags false."
+  }
 }
 
-# WHAT: the floor Application Auto Scaling may reduce the task count to.
 # WHY : Assumptions: matched to the desired_count default rather than set
 #       lower, because the two answer the same question at different times --
 #       desired_count is where the service starts and this is where scaling is
@@ -1439,7 +1511,6 @@ variable "min_capacity" {
   }
 }
 
-# WHAT: the ceiling Application Auto Scaling may grow the task count to.
 # WHY : Trade-offs: a bounded ceiling rather than a generous one. The point of
 #       the bound is that a runaway scale-out -- driven by a fault that raises
 #       CPU rather than by real demand -- is capped at a known number of tasks
@@ -1509,7 +1580,6 @@ variable "autoscaling_target_cpu_utilization" {
   }
 }
 
-# WHAT: how long the policy waits after a scale-in before scaling in again.
 # WHY : Assumptions: scale-in is safe at all only because the services are
 #       stateless -- no sticky sessions and no server-side session store,
 #       which is what makes tasks behind a load balancer interchangeable and
@@ -1540,7 +1610,6 @@ variable "autoscaling_scale_in_cooldown" {
   }
 }
 
-# WHAT: how long the policy waits after a scale-out before scaling out again.
 # WHY : Trade-offs: the shorter of the two cooldowns, for the reason recorded
 #       on autoscaling_scale_in_cooldown -- adding capacity that turns out to
 #       be unnecessary is the cheaper mistake, so the policy is allowed to
@@ -1572,7 +1641,6 @@ variable "autoscaling_scale_out_cooldown" {
 # Logging.
 # -----------------------------------------------------------------------------
 
-# WHAT: how long the service's CloudWatch log group keeps its events.
 # WHY : Assumptions: CloudWatch Logs accepts only a fixed set of retention
 #       values and rejects any other integer, so the validation restates that
 #       set in order to move the rejection from apply to plan. The set is an
@@ -1610,25 +1678,22 @@ variable "log_retention_in_days" {
   }
 }
 
-# WHAT: an optional customer-managed key to encrypt the log group with.
-# WHY : Assumptions: null is the expected value, not a gap. Log events are
-#       encrypted at rest by CloudWatch Logs regardless; supplying a key here
-#       changes who controls that encryption, not whether it happens. The
-#       package provisions four customer-managed keys -- for the database,
-#       object storage, the secret store and the queues -- and a log key is
-#       deliberately not among them, so there is normally no ARN to pass.
-#       Trade-offs: the variable exists anyway so a root deciding its logs need
-#       a key it controls can supply one without editing this module. The
-#       alternative -- omitting the input and relying only on the service
-#       default -- would turn one environment's policy decision into a module
-#       change affecting all sixteen instances.
+# WHY : Assumptions: null remains an explicit escape hatch for a throwaway
+#       caller, because CloudWatch Logs still encrypts events with its service
+#       key. The dev and prod roots are expected to pass the KMS module's S3
+#       data-domain key: the AAP defines four customer-managed keys rather than a
+#       fifth log key, and the KMS policy grants the regional Logs principal
+#       account-and-region-scoped use of that key.
+#       Trade-offs: keeping null expressible preserves standalone module
+#       validation and a minimal test root, while the environment composition
+#       owns the stricter production contract. A policy scan against dev or prod
+#       remains the gate that refuses the escape hatch there.
 variable "log_group_kms_key_arn" {
   description = <<-EOT
     ARN of a customer-managed KMS key to encrypt the service's log group with.
-    Leave null to let CloudWatch Logs encrypt events with its own
-    service-managed key, which is the expected case because the package
-    provisions no dedicated log key. Supply a key ARN from the kms module to
-    take control of that encryption.
+    The dev and prod roots pass the KMS module's S3 data-domain key; leave null
+    only in a standalone test root to use CloudWatch Logs service-managed
+    encryption.
   EOT
   type        = string
   default     = null
@@ -1641,8 +1706,69 @@ variable "log_group_kms_key_arn" {
   #       leaves a group encrypted with the service key while the configuration
   #       claims a customer-managed one.
   validation {
-    condition     = var.log_group_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:", var.log_group_kms_key_arn))
+    condition     = var.log_group_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.log_group_kms_key_arn))
     error_message = "log_group_kms_key_arn must be null, or a KMS key ARN beginning arn:<partition>:kms:. A bare key id or an alias name is accepted by Terraform here and then rejected by CloudWatch Logs at apply."
+  }
+}
+
+# WHY : Refactoring Rationale: every service already exposes Micrometer metrics
+#       on its Actuator Prometheus endpoint, but an endpoint with no scraper is
+#       not centralized telemetry. The sidecar closes that path in the same task
+#       network namespace and exports metrics and traces without making the
+#       application image own AWS-specific collector configuration.
+#       Trade-offs: enabled by default because an optional collector would let
+#       a root produce a deployment whose dashboards exist but never receive
+#       application metrics. The collector is essential, so a bad configuration
+#       fails task placement visibly instead of leaving a healthy-looking task
+#       with a silent telemetry gap.
+variable "enable_telemetry_collector" {
+  description = <<-EOT
+    Whether to add the AWS Distro for OpenTelemetry collector sidecar that
+    scrapes the service's Actuator Prometheus endpoint, receives OTLP traces,
+    exports metrics through CloudWatch EMF and exports traces to X-Ray.
+  EOT
+  type        = bool
+  default     = true
+}
+
+# WHY : Assumptions: v0.48.0 was verified as a published multi-architecture
+#       Linux image, and the explicit tag is part of the reproducible runtime
+#       contract. A floating tag would let an unrelated task-definition apply
+#       pull different collector code without a repository diff.
+variable "telemetry_collector_image" {
+  description = <<-EOT
+    Pinned AWS Distro for OpenTelemetry collector image used by the telemetry
+    sidecar. The value must include an explicit non-latest tag so collector
+    upgrades remain reviewed task-definition changes.
+  EOT
+  type        = string
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
+
+  validation {
+    condition = (
+      can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector:[A-Za-z0-9._-]+$", var.telemetry_collector_image)) &&
+      !endswith(lower(var.telemetry_collector_image), ":latest")
+    )
+    error_message = "telemetry_collector_image must be the public AWS observability collector image with an explicit tag other than latest."
+  }
+}
+
+# WHY : Trade-offs: successful traffic is sampled to bound X-Ray ingest volume,
+#       while status-code ERROR traces are a separate tail-sampling policy and
+#       are retained independently. This is a cost control rather than a
+#       service-level objective, so the environment root may choose the value.
+variable "telemetry_success_sample_percentage" {
+  description = <<-EOT
+    Percentage of successful traces retained by the collector after its
+    always-keep-error policy. Accepts 0 through 100 and may differ by
+    environment without changing task topology.
+  EOT
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.telemetry_success_sample_percentage >= 0 && var.telemetry_success_sample_percentage <= 100
+    error_message = "telemetry_success_sample_percentage must be between 0 and 100 inclusive."
   }
 }
 
@@ -1650,12 +1776,10 @@ variable "log_group_kms_key_arn" {
 # Configuration injection.
 # -----------------------------------------------------------------------------
 
-# WHAT: plain, non-secret values injected into the container as environment
-#       variables.
 # WHY : Assumptions: everything passed here is readable by anyone who can
 #       describe the task definition, because a container definition's
 #       environment entries are stored and returned in clear text. That is
-#       exactly why the split with ssm_parameter_arns and secret_arns exists:
+#       exactly why the split with ssm_parameter_arns and secret_sources exists:
 #       those two carry a REFERENCE that ECS resolves at task start, so the
 #       value never enters the task definition and never enters a state or
 #       plan file. A credential placed here instead would be written to state
@@ -1664,7 +1788,7 @@ variable "log_group_kms_key_arn" {
 #       Trade-offs: the empty default keeps the common case -- a service
 #       needing only its active profile and a handful of references -- free of
 #       ceremony.
-#       Refactoring Rationale: the split with ssm_parameter_arns and secret_arns
+#       Refactoring Rationale: the split with ssm_parameter_arns and secret_sources
 #       was described here and enforced nowhere, and a described split is not a
 #       control. Anything a caller put in this map was accepted, so the one
 #       mistake the paragraph above warns against -- a credential passed as a
@@ -1683,7 +1807,7 @@ variable "environment_variables" {
     Non-secret environment variables for the container, as a map of name to
     literal value: the active Spring profile and similar plain settings. Values
     appear in clear text in the task definition, in plan output and in state, so
-    anything sensitive belongs in ssm_parameter_arns or secret_arns instead --
+    anything sensitive belongs in ssm_parameter_arns or secret_sources instead --
     and a name that reads as a secret is refused here rather than trusted.
     Accepted keys are upper-case, begin with one of the namespaces the CardDemo
     services read, and do not end in a secret-bearing word.
@@ -1767,12 +1891,10 @@ variable "environment_variables" {
         "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
       ], name)
     ])
-    error_message = "an environment_variables key must not end in PASSWORD, PASSWD, PWD, SECRET, TOKEN, CREDENTIAL, CREDENTIALS, PASSPHRASE, KEY, APIKEY, PRIVATEKEY, SIGNATURE or SALT, and must not be a static AWS credential name. Values here are stored in clear text in the task definition, in plan output and in state; pass the reference through secret_arns or ssm_parameter_arns so ECS resolves it at task start instead."
+    error_message = "an environment_variables key must not end in PASSWORD, PASSWD, PWD, SECRET, TOKEN, CREDENTIAL, CREDENTIALS, PASSPHRASE, KEY, APIKEY, PRIVATEKEY, SIGNATURE or SALT, and must not be a static AWS credential name. Values here are stored in clear text in the task definition, in plan output and in state; pass the reference through secret_sources or ssm_parameter_arns so ECS resolves it at task start instead."
   }
 }
 
-# WHAT: environment variables whose values ECS reads from Parameter Store when
-#       the task starts.
 # WHY : Assumptions: this is how a service learns any runtime endpoint or
 #       identifier at all. Terraform module outputs are the only source of
 #       those values -- the database writer endpoint, the queue URLs, the token
@@ -1810,42 +1932,35 @@ variable "ssm_parameter_arns" {
   validation {
     condition = alltrue([
       for key, arn in var.ssm_parameter_arns :
-      can(regex("^[A-Z][A-Z0-9_]*$", key)) && can(regex("^arn:[a-z0-9-]+:ssm:[a-z0-9-]+:[0-9]{12}:parameter/", arn))
+      can(regex("^[A-Z][A-Z0-9_]*$", key)) && can(regex("^arn:[a-z0-9-]+:ssm:[a-z0-9-]+:[0-9]{12}:parameter/[A-Za-z0-9_.\\-/]+$", arn))
     ])
     error_message = "Each ssm_parameter_arns entry must map an upper-case environment-variable name to a full SSM parameter ARN of the form arn:<partition>:ssm:<region>:<account>:parameter/<path>. A bare parameter name leaves the execution role scoped to nothing and the task unable to start."
   }
 }
 
-# WHAT: environment variables whose values ECS reads from Secrets Manager when
-#       the task starts.
-# WHY : Assumptions: ECS resolves Parameter Store and Secrets Manager through
-#       the SAME container secrets mechanism, distinguished only by the kind of
-#       ARN in each entry, which is why two maps are accepted here and merged
-#       into one list in main.tf. They are kept apart at the module boundary
-#       because the execution role needs a different action for each store, and
-#       merging them earlier would discard the information needed to write
-#       those two statements separately.
-#       Assumptions: as with ssm_parameter_arns, these ARNs are what the
-#       execution role's read permission is scoped to, so a caller passing them
-#       is the mechanism that keeps the policy wildcard-free.
+# WHY : Refactoring Rationale: ECS and IAM consume different representations of
+#       one Secrets Manager source. ECS valueFrom may carry a JSON-key and
+#       version selector suffix; IAM Resource must carry only the base secret
+#       ARN. Keeping them in one object preserves their relationship without
+#       reusing the selector as a policy resource.
 variable "secret_arns" {
   description = <<-EOT
-    Map of container environment-variable name to the ARN of the Secrets
-    Manager secret holding its value, such as the database credential.
-    Resolved by ECS at task start through the same container secrets mechanism
-    as ssm_parameter_arns, and used as the Resource list of the execution
-    role's secret-read statement. Comes from the secrets module's outputs,
-    which generate every credential at apply time.
+    Map of container environment-variable name to an object with `value_from`,
+    the ECS selector that may name one JSON key, and `resource_arn`, the base
+    Secrets Manager ARN IAM authorizes. This separates runtime field selection
+    from policy scope: a JSON-key selector is not a valid IAM Resource and a
+    base ARN injects the whole credential document rather than one field.
   EOT
-  type        = map(string)
-  default     = {}
+  type = map(object({
+    value_from   = string
+    resource_arn = string
+  }))
+  default = {}
 
-  # WHY : Assumptions: every value is a Secrets Manager secret ARN, checked for the
-  #       same reason as the parameter ARNs above and with one addition: a secret
-  #       ARN carries a six-character random suffix, so the value cannot be
-  #       composed by hand from a name and must come from the module that created
-  #       the secret. A hand-written value without the suffix resolves to nothing,
-  #       and the task fails at start with a message about the secret.
+  # WHY : Assumptions: resource_arn is the policy resource and value_from is
+  #       either that same ARN or that ARN followed by the ECS JSON-key/version
+  #       selector suffix. Requiring the prefix relationship prevents a caller
+  #       from authorizing one secret while injecting a field from another.
   #       Assumptions: this is the ONLY path by which a credential reaches a
   #       container. Values here are resolved by the ECS agent at task start and
   #       never appear in the task definition, which is what distinguishes this map
@@ -1853,10 +1968,45 @@ variable "secret_arns" {
   #       rather than a style choice.
   validation {
     condition = alltrue([
-      for key, arn in var.secret_arns :
-      can(regex("^[A-Z][A-Z0-9_]*$", key)) && can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:", arn))
+      for key, source in var.secret_arns :
+      can(regex("^[A-Z][A-Z0-9_]*$", key)) &&
+      can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[^:]+$", source.resource_arn)) &&
+      (
+        source.value_from == source.resource_arn ||
+        startswith(source.value_from, "${source.resource_arn}:")
+      )
     ])
-    error_message = "Each secret_arns entry must map an upper-case environment-variable name to a full Secrets Manager ARN of the form arn:<partition>:secretsmanager:<region>:<account>:secret:<name>-<suffix>. The six-character suffix means the ARN has to come from the secrets module's output rather than being composed from a name."
+    error_message = "Each secret_arns entry must map an upper-case name to { value_from, resource_arn }; resource_arn must be a base Secrets Manager secret ARN and value_from must equal it or append an ECS JSON-key/version selector to that same ARN."
+  }
+
+  # WHY : Refactoring Rationale: an HTTPS target group is not sufficient if the
+  #       task starts without the certificate and private key its Spring
+  #       `server.ssl` block requires. This cross-variable check makes the
+  #       load-balanced shape fail during plan instead of cycling unhealthy
+  #       tasks after infrastructure reports success.
+  # WHY : Assumptions: the environment-variable names and JSON member names are
+  #       the shared application contract used by every online service. Batch
+  #       has no load balancer and is deliberately exempt.
+  # WHY : Assumptions: the two names below are the ones the container images
+  #       actually read -- every service's application.yml resolves its listener
+  #       material from ${CARDDEMO_SERVER_TLS_CERTIFICATE} and
+  #       ${CARDDEMO_SERVER_TLS_PRIVATE_KEY} -- so this check ties the task
+  #       definition to the image contract rather than to a naming convention.
+  #       A load-balanced service whose listener has no certificate fails its
+  #       target-group health check and is then replaced repeatedly, which reads as
+  #       a crash loop rather than as a missing secret, so the omission is refused
+  #       at plan time instead.
+  #       Trade-offs: the check names the JSON keys as OPTIONAL. Both a two-scalar
+  #       secret layout and a single JSON document with `certificate` and
+  #       `private_key` keys are accepted, because the two layouts are equivalent
+  #       to the container and the choice belongs to whoever provisions the
+  #       material; what is not accepted is the value being absent.
+  validation {
+    condition = !(var.create_service && var.attach_load_balancer) || (
+      can(var.secret_arns["CARDDEMO_SERVER_TLS_CERTIFICATE"]) &&
+      can(var.secret_arns["CARDDEMO_SERVER_TLS_PRIVATE_KEY"])
+    )
+    error_message = "A load-balanced service must inject CARDDEMO_SERVER_TLS_CERTIFICATE and CARDDEMO_SERVER_TLS_PRIVATE_KEY through secret_arns: those are the names every service's application.yml reads for its own TLS listener, and without them the HTTPS target group and health check cannot complete."
   }
 }
 
@@ -1872,57 +2022,192 @@ variable "secret_arns" {
 #       consume the authorization queue and the auth service could start batch
 #       executions, which is the opposite of the least-privilege posture this
 #       package is required to hold. Taking the document as an input means the
-#       task role starts with no permissions and receives only what one caller
-#       passes for one service, so the module cannot widen it even by accident.
+#       task role starts with no BUSINESS permission and receives only what one
+#       caller passes for one service. The module's fixed telemetry policy is
+#       separate and grants only writes to this service's own log group and
+#       X-Ray ingestion, so it cannot widen a bounded context's data access.
 #       Refactoring Rationale: the migrated system delegated this to an
 #       external security manager that has no cloud equivalent and is not
 #       pretended to have one. Its role is filled by these per-service task
 #       roles together with the managed user directory, and the substitution
 #       is documented as a mapping rather than presented as a port.
-#       Assumptions: null means the role is created with a trust policy and
-#       nothing else. That is a valid and useful state -- a service that only
-#       serves HTTP and reaches the database through an injected credential
-#       needs no AWS API permission at all -- so null is not a missing value.
+#       Assumptions: null means the role receives no SERVICE-SPECIFIC business
+#       policy. That is a valid and useful state -- a service that only serves
+#       HTTP and reaches the database through an injected credential needs no
+#       queue, object-store or state-machine permission -- so null is not a
+#       missing value.
+variable "create_task_role_policy" {
+  description = "Whether to create the service-specific inline task-role policy resource. Set from root-owned topology rather than inferred from task_role_policy_json, whose module-output-derived value may remain unknown until apply."
+  type        = bool
+  default     = false
+}
+
 variable "task_role_policy_json" {
   description = <<-EOT
     Complete IAM policy document, as JSON, granting this one service the AWS
     API permissions it needs at run time. Attached to the task role, which the
-    module otherwise leaves empty because it composes no permissions of its
-    own. Leave null for a service that needs none. This is the TASK role used
-    by the application, not the execution role the ECS agent uses to pull the
-    image and read parameters.
+    module otherwise leaves free of business-resource access. Leave null for a
+    service that needs none; the collector-only log and X-Ray export policy may
+    still be present when telemetry is enabled. This is the TASK role used by
+    the application, not the execution role the ECS agent uses to pull the image
+    and read parameters.
   EOT
   type        = string
-  default     = null
+  nullable    = false
 
-  # WHY : Assumptions: null means this service needs no service-specific permission
-  #       beyond the baseline the module attaches, and that path stays expressible,
-  #       so the check is an explicit null test first.
-  #       Assumptions: when a document IS supplied it is parsed here. A malformed
-  #       policy is a string like any other to Terraform, so without this the
-  #       failure arrives from IAM during apply -- often after the role itself
-  #       exists -- with a message about the document rather than about which
-  #       caller supplied it. can(jsondecode(...)) is the cheapest complete syntax
-  #       check available at plan time.
-  #       Trade-offs: the check is syntactic, and deliberately not semantic. It
-  #       confirms the document parses and carries the two required top-level
-  #       members; it does not judge whether the statements are least-privilege,
-  #       which is what the policy scan in the infrastructure pipeline is for.
-  #       Duplicating that judgement here would give one concern two enforcement
-  #       points that drift apart.
+  # WHY : Refactoring Rationale: resource cardinality must be known during plan.
+  #       A document assembled from sibling-module outputs is unknown until
+  #       apply, so main.tf gates on create_task_role_policy and validates the
+  #       document relationship separately.
   validation {
-    condition     = var.task_role_policy_json == null || can(jsondecode(var.task_role_policy_json))
-    error_message = "task_role_policy_json must be null or a parseable JSON document; an unparseable string reaches IAM at apply, where the error names the document rather than the caller that supplied it. Build it with jsonencode or data.aws_iam_policy_document."
-  }
-
-  validation {
-    condition     = var.task_role_policy_json == null || try(can(jsondecode(var.task_role_policy_json).Version) && can(jsondecode(var.task_role_policy_json).Statement), false)
-    error_message = "task_role_policy_json must carry both a Version and a Statement member: a document that parses but omits either is accepted by Terraform and rejected by IAM at apply."
+    condition     = var.create_task_role_policy || var.task_role_policy_json == null
+    error_message = "task_role_policy_json must be null when create_task_role_policy is false."
   }
 }
 
-# WHAT: existing managed policies to attach to the task role alongside the
-#       inline document.
+# WHY : Refactoring Rationale: request/reply messages may carry a
+#       replyToQueueUrl supplied by the requester. Treating that value as
+#       authority would make the task role a confused deputy able to send to any
+#       queue named by an inbound message. The application still validates the
+#       URL against its environment-owned allowlist, and this input supplies the
+#       independent IAM backstop: sqs:SendMessage is granted only on these exact
+#       ARNs, never on `*` and never on an ARN assembled from the message.
+variable "sqs_send_queue_arns" {
+  description = <<-EOT
+    Exact environment-owned SQS queue ARNs this application's task role may
+    send to. Used as the Resource list of a dedicated sqs:SendMessage statement.
+    Keep empty for services that publish no messages; never derive it from an
+    inbound replyToQueueUrl.
+  EOT
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.sqs_send_queue_arns :
+      can(regex("^arn:[a-z0-9-]+:sqs:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$", arn))
+    ])
+    error_message = "Every sqs_send_queue_arns entry must be a full SQS queue ARN. Queue URLs, wildcards and partial ARNs are refused because this set becomes an IAM Resource allowlist."
+  }
+}
+
+# WHY : Assumptions: receive and delete belong to the same processing
+#       discipline. Splitting them into independently configurable lists could
+#       create a service that receives a message it can never acknowledge, so
+#       the one set drives ReceiveMessage, DeleteMessage and visibility changes
+#       together.
+variable "sqs_receive_queue_arns" {
+  description = <<-EOT
+    Exact environment-owned SQS queue ARNs this application's task role may
+    receive, delete and change visibility on. Keep empty for services that
+    consume no queue. The module grants no wildcard SQS action or resource.
+  EOT
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.sqs_receive_queue_arns :
+      can(regex("^arn:[a-z0-9-]+:sqs:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$", arn))
+    ])
+    error_message = "Every sqs_receive_queue_arns entry must be a full SQS queue ARN. Queue URLs, wildcards and partial ARNs are refused because this set becomes an IAM Resource allowlist."
+  }
+}
+# WHY : Assumptions: a resource-scoped parameter-read or secret-read permission
+#       is not sufficient on its own. When a parameter is a SecureString or a
+#       secret is encrypted with a customer-managed key, reading it also
+#       requires permission to decrypt with that key, so a role granted only
+#       the read action fails at task start with an access-denied error naming
+#       the key rather than the parameter -- a confusing failure that naming
+#       the keys here prevents.
+#       Alternatives Considered: granting the decrypt action on all keys.
+#       Rejected for the same reason the image-pull permission names one
+#       repository: least privilege is a stated non-negotiable constraint and
+#       the CI policy scan treats a wildcard resource as a finding, so the
+#       wildcard would redden a gating step as well as over-grant. Listing
+#       exact ARNs keeps every statement in both roles resource-scoped.
+variable "execution_secret_kms_key_arns" {
+  description = <<-EOT
+    Exact KMS key ARNs protecting the Secrets Manager entries in
+    secret_sources. Used only by the ECS execution role with Secrets Manager
+    ViaService and SecretARN encryption-context conditions. Application key use
+    belongs in task_kms_key_arns instead.
+  EOT
+  type        = list(string)
+  default     = []
+
+  # WHY : Assumptions: each entry is a KMS key ARN, for the same reason the log
+  #       group's key is: a key id or an alias satisfies the type and produces an
+  #       IAM statement whose resource matches no key, so the decrypt permission
+  #       the caller believes it granted is absent. That failure appears when a
+  #       secret or a queue message is first decrypted, not when this applies.
+  #       Trade-offs: an empty list is permitted, because a service that touches
+  #       none of the customer-managed keys needs no decrypt grant, and the batch
+  #       and reporting shapes differ from the online ones in exactly that way.
+  validation {
+    condition = alltrue([
+      for arn in var.execution_secret_kms_key_arns :
+      can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", arn))
+    ])
+    error_message = "Each execution_secret_kms_key_arns entry must be an anchored KMS key ARN with a UUID key identifier."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Tagging.
+# -----------------------------------------------------------------------------
+
+# WHY : Assumptions: this MERGES with, rather than replaces, whatever the
+#       calling root already applies through the provider's default_tags. A
+#       module cannot set default_tags -- that belongs to a provider
+#       configuration, and this module deliberately declares no provider so
+#       the root keeps control of the region and of the package-wide tag set
+#       -- so this input is the only way a caller can add a tag to one
+#       service's resources without adding it to all sixteen instances.
+#       Trade-offs: because the two sets combine, a key present in both
+#       resolves to the value given here. That is what makes a per-service
+#       override possible, and it also means a carelessly chosen key can
+#       shadow a package-wide one; naming the precedence in the description
+#       is the guard.
+variable "tags" {
+  description = <<-EOT
+    Extra tags to merge onto every resource this module creates, for tagging
+    that applies to one service rather than to the whole package. Combines with
+    the tags the calling root applies through the provider's default_tags; a
+    key given here takes precedence over the same key there.
+  EOT
+  type        = map(string)
+  default     = {}
+}
+
+# -----------------------------------------------------------------------------
+# The maximum permissions either role may ever hold
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: this module composes inline policies from caller-supplied ARN
+#       lists and, for the task role, from a caller-supplied policy document. A
+#       boundary is the only control that bounds what those compositions can add
+#       up to, because it is evaluated in addition to every identity policy: a
+#       statement the boundary does not permit is denied even if an inline policy
+#       allows it. Attaching it here rather than trusting each caller means a root
+#       that widens task_role_policy_json cannot widen past the account's ceiling.
+#       Alternatives Considered: reviewing each root's policy document instead.
+#       Rejected because review does not bind a later edit, and the module cannot
+#       see the document's contents in any case.
+#       Trade-offs: the input is required, so a caller must own a boundary policy
+#       before it can create a service. Accepted: an account deploying this system
+#       has a deployment boundary already, and making it optional would leave the
+#       control off in exactly the environments least likely to notice.
+variable "permissions_boundary_arn" {
+  description = "Same-account customer-managed IAM policy ARN used as the permissions boundary on both ECS roles. Required so no inline capability assembled by this module can exceed the account's deployment boundary."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN in a twelve-digit AWS account."
+  }
+}
+
 # WHY : Trade-offs: accepted as a second, separate way of granting the same role
 #       permissions, which is redundant in the simple case. It earns its place
 #       where a permission set is genuinely shared -- a policy a root already
@@ -1957,74 +2242,4 @@ variable "task_role_managed_policy_arns" {
     ])
     error_message = "Each task_role_managed_policy_arns entry must be an IAM policy ARN of the form arn:<partition>:iam::aws:policy/<name> for an AWS-managed policy, or arn:<partition>:iam::<account>:policy/<name> for a customer-managed one. A bare policy name is rejected only when the attachment is attempted."
   }
-}
-
-# WHAT: the specific keys the roles may use to decrypt what they read.
-# WHY : Assumptions: a resource-scoped parameter-read or secret-read permission
-#       is not sufficient on its own. When a parameter is a SecureString or a
-#       secret is encrypted with a customer-managed key, reading it also
-#       requires permission to decrypt with that key, so a role granted only
-#       the read action fails at task start with an access-denied error naming
-#       the key rather than the parameter -- a confusing failure that naming
-#       the keys here prevents.
-#       Alternatives Considered: granting the decrypt action on all keys.
-#       Rejected for the same reason the image-pull permission names one
-#       repository: least privilege is a stated non-negotiable constraint and
-#       the CI policy scan treats a wildcard resource as a finding, so the
-#       wildcard would redden a gating step as well as over-grant. Listing
-#       exact ARNs keeps every statement in both roles resource-scoped.
-variable "kms_key_arns" {
-  description = <<-EOT
-    ARNs of the KMS keys the roles may decrypt with: the keys protecting the
-    parameters and secrets named in ssm_parameter_arns and secret_arns, plus
-    any key the application itself uses at run time. Used as the Resource list
-    of the decrypt statements, so the permission never widens to every key in
-    the account. Comes from the kms module's outputs.
-  EOT
-  type        = list(string)
-  default     = []
-
-  # WHY : Assumptions: each entry is a KMS key ARN, for the same reason the log
-  #       group's key is: a key id or an alias satisfies the type and produces an
-  #       IAM statement whose resource matches no key, so the decrypt permission
-  #       the caller believes it granted is absent. That failure appears when a
-  #       secret or a queue message is first decrypted, not when this applies.
-  #       Trade-offs: an empty list is permitted, because a service that touches
-  #       none of the customer-managed keys needs no decrypt grant, and the batch
-  #       and reporting shapes differ from the online ones in exactly that way.
-  validation {
-    condition = alltrue([
-      for arn in var.kms_key_arns :
-      can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", arn))
-    ])
-    error_message = "Each kms_key_arns entry must be a KMS key ARN of the form arn:<partition>:kms:<region>:<account>:key/<key-id>. A bare key id or an alias produces an IAM statement matching no key, so the decrypt permission is silently absent."
-  }
-}
-
-# -----------------------------------------------------------------------------
-# Tagging.
-# -----------------------------------------------------------------------------
-
-# WHAT: additional tags merged onto every resource this module creates.
-# WHY : Assumptions: this MERGES with, rather than replaces, whatever the
-#       calling root already applies through the provider's default_tags. A
-#       module cannot set default_tags -- that belongs to a provider
-#       configuration, and this module deliberately declares no provider so
-#       the root keeps control of the region and of the package-wide tag set
-#       -- so this input is the only way a caller can add a tag to one
-#       service's resources without adding it to all sixteen instances.
-#       Trade-offs: because the two sets combine, a key present in both
-#       resolves to the value given here. That is what makes a per-service
-#       override possible, and it also means a carelessly chosen key can
-#       shadow a package-wide one; naming the precedence in the description
-#       is the guard.
-variable "tags" {
-  description = <<-EOT
-    Extra tags to merge onto every resource this module creates, for tagging
-    that applies to one service rather than to the whole package. Combines with
-    the tags the calling root applies through the provider's default_tags; a
-    key given here takes precedence over the same key there.
-  EOT
-  type        = map(string)
-  default     = {}
 }

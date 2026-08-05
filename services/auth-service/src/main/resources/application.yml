@@ -58,14 +58,13 @@
 
 server:
   # Assumptions: this service's Dockerfile declares EXPOSE 8080 and the network
-  # design admits load-balancer-to-application traffic on 8080 alone, so the
-  # number is fixed by two artifacts this file cannot see. Changing it here on
-  # its own leaves the container listening on a port nothing connects to, and
-  # the target group deregisters the task while the process stays healthy.
+  #   design admits load-balancer-to-application traffic on 8080 alone, so the
+  #   number is fixed by two artifacts this file cannot see. Changing it here on
+  #   its own leaves the container listening on a port nothing connects to, and
+  #   the target group deregisters the task while the process stays healthy.
   port: 8080
 
   ssl:
-    # WHAT: the listener above serves HTTPS rather than cleartext HTTP.
     # WHY : (1) Refactoring Rationale: this block did not exist, and its absence
     #       meant the encrypted path stopped at the load balancer. Traffic
     #       reaches the internal Application Load Balancer over TLS -- the alb
@@ -97,8 +96,8 @@ server:
     #       can pull the image, and one keystore in one image means dev and prod
     #       share a key, so a compromise anywhere is a compromise everywhere.
     #       (2) Assumptions: both values arrive from Secrets Manager, injected by
-    #       the task definition as SERVER_SSL_CERTIFICATE and
-    #       SERVER_SSL_CERTIFICATE_PRIVATE_KEY through the ECS container secrets
+    #       the task definition as CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY through the ECS container secrets
     #       mechanism -- which resolves them at task start, so neither is stored
     #       in the task definition, in Terraform state or in plan output. They
     #       must be passed through the ecs-service module's secret_arns input and
@@ -118,113 +117,136 @@ server:
     #       instead of silently falling back to cleartext, which would present as
     #       a healthy service that had quietly stopped meeting the requirement
     #       this block exists for.
-    certificate: ${SERVER_SSL_CERTIFICATE}
-    certificate-private-key: ${SERVER_SSL_CERTIFICATE_PRIVATE_KEY}
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
 
-    # WHY : (1) Assumptions: the two protocol versions are named rather than left
-    #       to the JDK default, which still negotiates TLS 1.1 and, on some
-    #       distributions, TLS 1.0. Both are withdrawn and have practical attacks
-    #       against them. Naming 1.2 and 1.3 holds the same floor the alb module
-    #       pins on its listener and the cloudfront-spa module enforces for
-    #       viewers, so one floor applies at all three hops rather than three
-    #       modules each choosing their own.
-    #       (2) Trade-offs: no `ciphers` list is given. A hand-written list ages
-    #       into a liability -- it silently keeps permitting a suite the JDK has
-    #       since deprecated, and it excludes suites added later -- whereas the
-    #       JDK's own default set for these two protocol versions is maintained
-    #       by whoever ships the runtime. The accepted cost is that the exact
-    #       suite set is not readable from this file.
-    #       (3) Assumptions: the load balancer does NOT verify this certificate.
-    #       An Application Load Balancer trusts whatever a registered target
-    #       presents, so this encrypts the hop without authenticating it; that
-    #       residual is recorded on target_protocol in the ecs-service module and
-    #       is bounded by target registration and the security groups, not by
-    #       this certificate.
+    # Assumptions: the two protocol versions are named rather than left
+    #   to the JDK default, which still negotiates TLS 1.1 and, on some
+    #   distributions, TLS 1.0. Both are withdrawn and have practical attacks
+    #   against them. Naming 1.2 and 1.3 holds the same floor the alb module
+    #   pins on its listener and the cloudfront-spa module enforces for
+    #   viewers, so one floor applies at all three hops rather than three
+    #   modules each choosing their own.
+    # Trade-offs: no `ciphers` list is given. A hand-written list ages
+    #   into a liability -- it silently keeps permitting a suite the JDK has
+    #   since deprecated, and it excludes suites added later -- whereas the
+    #   JDK's own default set for these two protocol versions is maintained
+    #   by whoever ships the runtime. The accepted cost is that the exact
+    #   suite set is not readable from this file.
+    # Assumptions: the load balancer does NOT verify this certificate.
+    #   An Application Load Balancer trusts whatever a registered target
+    #   presents, so this encrypts the hop without authenticating it; that
+    #   residual is recorded on target_protocol in the ecs-service module and
+    #   is bounded by target registration and the security groups, not by
+    #   this certificate.
     protocol: TLS
     enabled-protocols: TLSv1.2,TLSv1.3
 
 spring:
   application:
     # Assumptions: management.metrics.tags.service below reads this property
-    # instead of repeating the literal, so the two cannot drift apart.
+    #   instead of repeating the literal, so the two cannot drift apart.
     name: auth-service
 
+  # WHY : (1) Refactoring Rationale: this import replaces values that were either
+  #       absent here or duplicated per service. The console log pattern naming the
+  #       correlation and edge-request context keys, and the two metric tag values
+  #       the shared meter filter reads, are identical in every bounded context, and
+  #       before this line most services carried neither -- so the correlation
+  #       identity the shared filter published reached no log line and the meters
+  #       carried the "unspecified" tag fallback. The file lives in common-lib, the
+  #       one module every service already depends on and cannot compile without.
+  #       (2) Assumptions: config-data imports are resolved BEFORE the logging
+  #       system initialises, so a pattern supplied this way is in force for the
+  #       first line this service logs. That ordering is the reason the pattern can
+  #       live in an imported property file at all rather than in a logging
+  #       configuration resource.
+  #       (3) Assumptions: an imported document sits BENEATH this file in
+  #       precedence, so any key below overrides the shared default rather than
+  #       colliding with it, and the override is visible in this service's own file.
+  #       (4) Trade-offs: NOT marked optional. An absent classpath resource would
+  #       then be silently ignored, leaving the same defect this import corrects and
+  #       no error to explain it; a hard failure at startup names the missing
+  #       resource instead. The resource ships inside a jar this module's compile
+  #       path already requires, so the only way it can be absent is a packaging
+  #       defect worth failing on.
+  config:
+    import: "classpath:/carddemo-common-defaults.yml"
+
   datasource:
-    # WHY : (1) Trade-offs: none of the three values below carries a fallback,
-    #       so an absent one stops startup with an unresolved-placeholder
-    #       failure. That is accepted over a default that would let the process
-    #       come up and read or write another environment's data, which is a
-    #       fault that presents as a working service. (2) Assumptions: the
-    #       platform resolves all three before the process starts. The task
-    #       definition injects them from Parameter Store and Secrets Manager as
-    #       SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME and
-    #       SPRING_DATASOURCE_PASSWORD, which relaxed environment binding maps
-    #       onto these keys ahead of this file; the image deliberately bakes in
-    #       neither an active profile nor an endpoint.
+    # Trade-offs: none of the three values below carries a fallback,
+    #   so an absent one stops startup with an unresolved-placeholder
+    #   failure. That is accepted over a default that would let the process
+    #   come up and read or write another environment's data, which is a
+    #   fault that presents as a working service. Assumptions: the
+    #   platform resolves all three before the process starts. The task
+    #   definition injects them from Parameter Store and Secrets Manager as
+    #   SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME and
+    #   SPRING_DATASOURCE_PASSWORD, which relaxed environment binding maps
+    #   onto these keys ahead of this file; the image deliberately bakes in
+    #   neither an active profile nor an endpoint.
     url: ${SPRING_DATASOURCE_URL}
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
     hikari:
       # Alternatives Considered: accepting the driver pool's generated default
-      # name was rejected. That default is the same string in every service, so
-      # a pool metric or a stack dump of a blocked borrower could not be
-      # attributed to a context without correlating it by hand.
+      #   name was rejected. That default is the same string in every service, so
+      #   a pool metric or a stack dump of a blocked borrower could not be
+      #   attributed to a context without correlating it by hand.
       pool-name: auth-service-pool
       # Assumptions: this context owns exactly one schema, because the one
-      # baseline record it migrates is app/cpy/CSUSR01Y.cpy; reading another
-      # context's schema is not part of its contract, so an unqualified
-      # statement resolving anywhere else is a defect rather than a feature.
+      #   baseline record it migrates is app/cpy/CSUSR01Y.cpy; reading another
+      #   context's schema is not part of its contract, so an unqualified
+      #   statement resolving anywhere else is a defect rather than a feature.
       # Alternatives Considered: appending currentSchema to the JDBC URL was
-      # rejected, because the URL arrives from the platform as an opaque string
-      # that may already carry parameters, and editing it here would mean
-      # parsing a value this file does not own. Setting the path per connection
-      # keeps the pin independent of the URL's shape. Setting it to a schema
-      # that does not exist yet is accepted by the engine, so this does not
-      # race the Flyway bootstrap below.
+      #   rejected, because the URL arrives from the platform as an opaque string
+      #   that may already carry parameters, and editing it here would mean
+      #   parsing a value this file does not own. Setting the path per connection
+      #   keeps the pin independent of the URL's shape. Setting it to a schema
+      #   that does not exist yet is accepted by the engine, so this does not
+      #   race the Flyway bootstrap below.
       connection-init-sql: SET search_path TO auth
       # Trade-offs: the pool is sized modestly here and the dev and prod
-      # profiles move these numbers. A pool wider than the cluster's own
-      # connection budget turns a traffic peak into refused connections for
-      # every service sharing that cluster, so the base value is the
-      # conservative one and raising it is a deliberate per-environment act.
-      # The third value bounds how long a caller waits for a connection before
-      # failing: stated explicitly so that raising the pool size in a profile
-      # cannot be read as also relaxing the wait, since the two are what decide
-      # whether a saturated pool sheds load or accumulates blocked threads.
+      #   profiles move these numbers. A pool wider than the cluster's own
+      #   connection budget turns a traffic peak into refused connections for
+      #   every service sharing that cluster, so the base value is the
+      #   conservative one and raising it is a deliberate per-environment act.
+      #   The third value bounds how long a caller waits for a connection before
+      #   failing: stated explicitly so that raising the pool size in a profile
+      #   cannot be read as also relaxing the wait, since the two are what decide
+      #   whether a saturated pool sheds load or accumulates blocked threads.
       maximum-pool-size: 10
       minimum-idle: 2
       connection-timeout: 30000
-      # WHAT: the transport-security terms every connection this pool opens is
-      #       made on, independent of whatever the injected URL happens to say.
-      # WHY : (1) Assumptions: the URL above arrives from the platform as an
-      #       opaque string, so this file cannot inspect it and cannot rely on it
-      #       carrying any TLS parameter. Driver properties set here are handed to
-      #       the driver alongside the URL, so a URL with no ssl parameter at all
-      #       still negotiates on these terms. Stating them here is therefore the
-      #       only way this file can require verified encryption rather than hope
-      #       for it. (2) Assumptions: verify-full is the strongest of the
-      #       driver's modes and the only one that closes the whole gap. `require`
-      #       encrypts and accepts ANY certificate, so it stops a passive listener
-      #       and not an active one; `verify-ca` checks the chain but not the name,
-      #       so a valid certificate for a different host is accepted. Only
-      #       verify-full checks both, which is what makes the endpoint the
-      #       connection reaches the endpoint the credential was issued for.
-      #       (3) Assumptions: this is the CLIENT half of a two-sided
-      #       requirement. The cluster parameter group sets rds.force_ssl, so the
-      #       server refuses an unencrypted connection outright; that is what
-      #       makes the requirement hold even against a URL that deliberately
-      #       tried to weaken it, since the two halves cannot be defeated from one
-      #       side. Neither half is redundant: without the server flag a
-      #       misconfigured client could downgrade, and without these properties a
-      #       forced-TLS server would still accept a connection that verified no
-      #       certificate at all. (4) Assumptions: verify-full needs a trust
-      #       anchor, and this driver has no option to fall back to the JVM trust
-      #       store, so the bundle path is explicit. The default names the location
-      #       the service image places the managed certificate bundle at; an
-      #       environment that stores it elsewhere overrides the variable rather
-      #       than editing this file. A missing bundle fails the connection with a
-      #       message naming the file, which is the correct outcome: connecting
-      #       without a trust anchor is what this setting exists to prevent.
+      # Assumptions: the URL above arrives from the platform as an
+      #   opaque string, so this file cannot inspect it and cannot rely on it
+      #   carrying any TLS parameter. Driver properties set here are handed to
+      #   the driver alongside the URL, so a URL with no ssl parameter at all
+      #   still negotiates on these terms. Stating them here is therefore the
+      #   only way this file can require verified encryption rather than hope
+      #   for it. Assumptions: verify-full is the strongest of the
+      #   driver's modes and the only one that closes the whole gap. `require`
+      #   encrypts and accepts ANY certificate, so it stops a passive listener
+      #   and not an active one; `verify-ca` checks the chain but not the name,
+      #   so a valid certificate for a different host is accepted. Only
+      #   verify-full checks both, which is what makes the endpoint the
+      #   connection reaches the endpoint the credential was issued for.
+      # Assumptions: this is the CLIENT half of a two-sided
+      #   requirement. The cluster parameter group sets rds.force_ssl, so the
+      #   server refuses an unencrypted connection outright; that is what
+      #   makes the requirement hold even against a URL that deliberately
+      #   tried to weaken it, since the two halves cannot be defeated from one
+      #   side. Neither half is redundant: without the server flag a
+      #   misconfigured client could downgrade, and without these properties a
+      #   forced-TLS server would still accept a connection that verified no
+      #   certificate at all. Assumptions: verify-full needs a trust
+      #   anchor, and this driver has no option to fall back to the JVM trust
+      #   store, so the bundle path is explicit. The default names the location
+      #   the service image places the managed certificate bundle at; an
+      #   environment that stores it elsewhere overrides the variable rather
+      #   than editing this file. A missing bundle fails the connection with a
+      #   message naming the file, which is the correct outcome: connecting
+      #   without a trust anchor is what this setting exists to prevent.
       data-source-properties:
         sslmode: verify-full
         sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
@@ -232,33 +254,33 @@ spring:
   jpa:
     hibernate:
       # Alternatives Considered: schema generation from the mapped entities was
-      # evaluated and rejected, because it cannot express two things
-      # V1__auth.sql has to state once it lands. First, the fixed-width CHAR(8)
-      # primary key that app/cpy/CSUSR01Y.cpy L18 fixes as SEC-USR-ID PIC X(08)
-      # at offset 0; a generated column would be variable-length, and the
-      # identifier would stop comparing equal to the blank-padded value the
-      # baseline record holds. Second, the CHECK constraint restricting the user
-      # type to A or U, whose authority is app/cpy/COCOM01Y.cpy L26-L28, where
-      # CDEMO-USER-TYPE PIC X(01) carries 88 CDEMO-USRTYP-ADMIN VALUE 'A' and
-      # 88 CDEMO-USRTYP-USER VALUE 'U'. Generation emits no such domain, so a
-      # third user type would become insertable and the admin/user split that
-      # guards every administrative route would no longer be total.
+      #   evaluated and rejected, because it cannot express two things
+      #   V1__auth.sql has to state once it lands. First, the fixed-width CHAR(8)
+      #   primary key that app/cpy/CSUSR01Y.cpy L18 fixes as SEC-USR-ID PIC X(08)
+      #   at offset 0; a generated column would be variable-length, and the
+      #   identifier would stop comparing equal to the blank-padded value the
+      #   baseline record holds. Second, the CHECK constraint restricting the user
+      #   type to A or U, whose authority is app/cpy/COCOM01Y.cpy L26-L28, where
+      #   CDEMO-USER-TYPE PIC X(01) carries 88 CDEMO-USRTYP-ADMIN VALUE 'A' and
+      #   88 CDEMO-USRTYP-USER VALUE 'U'. Generation emits no such domain, so a
+      #   third user type would become insertable and the admin/user split that
+      #   guards every administrative route would no longer be total.
       ddl-auto: none
     # Trade-offs: the persistence session closes with the transaction instead of
-    # staying open until the response is written. Touching an unfetched
-    # association in a controller therefore throws rather than quietly issuing
-    # another query, which costs an explicit fetch in the repository for every
-    # association a response needs. The compromise returns the connection to
-    # the pool before serialisation begins, so a slow client cannot occupy one
-    # of the connections counted above.
+    #   staying open until the response is written. Touching an unfetched
+    #   association in a controller therefore throws rather than quietly issuing
+    #   another query, which costs an explicit fetch in the repository for every
+    #   association a response needs. The compromise returns the connection to
+    #   the pool before serialisation begins, so a slow client cannot occupy one
+    #   of the connections counted above.
     open-in-view: false
     properties:
       hibernate:
         # Assumptions: generated statements are schema-qualified here as well as
-        # path-pinned on the connection above. The two mechanisms are
-        # independent, so a pooled connection that somehow reached this service
-        # without its init statement still cannot resolve a table in another
-        # context's schema.
+        #   path-pinned on the connection above. The two mechanisms are
+        #   independent, so a pooled connection that somehow reached this service
+        #   without its init statement still cannot resolve a table in another
+        #   context's schema.
         default_schema: auth
 
   flyway:
@@ -266,60 +288,61 @@ spring:
     # entity-driven generation switched off, nothing else in the process would
     # create the auth table, so leaving migration to the framework default
     # rather than stating it here would make the schema's existence depend on
-    # which artifacts happen to be on the classpath. The migration this enables
-    # is authored at a later index of the same plan; until then the location
-    # below resolves to nothing and startup reports zero migrations applied,
-    # which is the intended staged state rather than a misconfiguration.
+    # which artifacts happen to be on the classpath. V1__auth.sql now occupies
+    # the location below and creates the one table this context owns.
+    # Refactoring Rationale: the former staged-state note said the location was
+    # empty after that migration had landed, which could send an operator
+    # looking for a missing artifact when Flyway reported a real migration
+    # failure.
     enabled: true
-    # Assumptions: this module is to ship exactly one migration on this
-    # classpath location, V1__auth.sql. There is no seed migration in this
-    # context; only the reference context owns one, so a second version here
-    # would be an artifact nothing produced. See State at this checkpoint in the
-    # header for why this location is currently empty.
+    # Assumptions: exactly one migration exists at this classpath location,
+    # V1__auth.sql. There is no seed migration in this context; only the
+    # reference context owns one, so a second version here would be an artifact
+    # no auth-service requirement produces.
     locations: classpath:db/migration
     # Assumptions: both keys are set because they answer different questions.
-    # The first is the set of schemas this context manages, and the second is
-    # where the migration history table itself lives. Setting only the first
-    # would leave the history table to land in whatever schema the connection
-    # resolved to, which would put this context's migration state outside the
-    # one schema it owns and make it invisible to a reader inspecting auth.
+    #   The first is the set of schemas this context manages, and the second is
+    #   where the migration history table itself lives. Setting only the first
+    #   would leave the history table to land in whatever schema the connection
+    #   resolved to, which would put this context's migration state outside the
+    #   one schema it owns and make it invisible to a reader inspecting auth.
     schemas: auth
     default-schema: auth
     # Assumptions: data-migration/sql/V0__schemas_and_roles.sql is the EXCLUSIVE
-    # authority for schemas, roles and grants in this system. It creates all
-    # eight schemas together with the eight login roles, the NOLOGIN owner of
-    # the reporting schema, the credential binding for every role, and the whole
-    # cross-schema privilege graph. Its completion is a deployment precondition
-    # of this service, not a convenience it can work around, so this flag is
-    # false: Flyway may migrate the `auth` schema and may not create it.
+    #   authority for schemas, roles and grants in this system. It creates all
+    #   eight schemas together with the eight login roles, the NOLOGIN owner of
+    #   the reporting schema, the credential binding for every role, and the whole
+    #   cross-schema privilege graph. Its completion is a deployment precondition
+    #   of this service, not a convenience it can work around, so this flag is
+    #   false: Flyway may migrate the `auth` schema and may not create it.
     #
     # Refactoring Rationale: this was true, on the reasoning that a bare
-    # database should still reach a usable state. The reasoning does not survive
-    # what V0 actually does. A schema Flyway creates is owned by whichever role
-    # connected, and it carries none of V0's grants -- so the flag did not
-    # substitute for V0, it produced a second, differently-owned schema that
-    # merely looked like V0 had run. Worse, it made a missing bootstrap
-    # invisible: the service started, migrated, and failed later on a permission
-    # error in a schema nothing had granted anything on. With the flag false the
-    # missing bootstrap aborts startup with a message naming the absent schema,
-    # which is the failure an operator can act on.
+    #   database should still reach a usable state. The reasoning does not survive
+    #   what V0 actually does. A schema Flyway creates is owned by whichever role
+    #   connected, and it carries none of V0's grants -- so the flag did not
+    #   substitute for V0, it produced a second, differently-owned schema that
+    #   merely looked like V0 had run. Worse, it made a missing bootstrap
+    #   invisible: the service started, migrated, and failed later on a permission
+    #   error in a schema nothing had granted anything on. With the flag false the
+    #   missing bootstrap aborts startup with a message naming the absent schema,
+    #   which is the failure an operator can act on.
     #
     # Trade-offs: the cost is that a bare database -- a fresh local instance, or
-    # a container this module's repository integration test starts -- now needs
-    # its schema created before this service can migrate. The test profile
-    # supplies that for itself, which is a visible, reviewable act in a test
-    # resource rather than a production default that hides a missing
-    # precondition. The alternative of letting this module's own migration
-    # create what it needs was rejected outright: it would put CREATE ROLE and
-    # GRANT statements into V1__auth.sql, which is exactly the cluster-wide
-    # privileged coupling schema-per-service exists to prevent.
+    #   a container this module's repository integration test starts -- now needs
+    #   its schema created before this service can migrate. The test profile
+    #   supplies that for itself, which is a visible, reviewable act in a test
+    #   resource rather than a production default that hides a missing
+    #   precondition. The alternative of letting this module's own migration
+    #   create what it needs was rejected outright: it would put CREATE ROLE and
+    #   GRANT statements into V1__auth.sql, which is exactly the cluster-wide
+    #   privileged coupling schema-per-service exists to prevent.
     create-schemas: false
     # Alternatives Considered: baselining on migrate was rejected. Against a
-    # schema that already holds objects it marks the history as current and
-    # would skip V1__auth.sql, so the service would report a successful
-    # migration while the table it needs was never created -- a failure that
-    # surfaces later as a missing relation on the first sign-on rather than at
-    # startup.
+    #   schema that already holds objects it marks the history as current and
+    #   would skip V1__auth.sql, so the service would report a successful
+    #   migration while the table it needs was never created -- a failure that
+    #   surfaces later as a missing relation on the first sign-on rather than at
+    #   startup.
     baseline-on-migrate: false
 
   security:
@@ -327,34 +350,34 @@ spring:
       resourceserver:
         jwt:
           # Trade-offs: an unresolved placeholder with no fallback, on the same
-          # reasoning as the datasource above and with a sharper consequence. A
-          # default issuer would let this service accept tokens minted by the
-          # wrong user pool, and that fault presents as successful
-          # authentication rather than as an error.
+          #   reasoning as the datasource above and with a sharper consequence. A
+          #   default issuer would let this service accept tokens minted by the
+          #   wrong user pool, and that fault presents as successful
+          #   authentication rather than as an error.
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
 management:
   endpoints:
     web:
-      # WHY : Assumptions: the load balancer target group and this service's
-      #       container HEALTHCHECK both request exactly GET /actuator/health,
-      #       and neither can present a JWT, so that path has to stay reachable
-      #       without one. It reports aggregate status only and no business
-      #       data. Both now request it over HTTPS, because server.ssl above
-      #       encrypts the listener they share with application traffic: the
-      #       target group is configured for HTTPS by target_protocol in
-      #       infra/modules/ecs-service, and this service's Dockerfile HEALTHCHECK
-      #       must probe https://localhost:8080/actuator/health with certificate
-      #       verification disabled for the loopback hop -- the certificate is
-      #       issued for the task's registered name, not for localhost, so a
-      #       verifying probe fails against a correctly configured service.
-      #       Moving the base path, renaming the endpoint, or putting a
-      #       credential in front of it breaks target-group registration and
-      #       container liveness in the same change, which removes the two
-      #       independent signals that a deployment is progressing. Which
-      #       principals may reach the remaining endpoints is decided in this
-      #       service's SecurityConfig; this file only fixes where they live and
-      #       which ones exist.
+      # Assumptions: the load balancer target group and this service's
+      #   container HEALTHCHECK both request exactly GET /actuator/health,
+      #   and neither can present a JWT, so that path has to stay reachable
+      #   without one. It reports aggregate status only and no business
+      #   data. Both now request it over HTTPS, because server.ssl above
+      #   encrypts the listener they share with application traffic: the
+      #   target group is configured for HTTPS by target_protocol in
+      #   infra/modules/ecs-service, and this service's Dockerfile HEALTHCHECK
+      #   must probe https://localhost:8080/actuator/health with certificate
+      #   verification disabled for the loopback hop -- the certificate is
+      #   issued for the task's registered name, not for localhost, so a
+      #   verifying probe fails against a correctly configured service.
+      #   Moving the base path, renaming the endpoint, or putting a
+      #   credential in front of it breaks target-group registration and
+      #   container liveness in the same change, which removes the two
+      #   independent signals that a deployment is progressing. Which
+      #   principals may reach the remaining endpoints is decided in this
+      #   service's SecurityConfig; this file only fixes where they live and
+      #   which ones exist.
       base-path: /actuator
       exposure:
         include: health,info,metrics,prometheus
@@ -362,29 +385,28 @@ management:
     health:
       probes:
         # Assumptions: enabling probes is what creates the liveness and
-        # readiness groups, so the aggregate reported at the path above
-        # distinguishes a task that is alive from one ready to be sent traffic.
-        # Without them both consumers would read a single combined status and a
-        # task still running its migration would be advertised as ready.
+        #   readiness groups, so the aggregate reported at the path above
+        #   distinguishes a task that is alive from one ready to be sent traffic.
+        #   Without them both consumers would read a single combined status and a
+        #   task still running its migration would be advertised as ready.
         enabled: true
       # Assumptions: the two pollers above act on the aggregate status alone.
-      # Component detail names the datasource and the schema behind it, which
-      # would publish deployment topology on a path that by design carries no
-      # credential.
+      #   Component detail names the datasource and the schema behind it, which
+      #   would publish deployment topology on a path that by design carries no
+      #   credential.
       show-details: never
-  metrics:
-    tags:
-      # Assumptions: these three tag names are the common tags the shared
-      # kernel's MetricsConfig contributes, so one dashboard query can group
-      # every service in the migration by the same keys. A fourth tag added
-      # here would exist for this service alone and would not group.
-      service: ${spring.application.name}
-      # Trade-offs: these two fall back to a token that is deliberately not the
-      # name of any real environment, so a task that starts without them is
-      # counted as unspecified and shows up as its own series, instead of being
-      # folded silently into dev or prod and skewing whichever it landed in.
-      environment: ${CARDDEMO_ENVIRONMENT:unspecified}
-      version: ${CARDDEMO_VERSION:unspecified}
+  # WHY : Refactoring Rationale: there is deliberately NO metrics.tags block here,
+  #       where an earlier revision declared the three common tags. Those exact
+  #       three tags are contributed by the shared kernel's MetricsConfig, whose
+  #       meter filter is registered for every service by common-lib's own
+  #       auto-configuration, and it reads its two configurable values from the
+  #       carddemo.environment and carddemo.version properties that the imported
+  #       carddemo-common-defaults.yml supplies. Declaring them here as well was
+  #       two mechanisms for one concern: a rename in the shared filter would leave
+  #       this service publishing the old key alongside the new one, and a
+  #       deployment that set only one of the two environment-variable spellings
+  #       would produce a service whose tags disagreed with its configuration. One
+  #       owner, named here so its absence reads as a decision.
 
 springdoc:
   api-docs:
@@ -393,107 +415,107 @@ springdoc:
     # against that document rather than against this endpoint. The document
     # served here has to agree with it; a difference between the two is a defect
     # in whichever one moved and is not something to reconcile at runtime.
-    # Neither that contract nor the client exists at this checkpoint, and nor do
-    # the controllers this endpoint would describe, so what it serves today is
-    # an empty document; see State at this checkpoint in the header.
+    # Neither that contract nor the client exists in the current tree, and nor
+    # do the controllers this endpoint would describe, so what it serves today
+    # is an empty document.
+    # Refactoring Rationale: this statement previously pointed to a
+    # "State at this checkpoint" header section that this file never contained;
+    # keeping the measured inventory adjacent to the key removes that dangling
+    # cross-reference.
     path: /v3/api-docs
     enabled: true
   swagger-ui:
     # Trade-offs: the browsable view is published in every environment rather
-    # than switched off outside development. It renders the same document the
-    # path above already serves and adds no endpoint of its own, and the
-    # profiles are not permitted to vary it, so turning it off per environment
-    # would make the surface differ between the environment a change is tested
-    # in and the one it runs in.
+    #   than switched off outside development. It renders the same document the
+    #   path above already serves and adds no endpoint of its own, and the
+    #   profiles are not permitted to vary it, so turning it off per environment
+    #   would make the surface differ between the environment a change is tested
+    #   in and the one it runs in.
     path: /swagger-ui.html
     enabled: true
 
 logging:
   level:
-    # WHY : (1) Assumptions: this file owns the property shapes for the
-    #       datasource, Flyway, the resource server, Cognito, JPA, the actuator
-    #       and observability. application-dev.yml and application-prod.yml
-    #       override values only. They may differ in these log levels, in the
-    #       pool sizing above, in how broadly the actuator is exposed, and in
-    #       the Flyway clean flag -- which is why that flag appears in the prod
-    #       profile and nowhere in this file. They may not differ in route
-    #       structure, schema ownership, identity mechanism, queue usage or
-    #       datastore type, because topology that varies by environment cannot
-    #       be verified in one and then trusted in another. (2) Trade-offs: the
-    #       two loggers below sit above DEBUG on purpose, which costs a
-    #       deliberate override when diagnosing a failing sign-on. At DEBUG they
-    #       emit token claims and bound statement parameters respectively, so
-    #       leaving them low would put user identifiers and credential material
-    #       into log aggregation, where its retention is governed by the log
-    #       group rather than by this service.
+    # Assumptions: this file owns the property shapes for the
+    #   datasource, Flyway, the resource server, Cognito, JPA, the actuator
+    #   and observability. application-dev.yml and application-prod.yml
+    #   override values only. They may differ in these log levels, in the
+    #   pool sizing above, in how broadly the actuator is exposed, and in
+    #   the Flyway clean flag -- which is why that flag appears in the prod
+    #   profile and nowhere in this file. They may not differ in route
+    #   structure, schema ownership, identity mechanism, queue usage or
+    #   datastore type, because topology that varies by environment cannot
+    #   be verified in one and then trusted in another. Trade-offs: the
+    #   two loggers below sit above DEBUG on purpose, which costs a
+    #   deliberate override when diagnosing a failing sign-on. At DEBUG they
+    #   emit token claims and bound statement parameters respectively, so
+    #   leaving them low would put user identifiers and credential material
+    #   into log aggregation, where its retention is governed by the log
+    #   group rather than by this service.
     root: INFO
     com.carddemo: INFO
     org.flywaydb: INFO
     org.springframework.security: WARN
     org.hibernate.SQL: WARN
-    # WHAT: the logger that emits the VALUES bound into each statement, pinned
-    #       separately from the logger that emits the statement text above.
-    # WHY : Refactoring Rationale: pinning org.hibernate.SQL alone was not enough
-    #       and the gap was not obvious. That logger emits parameterised SQL with
-    #       the values still as placeholders, so it discloses shape rather than
-    #       data; the bound values travel on a DIFFERENT logger, and at TRACE it
-    #       prints every parameter of every statement. In this context those
-    #       parameters are the eight-character user identifier, the given and
-    #       family names, and the pool subject reference of the row being read or
-    #       written, so an operator who raised org.hibernate to TRACE while
-    #       diagnosing a failing sign-on would ship user identity into log
-    #       aggregation and would have no line in this file telling them so. An
-    #       explicitly pinned child logger cannot be raised by a broader parent
-    #       setting, which is what makes this line a control rather than a
-    #       comment.
-    # WHY : Assumptions: the logger name belongs to the current persistence
-    #       provider's package layout and is not the pre-6.x
-    #       org.hibernate.type.descriptor.sql spelling; a stale name would bind
-    #       to nothing and would look like protection while providing none.
-    # WHY : Trade-offs: WARN rather than OFF. WARN still lets a genuine binding
-    #       failure be reported, which is diagnostically useful and carries no
-    #       parameter values; OFF would suppress that too. The two profiles
-    #       beside this file may lower the levels above for diagnosis but must
-    #       not lower this one or org.springframework.security, because both emit
-    #       credential-adjacent material at DEBUG and below.
+    # Refactoring Rationale: pinning org.hibernate.SQL alone was not enough
+    #   and the gap was not obvious. That logger emits parameterised SQL with
+    #   the values still as placeholders, so it discloses shape rather than
+    #   data; the bound values travel on a DIFFERENT logger, and at TRACE it
+    #   prints every parameter of every statement. In this context those
+    #   parameters are the eight-character user identifier, the given and
+    #   family names, and the pool subject reference of the row being read or
+    #   written, so an operator who raised org.hibernate to TRACE while
+    #   diagnosing a failing sign-on would ship user identity into log
+    #   aggregation and would have no line in this file telling them so. An
+    #   explicitly pinned child logger cannot be raised by a broader parent
+    #   setting, which is what makes this line a control rather than a
+    #   comment.
+    # Assumptions: the logger name belongs to the current persistence
+    #   provider's package layout and is not the pre-6.x
+    #   org.hibernate.type.descriptor.sql spelling; a stale name would bind
+    #   to nothing and would look like protection while providing none.
+    # Trade-offs: WARN rather than OFF. WARN still lets a genuine binding
+    #   failure be reported, which is diagnostically useful and carries no
+    #   parameter values; OFF would suppress that too. The two profiles
+    #   beside this file may lower the levels above for diagnosis but must
+    #   not lower this one or org.springframework.security, because both emit
+    #   credential-adjacent material at DEBUG and below.
     org.hibernate.orm.jdbc.bind: WARN
 
 carddemo:
   auth:
     cognito:
-      # WHAT: the three sign-on values the framework publishes no standard key
-      #       for, held in one namespace this project owns.
-      # WHY : (1) Alternatives Considered: declaring them as extra children of
-      #       spring.security was rejected, because that prefix is bound by the
-      #       framework's own configuration properties, so an unrecognised child
-      #       there is either ignored without a warning or rejected outright
-      #       depending on the release -- and a silently ignored pool
-      #       identifier would leave sign-on pointed at nothing. A prefix this
-      #       project owns binds predictably and is greppable in one place.
-      #       (2) Trade-offs: as with the datasource and the issuer above, none
-      #       of the three carries a fallback, so startup stops when one is
-      #       missing rather than the service coming up bound to another
-      #       environment's user pool. (3) Assumptions: the task definition
-      #       injects all three, the confidential one out of Secrets Manager and
-      #       the other two out of Parameter Store. No value for any of them
-      #       exists anywhere in this repository -- not in this file, not in
-      #       either profile beside it.
+      # Alternatives Considered: declaring them as extra children of
+      #   spring.security was rejected, because that prefix is bound by the
+      #   framework's own configuration properties, so an unrecognised child
+      #   there is either ignored without a warning or rejected outright
+      #   depending on the release -- and a silently ignored pool
+      #   identifier would leave sign-on pointed at nothing. A prefix this
+      #   project owns binds predictably and is greppable in one place.
+      # Trade-offs: as with the datasource and the issuer above, none
+      #   of the three carries a fallback, so startup stops when one is
+      #   missing rather than the service coming up bound to another
+      #   environment's user pool. Assumptions: the task definition
+      #   injects all three, the confidential one out of Secrets Manager and
+      #   the other two out of Parameter Store. No value for any of them
+      #   exists anywhere in this repository -- not in this file, not in
+      #   either profile beside it.
       #
-      # WHY : (4) Refactoring Rationale: a fourth key, `token-endpoint`, was
-      #       declared here and has been removed, because it named a mechanism
-      #       that cannot perform this service's job. The pool's OAuth token
-      #       endpoint implements the authorization-code, client-credentials and
-      #       refresh-token grants; it implements NO password grant, so there is
-      #       no request on it that exchanges a user id and a password for a
-      #       token. Carrying the key therefore described a sign-on flow that
-      #       could never run, and it described one incompatible with the rest of
-      #       the design at the same time: a token endpoint plus a client secret
-      #       is the confidential authorization-code shape, which requires a
-      #       hosted sign-in domain and a browser redirect, while the SPA renders
-      #       the baseline's own sign-on screen from app/bms/COSGN00.bms and
-      #       posts the credential here. Two incompatible flows half-configured
-      #       is worse than either, because each half looks correct beside its
-      #       own neighbours.
+      # Refactoring Rationale: a fourth key, `token-endpoint`, was
+      #   declared here and has been removed, because it named a mechanism
+      #   that cannot perform this service's job. The pool's OAuth token
+      #   endpoint implements the authorization-code, client-credentials and
+      #   refresh-token grants; it implements NO password grant, so there is
+      #   no request on it that exchanges a user id and a password for a
+      #   token. Carrying the key therefore described a sign-on flow that
+      #   could never run, and it described one incompatible with the rest of
+      #   the design at the same time: a token endpoint plus a client secret
+      #   is the confidential authorization-code shape, which requires a
+      #   hosted sign-in domain and a browser redirect, while the SPA renders
+      #   the baseline's own sign-on screen from app/bms/COSGN00.bms and
+      #   posts the credential here. Two incompatible flows half-configured
+      #   is worse than either, because each half looks correct beside its
+      #   own neighbours.
       #
       # WHY : (5) Assumptions: THE sign-on mechanism, stated once so no later
       #       reader has to reconstruct it. CognitoIdentityService calls the
@@ -507,59 +529,60 @@ carddemo:
       #       Secrets Manager and why nothing resembling it appears in
       #       ui/.env.example. No hosted-UI domain is provisioned, so
       #       infra/modules/cognito leaves `domain_prefix` null. And the three
-      #       verbatim baseline messages -- 'Wrong Password. Try again ...',
-      #       'User not found. Try again ...' and 'Unable to verify the User
-      #       ...' -- remain this service's to emit, mapped from the provider's
-      #       uniform failure so that the reply text is preserved without the
-      #       provider disclosing which of the two applies.
+      #       exact public mapping is deliberate: with Cognito's uniform
+      #       user-existence errors enabled, BOTH an unknown user and a bad
+      #       password return the baseline string 'Wrong Password. Try again
+      #       ...'. 'User not found. Try again ...' remains catalogued for
+      #       traceability and an explicitly selected LEGACY provider posture;
+      #       unrelated provider or integration failures return 'Unable to
+      #       verify the User ...'. This loses the baseline's public
+      #       user-existence distinction on purpose instead of claiming three
+      #       distinguishable responses survive one uniform provider failure.
       user-pool-id: ${CARDDEMO_AUTH_COGNITO_USER_POOL_ID}
       client-id: ${CARDDEMO_AUTH_COGNITO_CLIENT_ID}
       client-secret: ${CARDDEMO_AUTH_COGNITO_CLIENT_SECRET}
 
-  # WHAT: the three token properties every request's bearer token is checked
-  #       against, over and above the issuer and expiry the resource server
-  #       already validates for itself.
-  # WHY : (1) Assumptions: validating the issuer is NOT validating the token.
-  #       `spring.security.oauth2.resourceserver.jwt.issuer-uri` above makes the
-  #       filter chain verify the signature, the issuer and the time claims, and
-  #       that is where its guarantees end. One user pool mints TWO token kinds
-  #       from the same signing key: an access token, whose `token_use` claim is
-  #       `access`, and an identity token, whose `token_use` claim is `id`. Both
-  #       are validly signed by the configured issuer, so without the check
-  #       below an identity token -- which is meant to describe a user to a
-  #       client, not to authorize an API call -- would be accepted as
-  #       authorization here. It is also the token a browser is most likely to
-  #       have to hand.
-  #       (2) Assumptions: the same pool can hold more than one app client, and
-  #       a token minted for a different client of this pool carries this pool's
-  #       issuer. Binding the accepted client id closes that, and the value has
-  #       to be the client this service's own sign-on flow uses, which is why it
-  #       is injected rather than defaulted.
-  #       (3) Alternatives Considered: expressing this through the framework's
-  #       own `spring.security.oauth2.resourceserver.jwt.audiences` key, which
-  #       is the obvious declarative route and is WRONG here. A Cognito ACCESS
-  #       token carries no `aud` claim at all -- the client id travels in
-  #       `client_id` instead -- so an audience validator would reject every
-  #       access token the sign-on flow issues while accepting the identity
-  #       tokens this block exists to refuse. It would invert the control.
-  #       (4) Assumptions: these keys are read by this service's SecurityConfig,
-  #       which installs a delegating token validator ahead of the group
-  #       mapping, so a token failing any of the three never reaches
-  #       JwtRoleConverter and no authority is derived from it. common-lib's
-  #       security package deliberately owns the group mapping alone and no
-  #       token validation, so the validator belongs to each service rather than
-  #       to the shared kernel; the property shape is identical in every
-  #       service so that the eight chains cannot diverge in what they accept.
-  #       (5) Trade-offs: `required-scope` names the scope the pool grants to a
-  #       token obtained through the authentication API rather than a custom
-  #       resource-server scope. Custom scopes are only granted through the
-  #       OAuth flows this design does not use, so requiring one would reject
-  #       every token the sign-on flow can produce. What this value still buys
-  #       is decisive: an identity token carries no `scope` claim whatsoever, so
-  #       requiring any scope at all is a second, independent rejection of the
-  #       wrong token kind, and it is the same claim the API Gateway route
-  #       authorization scopes assert at the edge, so the edge and the service
-  #       agree rather than each guessing.
+  # Assumptions: validating the issuer is NOT validating the token.
+  #   `spring.security.oauth2.resourceserver.jwt.issuer-uri` above makes the
+  #   filter chain verify the signature, the issuer and the time claims, and
+  #   that is where its guarantees end. One user pool mints TWO token kinds
+  #   from the same signing key: an access token, whose `token_use` claim is
+  #   `access`, and an identity token, whose `token_use` claim is `id`. Both
+  #   are validly signed by the configured issuer, so without the check
+  #   below an identity token -- which is meant to describe a user to a
+  #   client, not to authorize an API call -- would be accepted as
+  #   authorization here. It is also the token a browser is most likely to
+  #   have to hand.
+  # Assumptions: the same pool can hold more than one app client, and
+  #   a token minted for a different client of this pool carries this pool's
+  #   issuer. Binding the accepted client id closes that, and the value has
+  #   to be the client this service's own sign-on flow uses, which is why it
+  #   is injected rather than defaulted.
+  # Alternatives Considered: expressing this through the framework's
+  #   own `spring.security.oauth2.resourceserver.jwt.audiences` key, which
+  #   is the obvious declarative route and is WRONG here. A Cognito ACCESS
+  #   token carries no `aud` claim at all -- the client id travels in
+  #   `client_id` instead -- so an audience validator would reject every
+  #   access token the sign-on flow issues while accepting the identity
+  #   tokens this block exists to refuse. It would invert the control.
+  # Assumptions: these keys are read by this service's SecurityConfig,
+  #   which installs a delegating token validator ahead of the group
+  #   mapping, so a token failing any of the three never reaches
+  #   JwtRoleConverter and no authority is derived from it. common-lib's
+  #   security package deliberately owns the group mapping alone and no
+  #   token validation, so the validator belongs to each service rather than
+  #   to the shared kernel; the property shape is identical in every
+  #   service so that the eight chains cannot diverge in what they accept.
+  # Trade-offs: `required-scope` names the scope the pool grants to a
+  #   token obtained through the authentication API rather than a custom
+  #   resource-server scope. Custom scopes are only granted through the
+  #   OAuth flows this design does not use, so requiring one would reject
+  #   every token the sign-on flow can produce. What this value still buys
+  #   is decisive: an identity token carries no `scope` claim whatsoever, so
+  #   requiring any scope at all is a second, independent rejection of the
+  #   wrong token kind, and it is the same claim the API Gateway route
+  #   authorization scopes assert at the edge, so the edge and the service
+  #   agree rather than each guessing.
   security:
     jwt:
       expected-token-use: access

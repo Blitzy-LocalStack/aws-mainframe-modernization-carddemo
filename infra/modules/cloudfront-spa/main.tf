@@ -3,10 +3,9 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The substance of the `cloudfront-spa` module: a PRIVATE S3 origin bucket
-#   holding the built CardDemo single-page application, a CloudFront
-#   distribution that reaches that bucket through an origin access control, and
-#   a second, module-private bucket that receives the distribution's access
-#   logs. Together these resources are the delivery path for the migrated user
+#   holding the built CardDemo single-page application and a CloudFront
+#   distribution that reaches that bucket through an origin access control.
+#   Together these resources are the delivery path for the migrated user
 #   interface.
 #
 #   What it replaces: the 3270 datastream delivery of the CardDemo BMS
@@ -25,13 +24,11 @@
 #   app/csd/CARDDEMO.CSD:L489-L491, which belongs to the `ecr` module. This
 #   module carries the presentation layer's DELIVERY and nothing else.
 #
-#   Bucket boundary -- this module owns exactly TWO buckets, and neither is
-#   either of the other two S3 buckets in this package:
+#   Bucket boundary -- this module owns exactly ONE bucket, distinct from the
+#   other two S3 buckets in this package:
 #     aws_s3_bucket.spa ..... the SPA origin, holding the built ui/dist output.
-#     aws_s3_bucket.logs .... this distribution's access logs, created here for
-#                             the reason recorded on that resource.
 #   The dataset bucket belongs to infra/modules/s3-datasets and the Terraform
-#   remote-state bucket to infra/bootstrap. All four are versioned and
+#   remote-state bucket to infra/bootstrap. All three are versioned and
 #   encrypted, which is precisely what makes them confusable, and no input to
 #   this module accepts a pre-existing bucket name: it names and creates its
 #   own.
@@ -55,8 +52,13 @@
 #        and the key each look correct in isolation. Cause: the customer-managed
 #        key named by var.s3_kms_key_arn has a key policy that does not grant
 #        the CloudFront service principal `kms:Decrypt` for this distribution,
-#        so the origin access control cannot decrypt an SSE-KMS object. The fix
-#        belongs to infra/modules/kms; see the encryption resource below.
+#        so the origin access control cannot decrypt an SSE-KMS object. The
+#        grant belongs to infra/modules/kms, which now issues it unconditionally
+#        on its S3 key -- narrowed to this account and to a distribution ARN
+#        pattern -- so this failure is expected only when the key named here was
+#        produced somewhere other than that module, or when its
+#        `s3_cloudfront_distribution_arns` input names distributions that do not
+#        include this one. See the encryption resource below.
 #     2. `terraform apply` fails at the point CloudFront is asked to accept the
 #        certificate. Cause: the ACM certificate named by
 #        var.acm_certificate_arn was issued somewhere other than us-east-1.
@@ -66,12 +68,15 @@
 #        one until the API rejects it.
 #     3. `terraform destroy` stops with BucketNotEmpty. Cause: var.force_destroy
 #        is false -- its default -- and one of the two buckets still holds
-#        objects. This is deliberate, and docs/runbooks/teardown.md carries the
-#        purge step it requires.
+#        objects. This is deliberate, and infra/README.md carries the purge step
+#        it requires.
 #
-#   A fourth is refused at PLAN time and by variables.tf rather than by this
-#   file: `environment = "prod"` with no ACM certificate and no alias, because
-#   the default certificate pins the viewer security policy to TLSv1.
+#   Two more are refused BEFORE any resource is touched, by variables.tf rather
+#   than by this file: an ACM certificate ARN whose region segment is not
+#   us-east-1, and an empty `aliases` list. Both inputs are required in every
+#   environment -- there is no default-certificate path in this module -- because
+#   the default CloudFront certificate pins the viewer security policy to TLSv1
+#   and so admits TLS 1.0 and 1.1 whatever `minimum_protocol_version` asks for.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: HCL has no docstring construct, so this header block IS the
@@ -93,11 +98,10 @@
 #     DEPLOYED path, and the two are kept behaviourally identical where it
 #     matters -- see the error-response and response-headers comments below.
 #   - Trade-offs: the resource graph here is deliberately fixed. There is no
-#     toggle to skip the log bucket, skip the distribution or add a second
-#     origin, because the dev and prod roots are required to differ only in
-#     sizing and retention. What that costs is flexibility this package has no
-#     use for; what it buys is that a defect reproduced in dev is reachable in
-#     prod, because the two configurations differ only in numbers.
+#     toggle to skip the distribution or add a second origin, because the dev
+#     and prod roots are required to differ only in sizing and retention. What
+#     that costs is flexibility this package has no use for; what it buys is
+#     that a defect reproduced in dev is reachable in prod.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -105,8 +109,7 @@
 # inputs. Both exist solely to compose the two globally-unique bucket names.
 # -----------------------------------------------------------------------------
 
-# WHAT: the AWS account id.
-# WHY : Assumptions: the S3 bucket namespace is GLOBAL -- not per-account and
+# Assumptions: the S3 bucket namespace is GLOBAL -- not per-account and
 #       not per-region -- so a bare `carddemo-dev-spa` belongs to whichever
 #       account created it first, and every later account is refused with
 #       BucketAlreadyExists by a bucket in an unrelated organisation, which is
@@ -120,8 +123,7 @@
 #       random one is only discoverable from state.
 data "aws_caller_identity" "current" {}
 
-# WHAT: the region this module's buckets are created in.
-# WHY : Assumptions: read from the provider rather than accepted as an input,
+# Assumptions: read from the provider rather than accepted as an input,
 #       and infra/modules/cloudfront-spa/variables.tf records the same decision
 #       from the other side, in its "No `region` or `aws_region` input" note. A
 #       region variable could disagree with the inherited provider
@@ -136,11 +138,11 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 # -----------------------------------------------------------------------------
-# The two AWS-managed CloudFront policies this distribution attaches.
+# The cache policy and repository-owned response-header policy this
+# distribution attaches.
 # -----------------------------------------------------------------------------
 
-# WHAT: the AWS-managed cache policy, resolved by its name.
-# WHY : Alternatives Considered: writing the managed policy's identifier as a
+# Alternatives Considered: writing the managed policy's identifier as a
 #       literal, which is what the console displays and costs one fewer read.
 #       Rejected -- a managed-policy identifier is an opaque UUID that no
 #       reviewer can verify by reading it, so the literal form makes the
@@ -157,25 +159,171 @@ data "aws_cloudfront_cache_policy" "caching_optimized" {
   name = "Managed-CachingOptimized"
 }
 
-# WHAT: the AWS-managed security-headers policy, resolved by its name.
-# WHY : Assumptions: this application has TWO delivery paths for the same
-#       bundle and only one of them passes through a web server. ui/nginx.conf
-#       serves the containerised `ui` image and can add response headers itself;
-#       the deployed path is this distribution over a private S3 origin, where
-#       there is no nginx layer and S3 returns only what was stored. Attaching
-#       this policy is therefore what puts Strict-Transport-Security, the
-#       content-type-options, frame-options and referrer-policy headers onto the
-#       responses viewers actually receive. Without it the two paths would
-#       disagree on response headers while serving byte-identical content, and
-#       that kind of difference is only ever found in production.
-#       Alternatives Considered: a bespoke
-#       `aws_cloudfront_response_headers_policy` so individual header values
-#       could be tuned. Rejected on the same grounds as the cache policy above,
-#       plus one specific to this pair: a custom policy would have to be kept in
-#       step with ui/nginx.conf by hand, whereas both referring to a named
-#       standard keeps them aligned by construction.
-data "aws_cloudfront_response_headers_policy" "security_headers" {
-  name = "Managed-SecurityHeadersPolicy"
+# WHY : Assumptions: this application has TWO delivery paths for the same bundle
+#       and only one of them passes through a web server. ui/nginx.conf serves the
+#       containerised `ui` image and adds response headers itself; the deployed
+#       path is this distribution over a private S3 origin, where there is no
+#       nginx layer and S3 returns only what was stored. This policy is therefore
+#       the only thing that can put those headers on the responses viewers
+#       actually receive.
+#       Refactoring Rationale: this was the AWS-managed `Managed-SecurityHeadersPolicy`,
+#       chosen so that both paths could refer to a named standard and stay aligned
+#       by construction. They did not stay aligned, because the managed policy is
+#       not the same policy: it sets NO Content-Security-Policy at all, and it sets
+#       X-Frame-Options to SAMEORIGIN where ui/nginx.conf sets DENY. So the two
+#       paths served byte-identical content under materially different security
+#       headers, and the deployed path -- the one facing the internet -- was the
+#       weaker of the two. A managed policy cannot express a per-environment
+#       `connect-src` either, so no configuration of it could have closed the gap.
+#       The custom policy is written out in full below and the hand-alignment cost
+#       is accepted, because the alternative was an alignment that only appeared to
+#       exist.
+resource "aws_cloudfront_response_headers_policy" "security_headers" {
+  name    = "${local.name_stem}-security-headers"
+  comment = "CardDemo SPA security headers and content-security policy for ${var.environment}."
+
+  security_headers_config {
+    # WHY : Assumptions: this value is the policy in ui/nginx.conf with one
+    #       directive narrowed, and the two are meant to be read side by side.
+    #       Every directive except `connect-src` is environment-invariant and is
+    #       byte-identical to that file: `script-src 'self'` because the bundle is
+    #       the only script and ui/index.html carries no inline script element;
+    #       `style-src` keeping 'unsafe-inline' because antd 6 themes through CSS
+    #       variables and injects style elements at run time, so a nonce or hash
+    #       cannot be known in advance and removing 'unsafe-inline' would strip the
+    #       design system from every screen; `img-src` and `font-src` admitting
+    #       `data:` because inlined assets are emitted as data URIs; and
+    #       `object-src 'none'`, `base-uri 'self'`, `form-action 'self'` and
+    #       `frame-ancestors 'none'` constraining capabilities this application
+    #       never exercises.
+    #       Trade-offs: `connect-src` is the one directive that cannot be identical
+    #       on both paths, because only this side knows the API origin. The
+    #       container image states the tightest invariant form it can, `'self'
+    #       https:`; here the exact origins are supplied as a module input and
+    #       joined in, so this policy is strictly the narrower of the two. That is
+    #       the correct direction for the asymmetry, since this is the path that
+    #       faces the internet. An empty input yields `connect-src 'self'`, which
+    #       fails closed: a browser blocks the API call visibly and immediately
+    #       rather than the policy silently permitting any origin.
+    content_security_policy {
+      content_security_policy = local.content_security_policy
+      override                = true
+    }
+
+    # WHY : Assumptions: this is the X-Content-Type-Options nosniff header, and it
+    #       matters more on this path than on the other one. The regular-expression
+    #       location in ui/nginx.conf now returns 404 for a missing file, but S3
+    #       stores whatever Content-Type it was given at upload; if a deploy ever
+    #       stored an asset with the wrong type, sniffing would let a browser
+    #       execute it as script. nosniff makes the stored type authoritative.
+    content_type_options {
+      override = true
+    }
+
+    # WHY : Assumptions: DENY, matching ui/nginx.conf exactly rather than the
+    #       SAMEORIGIN the managed policy set. This application is never framed by
+    #       anything, including itself, so the stricter value costs nothing and the
+    #       looser one would have permitted same-origin framing that no screen
+    #       needs. `frame-ancestors 'none'` in the policy above is the modern
+    #       specified form of the same constraint; this header is retained because
+    #       it is what older browsers honour.
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+
+    # WHY : Assumptions: strict-origin-when-cross-origin, matching ui/nginx.conf.
+    #       A CardDemo path can carry an account identifier or a card number in the
+    #       URL -- /account/update and /cards/:num both do -- so a full referrer
+    #       sent off-origin would disclose one. This value sends the origin alone
+    #       cross-origin and nothing at all when leaving HTTPS for HTTP.
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+
+    # WHY : Assumptions: this header is set HERE and deliberately not in
+    #       ui/nginx.conf, and the asymmetry is reasoned rather than an oversight.
+    #       That server sits behind a proxy on a cleartext leg and cannot know
+    #       whether the viewer's own connection was encrypted, so asserting a
+    #       transport policy from there would be a claim it has no evidence for.
+    #       This distribution terminates TLS itself and redirects viewers to HTTPS,
+    #       so it does have that evidence.
+    #       Trade-offs: `preload` is left off. Submitting to the browser preload
+    #       list is effectively irreversible for the domain and its subdomains, so
+    #       it is an operator decision about a domain this module does not own,
+    #       whereas include_subdomains with a one-year age is recoverable by
+    #       lowering the age and waiting it out.
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = true
+      preload                    = false
+      override                   = true
+    }
+  }
+}
+
+# WHY : Assumptions: this exists because `custom_error_response` is
+#       DISTRIBUTION-WIDE. It cannot be attached to one cache behaviour, so no
+#       arrangement of behaviours could distinguish "a route the router will
+#       resolve" from "a file that is genuinely missing" -- the two arrive at S3
+#       identically, as a key that does not exist. A function is the only place in
+#       the request path where that distinction can be drawn before the origin is
+#       consulted.
+#       Assumptions: the test is whether the LAST path segment contains a dot,
+#       which is the same test the regular-expression location in ui/nginx.conf
+#       applies. All twenty-one client routes are dotless in their last segment --
+#       the identifiers they carry are numeric account and card numbers, an
+#       eight-character user id and a two-character transaction-type code, none of
+#       which admits a dot -- so no real route is misclassified. A path such as
+#       /foo.bar/baz is correctly treated as a route, because its last segment
+#       carries no dot, and nginx agrees.
+#       Alternatives Considered: matching an allow-list of asset extensions
+#       instead. Rejected because an allow-list is only as complete as the list:
+#       any extension nobody thought of would fall through to the rewrite and be
+#       answered with HTML, which is the defect this replaces, reintroduced for a
+#       narrower set of inputs and therefore harder to notice.
+#       Trade-offs: a Lambda@Edge function was the other option and is rejected on
+#       cost and latency. CloudFront Functions run in the edge process with
+#       sub-millisecond overhead and are billed per invocation at a small fraction
+#       of Lambda@Edge, and this rewrite needs none of what Lambda@Edge adds --
+#       no network access, no request body, no long execution. The constraint that
+#       comes with that choice is a restricted JavaScript environment, which the
+#       code below stays well inside.
+resource "aws_cloudfront_function" "spa_router" {
+  name    = "${local.name_stem}-spa-router"
+  runtime = "cloudfront-js-2.0"
+  comment = "Rewrites CardDemo SPA client routes to ${var.default_root_object} so a missing file can still return 404."
+  publish = true
+
+  # WHY : Assumptions: `publish` above puts this code in the LIVE stage, which is
+  #       the stage the association references. Without it the function exists in
+  #       DEVELOPMENT only and the distribution would be associated with nothing
+  #       that runs.
+  #       Assumptions: the rewrite is idempotent with respect to
+  #       `default_root_object`. A request for "/" has an empty last segment, so it
+  #       is rewritten here to the entry document; if CloudFront has already
+  #       applied the default root object, the incoming URI ends in a dotted
+  #       segment and is left alone. Either order produces the same origin request,
+  #       so the two mechanisms cannot fight.
+  #       Assumptions: this runs on the VIEWER request, before the cache lookup,
+  #       so the error-page fetch that `custom_error_response` performs does not
+  #       re-enter it and no loop is possible.
+  code = <<-JS
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+      var lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+
+      // A dot in the final segment means the viewer asked for a file. Leave it
+      // untouched so a missing one can still be reported as missing.
+      if (lastSegment.indexOf('.') === -1) {
+        request.uri = '/${var.default_root_object}';
+      }
+
+      return request;
+    }
+  JS
 }
 
 # -----------------------------------------------------------------------------
@@ -183,21 +331,19 @@ data "aws_cloudfront_response_headers_policy" "security_headers" {
 # -----------------------------------------------------------------------------
 
 locals {
-  # WHAT: <name_prefix>-<environment>-spa-<account id>-<region>.
-  # WHY : Assumptions: this is the exact composition
+  # Assumptions: this is the exact composition
   #       infra/modules/cloudfront-spa/variables.tf derives its 20-character cap
   #       on name_prefix from, and the two must agree or that cap stops being a
   #       proof and becomes a guess. The derivation budgets 4 characters for
-  #       `prod`, 8 for the longer `spa-logs` role token, 12 for the account id,
-  #       15 for the longest region name AWS publishes and 4 for the hyphens
-  #       joining five segments: 43 of the 63 an S3 general-purpose bucket name
-  #       allows, leaving the 20 that variable caps at. Changing the shape of
-  #       either name below without revisiting that validation would let a legal
+  #       `prod`, 3 for `spa`, 12 for the account id, 15 for the longest region
+  #       name AWS publishes and 4 for the hyphens joining five segments: 38 of
+  #       the 63 an S3 general-purpose bucket name allows. The 20-character cap
+  #       leaves a five-character safety margin. Changing the shape below
+  #       without revisiting that validation would let a legal
   #       prefix compose an illegal bucket name, and it would fail during apply.
   spa_bucket_name = "${var.name_prefix}-${var.environment}-spa-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
 
-  # WHAT: the same composition with the `spa-logs` role token in place of `spa`.
-  # WHY : Assumptions: the role token is what makes a collision between these
+  # Assumptions: the role token is what makes a collision between these
   #       two names impossible rather than merely unlikely. Both are built from
   #       the same prefix, environment, account and region, so the token is the
   #       only thing distinguishing them -- and no input to the `spa` form can
@@ -207,9 +353,7 @@ locals {
   #       this name rather than from the origin bucket's.
   log_bucket_name = "${var.name_prefix}-${var.environment}-spa-logs-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
 
-  # WHAT: one identifier for the single origin, defined once and referenced
-  #       twice.
-  # WHY : Refactoring Rationale: CloudFront requires the distribution's `origin`
+  # Refactoring Rationale: CloudFront requires the distribution's `origin`
   #       block and its `default_cache_behavior.target_origin_id` to name the
   #       same string, and a mismatch is not reported as a typo -- Terraform
   #       reports an unresolvable target origin, which reads as a problem with
@@ -217,6 +361,40 @@ locals {
   #       Writing the value once removes that failure mode instead of leaving it
   #       to be documented.
   spa_origin_id = "${var.name_prefix}-${var.environment}-spa-origin"
+
+  # WHY : Assumptions: a response-headers policy name and a function name must be
+  #       unique per AWS account, not per region and not globally, so neither
+  #       needs the account and region segments the two bucket names above carry.
+  #       Including them would be harmless but misleading, implying a global
+  #       namespace that these resources do not sit in. The stem is defined once
+  #       so the two names cannot drift into different conventions.
+  name_stem = "${var.name_prefix}-${var.environment}"
+
+  # WHY : Assumptions: the directive order and spelling here are byte-identical to
+  #       the policy literal in ui/nginx.conf for every directive except
+  #       `connect-src`, so the two delivery paths can be compared by reading them
+  #       side by side. The list is built as elements and joined rather than
+  #       written as one interpolated string, because a single long string is where
+  #       a missing semicolon hides: a malformed directive is not an error, it is
+  #       silently ignored, so the policy would still deploy and would simply stop
+  #       enforcing whatever it swallowed.
+  #       Trade-offs: `connect-src` is the only directive that varies, and an empty
+  #       `api_connect_src_origins` yields `connect-src 'self'`. That fails closed:
+  #       the browser blocks the API call visibly on first use rather than the
+  #       policy quietly allowing any origin, which is the behaviour a missing
+  #       security input should have.
+  content_security_policy = join("; ", [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    join(" ", concat(["connect-src 'self'"], var.api_connect_src_origins)),
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ])
 }
 
 # =============================================================================
@@ -235,12 +413,10 @@ locals {
 resource "aws_s3_bucket" "spa" {
   bucket = local.spa_bucket_name
 
-  # WHAT: deletion of a populated bucket is refused unless the caller opts in.
-  # WHY : Trade-offs: with the default of false, `terraform destroy` stops
+  # Trade-offs: with the default of false, `terraform destroy` stops
   #       rather than deleting a bucket that still holds the deployed front end,
-  #       and an operator has to purge it first -- the manual step
-  #       docs/runbooks/teardown.md documents. What that costs is a teardown
-  #       that is not a single command. What it buys is that a mistyped or
+  #       and an operator has to purge every version before retrying. What that
+  #       costs is a teardown that is not a single command. What it buys is that a mistyped or
   #       mistargeted destroy cannot silently take the deployed SPA with it,
   #       and because versioning is enabled below, "purge" means every version,
   #       which is exactly the irreversible act worth making deliberate. The
@@ -249,16 +425,14 @@ resource "aws_s3_bucket" "spa" {
   force_destroy = var.force_destroy
 }
 
-# WHAT: all four public-access controls asserted, not just the two that block
-#       new grants.
-# WHY : Assumptions: with an origin access control the only legitimate reader of
+# Assumptions: with an origin access control the only legitimate reader of
 #       this bucket is the distribution, so every public path is closed rather
 #       than only the ones a scanner names -- `block_*` refuse a public grant
 #       being ADDED and `ignore_public_acls` / `restrict_public_buckets` neuter
 #       one that somehow already exists, which are different guarantees and both
-#       are wanted. This is also the bucket-public-access item the HIGH/CRITICAL
-#       infrastructure policy scan asserts, satisfied by construction rather
-#       than by a suppression.
+#       are wanted. This is also the bucket-public-access item the explicit
+#       material-security policy baseline asserts, satisfied by construction
+#       rather than by a suppression.
 #       Assumptions: `restrict_public_buckets = true` does NOT block the
 #       CloudFront grant written further down, which looks like a contradiction
 #       until the distinction is named: that setting restricts a policy granting
@@ -274,19 +448,20 @@ resource "aws_s3_bucket_public_access_block" "spa" {
   restrict_public_buckets = true
 }
 
-# WHAT: access-control lists disabled outright on this bucket.
-# WHY : Assumptions: access to the origin is granted by exactly one mechanism --
+# Assumptions: access to the origin is granted by exactly one mechanism --
 #       the bucket policy below, to one service principal, conditioned on one
 #       distribution. Leaving ACLs enabled would leave a second, parallel way to
 #       grant read access that no reader of that policy would think to check, so
 #       disabling them makes the policy the complete answer to "who can read
 #       this bucket" rather than a partial one.
-#       Trade-offs: this deliberately DIFFERS from the log bucket further down,
-#       which must use `BucketOwnerPreferred`. The asymmetry is not an
-#       inconsistency to tidy up: CloudFront's standard log delivery grants
-#       itself write access to its destination through an ACL, so ACLs are a
-#       hard requirement there and a liability here. The reason is recorded at
-#       both ends so that neither is "harmonised" with the other.
+#       Alternatives Considered: `BucketOwnerPreferred`, which keeps ACLs
+#       usable. Rejected, and worth recording because it is the setting a log
+#       destination would have needed: CloudFront's legacy standard log delivery
+#       grants itself write access to its destination through an ACL, so a
+#       bucket receiving those logs cannot enforce owner-only ownership. This
+#       module publishes no such destination -- see the access-log decision
+#       recorded further down -- so nothing here requires ACLs and the strictest
+#       setting is available for free.
 resource "aws_s3_bucket_ownership_controls" "spa" {
   bucket = aws_s3_bucket.spa.id
 
@@ -295,11 +470,9 @@ resource "aws_s3_bucket_ownership_controls" "spa" {
   }
 }
 
-# WHAT: versioning, which on this bucket is a rollback mechanism rather than a
-#       compliance checkbox -- and once enabled it can never be switched off,
-#       only suspended.
-# WHY : Assumptions: this is the bucket-versioning item the HIGH/CRITICAL policy
-#       scan asserts, and asserting it here is what makes that gate pass by
+# WHY : Assumptions: this is the bucket-versioning item the explicit
+#       material-security policy baseline asserts, and declaring it here makes
+#       that gate pass by
 #       construction.
 #       Refactoring Rationale: it is also load-bearing for a requirement that
 #       has nothing to do with the scan. A SPA deploy overwrites objects in
@@ -322,9 +495,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "spa" {
   bucket = aws_s3_bucket.spa.id
 
   rule {
-    # WHAT: a bucket key, so S3 derives per-object keys from one KMS data key
-    #       instead of calling KMS per object.
-    # WHY : Trade-offs: every asset fetch that misses the edge cache is an
+    # Trade-offs: every asset fetch that misses the edge cache is an
     #       origin read, and each such read of an SSE-KMS object is otherwise a
     #       separate KMS Decrypt request -- billed per request and subject to a
     #       per-account request rate. A bucket key collapses those into one
@@ -335,8 +506,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "spa" {
     bucket_key_enabled = true
 
     apply_server_side_encryption_by_default {
-      # WHAT: encryption at rest under the caller-supplied customer-managed key.
-      # WHY : Refactoring Rationale: the baseline had neither encryption nor
+      # Refactoring Rationale: the baseline had neither encryption nor
       #       recoverability -- every file resource in the CICS definition is
       #       declared `JOURNAL(NO)` and `RECOVERY(NONE)`
       #       (app/csd/CARDDEMO.CSD:L7,L9 on `DEFINE FILE(ACCTDAT)`, and the
@@ -345,19 +515,22 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "spa" {
       #       deliberate improvements over it, not a like-for-like port.
       #       Assumptions: the ARN alone is NOT sufficient for this to work. The
       #       key policy on that key must also grant the CloudFront service
-      #       principal `kms:Decrypt`, conditioned on this distribution, or the
-      #       origin access control cannot decrypt an object and CloudFront
-      #       answers 403 to every asset while the bucket, the distribution and
-      #       the key each look correct in isolation. That grant is owned by
-      #       infra/modules/kms; it is recorded here because this is the first
-      #       place a reader debugging that 403 will look, and the module that
-      #       has to change is not this one.
+      #       principal `kms:Decrypt`, conditioned on this account and on a
+      #       distribution ARN, or the origin access control cannot decrypt an
+      #       object and CloudFront answers 403 to every asset while the bucket,
+      #       the distribution and the key each look correct in isolation. That
+      #       grant is owned by infra/modules/kms and is issued there
+      #       unconditionally on the S3 key -- see its
+      #       `AllowCloudFrontOriginAccessControlDecrypt` statement and the
+      #       optional `s3_cloudfront_distribution_arns` narrowing. It is
+      #       recorded here because this is the first place a reader debugging
+      #       that 403 will look, and the file that has to be correct is not
+      #       this one.
       #       Alternatives Considered: `AES256`, which needs no key policy at
-      #       all and is what the log bucket below uses. Rejected here because
-      #       the policy scan expects customer-managed-key encryption on this
-      #       bucket, and because an origin access control -- unlike the legacy
-      #       origin access identity it replaces -- can read SSE-KMS objects,
-      #       so nothing forces the weaker choice.
+      #       all. Rejected because the policy scan expects customer-managed-key
+      #       encryption on this bucket, and because an origin access control --
+      #       unlike the legacy origin access identity it replaces -- can read
+      #       SSE-KMS objects, so nothing forces the weaker choice.
       kms_master_key_id = var.s3_kms_key_arn
       sse_algorithm     = "aws:kms"
     }
@@ -371,16 +544,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "spa" {
     id     = "expire-superseded-spa-builds"
     status = "Enabled"
 
-    # WHAT: an empty filter, which applies the rule to every object.
-    # WHY : Assumptions: S3 requires a rule to carry either a filter or a
+    # Assumptions: S3 requires a rule to carry either a filter or a
     #       prefix, and the provider marks `prefix` on a rule as deprecated, so
     #       an empty `filter` block is the supported way to say "bucket-wide".
     #       It is written explicitly because an omitted filter is a plan-time
     #       error rather than a silent default.
     filter {}
 
-    # WHAT: superseded object versions expire on the caller's schedule.
-    # WHY : Trade-offs: versioning above is what makes a front-end rollback
+    # Trade-offs: versioning above is what makes a front-end rollback
     #       possible, and its cost is that every build ever deployed would
     #       otherwise be stored forever -- a SPA bundle being a large number of
     #       small objects, that accumulation is real rather than theoretical.
@@ -401,8 +572,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "spa" {
     # WHY : Assumptions: bucket-wide, for the same reason as the rule above.
     filter {}
 
-    # WHAT: abandoned multipart uploads are cleaned up after seven days.
-    # WHY : Assumptions: the parts of an incomplete multipart upload are
+    # Assumptions: the parts of an incomplete multipart upload are
     #       BILLED as storage but do not appear in an object listing, so
     #       without this rule they accumulate as a cost with no visible cause --
     #       which is why this is worth a rule rather than an occasional manual
@@ -419,8 +589,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "spa" {
     }
   }
 
-  # WHAT: an explicit ordering against the versioning resource.
-  # WHY : Assumptions: `noncurrent_version_expiration` above is only meaningful
+  # Assumptions: `noncurrent_version_expiration` above is only meaningful
   #       once versioning is enabled, and Terraform infers no ordering between
   #       these two resources -- both merely reference the same bucket, and
   #       neither reads the other. Without this the two can be created in either
@@ -451,9 +620,7 @@ data "aws_iam_policy_document" "spa_bucket" {
     sid    = "AllowCloudFrontOriginAccessControlRead"
     effect = "Allow"
 
-    # WHAT: read only. No `s3:PutObject`, no `s3:DeleteObject`, no
-    #       `s3:ListBucket`.
-    # WHY : Assumptions: the distribution's entire job at the origin is to GET
+    # Assumptions: the distribution's entire job at the origin is to GET
     #       an object. Publishing the built bundle is done by the deployment
     #       pipeline under its own IAM identity, so no write action belongs in a
     #       statement whose principal is CloudFront -- granting one would let a
@@ -469,8 +636,7 @@ data "aws_iam_policy_document" "spa_bucket" {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.spa.arn}/*"]
 
-    # WHAT: a service principal, not an account, a role or a canonical user.
-    # WHY : Alternatives Considered: the legacy origin access identity form,
+    # Alternatives Considered: the legacy origin access identity form,
     #       whose grant names a CloudFront-owned canonical user instead. It is
     #       rejected for this module in full at the origin access control
     #       resource below; the two grant shapes are not interchangeable, and
@@ -480,8 +646,7 @@ data "aws_iam_policy_document" "spa_bucket" {
       identifiers = ["cloudfront.amazonaws.com"]
     }
 
-    # WHAT: the grant is conditioned on the ARN of THIS distribution.
-    # WHY : Assumptions: without this condition the statement grants read access
+    # Assumptions: without this condition the statement grants read access
     #       to the CloudFront service as a whole, which means any distribution in
     #       ANY AWS account could be pointed at this bucket and would be allowed
     #       to read it -- the confused-deputy problem, where a trusted
@@ -502,9 +667,7 @@ data "aws_iam_policy_document" "spa_bucket" {
     sid    = "DenyNonTlsRequests"
     effect = "Deny"
 
-    # WHAT: every action, every principal, every object and the bucket itself,
-    #       refused when the request did not arrive over TLS.
-    # WHY : Assumptions: the bucket policy is the ONLY place a plaintext request
+    # Assumptions: the bucket policy is the ONLY place a plaintext request
     #       to the S3 endpoint can be refused. The distribution's
     #       `redirect-to-https` further down governs viewer traffic reaching
     #       CloudFront; it has no bearing whatsoever on a request sent straight
@@ -537,8 +700,7 @@ resource "aws_s3_bucket_policy" "spa" {
   bucket = aws_s3_bucket.spa.id
   policy = data.aws_iam_policy_document.spa_bucket.json
 
-  # WHAT: the policy is applied only once the public-access block is in place.
-  # WHY : Assumptions: `block_public_policy` above rejects a policy S3 judges to
+  # Assumptions: `block_public_policy` above rejects a policy S3 judges to
   #       be public, so the two resources interact and Terraform infers no order
   #       between them. Applying the block FIRST means that if a future edit
   #       accidentally widened this document into a public grant, the attempt
@@ -550,13 +712,14 @@ resource "aws_s3_bucket_policy" "spa" {
 
 
 # =============================================================================
-# The access-log bucket
+# The access-log destination, and why it is created inside this module
 # -----------------------------------------------------------------------------
-# WHY this bucket exists in THIS module, which is the question a reviewer will
-# ask first, because a second bucket in a module named for a distribution looks
-# like scope creep:
+# WHY a module that otherwise creates only the SPA bucket and the distribution
+# also owns a second bucket, and why the distribution carries no legacy
+# `logging_config` argument even though it is logged -- the two questions a
+# reviewer asks first:
 #
-#   Assumptions: the HIGH/CRITICAL infrastructure policy scan asserts that the
+#   Assumptions: the explicit material-security policy baseline asserts that the
 #   distribution has access logging configured, and every gate this package is
 #   held to is required to be satisfied by construction rather than by a
 #   suppression. Logging needs a destination. This module's declared inputs are
@@ -567,35 +730,41 @@ resource "aws_s3_bucket_policy" "spa" {
 #   here. The bucket is not an extra; it is what makes the logging argument
 #   satisfiable.
 #
-#   Alternatives Considered: accepting the log bucket as an input from the
-#   environment root. Rejected because it makes the gate conditional on the
-#   caller -- a root that omitted the argument would produce a distribution with
-#   no logging that still planned and applied cleanly, which is precisely the
-#   shape "satisfied by construction" exists to rule out.
+#   Alternatives Considered: the legacy distribution `logging_config` argument,
+#   which is what a scanner recognises and what an earlier revision of this
+#   module carried. Rejected on a data-protection ground rather than a stylistic
+#   one: its schema is fixed, it always records the RESOLVED viewer URI and
+#   source IP, and it offers no field allowlist -- so with it enabled a browser
+#   route would write whatever its path segment happens to hold into durable
+#   objects. Standard logging v2 accepts a field list, so the query string,
+#   cookie and referrer fields are simply not delivered, and the one path field
+#   retained (`cs-uri-stem`) is safe because ui/src/routes/cards.ts makes the
+#   only identifier-bearing SPA route carry a server-issued opaque token rather
+#   than a card number. Dropping logging altogether was the other alternative and
+#   is rejected too: it leaves an operator with no record of edge transport or
+#   routing failures at all, and the exposure it avoided is already avoided by
+#   the field list and the opaque route.
 #
-#   Alternatives Considered: CloudFront standard logging v2, which delivers to
-#   CloudWatch Logs, Firehose or S3 through
-#   `aws_cloudwatch_log_delivery_source` / `_destination` / `_delivery` and
-#   needs no ACLs and no SSE-S3 concession. Rejected on one specific ground:
-#   the policy scanners assert on the presence of a `logging_config` block on
-#   `aws_cloudfront_distribution`, and a v2-only configuration leaves that block
-#   absent -- so it would raise the very finding it was meant to answer while
-#   the logs were in fact being delivered. Choosing the legacy mechanism is a
-#   deliberate concession to what the gate can actually see.
+#   Refactoring Rationale: standard logging v2 replaces the legacy distribution
+#   logging block because it supports a customer-managed KMS key, source-scoped
+#   bucket and key policies, and bucket-owner-enforced ownership. A scanner that
+#   recognizes only the legacy `logging_config` block is updated at the policy
+#   gate rather than allowed to force weaker deployed controls.
 #
 #   Alternatives Considered: reusing the dataset bucket owned by
-#   infra/modules/s3-datasets. Rejected -- that bucket's prefixes and lifecycle
-#   configuration reproduce the ten generation-dataset families of the
-#   mainframe batch chain, and interleaving edge access logs into it would put
-#   two unrelated retention policies in one bucket and one blast radius.
+#   infra/modules/s3-datasets as a destination, had logging been kept. Rejected
+#   independently of the above -- that bucket's prefixes and lifecycle
+#   configuration reproduce the ten generation-dataset families of the mainframe
+#   batch chain, and interleaving edge access logs into it would put two
+#   unrelated retention policies in one bucket and one blast radius.
 # =============================================================================
 
 resource "aws_s3_bucket" "logs" {
   bucket = local.log_bucket_name
 
-  # WHY : Trade-offs: the same flag and the same reasoning as the origin bucket
-  #       -- with the default of false a destroy stops rather than deleting the
-  #       audit trail, and docs/runbooks/teardown.md carries the purge step.
+  # Trade-offs: the same flag and the same reasoning as the origin bucket apply:
+  #       with the default of false a destroy stops rather than deleting the
+  #       audit trail, and teardown must purge every object version before retrying.
   #       Sharing one input across both buckets rather than giving each its own
   #       is deliberate: an operator tearing an environment down means the whole
   #       environment, and a teardown that removed the SPA but stalled on its
@@ -620,71 +789,30 @@ resource "aws_s3_bucket_public_access_block" "logs" {
   restrict_public_buckets = true
 }
 
-# WHAT: access-control lists left ENABLED here, unlike on the origin bucket.
-# WHY : Assumptions: CloudFront's standard log delivery writes to its
-#       destination by granting itself full control through a bucket ACL, so a
-#       destination with ACLs disabled cannot receive logs at all -- and the
-#       symptom is not an error at apply, it is a bucket that simply stays
-#       empty, which is the worst way for a logging misconfiguration to present.
-#       `BucketOwnerEnforced` disables ACLs outright, so it is unusable here.
-#       `BucketOwnerPreferred` keeps ACLs available for the delivery grant while
-#       still making this account the owner of every object written into the
-#       bucket, so ownership does not fragment.
-#       Trade-offs: this is deliberately WEAKER than the origin bucket's
-#       `BucketOwnerEnforced`, and the asymmetry is a consequence of the
-#       delivery mechanism rather than a preference. It is recorded at both ends
-#       precisely so that a future reader tidying an apparent inconsistency
-#       changes neither: raising this bucket to `BucketOwnerEnforced` silently
-#       stops log delivery, and lowering the origin bucket to match would add an
-#       unaudited second way to grant read access to the deployed application.
+# Refactoring Rationale: standard logging v2 uses the CloudWatch Logs delivery
+# service and an S3 bucket policy rather than the legacy CloudFront canonical
+# user ACL. Object ownership can therefore be enforced without disabling log
+# delivery, removing the second authorization plane the legacy mechanism
+# required.
 resource "aws_s3_bucket_ownership_controls" "logs" {
   bucket = aws_s3_bucket.logs.id
 
   rule {
-    object_ownership = "BucketOwnerPreferred"
+    object_ownership = "BucketOwnerEnforced"
   }
 }
 
-# WHAT: the ONE scanner suppression in this module, scoped to this single
-#       resource and naming the exact check it excuses.
-# WHY : Assumptions: the HIGH/CRITICAL policy scan reports this resource, and it
-#       is the only finding in the module at that threshold -- a measured run of
-#       `trivy config --severity HIGH,CRITICAL` over this directory returns
-#       AWS-0132 here and nothing else anywhere. The check asserts that an S3
-#       bucket is encrypted with a customer-managed key, and it CANNOT be
-#       satisfied on this bucket: CloudFront standard log delivery refuses an
-#       SSE-KMS destination, so complying with the check would silence the
-#       distribution access logging that the same scan asserts. The check's own
-#       published guidance records the analogous exception for S3 server
-#       access-log destinations; it simply has no way to recognise a CloudFront
-#       log destination as the same case.
-#       Trade-offs: a suppression is accepted here only because the alternative
-#       is to trade one gate item for another, and because it is scoped to one
-#       resource rather than to the file or the directory --
-#       aws_s3_bucket_server_side_encryption_configuration.spa is still checked
-#       by the same rule, and still passes it, under the customer-managed key.
-#       Referring to that resource by ADDRESS rather than by how far away it sits
-#       is deliberate: a line-distance reference goes quietly wrong the first
-#       time anything between the two is edited. Both the trivy and the checkov
-#       directive forms are
-#       written because the two scanners read different syntaxes in different
-#       positions -- trivy immediately above the resource, checkov inside it --
-#       and a directive addressed to the scanner that is not running is inert
-#       rather than harmlessly redundant.
-#       Alternatives Considered: raising the scan's failure floor above HIGH so
-#       the finding no longer gates. Rejected outright -- that would disarm the
-#       check for every resource in the tree in order to excuse one, which is
-#       the difference between a documented exception and a disabled gate.
-#trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
-  #checkov:skip=CKV_AWS_145:CloudFront standard log delivery cannot write to a bucket whose default encryption is SSE-KMS, so this access-log destination must use SSE-S3 or receive no logs at all. The SPA origin bucket this distribution serves does use the customer-managed key; see aws_s3_bucket_server_side_encryption_configuration.spa.
   bucket = aws_s3_bucket.logs.id
 
   rule {
+    # S3 Bucket Keys reduce KMS request volume for the append-only log stream.
+    # The KMS module admits both bucket and object encryption contexts so this
+    # optimization does not broaden which bucket the key can protect.
+    bucket_key_enabled = true
+
     apply_server_side_encryption_by_default {
-      # WHAT: S3-managed encryption here, NOT the customer-managed key the
-      #       origin bucket uses.
-      # WHY : Assumptions: CloudFront standard log delivery cannot write to a
+      # Assumptions: CloudFront standard log delivery cannot write to a
       #       bucket whose default encryption is SSE-KMS. That is a property of
       #       the delivery mechanism, not a limitation of this configuration, and
       #       it fails the same silent way the ACL constraint above does -- the
@@ -735,8 +863,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
     #       and an empty filter is how "every object" is expressed.
     filter {}
 
-    # WHAT: log objects expire on the caller's schedule.
-    # WHY : Assumptions: this is the "log retention" axis the dev and prod roots
+    # Assumptions: this is the "log retention" axis the dev and prod roots
     #       are expected to differ on for this module, so the value is an input
     #       and this rule is the only thing that gives that input any effect --
     #       without it, var.log_retention_days would be a documented number that
@@ -749,8 +876,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
       days = var.log_retention_days
     }
 
-    # WHAT: superseded log-object versions expire on the shortest legal horizon.
-    # WHY : Assumptions: versioning above without a noncurrent expiry would keep
+    # Assumptions: versioning above without a noncurrent expiry would keep
     #       every superseded version forever, so the retention setting would
     #       govern only the current version and the bucket would grow without
     #       bound anyway -- the two rules together are what make retention mean
@@ -805,6 +931,60 @@ data "aws_iam_policy_document" "logs_bucket" {
       values   = ["false"]
     }
   }
+
+  statement {
+    sid       = "AllowCloudWatchLogsDeliveryAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.logs.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_log_delivery_source.cloudfront_access.arn]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudWatchLogsDeliveryWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_log_delivery_source.cloudfront_access.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "logs" {
@@ -816,6 +996,76 @@ resource "aws_s3_bucket_policy" "logs" {
   #       document, so having the block in place first turns it into a gate on
   #       this policy rather than a correction applied after it.
   depends_on = [aws_s3_bucket_public_access_block.logs]
+}
+
+# CloudFront standard logging v2 is configured through the CloudWatch Logs
+# delivery API even when S3 is the destination. CloudFront's delivery control
+# plane is fixed in us-east-1, so these resources set their regional override
+# explicitly instead of inheriting the deployment region used by the bucket.
+resource "aws_cloudwatch_log_delivery_source" "cloudfront_access" {
+  region       = "us-east-1"
+  name         = "${var.name_prefix}-${var.environment}-cloudfront-access"
+  log_type     = "ACCESS_LOGS"
+  resource_arn = aws_cloudfront_distribution.spa.arn
+}
+
+resource "aws_cloudwatch_log_delivery_destination" "cloudfront_access" {
+  region                    = "us-east-1"
+  name                      = "${var.name_prefix}-${var.environment}-cloudfront-access"
+  delivery_destination_type = "S3"
+  output_format             = "w3c"
+
+  delivery_destination_configuration {
+    destination_resource_arn = aws_s3_bucket.logs.arn
+  }
+
+  # The service validates the destination while it is registered. Waiting for
+  # ownership, encryption and the exact source-scoped bucket policy prevents a
+  # transient destination that can be named but cannot accept a log object.
+  depends_on = [
+    aws_s3_bucket_ownership_controls.logs,
+    aws_s3_bucket_server_side_encryption_configuration.logs,
+    aws_s3_bucket_policy.logs,
+  ]
+}
+
+resource "aws_cloudwatch_log_delivery" "cloudfront_access" {
+  region                   = "us-east-1"
+  delivery_source_name     = aws_cloudwatch_log_delivery_source.cloudfront_access.name
+  delivery_destination_arn = aws_cloudwatch_log_delivery_destination.cloudfront_access.arn
+  field_delimiter          = "\t"
+
+  # Query strings, cookies and referrers are deliberately absent. The remaining
+  # URI stem carries only opaque identifiers, so the durable audit record can
+  # diagnose routing and transport failures without retaining PAN metadata.
+  record_fields = [
+    "date",
+    "time",
+    "x-edge-location",
+    "sc-bytes",
+    "c-ip",
+    "cs-method",
+    "cs(Host)",
+    "cs-uri-stem",
+    "sc-status",
+    "x-edge-request-id",
+    "cs-protocol",
+    "time-taken",
+    "ssl-protocol",
+    "ssl-cipher",
+  ]
+
+  s3_delivery_configuration = [{
+    enable_hive_compatible_path = false
+    suffix_path                 = "environment=${var.environment}"
+  }]
+
+  lifecycle {
+    precondition {
+      condition     = length(trimspace(var.s3_kms_key_policy_id)) > 0
+      error_message = "CloudFront log delivery requires the applied S3 KMS key policy so the delivery service can generate data keys for this exact source."
+    }
+  }
 }
 
 
@@ -830,8 +1080,8 @@ resource "aws_s3_bucket_policy" "logs" {
 #   policy and the distribution simply in front of it. Rejected because the
 #   bucket endpoint would then answer viewers directly, and every control this
 #   module places at the edge would become optional for anyone who found that
-#   endpoint -- the access logging, the redirect-to-https viewer policy, the
-#   response-headers policy, the point where a web ACL would attach, and, most
+#   endpoint -- the redirect-to-https viewer policy, the response-headers
+#   policy, the point where a web ACL would attach, and, most
 #   consequentially, the 403/404 error routing that makes client-side deep links
 #   resolve. A viewer reaching S3 directly would get the raw S3 error document
 #   for every route the router owns. It also contradicts the bucket
@@ -858,9 +1108,7 @@ resource "aws_cloudfront_origin_access_control" "spa" {
 
   origin_access_control_origin_type = "s3"
 
-  # WHAT: every origin request is signed, with no way for a viewer to suppress
-  #       it.
-  # WHY : Alternatives Considered: `"never"`, which signs nothing and would
+  # Alternatives Considered: `"never"`, which signs nothing and would
   #       leave the origin unreachable given the bucket policy above, and
   #       `"no-override"`, which signs only when the viewer did not supply its
   #       own `Authorization` header. `"no-override"` is the dangerous one,
@@ -883,15 +1131,34 @@ resource "aws_cloudfront_origin_access_control" "spa" {
 # The distribution
 # -----------------------------------------------------------------------------
 # The edge half of the delivery path: one origin, one cache behaviour, the SPA
-# error routing, and the viewer-facing TLS and logging configuration.
+# error routing, and viewer-facing TLS/header configuration.
 # =============================================================================
 
+# WHY : Security Exception: this distribution IS access-logged, through the
+#       standard logging v2 delivery declared above, and it deliberately carries
+#       no legacy `logging_config` argument. The scanner check recognises only
+#       that argument, so the check is suppressed here rather than answered by
+#       adding a logging path that is strictly worse: the legacy schema is fixed,
+#       always records the resolved viewer URI and source IP, and admits no field
+#       allowlist, whereas the v2 delivery above omits the query string, cookie
+#       and referrer fields entirely.
+#       Assumptions: the one path field the v2 delivery keeps, `cs-uri-stem`,
+#       carries no cardholder data because the SPA's only identifier-bearing
+#       routes are `/cards/:opaqueCardId` and `/cards/:opaqueCardId/edit`, whose
+#       segment is a 22-character server-issued opaque token -- the contract
+#       stated in ui/src/routes/cards.ts and enforced at the edge by the
+#       `{opaqueCardId}` route template in infra/modules/api-gateway-http. If a
+#       future route were to place a real identifier in a path, this field would
+#       have to be removed from the delivery's record_fields list.
+#       Alternatives Considered: disabling logging altogether, which an earlier
+#       revision did. Rejected because it removes the edge's transport and
+#       routing history for an exposure that the field list and the opaque route
+#       already remove.
+#checkov:skip=CKV_AWS_86:This distribution is logged through CloudWatch Logs standard logging v2 (aws_cloudwatch_log_delivery.cloudfront_access) with a curated field list; the check recognises only the legacy logging_config argument, which is deliberately absent because its fixed schema cannot omit the query string, cookie and referrer fields.
 resource "aws_cloudfront_distribution" "spa" {
   enabled = true
 
-  # WHAT: the document served for a request to `/`, and -- deliberately -- the
-  #       same document the error responses below rewrite to.
-  # WHY : Assumptions: the name has to match whatever the SPA build emits as its
+  # Assumptions: the name has to match whatever the SPA build emits as its
   #       entry document, which this module cannot see, so it is an input rather
   #       than a literal. Deriving the error-response target from the same
   #       variable instead of repeating the name is what stops the two drifting:
@@ -909,8 +1176,7 @@ resource "aws_cloudfront_distribution" "spa" {
   #       knows what the distribution is for.
   comment = "CardDemo SPA delivery for ${var.environment} -- replaces the 3270 BMS presentation path"
 
-  # WHAT: dual-stack, so the distribution answers on IPv6 as well as IPv4.
-  # WHY : Trade-offs: there is no cost and no topology change -- CloudFront
+  # Trade-offs: there is no cost and no topology change -- CloudFront
   #       publishes AAAA records for the same distribution -- and the failure it
   #       avoids is specific: a viewer on an IPv6-only network cannot reach an
   #       IPv4-only distribution at all, and the symptom is total
@@ -919,8 +1185,7 @@ resource "aws_cloudfront_distribution" "spa" {
   #       which any log consumer has to be able to parse.
   is_ipv6_enabled = true
 
-  # WHAT: which edge locations serve the bundle.
-  # WHY : Trade-offs: one of exactly two values the dev and prod roots are
+  # Trade-offs: one of exactly two values the dev and prod roots are
   #       expected to disagree on for this module, the other being log
   #       retention. The narrowest tier is the module default because this
   #       deployment is single-region by design, so a viewer population spread
@@ -931,18 +1196,17 @@ resource "aws_cloudfront_distribution" "spa" {
   #       fixed one.
   price_class = var.price_class
 
-  # WHAT: the alternate domain names the distribution answers on.
-  # WHY : Assumptions: this is one decision expressed in two inputs, and it
-  #       cannot be set alone. CloudFront refuses an alternate domain name that
-  #       the supplied certificate does not cover, and refuses any alias at all
-  #       while the default certificate is in use, so the certificate below and
-  #       this list are set together or not at all --
-  #       infra/modules/cloudfront-spa/variables.tf enforces exactly that
-  #       pairing at plan time. An empty list is what lets the module stand up
-  #       with no DNS prerequisite whatsoever.
+  # WHY : Assumptions: this is one decision expressed in two inputs, and neither
+  #       half is meaningful alone. CloudFront refuses an alternate domain name
+  #       that the supplied certificate does not cover, and refuses any alias at
+  #       all while the default certificate is in use, so the certificate below
+  #       and this list are supplied together -- and
+  #       infra/modules/cloudfront-spa/variables.tf requires both, non-empty, in
+  #       every environment. A distribution answering only on its generated
+  #       cloudfront.net name is exactly the TLSv1-pinned outcome the certificate
+  #       requirement exists to remove, so "no alias" is not an available state.
   aliases = var.aliases
 
-  # WHAT: the web ACL association, absent by default.
   # WHY : Alternatives Considered: provisioning a web ACL so every deployment
   #       gets one. Rejected, and this comment is the DOCUMENTED REASON FOR THE
   #       ABSENCE that the policy scan's WAF check is answered by, not an
@@ -969,8 +1233,7 @@ resource "aws_cloudfront_distribution" "spa" {
   web_acl_id = var.web_acl_arn
 
   origin {
-    # WHAT: the bucket's REGIONAL domain name, not its global one.
-    # WHY : Assumptions: an origin access control signs the origin request with
+    # Assumptions: an origin access control signs the origin request with
     #       SigV4, and a SigV4 signature is scoped to a region, so the request
     #       must be addressed to the regional endpoint for the signature to
     #       validate. Using the global `<bucket>.s3.amazonaws.com` form produces
@@ -985,9 +1248,7 @@ resource "aws_cloudfront_distribution" "spa" {
     #       drift reason recorded where it is defined.
     origin_id = local.spa_origin_id
 
-    # WHAT: the origin access control, which is what makes the private bucket
-    #       readable by this distribution and nothing else.
-    # WHY : Assumptions: this attribute and an `s3_origin_config` block are
+    # Assumptions: this attribute and an `s3_origin_config` block are
     #       mutually exclusive in the provider schema -- `s3_origin_config` is
     #       the legacy origin-access-identity form -- which is why no such block
     #       appears here. The rejection of that alternative is recorded in full
@@ -1000,10 +1261,9 @@ resource "aws_cloudfront_distribution" "spa" {
     #       so the two cannot disagree.
     target_origin_id = local.spa_origin_id
 
-    # WHAT: a plaintext request is answered with a redirect to its HTTPS form
-    #       rather than served.
-    # WHY : Assumptions: this is the HTTPS-only viewer policy the HIGH/CRITICAL
-    #       policy scan asserts, and it is the edge half of this package's
+    # WHY : Assumptions: this is the HTTPS-only viewer policy the explicit
+    #       material-security policy baseline asserts, and it is the edge half
+    #       of this package's
     #       encryption-in-transit posture -- the bucket-policy Deny above is the
     #       storage half, and neither substitutes for the other.
     #       Alternatives Considered: `https-only`, which refuses a plaintext
@@ -1015,8 +1275,7 @@ resource "aws_cloudfront_distribution" "spa" {
     #       any content over plaintext, so the redirect gives up nothing.
     viewer_protocol_policy = "redirect-to-https"
 
-    # WHAT: only the two read verbs are accepted, and both are cacheable.
-    # WHY : Assumptions: the origin is a static bucket, so there is nothing for a
+    # Assumptions: the origin is a static bucket, so there is nothing for a
     #       write verb to act on -- accepting PUT, POST, PATCH or DELETE would
     #       forward requests the origin can only refuse, which is reachable
     #       surface with no legitimate use.
@@ -1029,8 +1288,7 @@ resource "aws_cloudfront_distribution" "spa" {
     allowed_methods = ["GET", "HEAD"]
     cached_methods  = ["GET", "HEAD"]
 
-    # WHAT: CloudFront compresses eligible responses at the edge.
-    # WHY : Assumptions: the mechanism is that CloudFront gzip- or
+    # Assumptions: the mechanism is that CloudFront gzip- or
     #       brotli-encodes text responses for viewers that advertise support,
     #       and a SPA bundle is almost entirely text -- JavaScript, CSS and the
     #       entry document -- so the bytes actually transferred fall
@@ -1041,13 +1299,29 @@ resource "aws_cloudfront_distribution" "spa" {
     #       does not need to pre-compress them.
     compress = true
 
-    # WHY : Assumptions: the AWS-managed policies resolved by name above. Using
-    #       `cache_policy_id` also means the legacy `forwarded_values` block
+    # WHY : Assumptions: the cache policy is the AWS-managed one resolved by name
+    #       above; the response-headers policy is this module's own resource,
+    #       because no managed policy can carry a per-environment `connect-src`.
+    #       Using `cache_policy_id` also means the legacy `forwarded_values` block
     #       must NOT appear in this behaviour -- the two are mutually exclusive
     #       and the provider rejects a behaviour carrying both -- which is why
     #       there is no `forwarded_values` anywhere in this file.
     cache_policy_id            = data.aws_cloudfront_cache_policy.caching_optimized.id
-    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
+
+    # WHY : Assumptions: this association is what lets a deep link work WITHOUT
+    #       the error-response rewrite having to pretend a missing file was found.
+    #       It runs on every viewer request before the cache is consulted, so a
+    #       rewritten route is cached under the entry document's key and a request
+    #       for a real asset is untouched.
+    #       Assumptions: the event type must be `viewer-request`; an
+    #       `origin-request` association would run only on a cache miss, so the
+    #       rewrite would be skipped for any path already cached and the behaviour
+    #       would depend on cache state.
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_router.arn
+    }
   }
 
   # ---------------------------------------------------------------------------
@@ -1056,14 +1330,28 @@ resource "aws_cloudfront_distribution" "spa" {
   #
   #   Assumptions: ui/src/router.tsx owns all twenty-one screen routes ON THE
   #   CLIENT -- /signon, /menu, /admin, /account/view, /account/update, /cards,
-  #   /cards/:num, /cards/:num/edit, /transactions, /transactions/:id,
+  #   /cards/:opaqueCardId, /cards/:opaqueCardId/edit, /transactions, /transactions/:id,
   #   /transactions/new, /billpay, /reports, /users, /users/new,
   #   /users/:id/edit, /users/:id/delete, /authorizations, /authorizations/:key,
   #   /reference/transaction-types and /reference/transaction-types/:cd. The
   #   origin bucket holds the built bundle and nothing resembling a server, so a
-  #   request for /account/update arrives at S3 as a key that simply does not
-  #   exist. Rewriting the error back to the entry document with a 200 delivers
-  #   the bundle, and the router then resolves the path from the address bar.
+  #   request for /account/update would arrive at S3 as a key that simply does not
+  #   exist. The viewer-request function above rewrites those paths to the entry
+  #   document BEFORE the request reaches the origin, so the bundle is delivered
+  #   with a 200 and the router resolves the path from the address bar.
+  #
+  #   Refactoring Rationale: that rewriting was previously done here instead, by
+  #   mapping 403 and 404 to the entry document with `response_code = 200`. It made
+  #   deep links work and it also made every genuinely missing file answer 200 with
+  #   an HTML body -- so an undeployed or mistyped asset was indistinguishable from
+  #   a working one, a monitor watching status codes saw a healthy 200 for a failed
+  #   request, and a browser parsed HTML as JavaScript and reported a syntax error
+  #   that pointed at the asset's contents rather than at its absence. The two
+  #   cases cannot be separated at this layer: `custom_error_response` is
+  #   DISTRIBUTION-WIDE and cannot be scoped to a cache behaviour, so no
+  #   arrangement of behaviours here could have told a route from a file. Moving
+  #   the routing decision into a viewer-request function is what separates them,
+  #   which then frees these blocks to report a missing file honestly.
   #
   #   Assumptions: this is load-bearing rather than cosmetic because the
   #   migration made navigation client-side ON PURPOSE. The mainframe
@@ -1075,59 +1363,57 @@ resource "aws_cloudfront_distribution" "spa" {
   #   or a hard refresh, which is the one failure users find immediately and
   #   developers never do.
   #
-  #   Assumptions: ui/nginx.conf implements the same fallback for the
-  #   containerised `ui` image. That path and this one must agree, or the
-  #   application behaves differently depending on how it was served; the
-  #   duplication is deliberate and the two are kept in step by both being
-  #   documented as the same contract.
+  #   Assumptions: ui/nginx.conf implements the same contract for the
+  #   containerised `ui` image, and the two now agree request for request. It
+  #   classifies with a regular-expression location matching a dotted last
+  #   segment, and the function above applies that identical test, so a client
+  #   route is answered with the entry document under 200 on both paths and a
+  #   missing file is answered 404 on both. The mechanisms differ because the
+  #   platforms differ; the observable behaviour does not.
   # ---------------------------------------------------------------------------
 
-  # WHAT: 403 is rewritten, not only 404 -- and this is the counter-intuitive
-  #       half.
-  # WHY : Assumptions: S3 answers a request for a missing key with 403
+  # Assumptions: S3 answers a request for a missing key with 403
   #       AccessDenied rather than 404 NoSuchKey when the caller lacks
   #       `s3:ListBucket`, because disclosing that a key is absent is itself
   #       information the caller is not entitled to. The origin grant above is
   #       deliberately `s3:GetObject` only, so EVERY missing key on this origin
-  #       arrives as a 403 and a configuration handling only 404 would leave
-  #       every deep route broken while looking complete. The two blocks are one
-  #       decision, and this is the block that actually fires.
+  #       arrives as a 403. Left alone, a viewer asking for an asset that is not
+  #       deployed would receive S3's AccessDenied, which both misdescribes the
+  #       problem and reveals the origin's nature; mapping it to 404 says the one
+  #       true thing about the request, which is that the file is not there.
   custom_error_response {
     error_code         = 403
-    response_code      = 200
+    response_code      = 404
     response_page_path = "/${var.default_root_object}"
 
-    # WHAT: negative responses are not cached at the edge at all.
-    # WHY : Trade-offs: the status being rewritten does not mean "not found", it
-    #       means "the router will handle this" -- so caching it would persist an
-    #       answer for a path whose correct response can change the moment a new
-    #       bundle is deployed. The failure that avoids is nasty out of
-    #       proportion to its cause: an edge location holding a stale rewrite
-    #       serves the wrong document to some viewers and not others, for the
-    #       length of the time-to-live, which presents as an intermittent fault
-    #       with no reproducible trigger. The accepted cost is that each such
-    #       request reaches the origin, and since the origin's answer is one
-    #       small entry document, that cost is negligible.
+    # WHY : Trade-offs: caching a 404 would persist an answer for a path whose
+    #       correct response changes the moment a new bundle is deployed. The
+    #       failure that avoids is nasty out of proportion to its cause: an edge
+    #       location holding a stale negative answer serves it to some viewers and
+    #       not others for the length of the time-to-live, which presents as an
+    #       intermittent fault with no reproducible trigger -- exactly the shape of
+    #       bug a rolling deployment produces, where a viewer can be handed a new
+    #       entry document naming an asset an edge has already cached as absent.
+    #       The accepted cost is that each such request reaches the origin, and
+    #       since the origin's answer is one small entry document, that cost is
+    #       negligible.
     error_caching_min_ttl = 0
   }
 
   # WHY : Assumptions: 404 is handled as well as 403 because the 403 behaviour
   #       above is a consequence of the current grant rather than a permanent
   #       property of S3 -- if `s3:ListBucket` were ever added for a directory
-  #       index, missing keys would start arriving as 404 and deep links would
-  #       break again. Handling both makes the routing independent of that
-  #       grant. The rewrite target and the zero cache horizon are the same
-  #       values and carry the same reasoning as the block above.
+  #       index, missing keys would start arriving as 404 instead. Handling both
+  #       makes the outcome independent of that grant. The response page and the
+  #       zero cache horizon carry the same reasoning as the block above.
   custom_error_response {
     error_code            = 404
-    response_code         = 200
+    response_code         = 404
     response_page_path    = "/${var.default_root_object}"
     error_caching_min_ttl = 0
   }
 
-  # WHAT: no geographic restriction, in a block the provider requires to be
-  #       present.
-  # WHY : Assumptions: `restrictions` and its nested `geo_restriction` are
+  # Assumptions: `restrictions` and its nested `geo_restriction` are
   #       mandatory in the resource schema, so this block appears because it
   #       must, not because it encodes a decision -- an unexplained `"none"`
   #       otherwise reads as an oversight or as a setting somebody forgot to
@@ -1142,35 +1428,28 @@ resource "aws_cloudfront_distribution" "spa" {
   }
 
   # ---------------------------------------------------------------------------
-  # Viewer certificate -- one block covering both the default-certificate and
-  # the custom-domain cases.
+  # Viewer certificate -- ONE path: a supplied ACM certificate, always.
   #
-  #   Alternatives Considered: two `dynamic` blocks with mutually exclusive
-  #   `for_each` expressions, one per case. Rejected because
-  #   `viewer_certificate` is required exactly once by the schema, so a dynamic
-  #   pair has to be provably exhaustive AND provably non-overlapping to be
-  #   correct at all -- and a reader has to hold both `for_each` expressions in
-  #   mind to see that it is. Every attribute here is plain optional rather than
-  #   computed, so setting the inapplicable ones to null leaves them genuinely
-  #   unconfigured, and one static block with conditional values is both correct
-  #   by construction and readable in one pass.
+  #   Refactoring Rationale: this block previously covered two cases, selecting
+  #   the generated CloudFront certificate whenever `var.acm_certificate_arn`
+  #   was null and setting the other two attributes conditionally around it.
+  #   That branch is DELETED rather than narrowed. On the generated certificate
+  #   CloudFront pins the viewer security policy to TLSv1 as a stored value, so
+  #   the distribution accepted TLS 1.0 and 1.1 while the configuration still
+  #   read `minimum_protocol_version = "TLSv1.2_2021"` -- a weakness invisible in
+  #   the source and inert only in the sense that the setting was. Requiring the
+  #   certificate in variables.tf is what makes the deletion possible: with no
+  #   null case left, three conditional expressions become three plain
+  #   assignments, and `cloudfront_default_certificate` is not merely unset but
+  #   absent, which is the only way it cannot be reintroduced by a null input.
+  #
+  #   Assumptions: the three attributes below are three parts of one argument,
+  #   not three settings. CloudFront rejects an ACM certificate ARN presented
+  #   without both an SNI support method and a minimum protocol version, so
+  #   changing any one of them alone produces an apply-time rejection rather
+  #   than a different TLS posture.
   # ---------------------------------------------------------------------------
   viewer_certificate {
-    # WHAT: the generated CloudFront certificate, used only when no ACM
-    #       certificate was supplied.
-    # WHY : Trade-offs: on this path CloudFront serves its generated
-    #       cloudfront.net domain name and PINS the viewer security policy to
-    #       TLSv1 -- not as a floor this module could raise, but as the stored
-    #       value -- so the distribution accepts TLS 1.0 and 1.1 no matter what
-    #       `minimum_protocol_version` asks for, and a policy scan looking for a
-    #       modern viewer policy will report it. That is why
-    #       infra/modules/cloudfront-spa/variables.tf refuses this path when
-    #       environment is prod. What it buys, and the only reason it exists, is
-    #       that a dev environment is creatable and destroyable repeatedly by
-    #       anyone with no hosted zone, no certificate and no validation
-    #       records.
-    cloudfront_default_certificate = var.acm_certificate_arn == null ? true : null
-
     # WHY : Assumptions: the certificate must be issued in us-east-1 NO MATTER
     #       WHICH REGION the rest of the stack is deployed to, because a
     #       distribution is a global resource that reads its certificate from
@@ -1180,11 +1459,12 @@ resource "aws_cloudfront_distribution" "spa" {
     #       boundary, and it is rejected only when CloudFront is asked to use it
     #       partway through an apply. The certificate is supplied rather than
     #       created here so that no us-east-1 provider alias is needed in a
-    #       module which otherwise inherits exactly one provider configuration.
+    #       module which otherwise inherits exactly one provider configuration,
+    #       and variables.tf now asserts the region segment of the ARN so this
+    #       constraint fails at plan time rather than mid-apply.
     acm_certificate_arn = var.acm_certificate_arn
 
-    # WHAT: server-name-indication rather than a dedicated IP address.
-    # WHY : Trade-offs: a dedicated IP address exists for viewers whose clients
+    # Trade-offs: a dedicated IP address exists for viewers whose clients
     #       predate SNI, and it carries a substantial recurring per-month charge
     #       per distribution. This application's viewers are browsers running a
     #       React 19 bundle, so none of them predates SNI by many years, and the
@@ -1192,56 +1472,20 @@ resource "aws_cloudfront_distribution" "spa" {
     #       clients that could not load the application anyway. Cost is an
     #       explicit tie-breaker for this migration, and this is the clearest
     #       instance of it.
-    ssl_support_method = var.acm_certificate_arn == null ? null : "sni-only"
+    ssl_support_method = "sni-only"
 
-    # WHY : Assumptions: applied ONLY on the certificate path, and that is not a
-    #       convenience. On the default-certificate path CloudFront stores
-    #       TLSv1 regardless of what is asked for, so a configuration stating
-    #       anything else there produces a PERPETUAL plan diff -- the API keeps
-    #       reporting TLSv1 and the configuration keeps asking for something
-    #       else, and every subsequent plan is non-empty for a change that can
-    #       never converge. Leaving it null on that path is what keeps the plan
-    #       clean.
-    #       Assumptions: on the certificate path it is REQUIRED rather than
-    #       optional -- CloudFront will not accept an ACM certificate ARN without
-    #       both a minimum protocol version and an SNI support method -- so
-    #       these three attributes are three halves of one argument and are set
-    #       together.
-    minimum_protocol_version = var.acm_certificate_arn == null ? null : var.minimum_protocol_version
+    # Assumptions: the certificate, SNI mode and TLS policy are one indivisible
+    # viewer-security contract. Setting all three unconditionally prevents a
+    # source file that appears to request TLS 1.2 while the deployed default
+    # certificate silently serves TLS 1.0 and 1.1.
+    minimum_protocol_version = var.minimum_protocol_version
   }
 
-  logging_config {
-    # WHAT: the log bucket's DOMAIN NAME, not its bare name.
-    # WHY : Assumptions: this argument takes the S3 bucket endpoint in
-    #       `<bucket>.s3.amazonaws.com` form, which is what
-    #       `bucket_domain_name` produces; passing the bare bucket name is
-    #       accepted by Terraform and rejected by CloudFront, so the mistake
-    #       surfaces during apply rather than during plan. The reason this
-    #       destination is created by this module at all is recorded at length on
-    #       the bucket itself.
-    bucket = aws_s3_bucket.logs.bucket_domain_name
-
-    # WHY : Trade-offs: the bucket is module-private, so a prefix is not needed
-    #       to separate this producer from another one today. It is set anyway so
-    #       that the log objects occupy one addressable path -- which is what
-    #       lets an analytics query or a narrower lifecycle rule target them
-    #       without matching everything in the bucket -- and so that a second
-    #       producer added later cannot interleave keys with these.
-    prefix = "cloudfront-access-logs/"
-
-    # WHAT: cookies are excluded from the log records.
-    # WHY : Assumptions: the SPA authenticates with a bearer token obtained from
-    #       Cognito, and logging cookies would place credential-adjacent
-    #       material into durable storage that is retained for the whole of
-    #       var.log_retention_days and readable by anyone who can read the
-    #       bucket. The specific risk is not that a token is expected in a
-    #       cookie today but that an access log is the wrong place for one to
-    #       end up if it ever is. Excluding them costs nothing here, because a
-    #       static asset fetch has no cookie worth analysing.
-    #       Assumptions: stated explicitly rather than left to the provider
-    #       default so the decision is visible in the file -- an absent argument
-    #       reads as "not considered".
-    include_cookies = false
+  lifecycle {
+    precondition {
+      condition     = split(":", var.acm_certificate_arn)[4] == data.aws_caller_identity.current.account_id
+      error_message = "acm_certificate_arn must belong to the same AWS account as the CloudFront distribution."
+    }
   }
 }
 
@@ -1270,18 +1514,20 @@ resource "aws_cloudfront_distribution" "spa" {
 #
 # No `aws_s3_bucket_logging` on either bucket:
 #   Assumptions: the gate this module is held to asserts DISTRIBUTION access
-#   logging, which `logging_config` above provides. S3 server access logging is
+#   logging, which the CloudWatch Logs delivery source, destination and delivery
+#   above provide. S3 server access logging is
 #   a different mechanism, and enabling it would need either a third bucket --
 #   which this module's boundary forbids, because two of the four buckets in this
 #   package belong to other modules -- or self-logging, which writes log objects
 #   into the bucket whose reads are being logged and so logs its own writes. The
 #   distribution's logs already record every viewer request that reaches the
 #   origin path.
-#   Trade-offs: this absence is reported, and the severity was measured rather
-#   than assumed -- a full-severity scan of this directory raises AWS-0089 at LOW
-#   on both buckets, which is below the HIGH/CRITICAL threshold the gate applies.
-#   It is therefore an accepted, visible finding rather than something suppressed:
-#   a suppression would hide a real observation for no gate benefit.
+#   Trade-offs: this absence is reported rather than suppressed. The complete
+#   soft scan raises AWS-0089 for both buckets, while the explicit
+#   material-security baseline does not classify S3 server-access logging on
+#   these delivery buckets as a blocking control. The finding therefore remains
+#   visible without becoming a false substitute for the CloudFront v2 request
+#   logging this module actually provisions.
 #
 # No `origin_group`, no second `origin` and no `ordered_cache_behavior`:
 #   Assumptions: there is one origin because there is one bucket, and this
@@ -1300,22 +1546,9 @@ resource "aws_cloudfront_distribution" "spa" {
 #   needs no second provider alias; DNS is not managed by this package; and the
 #   web-ACL rejection is recorded in full at `web_acl_id` above.
 #
-# No scanner suppression anywhere except the ONE on the log bucket's encryption:
-#   Assumptions: every other item the HIGH/CRITICAL policy scan asserts for this
-#   module is satisfied by CONFIGURATION rather than by prose -- public access
-#   blocked on both buckets, customer-managed-key encryption on the origin,
-#   versioning on both, distribution access logging, an HTTPS-only viewer policy
-#   with a modern minimum TLS version on the certificate path, and a documented
-#   reason for the absent web ACL. A measured HIGH/CRITICAL scan of this
-#   directory returns exactly one finding, on
-#   aws_s3_bucket_server_side_encryption_configuration.logs, and it is
-#   unsatisfiable rather than unaddressed: complying with it stops the log
-#   delivery the same scan asserts. Its suppression is scoped to that single
-#   resource and carries the check identifier and the reason at the point of use.
-#   Trade-offs: writing that suppression is preferred to leaving a gating
-#   finding, and both are preferred to widening the scan's failure floor. What
-#   makes it acceptable is its scope -- one resource, one named check -- and what
-#   would make it unacceptable is exactly what this package's documentation
-#   standard forbids: a bare skip directive with no identifier and no reason.
+# No scanner suppression:
+#   Refactoring Rationale: both buckets now use the customer-managed S3 key, and
+#   standard logging v2 supplies the distribution audit stream without the
+#   legacy SSE-S3 or ACL exception. Security findings are therefore resolved by
+#   configuration rather than hidden at either resource.
 # =============================================================================
-

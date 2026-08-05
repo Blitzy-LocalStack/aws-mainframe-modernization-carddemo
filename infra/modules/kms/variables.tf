@@ -15,7 +15,7 @@
 #   the two environments visible in their own terraform.tfvars files instead of
 #   hidden in this module.
 #
-# Parameters -- one required, eight optional:
+# Parameters -- two required, eight optional:
 #   environment                string       REQUIRED. Selects which
 #                                           environment's aliases the keys take.
 #   name_prefix                string       Common prefix for the alias names.
@@ -27,6 +27,9 @@
 #   aurora_key_user_role_arns  list(string) Principals the Aurora key policy
 #                                           grants use to.
 #   s3_key_user_role_arns      list(string) The same, for the S3 key.
+#   cloudfront_distribution_arn string       REQUIRED. Exact SPA distribution
+#                                           allowed to decrypt the SSE-KMS
+#                                           origin.
 #   secrets_key_user_role_arns list(string) The same, for the Secrets Manager
 #                                           key.
 #   sqs_key_user_role_arns     list(string) The same, for the SQS key.
@@ -41,14 +44,15 @@
 #   infra/modules/kms/outputs.tf.
 #
 # Errors / Exceptions:
-#   Three inputs carry a `validation` block, and each rejects a bad value during
+#   Four inputs carry a `validation` block, and each rejects a bad value during
 #   `terraform plan`, before any request leaves the machine, rather than letting
 #   the service reject it part-way through `terraform apply`: `environment`
 #   (not one of the two environments that have a root), `name_prefix`
 #   (characters an alias name cannot hold), and `deletion_window_in_days`
-#   (outside the range the service accepts, or fractional). `environment` has no
-#   default, so omitting it stops the run with a missing-required-argument
-#   error instead of provisioning keys under a guessed name.
+#   (outside the range the service accepts, or fractional), and
+#   `cloudfront_distribution_arn` (not an exact distribution ARN).
+#   `environment` and `cloudfront_distribution_arn` have no default, so omitting
+#   either stops the run with a missing-required-argument error.
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: one shared list of trusted principals rather than
@@ -155,11 +159,9 @@ variable "name_prefix" {
 # the only value either environment root is expected to pass. The variable
 # exists so that the setting is legible at the call site and in this module's
 # generated documentation -- an operator can see it and reason about it -- and
-# not so that it can be turned off quietly. What keeps that honest is external
-# to this file: the policy-scan step in the infrastructure pipeline reports at
-# HIGH and CRITICAL severity, and a customer-managed key with rotation disabled
-# is exactly the class of finding it raises, so `false` reddens the pipeline.
-# That is the mechanism, not an opinion about how the key ought to be set.
+# not so that it can be turned off quietly. The validation below now enforces
+# the invariant at plan time, while the policy scan independently verifies the
+# rendered resources rather than serving as the only control.
 #
 # WHY no companion rotation-interval input -- Alternatives Considered: exposing
 # the interval as well was considered and rejected. Enabling rotation applies
@@ -167,9 +169,18 @@ variable "name_prefix" {
 # different one, and an input that is never varied is one more knob a reader
 # must evaluate before discovering it does not matter.
 variable "enable_key_rotation" {
-  description = "Whether all four customer-managed keys rotate their key material automatically on the service's own interval; `true` is the posture the target architecture specifies, and the pipeline's policy scan treats a customer-managed key without rotation as a HIGH-or-above finding."
+  description = "Whether all four customer-managed keys rotate their key material automatically on the service's own interval. The module accepts only true because rotation is an architecture invariant rather than an environment preference."
   type        = bool
   default     = true
+
+  # Assumptions: retaining the input keeps the generated module contract
+  # explicit while refusing the fail-open value at plan time. Removing the
+  # input entirely would also be safe, but it would hide the invariant from
+  # callers and from the terraform-docs table that reviewers inspect.
+  validation {
+    condition     = var.enable_key_rotation
+    error_message = "enable_key_rotation must be true. All four customer-managed keys rotate in every environment, and callers cannot lower that invariant."
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -232,6 +243,68 @@ variable "tags" {
 }
 
 # -----------------------------------------------------------------------------
+# CloudFront origin access -- narrowing the S3 key's service grant
+# -----------------------------------------------------------------------------
+
+variable "s3_cloudfront_distribution_arns" {
+  description = "CloudFront distribution ARNs the S3 key's mandatory `cloudfront.amazonaws.com` decrypt grant is confined to; empty narrows the grant to every distribution in THIS account and partition, which is the tightest scope expressible without a dependency cycle."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  # WHY : Refactoring Rationale: the S3 key's policy previously named no service
+  #       principal at all, and the single-page architecture bundle is served
+  #       from a private bucket encrypted with that key, read by CloudFront
+  #       through an origin access control. CloudFront -- not a task role -- is
+  #       the principal that decrypts those objects, so without a grant to it
+  #       every asset request answered 403 while the bucket, the distribution,
+  #       the origin access control and the key each looked correct in
+  #       isolation. That is why the grant in main.tf is unconditional: an
+  #       availability property of the front end must not depend on an operator
+  #       remembering to populate a list.
+  #
+  # WHY : Assumptions: a grant to a service principal is otherwise usable by
+  #       that service on behalf of ANY account it serves, so an unconditioned
+  #       CloudFront grant would let a stranger's distribution decrypt this
+  #       bucket's objects -- the confused-deputy problem. main.tf therefore
+  #       always applies two conditions: the request must be made on behalf of
+  #       THIS account, and its source ARN must match a distribution ARN. With
+  #       this list empty the ARN pattern is
+  #       `arn:<partition>:cloudfront::<this account>:distribution/*`, which
+  #       still admits only distributions this account owns.
+  #       Alternatives Considered: requiring the exact distribution ARN, which
+  #       is the tightest possible scope. Rejected as a REQUIRED input because
+  #       the distribution is created by the `cloudfront-spa` module, which
+  #       consumes this key's ARN for the bucket's default encryption -- so
+  #       feeding the distribution ARN back into this module from the same root
+  #       is a module-level dependency cycle that Terraform refuses to graph. A
+  #       root with a pre-existing distribution, or an operator tightening the
+  #       scope on a second apply, can still supply it here, which is why the
+  #       seam exists at all rather than the pattern being hardcoded.
+  #       Trade-offs: no `kms:ViaService` condition accompanies these two,
+  #       unlike the queue key's scheduler grant. CloudFront calls KMS itself
+  #       when it retrieves an encrypted object, so a condition asserting the
+  #       request arrived through the storage service would match nothing and
+  #       would deny the very path the grant exists to permit.
+  #
+  # WHY : Assumptions: a CloudFront ARN carries no region -- the service is
+  #       global, so the region segment is empty -- and a value that names
+  #       something other than a distribution would silently widen or void the
+  #       condition rather than fail loudly: an `ArnLike` test against a
+  #       malformed pattern simply never matches, and every asset request then
+  #       returns 403 with nothing in the plan to explain it. A wildcard is
+  #       admitted because narrowing to a distribution-ARN prefix is a
+  #       legitimate intermediate scope.
+  validation {
+    condition = alltrue([
+      for arn in var.s3_cloudfront_distribution_arns :
+      can(regex("^arn:[a-z0-9-]+:cloudfront::[0-9]{12}:distribution/[A-Z0-9*]+$", arn))
+    ])
+    error_message = "Each s3_cloudfront_distribution_arns entry must be a CloudFront distribution ARN of the form arn:<partition>:cloudfront::<account-id>:distribution/<id>. CloudFront is a global service, so the region segment is empty; a trailing * is accepted to narrow the grant to a prefix rather than one distribution."
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Trusted key users -- one list per key
 # -----------------------------------------------------------------------------
 #
@@ -274,25 +347,175 @@ variable "tags" {
 # load-bearing rather than placeholders awaiting one.
 
 variable "aurora_key_user_role_arns" {
-  description = "IAM role ARNs the Aurora key's policy grants cryptographic use of that key to -- the principals that read or write the encrypted database cluster and its automated backups; empty by default, since those roles are created by the module that consumes this key's ARN."
+  description = "Exact IAM role ARNs the Aurora key policy permits to use the key through Amazon RDS for the named Aurora encryption contexts. Wildcards, assumed-role session ARNs, users, roots and service principals are refused."
   type        = list(string)
   default     = []
+
+  validation {
+    condition = length(distinct(var.aurora_key_user_role_arns)) == length(var.aurora_key_user_role_arns) && alltrue([
+      for arn in var.aurora_key_user_role_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
+    ])
+    error_message = "aurora_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
 }
 
 variable "s3_key_user_role_arns" {
-  description = "IAM role ARNs the S3 key's policy grants cryptographic use of that key to -- the principals that read or write objects in the encrypted dataset bucket, which is where the batch and ETL steps stage dataset generations; empty by default, for the reason this section's shared notes record."
+  description = "Exact IAM role ARNs the S3 key policy permits to use the key through Amazon S3 for the named bucket encryption contexts. Wildcards, assumed-role session ARNs, users, roots and service principals are refused."
   type        = list(string)
   default     = []
+
+  validation {
+    condition = length(distinct(var.s3_key_user_role_arns)) == length(var.s3_key_user_role_arns) && alltrue([
+      for arn in var.s3_key_user_role_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
+    ])
+    error_message = "s3_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
+}
+
+variable "cloudfront_distribution_arn" {
+  description = "ARN of the CloudFront distribution allowed to decrypt the SPA origin under the S3 data-domain key. Required so the service-principal grant is always scoped to the exact distribution rather than omitted or widened."
+  type        = string
+  nullable    = false
+
+  # WHY : Refactoring Rationale: OAC authorizes the S3 GetObject request but
+  #       does not authorize KMS decryption. Accepting the exact distribution
+  #       ARN prevents a broad CloudFront service-principal grant covering every
+  #       distribution in the account.
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:cloudfront::[0-9]{12}:distribution/[A-Z0-9]+$", var.cloudfront_distribution_arn))
+    error_message = "cloudfront_distribution_arn must be a CloudFront distribution ARN of the form arn:<partition>:cloudfront::<account-id>:distribution/<id>."
+  }
 }
 
 variable "secrets_key_user_role_arns" {
-  description = "IAM role ARNs the Secrets Manager key's policy grants cryptographic use of that key to -- the principals that read the generated database and seed-user credentials the stack stores rather than commits; empty by default, for the reason this section's shared notes record."
+  description = "Exact IAM role ARNs the Secrets Manager key policy permits to use the key through Secrets Manager for the named secret encryption contexts. Wildcards, assumed-role session ARNs, users, roots and service principals are refused."
   type        = list(string)
   default     = []
+
+  validation {
+    condition = length(distinct(var.secrets_key_user_role_arns)) == length(var.secrets_key_user_role_arns) && alltrue([
+      for arn in var.secrets_key_user_role_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
+    ])
+    error_message = "secrets_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
 }
 
 variable "sqs_key_user_role_arns" {
-  description = "IAM role ARNs the SQS key's policy grants cryptographic use of that key to -- the principals that send or receive on the encrypted request, reply and error queues, including their dead-letter queues; empty by default, for the reason this section's shared notes record."
+  description = "Exact IAM role ARNs the SQS key policy permits to use the key through Amazon SQS. Wildcards, assumed-role session ARNs, users, roots and service principals are refused."
   type        = list(string)
   default     = []
+
+  validation {
+    condition = length(distinct(var.sqs_key_user_role_arns)) == length(var.sqs_key_user_role_arns) && alltrue([
+      for arn in var.sqs_key_user_role_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$", arn))
+    ])
+    error_message = "sqs_key_user_role_arns must contain unique, exact IAM role ARNs only. Wildcards and principals other than roles are not accepted; same-account enforcement is applied by the key-policy resource."
+  }
+}
+
+# The context inputs below are feedback edges from resources encrypted by these
+# keys. Refactoring Rationale: key creation is intentionally separate from
+# policy application in main.tf, so the key ARN can create an Aurora cluster,
+# bucket or secret first and the resulting exact resource identity can then
+# narrow the final key policy without a dependency cycle.
+variable "aurora_encryption_context_ids" {
+  description = "Aurora cluster resource identifiers accepted in the `aws:rds:db-id` KMS encryption context. A non-empty Aurora role trust list requires at least one exact identifier."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.aurora_encryption_context_ids)) == length(var.aurora_encryption_context_ids) && alltrue([
+      for id in var.aurora_encryption_context_ids :
+      can(regex("^cluster-[A-Za-z0-9-]+$", id))
+    ])
+    error_message = "aurora_encryption_context_ids must contain unique Aurora cluster resource identifiers beginning with `cluster-`; wildcards and blank identifiers are not accepted."
+  }
+}
+
+variable "s3_encryption_context_bucket_arns" {
+  description = "Exact S3 bucket ARNs accepted by the S3 key policy. The policy derives both bucket and object encryption-context forms so S3 Bucket Keys and direct object keys remain scoped to these buckets."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.s3_encryption_context_bucket_arns)) == length(var.s3_encryption_context_bucket_arns) && alltrue([
+      for arn in var.s3_encryption_context_bucket_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):s3:::[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", arn))
+    ])
+    error_message = "s3_encryption_context_bucket_arns must contain unique, exact S3 bucket ARNs with no object suffix or wildcard."
+  }
+}
+
+variable "secrets_encryption_context_arns" {
+  description = "Exact Secrets Manager secret ARNs accepted in the `SecretARN` KMS encryption context. A non-empty Secrets Manager role trust list requires at least one exact secret ARN."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.secrets_encryption_context_arns)) == length(var.secrets_encryption_context_arns) && alltrue([
+      for arn in var.secrets_encryption_context_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", arn))
+    ])
+    error_message = "secrets_encryption_context_arns must contain unique, exact Secrets Manager secret ARNs including the service-generated six-character suffix; wildcards are not accepted."
+  }
+}
+
+variable "cloudfront_distribution_arns" {
+  description = "Exact same-account CloudFront distribution ARNs allowed to decrypt the SSE-KMS SPA origin through an origin access control. Empty means no CloudFront service-principal grant is installed."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.cloudfront_distribution_arns)) == length(var.cloudfront_distribution_arns) && alltrue([
+      for arn in var.cloudfront_distribution_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):cloudfront::[0-9]{12}:distribution/[A-Z0-9]+$", arn))
+    ])
+    error_message = "cloudfront_distribution_arns must contain unique, exact CloudFront distribution ARNs; wildcard distribution identifiers are not accepted."
+  }
+}
+
+variable "cloudwatch_log_delivery_source_arns" {
+  description = "Exact same-account CloudWatch Logs delivery-source ARNs allowed to generate data keys for the CloudFront standard logging v2 S3 destination. Empty means no log-delivery service-principal grant is installed."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.cloudwatch_log_delivery_source_arns)) == length(var.cloudwatch_log_delivery_source_arns) && alltrue([
+      for arn in var.cloudwatch_log_delivery_source_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):logs:us-east-1:[0-9]{12}:delivery-source:[A-Za-z0-9._-]+$", arn))
+    ])
+    error_message = "cloudwatch_log_delivery_source_arns must contain unique, exact CloudWatch Logs delivery-source ARNs in us-east-1; wildcards are not accepted."
+  }
+}
+
+variable "cloudwatch_log_group_arns" {
+  description = "Exact same-account CloudWatch log-group ARNs the regional Logs service may encrypt with the S3/data key. Empty installs no CloudWatch Logs service-principal grant."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.cloudwatch_log_group_arns)) == length(var.cloudwatch_log_group_arns) && alltrue([
+      for arn in var.cloudwatch_log_group_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):logs:[a-z0-9-]+:[0-9]{12}:log-group:[A-Za-z0-9_./#-]+$", arn))
+    ])
+    error_message = "cloudwatch_log_group_arns must contain unique, exact log-group ARNs without a trailing :* wildcard."
+  }
+}
+
+variable "sns_topic_arns" {
+  description = "Exact same-account SNS topic ARNs that CloudWatch alarms and SNS may encrypt with the S3/data key. Empty installs no alert-topic service-principal grant."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = length(distinct(var.sns_topic_arns)) == length(var.sns_topic_arns) && alltrue([
+      for arn in var.sns_topic_arns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+$", arn))
+    ])
+    error_message = "sns_topic_arns must contain unique, exact SNS topic ARNs with no wildcard."
+  }
 }

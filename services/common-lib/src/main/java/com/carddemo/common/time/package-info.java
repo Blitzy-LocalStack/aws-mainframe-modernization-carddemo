@@ -216,12 +216,11 @@
  *
  * <p>This package holds exactly one production class, {@code TimestampFormatter}, which owns the
  * pattern named above; with this descriptor beside it, the directory contains exactly two
- * {@code .java} files. That makes this the one package in the module whose target inventory is
- * complete at this checkpoint. Across {@code com.carddemo.common} as a whole the target is
- * seventeen production classes, distributed as two in {@code money}, five in {@code codec}, three
- * in {@code error}, two in {@code web}, one in {@code security}, one in {@code observability}, one
+ * {@code .java} files. Across {@code com.carddemo.common} as a whole the target is
+ * twenty-one production classes, distributed as two in {@code money}, five in {@code codec}, three
+ * in {@code error}, three in {@code web}, three in {@code security}, one in {@code observability}, one
  * here in {@code time} and two in {@code validation}; adding the nine package descriptors, one for
- * the package root and one for each of its eight subpackages, gives twenty-six {@code .java} files
+ * the package root and one for each of its eight subpackages, gives thirty {@code .java} files
  * in total.</p>
  *
  * <h2>Why this descriptor exists</h2>

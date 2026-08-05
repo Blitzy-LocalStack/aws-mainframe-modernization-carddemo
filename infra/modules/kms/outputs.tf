@@ -19,10 +19,12 @@
 #              setting encrypts with, and it is the value the cluster's
 #              `kms_key_id`, managed master-credential secret and Performance
 #              Insights arguments each take.
-#     s3       infra/modules/s3-datasets, through `kms_key_arn`, and
-#              infra/modules/cloudfront-spa, through `s3_kms_key_arn`. Each
-#              sets it as the `kms_master_key_id` of a bucket's default
-#              server-side-encryption rule under the `aws:kms` algorithm.
+#     s3       infra/modules/s3-datasets, through `kms_key_arn`;
+#              infra/modules/cloudfront-spa, through `s3_kms_key_arn`; and the
+#              log-producing modules plus observability, through their log
+#              group or topic key inputs. The root wires one data-domain key
+#              into those uses because the AAP defines four keys rather than a
+#              fifth logging key.
 #     secrets  infra/modules/secrets, through `kms_key_arn`, and
 #              infra/modules/cognito, through `secrets_kms_key_arn`. Each sets
 #              it as the `kms_key_id` of the entries holding the credentials the
@@ -273,8 +275,8 @@ output "aurora_key_alias_name" {
 }
 
 # =============================================================================
-# S3 datasets -- consumed by infra/modules/s3-datasets and
-# infra/modules/cloudfront-spa
+# S3 objects, CloudWatch logs and alerts -- consumed by s3-datasets,
+# cloudfront-spa, observability and each log-producing module
 #
 # One key serves both buckets because both hold the same class of data: content
 # this stack produces and serves, rather than its system of record. Two consumers
@@ -284,18 +286,23 @@ output "aurora_key_alias_name" {
 # =============================================================================
 
 output "s3_key_arn" {
-  description = "ARN of the customer-managed key that encrypts objects at rest in the versioned dataset bucket, where the batch chain and the ETL stage the dataset generations that replace the baseline's generation-dataset families, and in the bucket holding the single-page application. A calling environment root passes this into the s3-datasets module's `kms_key_arn` input and into the cloudfront-spa module's `s3_kms_key_arn` input; each sets it as the `kms_master_key_id` of that bucket's default server-side-encryption rule under the `aws:kms` algorithm."
+  description = "ARN of the customer-managed key for stored objects, CloudWatch log groups and the encrypted alert topic. A calling root passes it to s3-datasets and cloudfront-spa for bucket SSE-KMS, to network/ecs-service/api-gateway-http/step-functions-batch for log-group encryption, and to observability for its managed groups and SNS topic; the key policy admits only the regional logging and notification service paths in this account."
   value       = aws_kms_key.s3.arn
 }
 
 output "s3_key_id" {
-  description = "Bare identifier -- not the ARN -- of the key that encrypts the dataset and single-page-application buckets, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN."
+  description = "Bare identifier -- not the ARN -- of the key that encrypts the object, log and alert data class, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN."
   value       = aws_kms_key.s3.key_id
 }
 
 output "s3_key_alias_name" {
   description = "Alias name this module assigns to the S3 key, carrying the module's name prefix and the environment. It survives replacement of the key behind it, so it is the reference an operator procedure should use when recording which key a stored dataset generation was encrypted under."
   value       = aws_kms_alias.s3.name
+}
+
+output "s3_key_policy_id" {
+  description = "Provider identifier of the fully applied S3 key policy. The CloudFront logging v2 delivery consumes this as an ordering token so log delivery is not enabled before the exact distribution and delivery-source grants exist."
+  value       = aws_kms_key_policy.s3.id
 }
 
 # =============================================================================
@@ -334,7 +341,7 @@ output "secrets_key_alias_name" {
 # =============================================================================
 
 output "sqs_key_arn" {
-  description = "ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply and the inquiry and error messages, whose delimited text carries the card number. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it as the `kms_master_key_id` of all five queues and of each of their five dead-letter queues."
+  description = "ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply, the split account/date inquiry requests, the shared inquiry reply and the error sink. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on all six queues and their six dead-letter queues."
   value       = aws_kms_key.sqs.arn
 }
 

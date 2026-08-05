@@ -33,23 +33,23 @@
  *
  * State at this checkpoint
  * ------------------------
- * This module is authored ahead of most of the tree it builds, and the
- * migration lands its artifacts in plan order, so of the files named above
- * only `ui/index.html`, `ui/.env.example`, `ui/package.json` and
- * `ui/tsconfig.node.json` exist today. `ui/src/main.tsx`, `ui/tsconfig.json`,
- * `ui/vitest.config.ts`, `ui/Dockerfile` and `ui/nginx.conf` are authored at
- * later indexes of the same plan. One consequence follows and it is not a
- * defect: `npm run build` cannot succeed yet, because its first half
- * type-checks against an absent `ui/tsconfig.json` and `vite build` would
- * then resolve an absent entry module. Nothing here asserts that a build of
- * this tree currently succeeds. The configuration is authored now because the
- * four things it settles -- above all the environment-variable boundary --
- * are decisions the later modules have to be written against, and relocating
- * that boundary once screens read from it means auditing every one of them.
+ * `ui/index.html`, `ui/.env.example`, `ui/package.json`,
+ * `ui/tsconfig.node.json`, `ui/tsconfig.json`, `ui/vitest.config.ts` and
+ * `ui/nginx.conf` now exist. `ui/src/main.tsx` and `ui/Dockerfile` remain
+ * later-index artifacts. One consequence follows and it is not a defect:
+ * `npm run build` passes its TypeScript check and then fails when Vite resolves
+ * the absent entry module. Nothing here asserts that a bundle currently
+ * succeeds.
+ *
+ * Refactoring Rationale: the former inventory classified the application
+ * tsconfig, Vitest configuration and nginx configuration as absent after they
+ * had landed. Separating the two remaining artifacts preserves the staged
+ * build warning while making the toolchain that can already be validated
+ * visible.
  */
 
-import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
 
 /**
  * Resolved Vite configuration for the CardDemo single-page application.
@@ -99,7 +99,7 @@ export default defineConfig({
   // -- is the one edit to this file that could publish a credential inside a
   // shipped artifact, and it would do so silently, because a leaked variable
   // still produces a working build.
-  envPrefix: 'VITE_',
+  envPrefix: "VITE_",
 
   build: {
     // Assumptions: `ui/Dockerfile` copies this exact directory out of its
@@ -109,7 +109,7 @@ export default defineConfig({
     // different value here breaks the image build with no error reported from
     // this side: the build succeeds, the copy finds nothing, and the served
     // image is empty.
-    outDir: 'dist',
+    outDir: "dist",
 
     // Assumptions: this matches the `target` of both TypeScript projects in
     // the tree -- `ui/tsconfig.json` for `ui/src` and `ui/tsconfig.node.json`
@@ -127,24 +127,34 @@ export default defineConfig({
     // target, leaving the check and the bundle free to drift apart. The
     // browsers in that baseline set support this level, so pinning it
     // surrenders no reach.
-    target: 'es2022',
+    target: "es2022",
 
-    // Trade-offs: source maps are published beside the bundle. That makes a
-    // production stack trace readable against the original TypeScript instead
-    // of against minified output, and it costs the readability of this
-    // application's own sources to anyone who fetches them. The cost is
-    // accepted here on two specific grounds. The bundle holds nothing secret
-    // to expose: every value in it arrived through `import.meta.env` and is
-    // public by construction, per the prefix boundary above. And the delivery
-    // path is a content-delivery distribution in front of a private bucket
-    // reached by an origin access control, so a map is served only as a named
-    // request rather than advertised by a listable directory. The
-    // alternative, omitting them, keeps the sources private and leaves every
-    // production stack trace pointing at generated column offsets -- a poor
-    // exchange for a system whose business rules are transcribed from COBOL
-    // and whose defects therefore have to be read back against that
-    // transcription.
-    sourcemap: true,
+    // Trade-offs: no source map is emitted for the production bundle, so a
+    // production stack trace points at generated offsets and has to be read back
+    // against the bundle rather than against the original TypeScript. That cost
+    // is real for a system whose business rules are transcribed from COBOL, and
+    // it is accepted because publishing a map beside the bundle publishes this
+    // application's entire source to anyone who fetches it. Two arguments that
+    // look like they license publishing it do not survive inspection. That the
+    // bundle holds no secret is true but irrelevant: the exposure at issue is the
+    // source itself, including the transcribed validation order, the reject
+    // reasons and the exact field widths, which together describe how to shape an
+    // input the server will accept. And a distribution in front of a private
+    // bucket with an origin access control prevents DIRECTORY LISTING, not
+    // retrieval; the map's URL is not a secret, because the bundle's own
+    // `sourceMappingURL` comment names it, so "served only as a named request"
+    // describes a request any reader of the bundle can already construct.
+    // Alternatives Considered: `'hidden'`, which emits the map but omits that
+    // comment, then uploading maps to a private store and excluding them from the
+    // deployed artifact. That is the right long-term shape and it is rejected
+    // here for a concrete reason rather than a preference: the exclusion has to
+    // be performed by something, and the two candidates -- `ui/Dockerfile`'s copy
+    // of `dist/` and the deploy pipeline that syncs it -- would both have to opt
+    // in. Until one of them does, `'hidden'` still writes `.map` files into
+    // `dist/` and still ships them, so it would read as protection while
+    // delivering none. Emitting nothing is the option that cannot be silently
+    // undone by a downstream file forgetting a step.
+    sourcemap: false,
 
     // Assumptions: every build starts from an empty output directory, so an
     // asset emitted by an earlier build under a different content hash cannot
@@ -199,7 +209,7 @@ export default defineConfig({
     // can reach the machine. Nothing in this project's workflow needs that,
     // because the container image serves the built bundle through nginx
     // rather than through this server.
-    host: 'localhost',
+    host: "localhost",
 
     // Alternatives Considered: a dev-only `proxy` entry forwarding an API
     // path prefix to a backend was evaluated and rejected. The SPA addresses

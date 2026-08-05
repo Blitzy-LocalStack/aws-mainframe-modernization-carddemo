@@ -33,6 +33,13 @@ import org.springframework.security.oauth2.jwt.Jwt;
  * 'U'                  carddemo-user     USER_AUTHORITY
  * </pre>
  *
+ * <p>Assumptions: the infrastructure module creates those exact two group names as fixed values,
+ * independent of its configurable resource-name prefix. That distinction is load-bearing:
+ * {@code name_prefix} may rename pools and secrets for another deployment, but it cannot rename the
+ * values carried in {@code cognito:groups}. Keeping the claim vocabulary fixed at its producer
+ * prevents a valid Terraform naming override from turning every recognized user into a subject with
+ * no authority here.</p>
+ *
  * <p>Assumptions: two independent reference artefacts attest to that two-value domain, and their
  * agreement is what makes it safe to close. The in-flight form is line 26 of
  * {@code app/cpy/COCOM01Y.cpy} -- a one-character user type inside the 160-byte communication area
@@ -165,8 +172,10 @@ import org.springframework.security.oauth2.jwt.Jwt;
  * eight route tables it cannot see. The cost is that eight modules each carry a few lines of wiring
  * that one class could have carried once; the gain is that a route table stays beside the routes it
  * governs, and that this class needs to know nothing about how any service is routed. A consuming
- * module opts in by handing an instance to the framework's authentication converter as its
- * authorities converter, which is precisely the interface implemented here.</p>
+ * module opts in by constructing this converter with the two group names read from configuration
+ * and handing it to the framework's authentication converter. Requiring those names in the
+ * constructor makes authorization drift fail while the service starts instead of turning every
+ * request into a forbidden response after deployment.</p>
  *
  * <p>Alternatives Considered: no annotation processor generates any member of this class. Generated
  * accessors and constructors cannot carry the documentation this tree requires, so a generated
@@ -223,6 +232,20 @@ public final class JwtRoleConverter implements Converter<Jwt, Collection<Granted
      * field at line 22 of {@code app/cpy/CSUSR01Y.cpy}. A route that demands it is authorised with
      * the authority predicate and this constant, never with the role predicate; the reason that
      * distinction matters is recorded on this class.</p>
+     *
+     * <p><strong>Assumptions: this literal is a FIXED CROSS-LANGUAGE CONTRACT and is not derived from
+     * any deployment-time value.</strong> Three consumers match it byte for byte -- this class, which
+     * turns it into a Spring Security authority; {@code ui/src/hooks/useAuth.ts}, which reads it out
+     * of the token; and the SPA's administrative routes, which test for it -- and the identity
+     * provider must therefore mint a group of exactly this name. That is why
+     * {@code infra/modules/cognito} declares its group names as this same literal rather than
+     * composing them from its {@code name_prefix} input. Refactoring Rationale: the composed form was
+     * the earlier shape and it failed in the worst available way. Group names are scoped to a user
+     * pool, so composing them bought no collision safety, while any root that set a non-default
+     * prefix produced tokens carrying a group name no consumer recognises -- and because an
+     * unrecognised group contributes no authority rather than raising, every user in that environment
+     * would authenticate successfully and then be refused by every route, with nothing in any log
+     * naming the group as the cause. A fixed literal makes that failure unreachable.</p>
      */
     public static final String ADMIN_AUTHORITY = "carddemo-admin";
 
@@ -247,21 +270,30 @@ public final class JwtRoleConverter implements Converter<Jwt, Collection<Granted
     private static final Set<String> RECOGNISED_AUTHORITIES = Set.of(ADMIN_AUTHORITY, USER_AUTHORITY);
 
     /**
-     * Creates a converter that reads the claim named by {@link #GROUPS_CLAIM}.
+     * Creates a converter after verifying the configured identity-provider group contract.
      *
-     * <p>The constructor deliberately initialises nothing. Every value this class needs is a
-     * compile-time constant of the migration's own contract, so an instance carries no state and
-     * there is nothing to inject, configure or set afterwards.</p>
+     * <p>Assumptions: the calling service reads both values from the configuration written by the
+     * infrastructure root from the Cognito module's group-name outputs. The names are checked but
+     * not stored because the constants in this class remain the executable authority vocabulary;
+     * configuration is evidence that the deployed pool agrees with that vocabulary, not a way to
+     * redefine it.</p>
      *
-     * <p>Alternatives Considered: exposing the claim name and the two group names as settable
-     * properties, in the manner of the framework's own configurable converter, was evaluated and
-     * rejected. The mapping is a migration contract derived from the reference baseline rather than a
-     * deployment choice, and making it settable would invite the eight consuming modules to disagree
-     * about the one thing this class exists to own. The cost is that a deployment cannot rename a
-     * group without a change here; that is the same cost accepted under the unrecognised-group
-     * heading on this class, and it is accepted for the same reason.</p>
+     * <p>Alternatives Considered: a no-argument constructor was rejected because it lets a service
+     * start without ever comparing its compiled authority names with the groups the deployed pool
+     * actually created. Mutable properties were also rejected: a group rename is a migration
+     * contract change, not a deployment preference, and making it settable would permit two
+     * services to authorize the same token differently.</p>
+     *
+     * @param configuredAdminGroupName the administrator group name read from runtime
+     *     configuration; must equal {@link #ADMIN_AUTHORITY}
+     * @param configuredUserGroupName the ordinary-user group name read from runtime
+     *     configuration; must equal {@link #USER_AUTHORITY}
+     * @throws NullPointerException if either configured name is {@code null}
+     * @throws IllegalStateException if either configured name differs from the compiled contract
      */
-    public JwtRoleConverter() {
+    public JwtRoleConverter(String configuredAdminGroupName, String configuredUserGroupName) {
+        requireConfiguredGroupName(ADMIN_AUTHORITY, configuredAdminGroupName);
+        requireConfiguredGroupName(USER_AUTHORITY, configuredUserGroupName);
     }
 
     /**
@@ -372,5 +404,28 @@ public final class JwtRoleConverter implements Converter<Jwt, Collection<Granted
             }
         }
         return groupNames;
+    }
+
+    /**
+     * Fails service construction when one configured group name differs from the compiled contract.
+     *
+     * <p>Trade-offs: the exception reports only which side of the contract failed and never echoes
+     * the configured value. Group names are not credentials, but omitting the value keeps startup
+     * diagnostics shape-only and prevents a future caller from turning this helper into a generic
+     * configuration-value disclosure path.</p>
+     *
+     * @param expectedGroupName the invariant authority name compiled into this class
+     * @param configuredGroupName the group name supplied by runtime configuration
+     * @throws NullPointerException if {@code configuredGroupName} is {@code null}
+     * @throws IllegalStateException if {@code configuredGroupName} differs from
+     *     {@code expectedGroupName}
+     */
+    private static void requireConfiguredGroupName(
+            String expectedGroupName, String configuredGroupName) {
+        Objects.requireNonNull(configuredGroupName, "configured group name must not be null");
+        if (!expectedGroupName.equals(configuredGroupName)) {
+            throw new IllegalStateException(
+                    "configured Cognito group name does not match the compiled authority contract");
+        }
     }
 }

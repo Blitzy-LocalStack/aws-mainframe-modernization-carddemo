@@ -3,6 +3,7 @@ package com.carddemo.common.money;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * Carries an exact monetary amount in memory and performs every arithmetic operation the migrated
@@ -25,15 +26,13 @@ import java.util.Objects;
  * this type admits.</p>
  *
  * <p>Assumptions: the base-master money fields are zoned decimal with a sign overpunch and are not
- * packed decimal. This was established by measurement rather than assumed: a search of all eleven
- * base-master copybooks -- {@code CVACT01Y}, {@code CVACT02Y}, {@code CVACT03Y}, {@code CVCUS01Y},
- * {@code CVTRA01Y}, {@code CVTRA02Y}, {@code CVTRA03Y}, {@code CVTRA04Y}, {@code CVTRA05Y},
- * {@code CVTRA06Y} and {@code CSUSR01Y} -- for a {@code COMP} usage or an {@code OCCURS} clause
- * returns no match in any of them, so no base-master money field is packed and none is an array.
- * Packed decimal does occur in the migration, but only outside those records: five occurrences in the
- * export record layout {@code app/cpy/CVEXPORT.cpy}, and pervasively in the two authorization segment
- * layouts. That split is why byte-level decoding lives in the sibling {@code codec} package and none
- * of it lives here.</p>
+ * packed decimal. A search of all eleven base-master copybooks for a {@code COMP} usage or an
+ * {@code OCCURS} clause returns no match, so no base-master money field is packed and none is an
+ * array. Packed decimal does occur in the migration -- in the export record layout
+ * {@code app/cpy/CVEXPORT.cpy} and pervasively in the two authorization segment layouts -- but never
+ * in a base master. That split is why byte-level and character-level encoding of money lives in the
+ * sibling {@code codec} package and in the reporting service, and none of it lives here: this type is
+ * the in-memory value those renderings decode to and encode from.</p>
  *
  * <h2>Contract one: exact fixed point, never a binary approximation</h2>
  *
@@ -41,26 +40,23 @@ import java.util.Objects;
  * exception: {@code NUMERIC(p,2)} in the database, {@link BigDecimal} carried at scale 2 in Java,
  * {@code Decimal} in the extract-transform-load code, and a JSON <em>string</em> on the wire. IEEE-754
  * binary arithmetic is excluded from the money path entirely -- neither of the language's two binary
- * primitive types, neither of their wrapper types, and never a bare JSON number either. The exclusion
- * is architecture-tested by {@code LayeringRulesTest} in this module's test tree, so a breach fails a
- * build rather than a review.</p>
+ * primitive types, neither of their wrapper types, and never a bare JSON number either.</p>
  *
  * <p>Trade-offs: the excluded numeric type names are described in the preceding paragraph rather than
  * spelled. Spelling them would make this file match a search for the very tokens the money path must
  * not contain, and that search is one of the checks this tree is audited with, so a literal mention
  * would produce a hit that has to be explained away on every audit. The description is unambiguous,
- * since the language has exactly two IEEE-754 binary primitive types and one wrapper type for each,
- * so the cost of the circumlocution is paid in reading effort and buys an audit that stays clean. The
- * convention is not invented here; the package descriptor beside this file states the same
- * prohibition the same way, so the two are consistent by construction.</p>
+ * since the language has exactly two IEEE-754 binary primitive types and one wrapper type for each.
+ * The package descriptor beside this file states the same prohibition the same way, so the two are
+ * consistent by construction.</p>
  *
  * <p>Assumptions: the scale is a property of the declaration and not a display preference. Two places
  * after an implied decimal point is what {@code PIC S9(10)V99} means, so a representation that is
- * exact at two places is a correctness requirement. The reason it matters is concrete rather than
- * theoretical: the two-place decimal fractions such a field is built from, {@code 0.01} among them,
- * have no finite binary expansion, so a binary parse cannot represent the value it was handed and must
- * approximate it. An amount wrong in its last cent flips an inclusive boundary comparison, and both
- * posting boundaries in the reference baseline are inclusive.</p>
+ * exact at two places is a correctness requirement. The reason is concrete rather than theoretical:
+ * the two-place decimal fractions such a field is built from, {@code 0.01} among them, have no finite
+ * binary expansion, so a binary parse must approximate the value it was handed. An amount wrong in
+ * its last cent flips an inclusive boundary comparison, and both posting boundaries in the reference
+ * baseline are inclusive.</p>
  *
  * <h2>Contract two: two rounding contracts, and correction C-ROUNDING</h2>
  *
@@ -77,91 +73,43 @@ import java.util.Objects;
  *       carry the chosen mode in their own names.</li>
  * </ul>
  *
- * <p>Assumptions: the baseline behaviour of the accrual path is truncation toward zero, and this was
- * derived from the reference program rather than inferred from convention. Lines 462 to 468 of
+ * <p>Assumptions: the baseline behaviour of the accrual path is truncation toward zero, derived from
+ * the reference program rather than inferred from convention. Lines 462 to 468 of
  * {@code app/cbl/CBACT04C.cbl} hold the accrual paragraph, whose statement at lines 464 and 465 is
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. The receiving field is
  * declared at line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.}, so
  * the result is stored at exactly two decimal places and surplus precision has to go somewhere; and
- * the statement carries no {@code ROUNDED} phrase, nor does any other statement in the program,
- * because a search for that phrase across all 652 lines returns no match. A store into a fixed-scale
- * field without that phrase discards the surplus digits rather than rounding them.</p>
+ * the statement carries no {@code ROUNDED} phrase, nor does any other statement in the program. A
+ * store into a fixed-scale field without that phrase discards the surplus digits rather than rounding
+ * them.</p>
  *
  * <p>Trade-offs: the divergence between those two modes is registered as <b>C-ROUNDING</b>, and it is
  * named here so that a later reader does not reconcile this API back to a single mode without knowing
  * what the reconciliation costs. Two sibling documents state the money contract as scale 2 with
  * half-up unconditionally -- this module's own README and
  * {@code docs/architecture/data-model-and-schema-mapping.md} -- while the reference program truncates
- * on the accrual path specifically. Rather than silently picking one and hiding the other, the mode is
- * made an explicit parameter of the accrual entry point. The compromise accepted is that an accrual
- * caller has one more decision to make than it would with a single mode; what is bought is that the
- * decision is visible at the call site, is named in the method name when a convenience form is used,
- * and can be asserted by a test either way. The alternative compromise -- one mode, chosen here,
- * applied silently -- costs nothing at the call site and hides which of two documented behaviours the
- * system actually implements, which is the more expensive of the two.</p>
+ * on the accrual path specifically. Making the mode an explicit parameter of the accrual entry point
+ * costs an accrual caller one more decision; what it buys is that the decision is visible at the call
+ * site, named in the method name when a convenience form is used, and assertable by a test either
+ * way. The alternative -- one mode, chosen here, applied silently -- costs nothing at the call site
+ * and hides which of two documented behaviours the system actually implements.</p>
  *
- * <p>Trade-offs: the size of the divergence is one cent, and only on a quotient landing exactly on a
- * half cent. It is worth stating so that nobody mistakes C-ROUNDING for an unresolved question. On the
- * vectors the reference fixtures actually carry the two modes agree exactly: a category balance of
- * {@code 1000.00} at a disclosure-group rate of {@code 15.00} yields {@code 12.5000} and both modes
- * return {@code 12.50}; the same balance at a rate of {@code 2.50} yields {@code 2.08333...} and both
- * modes return {@code 2.08}. They part company only on an exact half cent, as with a balance of
- * {@code 1000.80} at a rate of {@code 2.50}, where the quotient is {@code 2.0850} exactly, truncation
+ * <p>Trade-offs: the divergence is one cent, and only on a quotient landing exactly on a half cent, so
+ * nobody should mistake C-ROUNDING for an unresolved question. On the vectors the reference fixtures
+ * carry the two modes agree exactly -- a balance of {@code 1000.00} at a rate of {@code 2.50} yields
+ * {@code 2.08333...} and both return {@code 2.08}. They part company only on an exact half cent, as
+ * with {@code 1000.80} at {@code 2.50}, where the quotient is {@code 2.0850} exactly, truncation
  * returns {@code 2.08} and half-up returns {@code 2.09}. C-ROUNDING is therefore an API-contract
  * difference before it is ever a value difference.</p>
  *
- * <p>Alternatives Considered: collapsing the two contracts into a single half-up surface, and
- * recording the baseline truncation as a documented divergence only in prose, was evaluated. It has a
- * real advantage -- one arithmetic surface, and one architecture rule assertable without a carve-out.
- * It was not adopted because the accrual entry point would then apply a mode no call site named, and
- * the one behaviour a parity comparison against the reference goldens most needs to be able to
- * reproduce would not be reachable through this type at all. The shape chosen keeps the single default
- * available, by way of {@link #monthlyInterestHalfUp(BigDecimal)}, without making it the silent one.
- * Also considered: defaulting {@link #monthlyInterest(BigDecimal, RoundingMode)} to half-up through an
- * overload taking no mode. Rejected for the same reason in a smaller form; an overload that omits the
+ * <p>Alternatives Considered: collapsing the two contracts into a single half-up surface, recording
+ * the baseline truncation in prose only. It has a real advantage -- one arithmetic surface, and one
+ * architecture rule assertable without a carve-out -- and was not adopted because the accrual entry
+ * point would then apply a mode no call site named, and the one behaviour a parity comparison against
+ * the reference goldens most needs to reproduce would not be reachable through this type at all. Also
+ * considered: an overload of {@link #monthlyInterest(BigDecimal, RoundingMode)} taking no mode and
+ * defaulting to half-up. Rejected for the same reason in a smaller form; an overload that omits the
  * mode is exactly the silent application this contract exists to prevent.</p>
- *
- * <h2>The six renderings this type interoperates with</h2>
- *
- * <p>Assumptions: money reaches this type from six distinct external renderings of differing widths,
- * and a caller that assumes a single width will mis-frame a fixed-width record. The byte-level and
- * character-level forms are implemented in the sibling {@code codec} package and in the reporting
- * service; this type is the in-memory value they all decode to and encode from. The six are recorded
- * here so that the set is stated in one place:</p>
- *
- * <ul>
- *   <li><b>Zoned decimal with a sign overpunch</b> -- <b>11 bytes</b> for {@code PIC S9(09)V99} and
- *       <b>12 bytes</b> for {@code PIC S9(10)V99}. Both widths are directly observable in the
- *       reference fixtures: the account record of {@code tests/fixtures/posting/boundary_exact_limit}
- *       carries its credit limit as twelve characters, the ten digits {@code 0000002065} followed by a
- *       zero digit overpunched with the sign, and the driving transaction of the same scenario carries
- *       its amount as eleven characters in the same encoding, {@code 000002065} followed by the
- *       overpunched zero. In both, the overpunched final position encodes a positive zero, which is
- *       why the two values read as {@code +2065.00}.</li>
- *   <li><b>Packed decimal</b> -- <b>7 bytes</b> for {@code PIC S9(10)V99}, <b>5 bytes</b> for
- *       {@code PIC S9(09)} and <b>3 bytes</b> for {@code PIC S9(05)}, by the rule
- *       {@code floor(digits / 2) + 1}. It appears in the export record layout and in the two
- *       authorization segment layouts, and nowhere in the base masters.</li>
- *   <li><b>Edited display text {@code PIC +9(10).99}</b> -- <b>14 characters</b>, being one sign
- *       position, ten integer digits, a literal decimal point and two decimal digits. This is the form
- *       money takes in the message payloads, where the sign and the point are real bytes while the
- *       {@code V} of a base-master picture is implied and occupies none.</li>
- *   <li><b>The sort edit mask {@code EDIT=(TTTTTTTTT.TT)}</b> -- <b>12 characters</b>, being nine
- *       digit positions, a literal point and two more, as applied to the category balance at line 56
- *       of {@code app/jcl/PRTCATBL.jcl}.</li>
- *   <li><b>The report detail mask {@code -ZZZ,ZZZ,ZZZ.ZZ}</b> -- <b>15 characters</b>, declared at
- *       line 30 of {@code app/cpy/CVTRA07Y.cpy} as {@code TRAN-REPORT-AMT}. The comma group separators
- *       and the leading sign position are real characters.</li>
- *   <li><b>The report total mask {@code +ZZZ,ZZZ,ZZZ.ZZ}</b> -- <b>15 characters</b>, declared three
- *       times in the same copybook, at line 54 for the page total, line 60 for the account total and
- *       line 66 for the grand total.</li>
- * </ul>
- *
- * <p>Assumptions: the report's overall width of 133 columns comes from a separator literal and not
- * from the detail-line field widths. Line 48 of {@code app/cpy/CVTRA07Y.cpy} declares
- * {@code 01  TRANSACTION-HEADER-2  PIC X(133) VALUE ALL '-'.}, and that declaration is what carries
- * the width. The detail group's own field widths do not independently sum to it, so presenting 133 as
- * a field-width sum would be wrong; it is cited to line 48 instead.</p>
  *
  * <h2>Immutability and construction</h2>
  *
@@ -180,15 +128,9 @@ import java.util.Objects;
  * count of cents, is exactly the distinction a nameless constructor erases. A private constructor puts
  * validation in one place and forces every call site to name which interpretation it means. The cost is
  * the explicit accessor, {@code equals}, {@code hashCode} and {@code toString} written out below, all
- * of which a record would have generated.</p>
- *
- * <p>Alternatives Considered: generating the accessor and the value-object methods with an annotation
- * processor was evaluated and rejected. A generated member cannot carry the documentation the project's
- * Explainability rule requires on every class and method, and the Checkstyle configuration this module
- * builds under exempts no member from that requirement at any visibility -- its
- * {@code MissingJavadocMethod} module is configured with an empty allowed-annotations list, so not even
- * an overriding method is exempt. Java records plus explicit members give the same brevity with
- * documentable declarations, and the explicit form is what is written here.</p>
+ * of which a record would have generated. Generating them with an annotation processor instead was
+ * rejected because a generated member cannot carry the documentation this tree requires at every
+ * visibility, and this module's Checkstyle configuration exempts no member from it.</p>
  *
  * <h2>What this type deliberately does not offer</h2>
  *
@@ -295,6 +237,74 @@ public final class Money implements Comparable<Money> {
     public static final BigDecimal MAX_MAGNITUDE = new BigDecimal("9999999999.99");
 
     /**
+     * The greatest number of characters an amount in text form may carry.
+     *
+     * <p>Alternatives Considered: admitting any length the transport delivered and relying on
+     * {@code MAX_MAGNITUDE} to reject what does not belong was evaluated and rejected, because the
+     * bound is reached too late. The domain check runs on a value that has already been built and
+     * already been reduced to {@code SCALE}, and both of those steps cost work proportional to the
+     * text they were handed. A bound applied to the characters costs one comparison and runs before
+     * any of it.</p>
+     *
+     * <p>Assumptions: the widest well-formed value this type admits is a sign, ten integer digits, a
+     * point and the fractional digits {@code MAX_INPUT_SCALE} allows, which is 26 characters. The
+     * bound is set at 32 so that a value carrying a leading zero or two, which is exactly what a
+     * fixed-width reference field produces, is still admitted rather than rejected for its padding.</p>
+     */
+    public static final int MAX_INPUT_LENGTH = 32;
+
+    /**
+     * The greatest number of fractional digits a caller-supplied value may carry before reduction.
+     *
+     * <p>Assumptions: a value wider than {@code SCALE} is reduced rather than refused, which is this
+     * type's general contract, so some tolerance above two is required. Fifteen is chosen because it
+     * is wider than every fractional field in the reference records -- the widest is the two decimal
+     * digits of {@code PIC S9(10)V99} and the interest rate's two at line 7 of
+     * {@code app/cpy/CVTRA02Y.cpy} -- and wider than any intermediate the interest division produces,
+     * while remaining small enough that reduction is a constant-cost operation.</p>
+     *
+     * <p>Trade-offs: the bound converts a class of denial-of-service input into a rejected value. A
+     * value declaring an enormous number of fractional places, whether written as digits or implied by
+     * exponent notation, forces the reduction to materialise every one of those places before it can
+     * discard them; a request carrying such a value would occupy processor time and heap far out of
+     * proportion to its size. The cost accepted is that a caller with a legitimate need for more than
+     * fifteen fractional places must reduce the value itself first, and no such caller exists in this
+     * migration.</p>
+     */
+    public static final int MAX_INPUT_SCALE = 15;
+
+    /**
+     * The greatest number of significant digits a caller-supplied value may carry before reduction.
+     *
+     * <p>Assumptions: twelve significant digits is the reference domain, being the ten integer and two
+     * decimal digits of {@code PIC S9(10)V99}. The bound here is set at {@code MAX_INPUT_SCALE} plus
+     * those twelve so that a value inside the domain carrying the widest admitted fraction still
+     * passes, and so that the check bounds work rather than duplicating the domain check that
+     * {@code MAX_MAGNITUDE} already performs on the reduced value.</p>
+     */
+    public static final int MAX_INPUT_PRECISION = MAX_INPUT_SCALE + 12;
+
+    /**
+     * The one grammar an amount in text form may take: an optional sign, digits, and a bounded
+     * fraction, with no exponent.
+     *
+     * <p>Alternatives Considered: relying on the exact decimal type's own syntax and rejecting
+     * afterwards whatever fell outside the domain. Rejected because that syntax admits exponent
+     * notation, and an exponent lets four characters declare a value whose reduction to cents would
+     * have to produce billions of digit positions -- a disproportionate allocation provoked by a
+     * payload smaller than this sentence. This grammar admits no exponent at all, so the digit count
+     * of a value is bounded by the character count of the text that carried it.</p>
+     *
+     * <p>Assumptions: a leading plus sign is admitted because the reference report masks emit one --
+     * {@code +ZZZ,ZZZ,ZZZ.ZZ} at {@code app/cpy/CVTRA07Y.cpy} -- and a value read back from such a
+     * rendering would otherwise be refused for a character the reference itself wrote. A bare decimal
+     * point with no integer digit is not admitted, because every reference field declares its integer
+     * positions and a value that declares none did not come from one.</p>
+     */
+    private static final Pattern PLAIN_DECIMAL =
+            Pattern.compile("[+-]?[0-9]{1,20}(\\.[0-9]{1," + MAX_INPUT_SCALE + "})?");
+
+    /**
      * The zero amount, canonical at {@code SCALE} decimal places.
      *
      * <p>Assumptions: a shared constant is safe to expose because this type is immutable, so no caller
@@ -349,7 +359,10 @@ public final class Money implements Comparable<Money> {
      * @throws NullPointerException if {@code value} is {@code null}, because a monetary field under this
      *     contract has no representation for an absent amount and a caller holding one has a defect to
      *     address rather than a zero to substitute
-     * @throws ArithmeticException if the magnitude of the reduced value exceeds {@code MAX_MAGNITUDE}
+     * @throws ArithmeticException if {@code value} declares a scale outside the range bounded by
+     *     {@code MAX_INPUT_SCALE} and {@code MAX_INPUT_PRECISION}, or a precision above
+     *     {@code MAX_INPUT_PRECISION}, both of which are checked before any reduction is attempted; or
+     *     if the magnitude of the reduced value exceeds {@code MAX_MAGNITUDE}
      */
     public static Money of(BigDecimal value) {
         return new Money(canonicalize(value, "value"));
@@ -361,24 +374,53 @@ public final class Money implements Comparable<Money> {
      * <p>This is the factory the JSON wire form reads through, since the wire carries money as a string
      * rather than as a number.</p>
      *
-     * @param text the amount in decimal text, such as {@code "-1234.56"}; must not be {@code null} and
-     *     must be a value the {@link BigDecimal} string constructor accepts
+     * @param text the amount in decimal text, such as {@code "-1234.56"}; must not be {@code null},
+     *     must be at most {@code MAX_INPUT_LENGTH} characters, and must match the plain-decimal
+     *     grammar of an optional sign, at least one digit and at most {@code MAX_INPUT_SCALE} digits
+     *     after a single decimal point. Exponent notation is not admitted
      * @return an immutable amount at exactly {@code SCALE} decimal places
      * @throws NullPointerException if {@code text} is {@code null}
-     * @throws NumberFormatException if {@code text} is not a valid decimal representation, which is
-     *     raised rather than absorbed so that a malformed payload is reported at the boundary that
-     *     received it instead of becoming a zero further in
+     * @throws NumberFormatException if {@code text} is longer than {@code MAX_INPUT_LENGTH} or is not
+     *     a plain decimal amount, which is raised rather than absorbed so that a malformed payload is
+     *     reported at the boundary that received it instead of becoming a zero further in. Neither
+     *     message quotes {@code text}, because the value is caller-supplied and the message is bound
+     *     for a log
      * @throws ArithmeticException if the magnitude of the reduced value exceeds {@code MAX_MAGNITUDE}
      */
     public static Money of(String text) {
         Objects.requireNonNull(text, "text must not be null");
 
+        // WHY : Assumptions: the length is checked before the grammar and the grammar before the
+        //       parse, so the amount of work an untrusted value can provoke is settled by two
+        //       comparisons on characters. The order is the point: the exact decimal type's string
+        //       constructor accepts exponent notation, and an exponent is a compact way to declare an
+        //       enormous number of digit positions -- a handful of characters can ask for a value that
+        //       the reduction below would have to materialise place by place before it could discard
+        //       any of them. Rejecting on shape first means such a value never reaches a constructor
+        //       at all.
+        if (text.length() > MAX_INPUT_LENGTH) {
+            throw new NumberFormatException(
+                    "monetary text is " + text.length() + " characters, exceeding the "
+                            + MAX_INPUT_LENGTH + " a plain decimal amount may carry");
+        }
+
         // WHY : Alternatives Considered: parsing with a locale-aware decimal formatter was evaluated
         //       and rejected. The wire form of this contract is a fixed, locale-independent decimal
         //       string, and a locale-aware parse would read the group separator of the report mask as
         //       a decimal point under a locale that uses the comma that way, turning a thousand into
-        //       one. The BigDecimal string constructor accepts exactly one syntax in every locale,
+        //       one. The plain-decimal grammar below accepts exactly one syntax in every locale,
         //       which is the property wanted here.
+        //       Alternatives Considered: catching the failure the reduction raises on an
+        //       exponent-notation value, rather than refusing the notation up front. Rejected because
+        //       the failure arrives only after the work has been done, so the cost is paid whether the
+        //       value is accepted or not.
+        if (!PLAIN_DECIMAL.matcher(text).matches()) {
+            throw new NumberFormatException(
+                    "monetary text is not a plain decimal amount; the accepted form is an optional"
+                            + " sign, at least one digit, and at most " + MAX_INPUT_SCALE
+                            + " digits after a single decimal point, with no exponent");
+        }
+
         return of(new BigDecimal(text));
     }
 
@@ -646,7 +688,6 @@ public final class Money implements Comparable<Money> {
         Objects.requireNonNull(annualRatePercentage, "annualRatePercentage must not be null");
         Objects.requireNonNull(roundingMode, "roundingMode must not be null");
 
-        // WHAT: form the product at full precision, applying no scale and no rounding to it.
         // WHY : Assumptions: BigDecimal.multiply sets the product's scale to the sum of the operand
         //       scales, so a two-place balance times a two-place rate yields a four-place product with
         //       every digit retained. That is the intermediate the reference statement's parenthesised
@@ -654,7 +695,6 @@ public final class Money implements Comparable<Money> {
         //       once.
         BigDecimal product = amount.multiply(annualRatePercentage);
 
-        // WHAT: divide by the combined months-and-percent divisor, reducing to cents in this one step.
         // WHY : Trade-offs: the scaled divide is used rather than an unscaled divide followed by a
         //       separate reduction. An unscaled divide would raise on any quotient with a non-terminating
         //       expansion, and this quotient frequently has one -- a balance of 1000.00 at a rate of 2.50
@@ -892,9 +932,35 @@ public final class Money implements Comparable<Money> {
      * @param parameterName the name of the caller's parameter, used only to compose the failure message
      * @return the value at exactly {@code SCALE} decimal places
      * @throws NullPointerException if {@code value} is {@code null}
+     * @throws ArithmeticException if {@code value} declares a scale or a precision outside the bounds
+     *     {@code MAX_INPUT_SCALE} and {@code MAX_INPUT_PRECISION} set, which is checked before the
+     *     reduction so that an extreme declaration is refused rather than materialised
      */
     private static BigDecimal canonicalize(BigDecimal value, String parameterName) {
         Objects.requireNonNull(value, parameterName + " must not be null");
+
+        // WHY : Assumptions: the shape of the value is bounded BEFORE it is reduced, and the order is
+        //       load-bearing rather than tidy. Reduction to SCALE costs work proportional to the digit
+        //       positions the value declares, so a value declaring an extreme scale or an extreme
+        //       exponent -- which a caller can construct directly, without passing through the text
+        //       factory's grammar -- would consume processor time and heap in the reduction itself,
+        //       before any domain check could reject it. Checking the declared scale and precision
+        //       costs two comparisons on metadata the value already carries.
+        //       Alternatives Considered: bounding only through MAX_MAGNITUDE on the reduced value.
+        //       Rejected because that bound is reached after the expensive step, so it detects the
+        //       value without preventing the cost of admitting it.
+        if (value.scale() > MAX_INPUT_SCALE || value.scale() < -MAX_INPUT_PRECISION
+                || value.precision() > MAX_INPUT_PRECISION) {
+            // WHY : Trade-offs: the message reports the declared scale and precision and never the
+            //       digits. Those two numbers are what identify the defect -- a value arriving with a
+            //       scale of nine figures came from a mis-parsed exponent, not from a record -- while
+            //       the digits themselves could be an unbounded quantity of attacker-chosen text
+            //       heading for a log, which is the exposure this whole check exists to remove.
+            throw new ArithmeticException(
+                    parameterName + " declares scale " + value.scale() + " and precision "
+                            + value.precision() + ", outside the admitted scale of at most "
+                            + MAX_INPUT_SCALE + " and precision of at most " + MAX_INPUT_PRECISION);
+        }
 
         // WHY : Assumptions: setScale with an explicit mode is used rather than a bare setScale. The bare
         //       form raises whenever a reduction would discard a non-zero digit, which would make a
@@ -916,17 +982,25 @@ public final class Money implements Comparable<Money> {
      */
     private static BigDecimal requireWithinDomain(BigDecimal scaledAmount) {
         if (scaledAmount.abs().compareTo(MAX_MAGNITUDE) > 0) {
-            // WHY : Assumptions: the message quotes the offending amount in plain text rather than
-            //       reporting only the bound, because an overflow here is almost always the result of a
-            //       mis-decoded record or a mis-scaled intermediate, and the digits themselves are what
-            //       identify which. Plain text is used so a large value is not reported in exponent
-            //       notation, which would obscure exactly the digit count at issue.
+            // WHY : Refactoring Rationale: this message previously quoted the offending amount, on the
+            //       reasoning that the digits identify whether a mis-decoded record or a mis-scaled
+            //       intermediate produced it. That was withdrawn. An overflow is reached from
+            //       caller-supplied text, so quoting the amount copies attacker-chosen content into an
+            //       exception whose text becomes a log line, an alert and an error response -- a value
+            //       under one party's control being rendered by another, which is the exposure a
+            //       diagnostic must not create. The integer digit count and the bound identify the
+            //       defect exactly as well: an amount is over the domain because it declares more than
+            //       ten integer digits, and the count says how many.
+            //       Trade-offs: a maintainer diagnosing a mis-decoded field can no longer read the
+            //       value out of the log and must reproduce the decode. That cost is accepted because
+            //       the field's identity travels with the decoder's own diagnostic, which names the
+            //       field and its offset without naming its content.
             throw new ArithmeticException(
-                    "amount " + scaledAmount.toPlainString() + " exceeds the reference money domain of "
+                    "an amount declaring " + (scaledAmount.precision() - scaledAmount.scale())
+                            + " integer digits exceeds the reference money domain of "
                             + MAX_MAGNITUDE.toPlainString());
         }
 
         return scaledAmount;
     }
 }
-

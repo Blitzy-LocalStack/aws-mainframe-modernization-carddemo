@@ -11,13 +11,12 @@
 #   The defining property of this file is a thing it does NOT contain. No
 #   variable declared here accepts a password, a secret string, a credential
 #   value, or a path to one. Every credential this module manages is GENERATED
-#   at apply time by a `random_password` resource in main.tf and written
-#   straight into Secrets Manager, so a credential value is never expressed in
+#   ephemerally and written through a write-only provider argument, so a
+#   credential value is never expressed in source or retained in state.
 #   this repository in any form. That omission is deliberate and load-bearing:
 #   it is the mechanism that makes "no secrets committed to the repository" a
 #   structural property of the configuration rather than something a reviewer
-#   has to notice. See the rejected-alternative block beside
-#   `database_master_username` for the full reasoning.
+#   has to notice.
 #
 #   The variables here are therefore all NON-SECRET: naming components, the
 #   key to encrypt under, generation parameters (how long a password should be,
@@ -33,19 +32,21 @@
 #                                       root must state it.
 #   kms_key_arn                       - string. The customer-managed key the
 #                                       secret values are encrypted under.
-#   database_master_username          - string. Login NAME for the Aurora
-#                                       master user. Not a credential.
+#   aurora_cluster_arn                - string. Data API target cluster.
+#   aurora_master_secret_arn          - string. RDS-managed master reference.
+#   aurora_host                       - string. Writer endpoint.
+#   aurora_port                       - number. PostgreSQL listener port.
+#   aurora_database_name              - string. Database used for rotation.
 #   password_length                   - number. Character count for each
 #                                       generated password.
 #   service_credential_names          - set(string). One credential is created
 #                                       per name in this set.
 #   recovery_window_in_days           - number. Days a deleted secret stays
 #                                       recoverable, or 0 for none.
-#   rotation_lambda_arn               - string, nullable. Operator-supplied
-#                                       rotation function; null disables
-#                                       rotation.
-#   rotation_automatically_after_days - number, nullable. Rotation interval;
-#                                       null disables rotation.
+#   initial_secret_version            - number. Write-only initial revision.
+#   rotation_automatically_after_days - number. Rotation interval.
+#   rotation_log_retention_in_days    - number. Lambda log retention.
+#   rotation_permissions_boundary_arn - string. Lambda IAM boundary.
 #   tags                              - map(string). Tags applied to every
 #                                       secret this module creates.
 #
@@ -72,7 +73,7 @@
 #     shape. A value that cannot be supplied cannot be committed; a value that
 #     can be supplied relies on every future contributor choosing not to put
 #     it in a tfvars file. The detailed rationale, and the baseline defect it
-#     replaces, are recorded beside `database_master_username` below.
+#     replaces, are encoded by the absence of any credential-valued input.
 #   - Assumptions: this file is parsed as part of a MODULE, never a root. Its
 #     provider and CLI constraints come from
 #     infra/modules/secrets/versions.tf, and its values come from
@@ -207,6 +208,17 @@ variable "kms_key_arn" {
   }
 }
 
+variable "rotation_log_kms_key_arn" {
+  description = "Customer-managed KMS key ARN used only for the rotation Lambda CloudWatch log group. Kept separate from kms_key_arn so the Logs service grant does not widen the credential-store key policy."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-fA-F-]{36}$", var.rotation_log_kms_key_arn))
+    error_message = "rotation_log_kms_key_arn must be an anchored KMS key ARN."
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Credential generation parameters
 #
@@ -259,45 +271,69 @@ variable "kms_key_arn" {
 #       generated password protects. Treating the name as a secret would also
 #       be self-defeating: it has to be legible in the Aurora cluster
 #       definition, in connection strings and in operator runbooks.
-variable "database_master_username" {
+variable "aurora_cluster_arn" {
   description = <<-EOT
-    Login name for the Aurora PostgreSQL master user. This is an identifier,
-    not a credential: the matching password is generated at apply time and
-    never appears as an input. Safe to set in a committed tfvars file, and the
-    value the calling root also passes to the Aurora cluster so the cluster and
-    the stored credential agree.
+    ARN of the Aurora cluster whose service-role credentials this module
+    rotates through RDS Data API. Supplied by aurora-postgresql.
   EOT
   type        = string
-  default     = "carddemo_admin"
+  nullable    = false
 
   validation {
-    condition     = can(regex("^[a-zA-Z][a-zA-Z0-9_]*$", var.database_master_username))
-    error_message = "The database_master_username must begin with a letter and contain only letters, digits and underscores -- for example \"carddemo_admin\"."
+    condition     = can(regex("^arn:[a-z0-9-]+:rds:[a-z0-9-]+:[0-9]{12}:cluster:[A-Za-z0-9-]+$", var.aurora_cluster_arn))
+    error_message = "aurora_cluster_arn must be an anchored Aurora cluster ARN."
   }
+}
 
-  # WHY : Trade-offs: the ceiling is 16, the NARROWER of two figures AWS
-  #       publishes: the RDS for PostgreSQL guide documents a master username
-  #       of 1 to 16 alphanumeric characters, while Aurora PostgreSQL documents
-  #       up to 63 (PostgreSQL's own identifier limit). 16 is the only ceiling
-  #       valid under both, and the entire point of checking here is to fail at
-  #       plan instead of at cluster creation, so the conservative figure is
-  #       the correct one. The cost is rejecting a 17-to-63-character username
-  #       that Aurora alone would accept -- a length nothing in this stack
-  #       needs. Note also what this check cannot do: it does not know the
-  #       engine's reserved words, so a syntactically valid but reserved name
-  #       still fails at cluster creation.
+variable "aurora_master_secret_arn" {
+  description = "ARN of the RDS-managed Aurora master secret used only by the rotation Lambda through RDS Data API."
+  type        = string
+  nullable    = false
+
   validation {
-    condition     = length(var.database_master_username) >= 1 && length(var.database_master_username) <= 16
-    error_message = "The database_master_username must be 1 to 16 characters, the narrower of the two limits AWS publishes for a PostgreSQL master username."
+    condition     = can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.aurora_master_secret_arn))
+    error_message = "aurora_master_secret_arn must be an anchored Secrets Manager ARN including its six-character suffix."
+  }
+}
+
+variable "aurora_host" {
+  description = "Writer endpoint of the Aurora cluster, embedded in each service credential document and checked by the rotation Lambda."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9.-]+\\.rds\\.amazonaws\\.com$", var.aurora_host))
+    error_message = "aurora_host must be an RDS DNS endpoint ending in .rds.amazonaws.com."
+  }
+}
+
+variable "aurora_port" {
+  description = "Aurora PostgreSQL listener port embedded in each service credential document."
+  type        = number
+  nullable    = false
+  default     = 5432
+
+  validation {
+    condition     = floor(var.aurora_port) == var.aurora_port && var.aurora_port >= 1 && var.aurora_port <= 65535
+    error_message = "aurora_port must be a whole TCP port from 1 through 65535."
+  }
+}
+
+variable "aurora_database_name" {
+  description = "Initial Aurora database name used by RDS Data API during credential rotation."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9_]{0,62}$", var.aurora_database_name))
+    error_message = "aurora_database_name must be a lower-case PostgreSQL identifier of at most 63 characters."
   }
 }
 
 variable "password_length" {
   description = <<-EOT
-    Number of characters in each password this module generates -- the Aurora
-    master credential and every service credential. A generation parameter, not
-    a credential: it constrains the value main.tf produces and reveals nothing
-    about it.
+    Number of alphanumeric characters in each ephemeral initial service-role
+    password. A generation parameter, not a credential.
   EOT
   type        = number
   default     = 32
@@ -315,12 +351,12 @@ variable "password_length" {
   #       resolve than the plan-time error this converts it into. The default of
   #       32 sits clear of both bounds so neither edge is exercised by accident.
   validation {
-    condition     = var.password_length >= 16 && var.password_length <= 128
-    error_message = "The password_length must be 16 to 128: 128 is the longest a PostgreSQL master password may be, and 16 is this module's floor."
+    condition     = var.password_length >= 32 && var.password_length <= 128
+    error_message = "The password_length must be 32 to 128 characters, matching the rotation Lambda's bounded password grammar."
   }
 }
 
-# WHY : Refactoring Rationale -- this input previously defaulted to the EMPTY
+# WHY : Refactoring Rationale: this input previously defaulted to the EMPTY
 #       set, on the reasoning that a default here would be a second copy of the
 #       service inventory and a copy is what drifts. That reasoning was wrong in
 #       one specific way, and the correction is recorded rather than quietly
@@ -335,7 +371,7 @@ variable "password_length" {
 #       expression of it is a default that states the eight names plus a
 #       validation that refuses anything else, not an empty set the caller is
 #       trusted to fill in correctly.
-# WHY : Assumption -- drift is answered by the validation rather than by the
+# WHY : Assumptions: drift is answered by the validation rather than by the
 #       absence of a default. A ninth bounded context now fails HERE at plan
 #       time, naming this variable, instead of applying cleanly against a stale
 #       inventory; that is the opposite of the silent staleness the empty default
@@ -343,7 +379,7 @@ variable "password_length" {
 #       repository set in infra/modules/ecr, the dataset prefixes in
 #       infra/modules/s3-datasets and the listener rules in infra/modules/alb, so
 #       the four places the topology is enumerated all fail the same way.
-# WHY : Assumption -- the set contains only role NAMES, so it is non-secret and
+# WHY : Assumptions: the set contains only role NAMES, so it is non-secret and
 #       belongs in source. What it must never contain is a password: main.tf
 #       generates each credential with random_password during apply and writes it
 #       straight to Secrets Manager.
@@ -376,14 +412,14 @@ variable "service_credential_names" {
   ]
   nullable = false
 
-  # WHY : Assumption -- membership in a closed list is checked rather than a name
+  # WHY : Assumptions: membership in a closed list is checked rather than a name
   #       SHAPE, because shape was never the real constraint. The eight names are
   #       fixed by the bootstrap SQL that creates the roles and binds their
   #       credentials, so any other name is wrong however well-formed it is. A
   #       shape check accepted "ledger", "carddemo_Ledger" was already caught by
   #       the lowercase rule, and "carddemo_reports" would have passed silently --
   #       and only the closed list rejects all three.
-  # WHY : Trade-offs -- this module now holds a copy of the eight role names,
+  # WHY : Trade-offs: this module now holds a copy of the eight role names,
   #       which is exactly the duplication the default above declines to make, and
   #       the two decisions are not in conflict. A stale DEFAULT applies cleanly
   #       and provisions the wrong set silently; a stale VALIDATION LIST fails the
@@ -391,7 +427,7 @@ variable "service_credential_names" {
   #       context added to the bootstrap SQL and not to this list stops the apply
   #       at review time rather than half-provisioning. The copy is safe in
   #       precisely the direction the default was not.
-  # WHY : Assumption -- a SUBSET is accepted rather than all eight demanded. A
+  # WHY : Assumptions: a SUBSET is accepted rather than all eight demanded. A
   #       root that provisions a partial stack, or one environment brought up
   #       ahead of another, is a coherent state this module should not forbid; the
   #       bootstrap SQL is where the requirement that ALL eight roles be bound is
@@ -416,7 +452,7 @@ variable "service_credential_names" {
     error_message = "Each service_credential_names element must be lowercase letters, digits and underscores, start with a letter, and be at most 63 characters -- for example \"carddemo_ledger\"."
   }
 
-  # WHY : Assumption -- the eight role names are a contract with a SQL artifact,
+  # WHY : Assumptions: the eight role names are a contract with a SQL artifact,
   #       not a naming convention. data-migration/sql/V0__schemas_and_roles.sql
   #       creates exactly these eight roles, and its own header states that the
   #       names are the source of truth: the datasource username each service
@@ -425,12 +461,12 @@ variable "service_credential_names" {
   #       therefore a credential no service reads, and a role left without one is a
   #       service that cannot authenticate -- and BOTH states apply cleanly, which
   #       is what makes an unvalidated inventory here expensive.
-  #       Assumption -- equality needs both halves. The setunion comparison alone
+  #       Assumptions: equality needs both halves. The setunion comparison alone
   #       proves only that every name supplied is one of the eight, so a root
   #       creating a single credential would satisfy it; the count closes that,
   #       because a set holds no duplicates, so eight members drawn from a set of
   #       eight is that set exactly.
-  #       Trade-off -- a ninth bounded context now needs an edit here. Accepted:
+  #       Trade-offs: a ninth bounded context now needs an edit here. Accepted:
   #       that context also needs a schema and a role in the bootstrap SQL, a
   #       repository in infra/modules/ecr and, if it is online, a listener rule in
   #       infra/modules/alb, each of which is enumerated in the module that owns
@@ -503,71 +539,60 @@ variable "recovery_window_in_days" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Rotation
-#
-# WHY : Assumptions: rotation is OFF by default and nothing in this stack
-#       implements it. Rotating a Secrets Manager value requires a rotation
-#       Lambda that performs the change on both the secret and the database,
-#       and no such function exists anywhere in this migration's scope. (The
-#       rotation the design does provide is KMS KEY rotation, configured in
-#       infra/modules/kms on the four customer-managed keys -- a different
-#       mechanism protecting the key, not the value.) These two inputs exist so
-#       an operator who later supplies a rotation function can enable it, and
-#       so a policy scanner that expects a rotation configuration can be
-#       satisfied, without this module having to change shape to accommodate
-#       either. Both default to null, which leaves rotation unconfigured.
-# -----------------------------------------------------------------------------
-
-variable "rotation_lambda_arn" {
+variable "initial_secret_version" {
   description = <<-EOT
-    ARN of an operator-supplied Lambda function that performs rotation for the
-    secrets this module creates. Null -- the default -- leaves rotation
-    unconfigured, which is the state this stack ships in: no rotation function
-    is in scope, so nothing here implements rotation. Supplying a function ARN
-    is what enables it.
+    Monotonic version for the write-only initial secret documents. Increment
+    only when deliberately replacing every initial value before rotation owns
+    the credentials; ordinary applies keep this stable and store no password.
   EOT
-  type        = string
-  nullable    = true
-  default     = null
+  type        = number
+  nullable    = false
+  default     = 1
 
-  # WHY : Trade-offs: same shape-not-identity limit as kms_key_arn above: this
-  #       catches a non-Lambda ARN wired in by mistake, and cannot verify the
-  #       function actually implements the rotation protocol. The null branch
-  #       is written first so the default short-circuits before the regex ever
-  #       sees a null value.
   validation {
-    condition     = var.rotation_lambda_arn == null || can(regex("^arn:[a-z0-9-]+:lambda:", var.rotation_lambda_arn))
-    error_message = "The rotation_lambda_arn must be null to leave rotation unconfigured, or a Lambda ARN of the form arn:<partition>:lambda:..."
+    condition     = floor(var.initial_secret_version) == var.initial_secret_version && var.initial_secret_version >= 1
+    error_message = "initial_secret_version must be a whole number of at least 1."
   }
 }
 
 variable "rotation_automatically_after_days" {
   description = <<-EOT
-    Interval in days between automatic rotations, used only when a rotation
-    function is supplied. Null -- the default -- leaves rotation unconfigured.
-    Meaningless on its own: the interval schedules a rotation but the function
-    named by rotation_lambda_arn is what performs it.
+    Interval in days between automatic service-role credential rotations.
+    Rotation is mandatory and the Lambda is created by this module.
   EOT
   type        = number
-  nullable    = true
-  default     = null
+  nullable    = false
+  default     = 30
 
   validation {
-    condition     = var.rotation_automatically_after_days == null || (var.rotation_automatically_after_days >= 1 && var.rotation_automatically_after_days <= 1000)
-    error_message = "The rotation_automatically_after_days must be null, or 1 to 1000 days, the interval range Secrets Manager accepts."
+    condition     = floor(var.rotation_automatically_after_days) == var.rotation_automatically_after_days && var.rotation_automatically_after_days >= 1 && var.rotation_automatically_after_days <= 1000
+    error_message = "rotation_automatically_after_days must be a whole number from 1 through 1000."
   }
+}
 
-  # WHY : Trade-offs: this rule reads the OTHER rotation variable, which a
-  #       validation block may do, so that the one genuinely incoherent
-  #       combination is caught here. An interval with no function schedules
-  #       rotations that nothing can carry out: Secrets Manager rejects a
-  #       rotation configuration lacking a function, so the apply fails after
-  #       the secrets exist. The reverse pairing is deliberately NOT an error --
-  #       a function with no interval is a valid on-demand-only configuration.
+variable "rotation_log_retention_in_days" {
+  description = "CloudWatch retention for the rotation Lambda log group."
+  type        = number
+  nullable    = false
+  default     = 90
+
   validation {
-    condition     = var.rotation_automatically_after_days == null || var.rotation_lambda_arn != null
-    error_message = "Setting rotation_automatically_after_days also requires rotation_lambda_arn: set both to enable rotation, or leave both null to disable it."
+    condition = contains([
+      1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731,
+      1096, 1827, 2192, 2557, 2922, 3288, 3653,
+    ], var.rotation_log_retention_in_days)
+    error_message = "rotation_log_retention_in_days must be one of the CloudWatch Logs supported retention values."
+  }
+}
+
+variable "rotation_permissions_boundary_arn" {
+  description = "Same-account customer-managed IAM policy ARN applied as the rotation Lambda execution role's permissions boundary."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.rotation_permissions_boundary_arn))
+    error_message = "rotation_permissions_boundary_arn must be an anchored customer-managed IAM policy ARN."
   }
 }
 
@@ -594,4 +619,80 @@ variable "tags" {
   EOT
   type        = map(string)
   default     = {}
+}
+
+variable "service_tls_certificate" {
+  description = <<-EOT
+    PEM certificate or certificate chain presented by the CardDemo services'
+    internal HTTPS listeners. Imported material: supply it through an operator
+    secret channel, never a committed tfvars file. main.tf stores the complete
+    scalar value under the Secrets Manager CMK so ECS can inject the base secret
+    ARN directly into SERVER_SSL_CERTIFICATE. Leave null -- together with
+    service_tls_private_key -- when the calling root issues and owns the pair
+    itself, in which case this module creates no TLS entry at all. Both
+    environment roots in this package do exactly that, so null is their effective
+    value and the two inputs exist for a root that imports material instead.
+  EOT
+  type        = string
+  sensitive   = true
+  default     = null
+
+  # WHY : Assumptions: marker validation catches the common cross-wire -- a key
+  #       passed as the certificate -- before Secrets Manager accepts it. It
+  #       deliberately does not parse X.509 or validate expiry and SANs; those
+  #       properties belong to the issuing authority and cannot be proved by a
+  #       Terraform string check.
+  validation {
+    condition = var.service_tls_certificate == null || (
+      strcontains(var.service_tls_certificate, "-----BEGIN CERTIFICATE-----") &&
+      strcontains(var.service_tls_certificate, "-----END CERTIFICATE-----") &&
+      !strcontains(var.service_tls_certificate, "PRIVATE KEY")
+    )
+    error_message = "The service_tls_certificate must contain PEM BEGIN/END CERTIFICATE markers and must not contain private-key material."
+  }
+}
+
+variable "service_tls_private_key" {
+  description = <<-EOT
+    PEM private key paired with service_tls_certificate. Imported material:
+    supply it through an operator secret channel, never a committed tfvars file.
+    main.tf stores the scalar value under the Secrets Manager CMK so ECS can
+    inject its base ARN directly into SERVER_SSL_CERTIFICATE_PRIVATE_KEY. Leave
+    null -- together with service_tls_certificate -- when the calling root issues
+    and owns the pair itself.
+  EOT
+  type        = string
+  sensitive   = true
+  default     = null
+
+  # WHY : Trade-offs: accepting the three standard unencrypted PEM labels
+  #       supports PKCS#8, RSA and EC keys without pretending a string validation
+  #       can prove the key matches the certificate. Checking each BEGIN/END pair
+  #       together catches a truncated or cross-labelled value while leaving
+  #       cryptographic pairing to the Spring listener.
+  validation {
+    condition = var.service_tls_private_key == null || anytrue([
+      strcontains(var.service_tls_private_key, "-----BEGIN PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN RSA PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END RSA PRIVATE KEY-----"),
+      strcontains(var.service_tls_private_key, "-----BEGIN EC PRIVATE KEY-----") &&
+      strcontains(var.service_tls_private_key, "-----END EC PRIVATE KEY-----"),
+    ])
+    error_message = "The service_tls_private_key must contain matching PEM private-key markers such as BEGIN/END PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY."
+  }
+  # WHY : Assumptions: the pair is all-or-nothing, and this is the check that makes
+  #       "conditional" mean "both or neither" rather than "whatever arrives".
+  #       Supplying one half configures nothing -- a listener needs a certificate
+  #       AND its key -- so a root that wires one and forgets the other would apply
+  #       cleanly and then fail at task start with a TLS error that names neither
+  #       input.
+  #       Alternatives Considered: making both required. Rejected because it blocks
+  #       an incremental stand-up of the data tier before any certificate exists,
+  #       which is a legitimate order of operations for a new environment.
+  validation {
+    condition     = (var.service_tls_certificate == null) == (var.service_tls_private_key == null)
+    error_message = "service_tls_certificate and service_tls_private_key must be supplied together or both left null: one half of the pair configures no listener."
+  }
+
 }

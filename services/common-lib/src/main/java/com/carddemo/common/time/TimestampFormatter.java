@@ -373,7 +373,6 @@ public final class TimestampFormatter {
         //       idiom for a mandatory argument, so no local convention is invented for it.
         Objects.requireNonNull(timestamp, "timestamp must not be null");
 
-        // WHAT: establish the year is renderable in four characters before rendering anything.
         // WHY : Trade-offs: the alternative is to render first and then measure the result, which
         //       this method also does on the line below, and on its own that would be enough to stop
         //       a wrong-width value escaping. Checking the year FIRST is what makes the failure
@@ -383,7 +382,6 @@ public final class TimestampFormatter {
         //       the rule, the second is the proof that the rule was sufficient.
         LocalDateTime supported = requireSupportedYear(timestamp);
 
-        // WHAT: truncate to microseconds once, here, and render the truncated value.
         // WHY : Assumptions: rendering the raw value would produce the same six digits, because the
         //       .SSSSSS fraction field truncates rather than rounds, so this line does not change any
         //       returned string. What it changes is that ONE truncation now defines the contract
@@ -473,13 +471,12 @@ public final class TimestampFormatter {
      * @throws NullPointerException if {@code timestamp} is {@code null}
      */
     public static LocalDateTime normalize(LocalDateTime timestamp) {
-        // WHAT: reject a null before touching the value, matching the idiom used on every entry
-        //       point here.
-        // WHY : this method is called from format above, so a null reaching it would otherwise be
-        //       reported from two call depths below the caller's own line.
+        // Alternatives Considered: letting the null surface from truncatedTo was rejected. This
+        //       method is called from format above, so a null reaching it would then be reported
+        //       from two call depths below the caller's own line, naming neither this parameter
+        //       nor the entry point the caller actually invoked.
         Objects.requireNonNull(timestamp, "timestamp must not be null");
 
-        // WHAT: truncate toward the start of the second, at microsecond granularity.
         // WHY : Assumptions: ChronoUnit.MICROS is the platform's own name for the unit this contract
         //       carries, and truncatedTo is documented to discard the remainder rather than round it,
         //       which is exactly the semantic the paragraph above requires. Writing the equivalent
@@ -507,11 +504,11 @@ public final class TimestampFormatter {
      *     ambient clock to fall back to
      */
     public static LocalDateTime normalizeNow(Clock clock) {
-        // WHAT: validate the clock, then read it exactly once.
-        // WHY : one read per call is the same obligation formatNow above satisfies, and it is the
-        //       reason this method takes a clock rather than reading an ambient one: a test can pin
-        //       it, and a caller cannot read two different instants for one unit of work by
-        //       accident.
+        // Alternatives Considered: reading an ambient clock instead of accepting one was rejected,
+        //       for the two reasons formatNow above is given a clock for. An ambient clock cannot be
+        //       pinned by a test, and it lets a caller read two different instants for one unit of
+        //       work by accident, which is exactly the drift the one-read-per-call obligation exists
+        //       to prevent.
         Objects.requireNonNull(clock, "clock must not be null");
 
         return normalize(LocalDateTime.now(clock));
@@ -556,7 +553,6 @@ public final class TimestampFormatter {
         //       the more useful half of the diagnosis.
         String checked = requireContractLength(timestamp);
 
-        // WHAT: range-check the year of the parsed value, and report a breach as a parse failure.
         // WHY : Assumptions: the width check above cannot catch this one. A year of 0999 is four
         //       characters like any other, so "0999-06-10 19:27:53.000000" is exactly twenty-six
         //       characters and parses cleanly, yet it is outside the range this contract declares and
@@ -650,7 +646,6 @@ public final class TimestampFormatter {
         //       lenient alternative would have done.
         LocalDate date = LocalDate.parse(datePrefix(timestamp));
 
-        // WHAT: apply the contract's year range to the typed result as well.
         // WHY : Assumptions: one contract carries one year range, so the range is checked wherever a
         //       year crosses this class's boundary rather than only where it is rendered. Without
         //       this line the typed reader would accept a year that parse above rejects and that
@@ -717,7 +712,6 @@ public final class TimestampFormatter {
         int year = timestamp.getYear();
 
         if (year < MIN_SUPPORTED_YEAR || year > MAX_SUPPORTED_YEAR) {
-            // WHAT: state the offending year, the range and the reason the range exists.
             // WHY : Trade-offs: a bare statement of the rule would be shorter, and it would leave the
             //       reader to discover why a date library that accepts the year is being refused by
             //       this class. Naming the width is what makes the refusal make sense, because the
@@ -752,7 +746,6 @@ public final class TimestampFormatter {
         int year = parsed.getYear();
 
         if (year < MIN_SUPPORTED_YEAR || year > MAX_SUPPORTED_YEAR) {
-            // WHAT: raise the platform's parse exception with an error index of zero.
             // WHY : Assumptions: zero is where the year begins in this form, so the index points at
             //       the component that failed rather than at an arbitrary position. Alternatives
             //       Considered: re-throwing whatever the formatter produced was not possible here,
