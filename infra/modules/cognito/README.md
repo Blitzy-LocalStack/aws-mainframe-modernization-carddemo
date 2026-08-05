@@ -1,26 +1,458 @@
-# Cognito module
+# `infra/modules/cognito/` — Identity provider for the migrated sign-on path
 
-This module creates the user pool, app client, resource-server scopes,
-`carddemo-admin` and `carddemo-user` groups, optional opaque seed identities and
-Secrets Manager entries for generated bootstrap and client credentials.
+> **Purpose.** This module provisions the identity provider that replaces the
+> mainframe sign-on path: a Cognito user pool standing in for the `USRSEC` VSAM
+> file, one confidential app client for the auth service, a resource server and
+> its scope vocabulary, the two groups `carddemo-admin` and `carddemo-user` that
+> carry the baseline's two user types, an optional hosted-UI domain, and — when a
+> caller asks for them — seed identities whose initial credentials are generated
+> during apply and written to Secrets Manager rather than authored anywhere.
+>
+> **Source of truth.** `versions.tf`, `variables.tf`, `main.tf`, `outputs.tf` and
+> `seed_user_bootstrap.py` in this directory are authoritative for what the module
+> does. Where this document and those files disagree, **the files win** and this
+> document is the defect. The behaviour they encode derives from the immutable
+> baseline: [`app/cpy/CSUSR01Y.cpy`](../../../app/cpy/CSUSR01Y.cpy),
+> [`app/cbl/COSGN00C.cbl`](../../../app/cbl/COSGN00C.cbl),
+> [`app/cpy/COCOM01Y.cpy`](../../../app/cpy/COCOM01Y.cpy),
+> [`app/csd/CARDDEMO.CSD`](../../../app/csd/CARDDEMO.CSD) and
+> [`app/jcl/DUSRSECJ.jcl`](../../../app/jcl/DUSRSECJ.jcl), which are read as the
+> specification and are never modified.
 
-## Design decisions
+Assumptions: this README exists because of the project's single user-specified rule, **Rule 1
+(Explainability)**, and not because the migration requirements asked for it. HCL
+has no docstring construct, so the rule's obligation for Terraform is met in two
+halves: the file-header blocks, typed variables, output descriptions and adjacent
+rationale inside the four `.tf` files are the mechanical half, linted by
+[`infra/.tflint.hcl`](../../.tflint.hcl) and surfaced by
+[`infra/.terraform-docs.yml`](../../.terraform-docs.yml); this document is the
+**prose half**. The conventions it follows — the four rationale labels in their one
+permitted written form, and the `# WHAT:` / `# WHY :` idiom in every fenced command
+block — are defined in the
+[documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
 
-**Assumptions:** group names are invariants shared with the Spring JWT role
-converter. They are not caller-configurable, preventing an identity group that
-maps to no application authority.
 
-**Trade-offs:** production requires MFA and enforced threat protection while
-development uses optional MFA and audit mode. Token rotation remains enabled in
-both environments with the same minimal reuse grace.
+## The one place this migration declines parity
 
-## Validation
+Assumptions: everything else in this migration preserves observable behaviour. Identity is the
+single documented exception, and it is this module that causes it, so the reasoning
+belongs here rather than in a footnote.
+
+Refactoring Rationale: the baseline stores a password in the user record and
+compares it in the clear. The evidence below was read directly from the reference
+tree, and every line citation is exact.
+
+| Evidence | Location | What it shows |
+|---|---|---|
+| `05 SEC-USR-PWD PIC X(08).` | `app/cpy/CSUSR01Y.cpy` L21 | An eight-character password held in the clear inside the user record itself |
+| `IF SEC-USR-PWD = WS-USER-PWD` | `app/cbl/COSGN00C.cbl` L223 | A direct comparison — unhashed, unsalted, no work factor, no lockout — inside `READ-USER-SEC-FILE` (L209–L257), reached by the keyed `EXEC CICS READ` at L211–L219 |
+| Ten in-stream seed records | `app/jcl/DUSRSECJ.jcl` L35–L44 | The seed credentials are committed to this repository in the clear, and the password column holds **one shared eight-character literal, byte-identical for all ten users**. That literal is described here and deliberately never transcribed — reproducing it would plant a credential in the very tree this module exists to keep free of one |
+| `JOURNAL(NO)`, `RECOVERY(NONE)` | `app/csd/CARDDEMO.CSD` L94, L96 | The identity store had no journalling, no recovery and no encryption at rest |
+| `CONFDATA(NO)`, `RESSEC(NO)`, `CMDSEC(NO)` | `app/csd/CARDDEMO.CSD` L384–L385 on `TRANSACTION(CC00)` | On the one transaction that handles a password, confidential-data suppression was off and CICS resource and command security were both off |
+
+The target does not carry that field forward at all. Cognito owns credential
+handling, complexity enforcement, lockout and rotation; the pool's password policy
+is deliberately stronger than the baseline's, and `variables.tf` refuses to let a
+caller configure the baseline's own eight-character length back in. Downstream,
+[`V1__auth.sql`](../../../services/auth-service/src/main/resources/db/migration/V1__auth.sql)
+keeps `user_type CHAR(1)` constrained to `'A'` and `'U'` (L49) and
+`cognito_sub UUID NOT NULL UNIQUE` (L54), and **no password column of any kind**.
+
+Alternatives Considered: porting `SEC-USR-PWD` forward, either as a `custom:` pool
+attribute or as a column on `auth.users`, hashed or not. Rejected because it
+preserves the credential store this design exists to eliminate — hashing would
+improve the storage and would still leave a second credential authority to keep in
+step with the first, when Cognito already owns all of it.
+
+Alternatives Considered: a self-managed user store — a table plus a hashing library
+inside the auth service. Rejected because it moves credential handling, policy
+enforcement, lockout and rotation into application code that then has to be
+maintained and audited, against the migration's guiding principle of preferring a
+managed service where that lowers operational burden.
+
+The resulting behavioural change — a baseline credential would not satisfy this
+policy — is registered in the
+[divergence register](../../../docs/architecture/cobol-to-service-traceability.md)
+rather than presented as parity. The decision itself is recorded in
+[ADR-008](../../../docs/adr/ADR-008-security-and-identity.md), and the wider
+treatment in
+[security and identity](../../../docs/architecture/security-and-identity.md).
+
+Assumptions: **what is preserved, so this section is not read as a general licence.** The
+eight-character `SEC-USR-ID` (`app/cpy/CSUSR01Y.cpy` L18) remains the user's key
+and is the Cognito username. The two-value user-type domain is preserved as the two
+groups. The administrator-versus-user branch is preserved. The three sign-on
+message strings are preserved verbatim — but service-side, in
+`services/auth-service` and
+[`ui/src/messages/messages.ts`](../../../ui/src/messages/messages.ts), not here.
+This module owns the identity provider and nothing above it.
+
+
+## The identity record, measured
+
+Assumptions: the record layout is the contract, so the module's attribute set is
+derived from it field by field rather than designed independently.
+
+| Copybook field | Line | Picture | Bytes | Disposition in this module |
+|---|---|---|---|---|
+| `SEC-USR-ID` | L18 | `X(08)` | 8 | The Cognito username, and the key of `auth.users` |
+| `SEC-USR-FNAME` | L19 | `X(20)` | 20 | The Cognito **standard** attribute `given_name` |
+| `SEC-USR-LNAME` | L20 | `X(20)` | 20 | The Cognito **standard** attribute `family_name` |
+| `SEC-USR-PWD` | L21 | `X(08)` | 8 | **Dropped — nothing at all.** The declined-parity decision above |
+| `SEC-USR-TYPE` | L22 | `X(01)` | 1 | The custom attribute `custom:user_type`, and the group assignment |
+| `SEC-USR-FILLER` | L23 | `X(23)` | 23 | **Dropped as padding**, recorded rather than silent |
+
+`8 + 20 + 20 + 8 + 1 + 23 = 80` bytes, which is the documented `USRSEC.PS` record
+length. Two of those six fields are dropped, and both drops are stated because an
+absence otherwise leaves no trace at the point it was decided.
+
+Assumptions: `given_name` and `family_name` are Cognito standard attributes and are
+therefore **not** redeclared in the pool's `schema`. A standard attribute needs a
+schema entry only when it differs from the default, and the pool schema is
+immutable once created, so a redundant entry would be a permanent
+pool-replacement risk for no gain. Their `X(20)` widths are still enforced —
+`variables.tf` validates both against those exact copybook lines.
+
+Assumptions: the user-type domain is **closed at two values** by its condition names in
+`app/cpy/COCOM01Y.cpy`: `88 CDEMO-USRTYP-ADMIN VALUE 'A'` at L27 and
+`88 CDEMO-USRTYP-USER VALUE 'U'` at L28. `app/cbl/COSGN00C.cbl` L230–L240 branches
+exactly two ways on it — `XCTL PROGRAM('COADM01C')` at L232 for an administrator,
+`XCTL PROGRAM('COMEN01C')` at L237 otherwise — which becomes `/admin` against
+`/menu` routing on the client.
+
+| User type | Group | Precedence |
+|---|---|---|
+| `'A'` | `carddemo-admin` | 1 |
+| `'U'` | `carddemo-user` | 10 |
+
+Assumptions: **these two group names are a cross-language contract, not a naming
+preference.** They are what Cognito places in a token's `cognito:groups` claim;
+[`JwtRoleConverter`](../../../services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java)
+matches these exact strings to produce Spring Security authorities, and
+`ui/src/hooks/useAuth.ts` tests them to decide whether the admin routes are
+reachable. They are fixed in `main.tf` independently of `var.name_prefix` precisely
+so that renaming environment resources cannot silently rename the authorities every
+service recognises; renaming a group would break authorization in two languages at
+once, and the converter refuses startup when its configured values differ from its
+compiled authority contract.
+
+Assumptions: **lower precedence wins in Cognito**, which is the opposite of the
+intuitive reading and is why the numbers are explained rather than merely set. A
+user in both groups resolves to administrator, mirroring `COSGN00C`'s structure
+where the admin test comes first and the user path is the `ELSE` arm. The gap
+between 1 and 10 permits another precedence value without renumbering either.
+
+
+## RACF is mapped, not ported
+
+Refactoring Rationale: RACF has no cloud analogue and is not ported. Its role is
+filled by least-privilege IAM task roles plus the pool groups created here, and that substitution is
+documented as a **mapping** rather than as a port — no claim of feature equivalence
+is made.
+
+Only one half of that mapping belongs to this module. This module provides the
+Cognito-group half and **creates no IAM role at all**; the least-privilege task-role
+half belongs to [`infra/modules/ecs-service`](../ecs-service/README.md).
+
+Alternatives Considered: setting `role_arn` on the group resources, which the
+provider permits and which reads at first glance like the natural way to express the
+IAM half. Rejected because that attribute serves Cognito **identity pools** vending
+temporary AWS credentials to a client, and this design has no identity pool — the
+services are OAuth2 resource servers that validate a JWT, and no browser or user is
+ever given AWS credentials. Setting it would attach a role that nothing assumes, so
+it is left unset deliberately rather than by oversight.
+
+
+## What the module provisions
+
+Assumptions: the resource choices below are constrained by the baseline contracts
+and by AWS and Terraform behaviour rather than being an open-ended target design.
+The final column states the consequence under the plausible alternative instead of
+restating the HCL. The generated reference at the end of this document lists the
+same resources mechanically.
+
+| Resource | Shape | Why it is this way |
+|---|---|---|
+| `aws_cognito_user_pool.this` | Singleton | The baseline had exactly one identity store — one `DEFINE FILE(USRSEC)` at `app/csd/CARDDEMO.CSD` L88 — and one sign-on transaction reading it. A second pool would split the meaning of the group claim across two issuers |
+| — password policy | Derived from five inputs | Stronger than the baseline by intent, and floored so the baseline's own length cannot be restored |
+| — MFA, threat protection | Coupled pairs | A software-token mechanism is emitted exactly when the mode is not `OFF`, and the pool tier is derived from the threat-protection mode rather than accepted as a second input, because an inconsistent pair fails at apply rather than at plan |
+| — sign-up, recovery | Admin-only | The baseline had no self-registration path and no self-service reset; these identities carry no email address or telephone number at all, so a mail-based recovery route could never complete |
+| — `schema` | One custom attribute | `custom:user_type`, one character wide, carrying `SEC-USR-TYPE`. Authorization does not depend on it — group membership grants authority and this records lineage |
+| `aws_cloudformation_stack.app_client` | Confidential client | See the credential path below; this is the most surprising choice in the module |
+| `aws_secretsmanager_secret.app_client` | CMK-encrypted | Carries the client id and generated secret for the auth service to read at run time |
+| `terraform_data.app_client_secret_rotation` | Rotation bridge | Rotates the secret against the existing client id, so rotation never changes the JWT audience |
+| `aws_cognito_resource_server.this` | Identifier + scopes | Creates the scope vocabulary once at the pool that owns it. These scopes are **not** what an interactive sign-on presents — such a token carries only the built-in scope |
+| `aws_cognito_user_group.admin` / `.user` | Two explicit resources | The domain is closed at two values, and writing them out is what makes that visible; a `for_each` list would suggest the set is open when it is not |
+| `aws_cognito_user_pool_domain.this` | `count`, default zero | Created only when `var.domain_prefix` is set. Nothing authenticates through a hosted page, and a domain prefix is globally unique within a region, so two environments in one region would collide on apply |
+| `random_id.seed_user_secret` | Per seed user | A 128-bit handle that keeps the identity out of a secret's **name**, so listing secrets discloses no user id to a principal without permission to read the value |
+| `aws_secretsmanager_secret.seed_user` | Per seed user, CMK-encrypted | Holds the one-time initial credential |
+| `terraform_data.seed_user` | Per seed user | Creates and converges the pool user; a destroy-time counterpart removes it |
+| `aws_cognito_user_in_group.seed_user` | Per seed user | Membership is a separate resource from the user, so a role change is an in-place membership change that does not touch the identity or its credential |
+
+Alternatives Considered: keying per-seed-user resources by list position with
+`count`. Rejected because removing one entry from the middle re-indexes every
+higher-indexed instance, and Terraform then destroys and recreates users and secrets
+that nobody touched — rotating credentials as a side effect of an unrelated edit.
+The chosen `for_each` key is the eight-character user id. `var.seed_users` defaults
+to an empty list, so a root that says nothing gets the pool, the client and both
+groups with no identities at all.
+
+
+## The user-enumeration trade-off
+
+Trade-offs: this is the one place where a security correction and the migration's
+verbatim-message requirement genuinely pull against each other, so both halves are
+stated rather than one being quietly dropped.
+
+The baseline answers the two credential failure modes differently on purpose:
+`app/cbl/COSGN00C.cbl` L242–L243 returns `Wrong Password. Try again ...` when the
+keyed read succeeded but the comparison failed, and L249 returns
+`User not found. Try again ...` when the read came back `RESP` 13. The difference
+between those two replies tells an unauthenticated caller which user ids exist,
+which is user enumeration. The app client therefore sets
+`PreventUserExistenceErrors` to `ENABLED`, so the provider answers both cases
+identically; the auth service returns the baseline's `Wrong Password. Try again ...`
+string for both, `User not found. Try again ...` stays catalogued for traceability
+only, and an unrelated provider failure keeps `Unable to verify the User ...`
+(L254). The lost discrimination between the two credential failures is a
+behavioural divergence and is registered in the
+[divergence register](../../../docs/architecture/cobol-to-service-traceability.md).
+
+Alternatives Considered: exposing this as a module input so a root could select the
+baseline's distinguishable responses. Rejected because a reachable legacy value
+ports the defect — the enumeration channel would be one line of tfvars away, and no
+root has a reason to want it. The value is fixed inside the module so the invariant
+cannot be overridden from outside it.
+
+
+## The credential path
+
+Two credentials exist here, and neither is ever authored, printed or published.
+
+**The app client secret.** Refactoring Rationale: CloudFormation creates the
+confidential client because it treats the generated client secret as a write-only
+service value. The native Terraform resource returns that secret as a computed
+attribute and therefore retains it in every historical state version, even when no
+output publishes it. The stack exposes only `ClientId`; the rotation bridge reads the
+secret from Cognito and writes it into Secrets Manager without it passing through
+Terraform. Rotation adds a new secret against the same client id and retains the
+previous one for a consumer rollout, because replacing the client instead would
+change the id that the JWT authorizer and every token validator use as the audience,
+turning a credential rotation into a coordinated identity-contract release.
+
+**A seed user's initial password.** Refactoring Rationale: the baseline commits one
+shared credential literal with the seed rows, whereas this path generates an
+independent value for each requested identity and leaves no value in source. The
+replacement path is:
+
+1. `seed_user_bootstrap.py` generates a policy-compliant value **in process
+   memory**, using a cryptographically secure generator seeded per required
+   character class and then shuffled.
+2. It is applied to the pool user through AWS CLI **JSON files** rather than process
+   arguments, so it never appears in a command line, and the pool receives it as a
+   **temporary** password that must be changed at first sign-in.
+3. The same value is written to that user's Secrets Manager entry, encrypted under
+   the customer-managed key supplied as `var.secrets_kms_key_arn`.
+4. `outputs.tf` publishes only each entry's **ARN and name**, keyed by the opaque
+   handle — never a value, and never a value paired with a user id.
+5. An operator retrieves it out of band under their own
+   `secretsmanager:GetSecretValue` and `kms:Decrypt` permissions, which leaves a
+   record in CloudTrail.
+
+Trade-offs: generating in process memory keeps credentials out of Terraform state,
+but the operator must change a revision input to request a deliberate rotation.
+State retains only non-credential material: resource identifiers, the opaque
+per-user handle, and those revision inputs. The temporary-password window bounds
+how long an unretrieved handover value stays useful, and
+`var.temporary_password_validity_days` is constrained to a short range for that
+reason.
+
+Refactoring Rationale: a customer-managed key rather than the AWS-managed default,
+which would also encrypt and would do so silently. A customer-managed key carries a
+key policy that can be audited and revoked independently of the secret, so
+possession of the secret is not sufficient without the key's permission. The key is
+created by [`infra/modules/kms`](../kms/README.md) and passed in by the calling
+root; the input is required with no default so a fall-back to the AWS-managed key
+cannot happen unnoticed.
 
 ```bash
-terraform -chdir=infra/modules/cognito init -backend=false
+# WHAT: retrieve one seed identity's initial credential from Secrets Manager, using
+#       a secret name taken from this module's seed_user_secret_names output.
+# WHY : Trade-offs: retrieval is deliberately out of band rather than a Terraform
+#       output. An output is printed to the console, written into the state of every
+#       consuming root and readable with one command, which would turn a managed,
+#       audited secret into an unmanaged copy of itself. The cost is one extra
+#       operator step; the gain is that every read is attributable in CloudTrail.
+#       Do not echo the result into a shell history, a log or a ticket.
+aws secretsmanager get-secret-value \
+  --region "<region>" \
+  --secret-id "<secret-name>" \
+  --query SecretString \
+  --output text
+```
+
+
+## Module boundary and usage
+
+Assumptions: this directory is a called module, not a Terraform root. It is **never
+applied directly**: it declares no `backend`, no provider configuration and no nested
+`module` block, and it calls no sibling module.
+
+```hcl
+module "cognito" {
+  source = "../../modules/cognito"
+
+  name_prefix         = var.name_prefix
+  environment         = var.environment
+  secrets_kms_key_arn = module.kms.secrets_key_arn
+
+  callback_urls = ["${local.spa_origin}/callback"]
+  logout_urls   = [local.spa_origin]
+
+  mfa_configuration      = var.environment == "prod" ? "ON" : "OPTIONAL"
+  advanced_security_mode = var.environment == "prod" ? "ENFORCED" : "AUDIT"
+  deletion_protection    = var.deletion_protection ? "ACTIVE" : "INACTIVE"
+
+  seed_users = [
+    {
+      user_id     = "ADM00001"
+      given_name  = "Demo"
+      family_name = "Admin"
+      user_type   = "A"
+    },
+  ]
+}
+```
+
+Assumptions: the calling root does every piece of cross-module wiring, because this
+module resolves no data source and reads no sibling's state. `secrets_kms_key_arn`
+arrives from the `kms` module's `secrets_key_arn` output rather than as a literal
+ARN, and `callback_urls` and `logout_urls` arrive from the distribution that
+[`infra/modules/cloudfront-spa`](../cloudfront-spa/README.md) creates. Keeping key
+ownership in the module responsible for it is also what prevents a dependency cycle,
+and it keeps region, credentials and default tags from disagreeing with the root's
+own provider configuration.
+
+Assumptions: of the published values, two matter most outside this module:
+**`issuer_uri`** and **`user_pool_client_id`** become the `issuer` and `audience` of the Cognito JWT
+authorizer in [`infra/modules/api-gateway-http`](../api-gateway-http/README.md), and
+the same two reach every service's OAuth2 resource-server configuration through
+Parameter Store, written there by the calling root. Terraform module outputs are the
+only source of these identifiers — no service hard-codes an endpoint.
+
+Assumptions: the environment roots that instantiate this module are
+[`infra/envs/dev`](../../envs/dev/README.md) and
+[`infra/envs/prod`](../../envs/prod/README.md). The deploy and teardown command
+sequences belong to those roots and to
+[`infra/bootstrap`](../../bootstrap/README.md), not to this directory: see the
+[infrastructure guide](../../README.md), the
+[deploy runbook](../../../docs/runbooks/deploy.md) and the
+[teardown runbook](../../../docs/runbooks/teardown.md), which orders teardown in
+reverse with bootstrap destroyed **last**.
+
+
+## Validation and gates
+
+Assumptions: this module is validated **transitively**. The CI job initialises and
+validates only the three Terraform roots, and a root's `terraform init` resolves
+`source = "../../modules/cognito"`, so a configuration error here surfaces as a
+failure of the root that calls it. The commands below check this directory on its
+own, which is useful locally and is the form the sibling modules document too.
+
+```bash
+# WHAT: check formatting, resolve providers without a backend, validate the
+#       configuration, lint the HCL, and confirm the generated region of this
+#       README still matches the .tf files beside it.
+# WHY : Assumptions: validate needs initialized provider schemas, while a normal
+#       init would demand the remote backend and credentials; -backend=false
+#       resolves providers without touching state. -lockfile=readonly is used
+#       because this directory's provider lock is committed, and a writable init
+#       could otherwise alter it and report as documentation drift no author caused.
+terraform fmt -check -recursive infra/modules/cognito
+terraform -chdir=infra/modules/cognito init -backend=false -lockfile=readonly -input=false
 terraform -chdir=infra/modules/cognito validate
 tflint --chdir=infra/modules/cognito --config="$(pwd)/infra/.tflint.hcl"
+terraform-docs --config infra/.terraform-docs.yml \
+  --output-check infra/modules/cognito
 ```
+
+Assumptions: [`infra-ci.yml`](../../../.github/workflows/infra-ci.yml) is
+authoritative for the gate shape. Every gate in it that covers
+this directory is **gating** — none is advisory and none tolerates a non-zero exit:
+
+* **Formatting** — `terraform fmt -check -recursive infra/`. Check mode rather than
+  a bare `fmt`, which would rewrite the checkout and let drift pass review.
+* **Initialise and validate** — run over the three roots, which is where this module
+  is reached from.
+* **HCL lint** — `tflint --recursive` against `infra/.tflint.hcl`, whose
+  documented-variables and documented-outputs rules are what guarantee the raw
+  material this document's generated region renders.
+* **Generated-document drift** — `terraform-docs --output-check` over every module
+  and root, including this one. It is **check-only by design**: CI is forbidden from
+  regenerating and committing, because silent mutation would repair the drift, turn
+  the build green and leave the author never knowing the published contract was
+  wrong. A stale README therefore fails the build, which is why the two markers and
+  everything between them must stay in step with the `.tf` files, and why
+  hand-editing inside them is the specific failure this gate exists to catch.
+* **Secret scan** — run over migration-owned tracked files, this document included.
+* **Policy scan** — Trade-offs: it does **not** select by severity. The offline
+  scanner distribution carries no policy severities, so a severity filter would
+  select zero checks and report a false green; the gate instead runs one visible
+  full scan and then hard-fails against an explicit, reviewable material-security
+  check list, with a summary assertion so an empty selection can never pass again.
+  The strong password policy, the MFA configuration and the threat-protection
+  setting satisfy it by construction. Two suppressions exist in `main.tf`, each
+  carrying the scanner's **real** check id and a distinct, specific reason — one
+  records that app-client rotation is implemented through service APIs the graph
+  check cannot recognise, the other that a one-time handover value would only be
+  desynchronised by rotating it. A fabricated id is not an acceptable suppression.
+
+Assumptions: the module is authored and statically validated. Applying a root against a live AWS
+account is an operator action outside this scope: no claim is made here that a pool
+exists, that an identity has been created, or that anything has been assessed
+against a live account.
+
+
+## What this module does not own
+
+Assumptions: ownership follows the component that implements each contract; this
+module deliberately stops at Cognito resources. A reader will otherwise look here
+for these:
+
+* `auth.users` and its columns —
+  [`V1__auth.sql`](../../../services/auth-service/src/main/resources/db/migration/V1__auth.sql).
+* The `cognito:groups`-to-authority conversion —
+  [`JwtRoleConverter`](../../../services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java).
+* The three verbatim sign-on messages — `services/auth-service` and
+  [`ui/src/messages/messages.ts`](../../../ui/src/messages/messages.ts).
+* The JWT authorizer — [`api-gateway-http`](../api-gateway-http/README.md).
+* The KMS keys — [`kms`](../kms/README.md).
+* The IAM task roles — [`ecs-service`](../ecs-service/README.md).
+* The SPA delivery path — [`cloudfront-spa`](../cloudfront-spa/README.md).
+* The Parameter Store writes — the two environment roots.
+
+Assumptions: the ETL boundary is worth stating because the two halves must agree.
+`data-migration/src/carddemo_migration/readers/usrsec.py` loads the `USRSEC`
+**profile rows** into `auth.users` and loads **no credentials**, because that table
+has no password column. Cognito holds the identities and their credentials,
+`auth.users` holds the profile rows, `cognito_sub` is the join, and the two must
+agree on the eight-character id and the `'A'`/`'U'` type. Note also that `USRSEC`
+exists only in EBCDIC form, at
+[`app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS`](../../../app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS),
+with no ASCII counterpart under `app/data/ASCII/` — so the reader decodes it rather
+than reading text.
+
+Assumptions: the baseline remains exactly where it was. It is reference-only as a
+matter of status, not deprecation: the migration adds a path and does not remove one, and the
+mainframe sign-on programs, their copybooks and their seed data are untouched. For
+the whole picture see [`MIGRATION_README.md`](../../../MIGRATION_README.md).
+
+
+## Generated Terraform reference
+
+Assumptions: the region below is generated from this module's `.tf` files by
+terraform-docs v0.20.0 under [`infra/.terraform-docs.yml`](../../.terraform-docs.yml). Do not edit
+it by hand; regenerate it instead, and keep hand-written prose outside the markers.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements

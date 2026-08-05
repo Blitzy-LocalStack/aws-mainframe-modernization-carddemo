@@ -1,26 +1,211 @@
-# Secrets module
+# Secrets Manager credentials and rotation module
 
-This module generates per-service PostgreSQL credentials, writes only
-write-only secret documents, creates the rotation Lambda and applies each
-credential to Aurora through the RDS Data API.
+> **Purpose.** This called Terraform module creates one Secrets Manager
+> credential for each CardDemo service database role, applies and rotates those
+> credentials through Aurora RDS Data API, and can store a caller-supplied
+> service TLS certificate and private key.
+>
+> **Source of truth.** The authoritative implementation is
+> [`versions.tf`](versions.tf), [`variables.tf`](variables.tf),
+> [`main.tf`](main.tf), [`outputs.tf`](outputs.tf), and
+> [`rotation_lambda.py`](rotation_lambda.py). The database-role inventory comes
+> from
+> [`data-migration/sql/V0__schemas_and_roles.sql`](../../../data-migration/sql/V0__schemas_and_roles.sql).
+> The untouched baseline context is
+> [`app/cpy/CSUSR01Y.cpy`](../../../app/cpy/CSUSR01Y.cpy); it is cited as
+> REFERENCE material and is never modified.
+>
+> **Status.** This README is in scope because Rule 1 requires a prose
+> explanation for each Terraform module, not because a migration requirement
+> independently requires this file. Terraform has no docstring construct, so
+> the HCL headers and descriptions provide the in-code half while this document
+> provides the prose half. The
+> [documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+> defines that obligation.
 
-## Design decisions
+Rule 1 uses the same four rationale categories as the pre-existing
+`tests/README.md` explainability convention. This module therefore extends an
+established house convention rather than introducing a competing one.
+A document missing either its purpose-and-source header or specific reasoning
+for a non-obvious choice fails review; the terraform-docs drift check below is
+the mechanical half of that validation gate.
 
-**Refactoring Rationale:** no password is accepted as an input or published as
-an output. Removing the input surface makes repository credentials impossible
-to express rather than relying on every reviewer to notice one.
 
-**Assumptions:** the credential key and rotation-log key are separate. Logs use
-the shared data/logging key so the CloudWatch Logs service grant does not widen
-the Secrets Manager credential key policy.
+## What the module provisions
 
-## Validation
+For each member of `service_credential_names`, the module creates a
+customer-managed-key-encrypted secret, generates an initial alphanumeric
+password through the `random` provider's ephemeral resource, and sends the
+initial JSON document to Secrets Manager through the AWS provider's write-only
+argument. It then attaches a module-owned rotation Lambda that applies the
+credential to Aurora and performs scheduled alternating-user rotation.
 
-```bash
-terraform -chdir=infra/modules/secrets init -backend=false
-terraform -chdir=infra/modules/secrets validate
-tflint --chdir=infra/modules/secrets --config="$(pwd)/infra/.tflint.hcl"
-```
+The service-role inventory is closed and defaulted so an omitted role fails
+configuration validation instead of surfacing later as a service that cannot
+resolve a credential:
+
+| Bounded context | Login role stored and rotated by this module |
+|---|---|
+| Auth | `carddemo_auth` |
+| Account | `carddemo_account` |
+| Card | `carddemo_card` |
+| Ledger | `carddemo_ledger` |
+| Reference | `carddemo_reference` |
+| Batch | `carddemo_batch` |
+| Authorization | `carddemo_authorization` |
+| Reporting | `carddemo_reporting` |
+
+`carddemo_reporting_owner` is deliberately absent. The bootstrap SQL creates it
+as a `NOLOGIN` owner for the reporting schema, so generating a connection
+credential for it would contradict its database contract.
+
+The module also packages `rotation_lambda.py` with the `archive` provider and
+creates the rotation log group, permissions-bounded execution role, inline
+policy, Lambda function, and one Secrets Manager invocation permission per
+service secret. The function implements the standard `createSecret`,
+`setSecret`, `testSecret`, and `finishSecret` steps and alternates each base role
+with a bounded `_clone` login.
+
+When both sensitive TLS inputs are supplied, two additional scalar secrets hold
+the service certificate and private key. Supplying only one half is rejected;
+supplying neither creates no TLS entries and makes `service_tls_secrets` empty.
+
+Assumptions: the caller supplies two different KMS key ARNs. `kms_key_arn`
+comes from the Secrets Manager key owned by [`../kms/`](../kms/) and encrypts
+database credentials and optional TLS material. `rotation_log_kms_key_arn`
+encrypts the CloudWatch log group under the shared data/logging key, so the Logs
+service grant does not widen the credential-store key policy.
+
+Aurora owns its RDS-managed master credential. This module consumes that
+credential's ARN only so the rotation Lambda can authenticate to RDS Data API;
+it neither creates nor publishes the master credential.
+
+The version contract is Terraform `>= 1.15.0` with `hashicorp/aws ~> 6.56`,
+`hashicorp/random ~> 3.9`, and `hashicorp/archive ~> 2.7`. The generated
+reference below remains authoritative for those constraints and for the locked
+provider releases that terraform-docs renders.
+
+
+## The structural database-credential boundary
+
+No database password is accepted as a variable, committed in a variable file,
+or written into module source. The initial value exists only as an ephemeral
+`random_password` result while the provider sends `secret_string_wo` to
+Secrets Manager. Terraform records the non-secret
+`secret_string_wo_version`, not the generated password. Scheduled rotation
+then generates pending values inside Secrets Manager and the Lambda runtime,
+outside Terraform.
+
+Alternatives Considered: accepting a `password`, `master_password`, or
+role-to-password map would force a caller to provide the credential through a
+variable file, environment variable, or automation input. Each alternative
+moves the literal rather than eliminating its input surface and makes
+repository safety depend on every author and reviewer noticing it. A database
+password that the module cannot accept cannot be committed through its
+contract.
+
+The optional TLS inputs are a deliberate, narrower exception to the statement
+above: they import certificate material rather than database credentials.
+They are marked sensitive, must be supplied through an operator-controlled
+secret channel, and must never be placed in a committed variable file. See
+[Trade-offs and operational boundaries](#trade-offs-and-operational-boundaries)
+for the resulting state-handling obligation.
+
+
+## Measured baseline divergence
+
+The baseline user-security record starts at
+`app/cpy/CSUSR01Y.cpy:L17` with `01 SEC-USER-DATA.`. Its fields at L18-L23
+total 80 bytes, including the clear-text eight-character
+`05 SEC-USR-PWD PIC X(08).` field at L21. The
+`READ-USER-SEC-FILE` paragraph begins at
+`app/cbl/COSGN00C.cbl:L209` and compares that field directly at L223 with
+`IF SEC-USR-PWD = WS-USER-PWD`.
+
+The containing CICS resource is `DEFINE FILE(USRSEC)` at
+`app/csd/CARDDEMO.CSD:L88`; its definition specifies `JOURNAL(NO)` at L94 and
+`RECOVERY(NONE) FWDRECOVLOG(NO)` at L96. Those settings describe the baseline
+as it exists; this migration does not edit them.
+
+Refactoring Rationale: the target architecture deliberately does not carry
+the password field forward. Cognito owns interactive identity, while generated
+service-role credentials live behind Secrets Manager handles and customer-
+managed encryption. This is a documented behavioural divergence, recorded in
+the
+[COBOL-to-service traceability register](../../../docs/architecture/cobol-to-service-traceability.md),
+not a claim that the mainframe path was changed or removed. The migration adds
+a second path and leaves the REFERENCE implementation intact.
+
+
+## Ownership boundaries
+
+This module owns the eight service database credentials, their rotation
+function and optional storage of the service TLS pair. Three neighbouring
+owners remain separate:
+
+* [`../cognito/`](../cognito/) owns the Cognito app-client and seed-user
+  secrets, together with the `carddemo-admin` and `carddemo-user` groups.
+* [`../aurora-postgresql/`](../aurora-postgresql/) owns the cluster and its
+  RDS-managed master secret.
+* [`../kms/`](../kms/) owns the customer-managed keys; this module receives
+  their ARNs and cannot change their policies.
+
+Assumptions: each resource has one Terraform owner. If this module and the
+Cognito module declared the same secret, each state would claim authority over
+one remote object and successive applies could replace metadata, versions, or
+recovery settings according to whichever module ran last. Keeping the
+ownership boundary explicit prevents that state collision from being mistaken
+for consolidation.
+
+
+## Module usage
+
+This directory is a reusable module, not a Terraform root. The `dev` and `prod`
+environment roots call it with sibling-module outputs and caller-owned
+variables:
+
+    module "secrets" {
+      source = "../../modules/secrets"
+
+      name_prefix                       = var.name_prefix
+      environment                       = var.environment
+      kms_key_arn                       = module.kms.secrets_key_arn
+      rotation_log_kms_key_arn          = module.kms.s3_key_arn
+      aurora_cluster_arn                = module.aurora.cluster_arn
+      aurora_master_secret_arn          = module.aurora.master_user_secret_arn
+      aurora_host                       = module.aurora.writer_endpoint
+      aurora_port                       = module.aurora.port
+      aurora_database_name              = module.aurora.database_name
+      rotation_permissions_boundary_arn = var.rotation_permissions_boundary_arn
+    }
+
+The references above are placeholders resolved by the calling root; the
+example contains no deployment identifier or credential. Optional inputs,
+including the TLS pair and environment-specific recovery and rotation values,
+remain caller decisions and are listed in the generated contract.
+
+The module is never applied directly. It has no backend block, provider
+configuration body, or nested module call. CI initializes it without a backend
+for isolated validation, while the complete dependency graph is initialized
+and validated through the environment roots.
+
+Deployment and teardown commands are intentionally not duplicated here. The
+authoritative procedures are the [infrastructure guide](../../README.md), the
+[deployment runbook](../../../docs/runbooks/deploy.md), and the
+[teardown runbook](../../../docs/runbooks/teardown.md).
+
+
+## Generated Terraform contract
+
+The block below is generated by terraform-docs v0.20.0 from this directory's
+HCL. Requirements, providers, resources, inputs, and outputs must be changed in
+their source files and regenerated locally; hand-written prose belongs outside
+the markers.
+
+Trade-offs: CI uses `--output-check` and refuses to rewrite a stale README.
+That costs an author a local regeneration step, but keeps a contract change
+visible in the same review as the HCL that caused it instead of letting
+automation silently repair and hide the drift.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -97,3 +282,224 @@ tflint --chdir=infra/modules/secrets --config="$(pwd)/infra/.tflint.hcl"
 | <a name="output_service_credential_secrets"></a> [service\_credential\_secrets](#output\_service\_credential\_secrets) | The Secrets Manager entry created for each per-service database role, as a<br/>map keyed by role name -- `carddemo_auth`, `carddemo_account` and the rest<br/>of the roles named in `service_credential_names` -- whose value carries<br/>that entry's base `arn` for IAM, its created `name` for by-name reads, and<br/>distinct `username_reference` / `password_reference` values in ECS's<br/>`<base-arn>:<json-key>::` syntax. One entry exists per element of that input,<br/>so the map is empty only if the input is. The calling root projects the<br/>`arn` fields into infra/modules/ecs-service's `secret_sources` input, keyed<br/>by the container environment-variable name each service expects, and scopes<br/>one `secretsmanager:GetSecretValue` statement per task role to the single<br/>ARN that role is entitled to read. The `name` fields are what a by-name<br/>reader passes as `SecretId`, matching the role name character for<br/>character.<br/><br/>These entries are not inert. Each value is APPLIED to the matching<br/>PostgreSQL role by the schema-bootstrap step, which reads the entry, passes<br/>the credential as a bound parameter on a session setting, and runs<br/>data-migration/sql/V0\_\_schemas\_and\_roles.sql -- which issues the ALTER ROLE<br/>inside the same transaction that creates the roles and refuses to commit<br/>while any role still lacks a credential. A caller therefore has two<br/>obligations, not one: grant the bootstrap identity read access to every<br/>entry in this map, and grant each task role read access to its own entry<br/>alone. |
 | <a name="output_service_tls_secrets"></a> [service\_tls\_secrets](#output\_service\_tls\_secrets) | Handles for the scalar certificate and private-key secrets used by the<br/>services' internal HTTPS listeners. Each object publishes the base `arn`,<br/>the created `name`, and a `value_reference`. Because each secret stores one<br/>scalar PEM value, `value_reference` intentionally equals `arn`: the same<br/>base ARN is valid for ECS injection and for the task execution role's IAM<br/>Resource. Empty when the caller left service\_tls\_certificate and<br/>service\_tls\_private\_key null, which is how a root that issues and owns its own<br/>pair says it does not want this module's entries -- a consumer therefore reads<br/>this map through `lookup` or `try` rather than indexing it unconditionally. |
 <!-- END_TF_DOCS -->
+
+
+## Consumer contract
+
+Output names are a one-way contract with the environment roots. The module
+publishes identifiers and runtime selectors only:
+
+| Output | Consumer-facing contract |
+|---|---|
+| `service_credential_secrets` | Role-keyed secret ARN, name, username selector, and password selector for task-role IAM and ECS injection |
+| `service_tls_secrets` | Conditional certificate and private-key ARN, name, and scalar value reference |
+| `rotation_lambda_arn` / `rotation_lambda_name` | Function identity for policy wiring, alarms, and operator inspection |
+| `rotation_role_arn` | Execution-role identity used by the Secrets Manager KMS policy |
+| `rotation_log_group_arn` / `rotation_log_group_name` | Log destination identity for key-policy and observability wiring |
+
+The dependency direction for the master credential is the reverse: the
+Aurora module supplies `aurora_master_secret_arn` to this module, and this
+module publishes no master-secret output.
+
+No output contains a generated password, rotated value, TLS scalar, SecretString,
+or secret-version identifier. ECS tasks resolve the database username and
+password from Secrets Manager at runtime under a role-scoped
+`GetSecretValue` grant; TLS consumers resolve the two scalar secret handles the
+same way. Terraform outputs remain the only source of resource identifiers, but
+Secrets Manager remains the only source of credential values.
+
+Assumptions: a child-module output can move a value into the calling root's
+state even when the child validates in isolation. Publishing a credential would
+therefore create another durable copy and make accidental projection into plan
+or CI output possible. Identifier-only outputs preserve reviewable IAM wiring
+without moving the protected value across the module boundary.
+
+Renaming an output requires changing every environment-root consumer in the
+same commit. This module cannot detect a stale caller because it does not import
+the roots that consume it.
+
+
+## Trade-offs and operational boundaries
+
+### Recovery window
+
+Trade-offs: a non-zero `recovery_window_in_days` protects a deleted secret from
+immediate permanent removal, but Secrets Manager reserves its name until the
+window expires. Recreating the same environment during that interval fails
+because the replacement secret cannot claim the scheduled-for-deletion name.
+The module therefore accepts either `0` or a service-supported protected
+window: the development root selects `0` for repeatable destroy/recreate, while
+the production root selects `30` for recovery.
+
+### Rotation
+
+Rotation is implemented and mandatory for every service database credential.
+The first attachment uses `rotate_immediately = true` so the Lambda applies a
+credential to a role that the bootstrap SQL may have created without a
+password. Later runs generate a pending password, apply it to the alternate
+base-or-`_clone` login inside one database transaction, verify its bounded
+attributes and membership, and move `AWSCURRENT` only after the test succeeds.
+
+Trade-offs: a module-owned Lambda, IAM role, log group, packaging step, and Data
+API dependency add resources and failure modes. They remove manual `ALTER ROLE`
+handling, support the initial passwordless-role bridge, and keep generated
+values out of Terraform and command text. A native PostgreSQL driver was not
+packaged because its platform-specific binary dependency would make the Lambda
+archive depend on the build host; RDS Data API keeps the package reproducible
+and the target cluster IAM-scoped.
+
+### State handling
+
+Assumptions: generated database passwords do not enter Terraform state. The
+ephemeral initial value is sent through `secret_string_wo`, and subsequent
+values are generated and managed by Secrets Manager plus the rotation Lambda.
+Only the non-secret write-only revision remains in state.
+
+The optional TLS pair has a different authority: ordinary sensitive inputs feed
+ordinary `secret_string` arguments so a caller-supplied renewal creates a new
+version. Those values are represented in the calling root's state. A root that
+uses this path must therefore protect state as credential-bearing material;
+[`infra/bootstrap`](../../bootstrap/) provides the versioned, encrypted remote
+state bucket and locking controls used by the environment roots.
+
+### Tags
+
+Assumptions: a child module cannot configure a provider and therefore cannot
+use provider `default_tags`. This module merges `var.tags` into each taggable
+secret, log group, role, and Lambda resource. The
+[`infra/bootstrap`](../../bootstrap/) root can use `default_tags` because it
+owns its provider configuration; the different mechanism follows the
+root-versus-module boundary rather than representing inconsistent tagging.
+
+### Static validation boundary
+
+The module can be formatted, initialized without a backend, validated, linted,
+documentation-drift checked, and policy scanned without claiming a live
+deployment. Applying an environment root to an AWS account, observing runtime
+rotation, and accepting the resulting cost remain operator actions outside
+this document's evidence.
+
+
+## Validation gates
+
+The infrastructure workflow applies four direct Terraform/documentation gates
+to this module:
+
+1. `terraform fmt -check -recursive infra/` rejects formatting drift without
+   rewriting the checkout.
+2. Backend-free initialization and `terraform validate` of both environment
+   roots exercise this module through its real callers.
+3. Recursive TFLint uses
+   [`infra/.tflint.hcl`](../../.tflint.hcl) to enforce documented and typed
+   variables, documented outputs, provider constraints, comment syntax, and
+   module structure.
+4. terraform-docs uses
+   [`infra/.terraform-docs.yml`](../../.terraform-docs.yml) in check-only mode
+   to reject any generated region that differs from the HCL beside it.
+
+The same workflow also scans migration-owned tracked files for committed
+secrets and runs its explicit material-security Checkov set. The secrets module
+is expected to use the supplied customer-managed key for every secret, attach
+rotation to every service database credential, and keep any scanner exception
+bounded and reviewable. See
+[`infra-ci.yml`](../../../.github/workflows/infra-ci.yml) for the executable
+contract.
+
+Run the module-local checks from the repository root:
+
+```bash
+# WHAT: verify this module's formatting, provider schema, HCL contract, lint
+#       rules, and generated documentation without changing AWS resources.
+# WHY : Assumptions: backend-free initialization exercises provider and module
+#       schemas without credentials, while check-only tools preserve the
+#       reviewed working tree instead of silently repairing a defect.
+terraform fmt -check -recursive infra/modules/secrets
+terraform -chdir=infra/modules/secrets init \
+  -backend=false -lockfile=readonly -input=false
+terraform -chdir=infra/modules/secrets validate
+tflint --chdir=infra/modules/secrets \
+  --config="$(pwd)/infra/.tflint.hcl"
+terraform-docs --config infra/.terraform-docs.yml \
+  --output-check infra/modules/secrets
+```
+
+The terraform-docs command is gating. After an intentional HCL contract change,
+run the same command without `--output-check`, inspect the generated diff, and
+commit the README together with the source change.
+
+
+## Troubleshooting
+
+### A secret name is already scheduled for deletion
+
+A protected recovery window keeps the name reserved after destroy, so a later
+create with the same name fails. For a retained environment, restore the
+scheduled secret and reconcile it with Terraform state, or wait until the
+deletion window completes before recreating it. For a disposable development
+environment, set the root-owned recovery value to `0` before destroy so the
+name is released immediately. Do not weaken the production recovery window to
+solve a one-off development collision.
+
+### Rotation reports a password-grammar error
+
+Module-owned generation excludes punctuation and requires 32 to 128
+alphanumeric characters for both initial and pending passwords. A disallowed
+special character therefore indicates that a secret version was written
+outside the module's closed generation path or that the configured document
+does not match the rotation contract. Inspect version stages and metadata
+without printing the secret value, remove the external writer, and create a new
+pending version through Secrets Manager rotation.
+
+### terraform-docs reports that the README is out of date
+
+Do not edit tables between the markers. Regenerate with terraform-docs v0.20.0,
+review the resulting Requirements, Providers, Resources, Inputs, and Outputs
+diff, and commit it with the HCL change. A newer terraform-docs binary is
+rejected because renderer changes would make unchanged contracts produce
+different bytes.
+
+### Apply shows no database-password diff after rotation
+
+This is expected. Terraform stores the stable `initial_secret_version`, not the
+write-only initial value or the Lambda-managed current value. There is no
+`ignore_changes` rule masking the credential. Increment
+`initial_secret_version` only for a deliberate initial-document replacement;
+ordinary applies must not take authority back from rotation.
+
+### Rotation cannot reach Aurora or write a new version
+
+Check the Lambda error log and the exact IAM/KMS boundaries rather than
+widening them. The execution-role permissions boundary must belong to the
+deployment account, the role must read the RDS-managed master secret, the
+credential key must allow use through Secrets Manager, and the cluster must
+accept RDS Data API calls. A failure in any one leaves the previous
+`AWSCURRENT` version in place.
+
+### Only one TLS input is configured
+
+Certificate and private key are a pair. Supply both through the caller's secret
+channel or leave both null. Creating one scalar secret without the other would
+publish an unusable listener configuration, so variable validation rejects the
+partial case before planning resources.
+
+
+## Related documents
+
+* [Infrastructure package guide](../../README.md) — module catalogue,
+  validation ownership, and the authoritative deploy/teardown cross-links.
+* [Security and identity ADR](../../../docs/adr/ADR-008-security-and-identity.md)
+  — identity, credential, IAM, and encryption decisions.
+* [Deployment runbook](../../../docs/runbooks/deploy.md) — environment-root
+  deployment procedure.
+* [Teardown runbook](../../../docs/runbooks/teardown.md) — ordered environment
+  and bootstrap removal procedure.
+* [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+  — the Rule 1 Markdown and HCL obligations this README follows.
+* [COBOL-to-service traceability](../../../docs/architecture/cobol-to-service-traceability.md)
+  — the register of preserved behaviour and documented divergences.
+* [KMS module](../kms/) — ownership of the Secrets Manager and logging keys.
+* [Cognito module](../cognito/) — ownership of interactive identity and
+  seed-user secrets.
+* [Bootstrap root](../../bootstrap/) — remote-state protection and locking.
+* [Schema and role bootstrap](../../../data-migration/sql/V0__schemas_and_roles.sql)
+  — authoritative service-role and schema inventory.

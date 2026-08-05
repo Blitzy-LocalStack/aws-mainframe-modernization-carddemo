@@ -12,27 +12,23 @@
  * deliberately. The platform underneath it changed; the observable behaviour
  * on top of it did not.</p>
  *
- * <p><b>This module is argument-driven, not request-driven, and it is not a
- * server at all.</b> A job here is started by an AWS Step Functions state that
- * runs an ECS Fargate task through the synchronous run-task integration, and
- * the state's container overrides carry the job token and the business date as
- * process arguments. There is no HTTP surface of any kind: no controller, no
- * published interface contract, no route by which anything outside that state
- * machine can start work, and <em>no listening socket</em>. The task runs to
- * completion, the JVM exits, and the invoking state reads the process exit
- * status described under <em>The exit-status contract</em> below.</p>
+ * <p><b>This module is argument-driven, not request-driven.</b> A job here is
+ * started by an AWS Step Functions state that runs an ECS Fargate task through
+ * the synchronous run-task integration, and the state's container overrides
+ * carry the job token and the business date as process arguments. There is no
+ * business controller, published interface contract or route by which an HTTP
+ * caller can start work. The sole listener serves actuator health while the job
+ * runs; the task then exits and the invoking state reads the process status
+ * described under <em>The exit-status contract</em> below.</p>
  *
- * <p><strong>Assumptions:</strong> the absence of a web stack is the mechanism
- * as well as the intent, which is why it is stated this early. This is the one
- * deployable in the reactor whose {@code pom.xml} declares neither
- * {@code spring-boot-starter-web} nor {@code spring-boot-starter-actuator}. With
- * no servlet API on the classpath Spring Boot deduces a non-web application by
- * itself, so no {@code spring.main.web-application-type} property is set and
- * none is needed. An embedded servlet container would be a non-daemon listener
- * that keeps the process alive after the final step has finished, so the task
- * would never reach a terminal state, the synchronous run-task integration would
- * never return, and the nightly chain would stall on a step that had in fact
- * completed correctly.</p>
+ * <p><strong>Trade-offs:</strong> {@code spring-boot-starter-web} and
+ * {@code spring-boot-starter-actuator} are carried only so the Dockerfile probe
+ * can detect an unreachable datasource during a run. A process-only probe was
+ * rejected because a live JVM says nothing about whether the selected job can
+ * reach its data. The accepted cost is a listener in a one-shot task;
+ * {@link com.carddemo.batch.BatchApplication} closes the context and calls
+ * {@code System.exit} with the job result, so the listener cannot keep a
+ * completed task alive.</p>
  *
  * <p><b>This is the only module measured directly against the golden-master
  * parity oracle, which raises the bar for everything inside it.</b> The COBOL
@@ -269,33 +265,18 @@
  * <p><b>No {@code api} subpackage, no controller, no published interface
  * contract, no {@code OpenApiConfig} and no {@code SecurityConfig}.</b> Of the
  * eight service rows in the migration plan's transformation mapping, this is
- * the single row that omits the published-contract directory, and the module's
- * own {@code pom.xml} matches that by declaring no API documentation starter,
- * no web starter, no actuator and neither security starter. There is also no
- * route for this module at the managed edge: {@code infra/modules/}
- * {@code api-gateway-http} creates none and refuses one by validation.</p>
+ * the single row that omits the published-contract directory. Its POM declares
+ * web and actuator only for health, no API documentation starter and neither
+ * security starter. There is also no route for this module at the managed edge:
+ * {@code infra/modules/api-gateway-http} creates none and refuses one by
+ * validation.</p>
  *
- * <p><strong>Assumptions:</strong> the absent {@code SecurityConfig} is not an
- * unguarded surface, because there is no surface. An authorization filter chain
- * defends a listener, and this module opens none: with no servlet web
- * application on the classpath both the security and the resource-server
- * autoconfigurations stay inactive, so declaring either starter would add an
- * artifact that installs no filter while leaving a reader convinced something
- * was being defended. The concern those starters would answer is real and is
- * answered one level further in. An unauthenticated caller inside the private
- * application tier reaches an actuator endpoint by opening a socket to a
- * listening port, and this container has none to open, so the health, info and
- * metrics data the other eight modules publish has no analogue here that could
- * be read without a token. The edge reaches the same conclusion from the other
- * side, which is why the validation cited above refuses a {@code /batch} route
- * rather than merely omitting one.</p>
- *
- * <p><strong>Trade-offs:</strong> an operator endpoint cannot be added here
- * without first adding the web starter, which would mean reversing the one-shot
- * lifecycle argument recorded below. That is the intended cost rather than an
- * oversight: it keeps the single invocation path the state machine's synchronous
- * run-task call, so there is no second authorization surface to design and no
- * second argument source that could disagree with the first.</p>
+ * <p><strong>Assumptions:</strong> application configuration exposes only
+ * actuator health and suppresses its details. The absent security configuration
+ * is therefore not permission to invoke work: no HTTP path selects a job, and
+ * the only operation that changes state remains the command-driven task entry
+ * point. Adding authentication to the health probe would require a credential in
+ * the Dockerfile while protecting no business operation.</p>
  *
  * <p><strong>Alternatives Considered:</strong> an administrative endpoint that
  * would let an operator trigger a job over HTTP was evaluated and rejected,
@@ -308,29 +289,11 @@
  * defend, for no operational gain -- and it would give the same job two
  * argument sources that could disagree.</p>
  *
- * <p><strong>Alternatives Considered:</strong> keeping the embedded web stack so
- * that an actuator health endpoint would be reachable over HTTP inside the
- * task's own network namespace, which is what the seven online services do.
- * Rejected, and the dependency removed from
- * {@code services/batch-service/pom.xml} along with the actuator itself. A
- * servlet container is a non-daemon listener, so it holds the JVM open once the
- * last step has finished; under {@code ecs:runTask.sync} the invoking state
- * waits for a terminal task state, so the process outliving its work is not
- * merely surplus but a stall in the nightly chain. An actuator without a web
- * server would meanwhile serve nothing over HTTP and sit in the build with no
- * consumer.</p>
- *
- * <p><strong>Trade-offs:</strong> health for this module is therefore the
- * process exit status and nothing else, which is a genuine divergence from the
- * shared {@code /actuator/health} convention and is matched on the
- * infrastructure side rather than left inconsistent: the batch instantiation of
- * {@code infra/modules/ecs-service} sets {@code attach_load_balancer} and
- * {@code create_service} to false, so no target group and no long-running
- * service exists to probe, and neither {@code infra/modules/alb} nor
- * {@code infra/modules/api-gateway-http} publishes a batch route. What is given
- * up is a periodic liveness signal during a run; what that signal would have
- * reported is only that the interpreter was still up, including while a load was
- * failing, so its absence removes a guarantee this container never provided.</p>
+ * <p><strong>Trade-offs:</strong> the web stack is deliberately narrower than
+ * the online services' surface. It provides health during a run but no controller
+ * contract, and the infrastructure creates no long-running service, target group
+ * or edge route for this module. Process exit status remains the authoritative
+ * outcome after the task reaches its terminal state.</p>
  *
  * <p><b>No ignore files.</b> Neither a {@code .gitignore} nor a
  * {@code .dockerignore} belongs in this module or anywhere in this tree;

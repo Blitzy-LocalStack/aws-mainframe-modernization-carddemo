@@ -64,9 +64,9 @@
  * an interface contract.</b> A job in this module is started by a state machine
  * state that runs a container task and waits for it, and that state's container
  * overrides carry the job token and the business date as process arguments.
- * There is no caller on a socket, no route, and no negotiated wire body. The
- * boundary these shapes cross is a process argument list on the way in and a
- * process exit status plus a ledger row on the way out.</p>
+ * The health-only actuator listener accepts no job body and exposes no route that
+ * consumes these types. Their boundary is a process argument list on the way in
+ * and a process exit status plus a ledger row on the way out.</p>
  *
  * <p>Assumptions: this is the one point on which the batch module deliberately
  * breaks the symmetry of the reactor, and the asymmetry is load-bearing rather
@@ -80,21 +80,20 @@
  * words: no {@code api} subpackage, no controller, no published interface
  * contract, no interface-documentation configuration class and no security
  * configuration class. The module's own {@code services/batch-service/pom.xml}
- * agrees independently, declaring no web starter, no actuator, no
- * interface-documentation starter and neither security starter, so the absence
- * is mechanical and not merely intended.</p>
+ * agrees independently: web and actuator are present solely for health, while
+ * no interface-documentation or security starter is declared. The actuator
+ * route has no application data-transfer contract.</p>
  *
  * <p>Assumptions: consequently no type in this package may carry a request-body
  * or response-body binding annotation, an HTTP response-entity wrapper type, a
  * bean-validation annotation asserted as an HTTP contract, or any annotation
  * from the interface-documentation library. None of those has a consumer here,
- * because there is nothing to bind a body to and nothing to document a route
- * for. Three of those four are not even resolvable here: the binding
- * annotations and the response-entity wrapper arrive with the web starter and
- * the documentation annotations with the interface-documentation starter, and
- * {@code services/batch-service/pom.xml} declares neither, so such a type does
- * not merely lack a purpose, it fails to compile. The fourth behaves
- * differently and the difference is worth stating rather than glossing:
+ * because there is no business body to bind and no application route to
+ * document. The web starter makes binding annotations and response wrappers
+ * technically resolvable, which makes this charter the load-bearing prohibition
+ * against using them for a nonexistent API. Documentation annotations remain
+ * absent from the classpath. Bean validation behaves differently and the
+ * difference is worth stating rather than glossing:
  * {@code services/batch-service/pom.xml:190} does declare
  * {@code spring-boot-starter-validation}, so a bean-validation annotation
  * resolves perfectly well and is legitimate here -- as a constraint on the
@@ -112,15 +111,11 @@
  *
  * <p>Trade-offs: refusing the HTTP-facing vocabulary costs this package the
  * convenience of the shared conventions the other seven modules use for
- * request validation and interface documentation, so a shape here states its
- * own constraints in ordinary Java rather than borrowing a starter to state
- * them. That cost was accepted because the alternative imports an entire
- * request-handling stack to reach two annotations, and the parent charter at
- * {@code com.carddemo.batch} records the concrete reason a web stack cannot be
- * present in this module at all: an embedded
- * servlet container is a non-daemon listener that holds the process open after
- * the final step finishes, so the task never reaches a terminal state and the
- * invoking state waits on work that has in fact completed.</p>
+ * request bodies and interface documentation. The web types are technically
+ * resolvable because actuator health needs a servlet container, but using those
+ * types here would invent a business request contract that no controller or
+ * published route consumes. These shapes therefore state their constraints in
+ * ordinary Java and remain tied to the process and ledger boundaries.</p>
  *
  * <h2>Parameters, return values and exceptions: declared inapplicable</h2>
  *

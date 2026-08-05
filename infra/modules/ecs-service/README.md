@@ -1,31 +1,298 @@
-# ECS workload module
+# ECS service module
 
-This reusable module creates one task definition, execution/task roles,
-encrypted log group and, when requested, a long-running ECS service, target
-group and autoscaling. It also supports task-only batch and data-migration
-workloads.
+> **Purpose.** Document the reusable Fargate workload module that creates the
+> task-level runtime for each CardDemo bounded context and for task-only
+> workloads.
+>
+> **Source of truth.** AAP §0.2.1.1, §0.4.1.6, and §0.5.1.12, decision D2 in
+> [ADR-002](../../../docs/adr/ADR-002-compute-platform.md), the sibling
+> [`versions.tf`](versions.tf), [`variables.tf`](variables.tf),
+> [`main.tf`](main.tf), and [`outputs.tf`](outputs.tf), plus the REFERENCE
+> sources [`app/csd/CARDDEMO.CSD`](../../../app/csd/CARDDEMO.CSD) and
+> [`app/cpy/COCOM01Y.cpy`](../../../app/cpy/COCOM01Y.cpy).
 
-## Design decisions
+> If this README and the sibling `.tf` files disagree, the `.tf` files are
+> authoritative. Correct this prose and regenerate the injected tables rather
+> than making the implementation conform to stale documentation.
 
-**Refactoring Rationale:** typed capability inputs assemble least-privilege IAM
-statements for queues, buckets, state machines, Cognito and keys. Arbitrary IAM
-JSON is not accepted, so a root cannot widen actions from a tfvars file.
 
-**Assumptions:** runtime configuration uses exact per-workload inventories.
-Plain values, SSM references, ECS secret selectors and application SDK reads
-are separate channels because each has a different storage and IAM contract.
+## 1. Purpose and documentation contract
 
-**Trade-offs:** production images require immutable digests; development also
-uses digests in the environment roots so artifact promotion does not change the
-task-definition shape.
+This is the one reusable per-workload module in `infra/`: an environment root
+supplies a bounded context's image, networking, configuration, permissions,
+sizing, and retention, and the module turns those inputs into an ECS Fargate
+task runtime. It can add a long-running, load-balanced service and autoscaling,
+or stop at the task definition, roles, and log group for an orchestrated task.
 
-## Validation
+This README exists because the Explainability rule requires it. AAP §0.2.1.6
+lists a README in every Terraform module, and AAP §0.8.1 defines that README as
+the **prose half** of the HCL documentation obligation. The file-header comments
+and resource rationales in the `.tf` files, the variable/output descriptions
+checked by [TFLint](../../.tflint.hcl), and the generated contract checked by
+[terraform-docs](../../.terraform-docs.yml) form the mechanical half.
 
-```bash
-terraform -chdir=infra/modules/ecs-service init -backend=false
-terraform -chdir=infra/modules/ecs-service validate
-tflint --chdir=infra/modules/ecs-service --config="$(pwd)/infra/.tflint.hcl"
+Assumptions: the module is consumed only through an environment root. It holds
+no backend and no environment state of its own, so applying this directory
+directly would bypass the composition layer that supplies every dependency.
+The AWS path is additive; the REFERENCE implementation under `app/**` remains
+unchanged and available.
+
+
+## 2. Provenance: the CICS region decomposed
+
+The measurements below come directly from
+`app/csd/CARDDEMO.CSD:L1-L505`. The 505-line definition contains 8
+`DEFINE FILE` stanzas in L1-L99, 17 `DEFINE MAPSET` stanzas in L100-L172,
+18 `DEFINE PROGRAM` stanzas in L173-L305, 18 `DEFINE TRANSACTION` stanzas
+in L306-L488, 2 `DEFINE LIBRARY` stanzas in L489-L498, and 1
+`DEFINE TDQUEUE` stanza in L499-L505.
+
+All 18 transaction stanzas repeat the same runtime template:
+`ISOLATE(YES)`, `TASKDATAKEY(USER)`, `ACTION(BACKOUT)`, `PRIORITY(1)`,
+`RESTART(NO)`, `PROFILE(DFHCICST)`, `TRANCLASS(DFHTCL00)`, `TWASIZE(0)`,
+`DTIMOUT(NO)`, `CONFDATA(NO)`, `RESSEC(NO)`, and `CMDSEC(NO)` each occur
+exactly 18 times. The 18 program stanzas likewise each carry
+`EXECKEY(USER)` and `CONCURRENCY(QUASIRENT)`.
+
+Refactoring Rationale: one repeated CICS template differing by transaction and
+program name is evidence for one parameterized runtime module, not copied
+Terraform per service. The service catalog groups those programs into eight
+bounded contexts so they can be deployed and scaled independently.
+
+| CICS attribute | Target expression | Category |
+|---|---|---|
+| `ISOLATE(YES)` | Each Fargate task is an isolated process and network boundary. | Refactoring Rationale: |
+| `TASKDATAKEY(USER)` / `EXECKEY(USER)` | The application container runs as the non-root `container_user`; application work was not privileged in the baseline either. | Refactoring Rationale: |
+| `ACTION(BACKOUT)` | Spring transaction boundaries remain inside the services; database transaction semantics are not owned by this infrastructure module. | Assumptions: |
+| `RESTART(NO)` | ECS desired-count reconciliation and target-group health replacement add automatic process recovery; this is an improvement, not a literal port. | Refactoring Rationale: |
+| `PRIORITY(1)` / `TRANCLASS(DFHTCL00)` | Each online service receives CPU target tracking. Step scaling was rejected because the uniform baseline attributes provide no per-transaction demand thresholds from which to derive steps. | Alternatives Considered: |
+| `DTIMOUT(NO)` / `RUNAWAY(SYSTEM)` | Target-group probe intervals, timeouts, thresholds, and deregistration delay bound unhealthy routing and request draining. | Refactoring Rationale: |
+| `LIBRARY(CARDDLIB)` at L489-L491 | `infra/modules/ecr` owns the image repository; this module consumes the selected image through `image_uri` and scopes pull access through `ecr_repository_arn`. | Refactoring Rationale: |
+
+One source entry is deliberately not converted into a service.
+`DEFINE TRANSACTION(CDV1)` at L388-L398 points to `PROGRAM(COCRDSEC)` at
+L390, whose program definition is L211-L218, but no matching `COCRDSEC.cbl`
+exists under `app/**`. AAP §0.5.2 records the pair with no target.
+
+Assumptions: the dangling definition is preserved as provenance rather than
+inventing a ninth bounded context for source code that does not exist.
+
+
+## 3. Statelessness makes the module viable
+
+The shared `01 CARDDEMO-COMMAREA` at
+`app/cpy/COCOM01Y.cpy:L19-L44` carried navigation, identity, selection, and
+re-entry state between terminal turns. The target decomposes it into four
+mechanisms:
+
+| COMMAREA fields | Target mechanism |
+|---|---|
+| `CDEMO-FROM-TRANID`, `CDEMO-FROM-PROGRAM`, `CDEMO-TO-TRANID`, `CDEMO-TO-PROGRAM`, `CDEMO-LAST-MAP`, `CDEMO-LAST-MAPSET` | Client-side router history |
+| `CDEMO-USER-ID`, `CDEMO-USER-TYPE`, `CDEMO-USRTYP-ADMIN`, `CDEMO-USRTYP-USER` | Signed JWT identity and role claims |
+| `CDEMO-CUST-ID`, `CDEMO-ACCT-ID`, `CDEMO-CARD-NUM` | REST path parameters |
+| `CDEMO-PGM-CONTEXT`, `CDEMO-PGM-ENTER`, `CDEMO-PGM-REENTER` | Eliminated; a request handler has no terminal-turn re-entry state |
+
+Refactoring Rationale: signed claims replace identity fields that the client
+previously echoed back, so identity is authenticated rather than trusted as
+session storage. Router state and selected resource identifiers move to the
+request boundary, leaving no continuity that must survive on one server.
+
+AAP §0.9.3 states the consequence: “all eight services are stateless with no
+sticky sessions and no server-side session store, which is precisely what
+makes horizontally-scaled Fargate tasks behind a load balancer a viable target
+at all.”
+
+Three module properties follow:
+
+* The target group explicitly disables stickiness.
+* Autoscaling may remove a task without losing session state.
+* A rolling deployment may replace every task without transferring session
+  state.
+
+Assumptions: in-flight requests still receive the configured deregistration
+delay; statelessness removes user-session affinity, not the need to drain active
+connections.
+
+
+## 4. What one instantiation provisions
+
+The generated contract in [§7](#7-inputs-and-outputs) lists all 13 resources.
+Their runtime responsibilities are:
+
+| Shape | Provisioned responsibility |
+|---|---|
+| Always | A CloudWatch log group with caller-selected retention and optional customer-managed encryption |
+| Always | An execution role and inline policy scoped to the selected ECR repository, this log group, exact Parameter Store and Secrets Manager references, and constrained KMS keys |
+| Always | An application task role with a same-account permissions boundary; business-resource access arrives only through caller-selected policy inputs, exact SQS queue sets, or managed-policy attachments |
+| Always | A Fargate task definition using `awsvpc`, Linux/X86_64, the selected CPU/memory pair, an unprivileged container user, `awslogs`, a read-only root, and one ephemeral volume per writable path |
+| Optional, enabled by default | An AWS Distro for OpenTelemetry sidecar that receives OTLP traces, scrapes the service's HTTPS Actuator Prometheus endpoint, emits metrics through CloudWatch EMF, and exports traces to X-Ray |
+| Online-service shape | An IP target group using HTTPS for traffic and health checks on `/actuator/health`, with stickiness disabled |
+| Online-service shape | An ECS service using the `ECS` rolling controller, an explicit capacity-provider strategy, private application subnets, no public IP, and the pinned Fargate platform version |
+| Online-service shape | An Application Auto Scaling target and CPU target-tracking policy |
+
+Assumptions: the task role starts free of **business-resource** access, not
+literally empty. Exact queue grants, a caller-owned business policy, optional
+managed policies, and the collector-only telemetry policy are separate because
+they have different owners and lifecycles.
+
+Trade-offs: `readonly_root_filesystem` is a fleet invariant and defaults to
+`true`. Each path in `writable_mount_paths` becomes task-local ephemeral
+storage, with `/tmp` supplied by default. Naming writable paths costs explicit
+configuration for an image that needs another scratch directory, but avoids
+leaving the entire image filesystem writable.
+
+Configuration follows AAP §0.5.3.5: no service hard-codes an endpoint and no
+endpoint is stored in `terraform.tfvars` as a secret. Plain settings are
+allowlisted, while Parameter Store and Secrets Manager values are injected by
+reference and the same exact resource identifiers scope the execution role.
+
+
+## 5. Workload instances and task-only shapes
+
+The eight bounded-context service deployables and their originating programs
+are:
+
+| Instance | Shape | Originating COBOL programs |
+|---|---|---|
+| `auth` | Online service | `COSGN00C`, `COUSR00C`, `COUSR01C`, `COUSR02C`, `COUSR03C` |
+| `account` | Online service | `COACTVWC`, `COACTUPC`, `CBACT01C`, `CBACT03C`, `CBCUS01C`, `COACCT01` |
+| `card` | Online service | `COCRDLIC`, `COCRDSLC`, `COCRDUPC`, `CBACT02C` |
+| `transaction` | Online service | `COTRN00C`, `COTRN01C`, `COTRN02C`, `COBIL00C` |
+| `reference` | Online service | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` |
+| `batch` | Task only | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` |
+| `authorization` | Online service | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` |
+| `reporting` | Online service | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
+
+Each service has its own name, image, configuration inventory, and
+least-privilege policy set. The current roots supply CPU, memory, desired count,
+and retention as per-environment values shared by the service fleet rather than
+inventing per-service topology.
+
+Decision D2 assigns batch work to Step-Functions-invoked Fargate tasks.
+AAP §0.4.1.7 specifies the synchronous `ecs:runTask.sync` integration and
+container overrides; AAP §0.5.1.7 requires argument-driven jobs; and
+AAP §0.4.1.6 assigns task-definition wiring to
+`infra/modules/step-functions-batch`. The `batch` call therefore sets
+`create_service = false`,
+`attach_load_balancer = false`, and `enable_autoscaling = false`.
+`service_name`, `service_arn`, `target_group_arn`, `target_group_name`,
+`target_group_arn_suffix`, and `autoscaling_target_resource_id` are `null`;
+the task definition, container name, both roles, and log group remain available
+to `infra/modules/step-functions-batch`.
+
+Alternatives Considered: a separate `ecs-task` module was rejected because it
+would duplicate the task definition, both roles, logging, secret injection, and
+telemetry logic. That duplication is the exact drift this reusable module is
+intended to prevent.
+
+Trade-offs: the common module carries three shape booleans that the seven online
+services leave enabled. The extra inputs are accepted because the resulting
+task-only shape shares every invariant that should not diverge.
+
+The environment roots also reuse this module for a ninth, task-only
+`data-migration` workload. It is not a ninth bounded-context service; it is the
+ETL image invoked by orchestration. The count relationship is therefore:
+
+* 8 bounded-context service images and service-module instances;
+* 1 additional `data-migration` image and task-only module instance;
+* 1 `ui` image delivered through `infra/modules/cloudfront-spa`;
+* 10 ECR repositories in total.
+
+Assumptions: `services/common-lib` is the ninth Maven module but produces no
+container image, so it creates neither an ECR repository nor an
+`ecs-service` instance.
+
+
+## 6. Usage
+
+An online service call is composed in an environment root from sibling-module
+outputs and root-owned policy/configuration maps:
+
+```hcl
+# WHAT: compose one long-running account-service task, target group, ECS service,
+#       and autoscaling policy from environment-root contracts.
+# WHY : Assumptions: the root is the only layer allowed to connect sibling module
+#       outputs; the ecs-service module never reaches sideways into another module.
+module "account_service" {
+  source = "../../modules/ecs-service"
+
+  service_name             = "account"
+  environment              = var.environment
+  cluster_arn              = module.ecs_cluster.cluster_arn
+  cluster_name             = module.ecs_cluster.cluster_name
+  vpc_id                   = module.network.vpc_id
+  private_app_subnet_ids   = module.network.private_app_subnet_ids
+  security_group_ids       = [module.network.app_security_group_id]
+  image_uri                = "${module.ecr.repository_urls["account-service"]}@${var.image_digests["account-service"]}"
+  ecr_repository_arn       = module.ecr.repository_arns["account-service"]
+  permissions_boundary_arn = var.permissions_boundary_arn
+
+  container_port        = module.network.app_container_port
+  task_cpu              = var.ecs_task_cpu
+  task_memory           = var.ecs_task_memory
+  desired_count         = var.ecs_desired_count
+  min_capacity          = var.ecs_desired_count
+  max_capacity          = var.ecs_desired_count * 2
+  log_retention_in_days = var.log_retention_days
+  log_group_kms_key_arn = module.kms.s3_key_arn
+
+  environment_variables   = local.environment_variables_by_workload["account"]
+  ssm_parameter_arns      = local.runtime_parameter_arns_by_service["account"]
+  secret_arns             = local.secret_sources_by_workload["account"]
+  create_task_role_policy = true
+  task_role_policy_json   = data.aws_iam_policy_document.account_runtime.json
+}
 ```
+
+The batch call uses the same runtime but suppresses service-only resources:
+
+```hcl
+# WHAT: register the batch task definition, roles, log group, and container
+#       contract without creating a continuously running ECS service.
+# WHY : Refactoring Rationale: Step Functions owns task invocation and passes
+#       arguments through ContainerOverrides, so desired-count reconciliation,
+#       a target group, and autoscaling would create idle infrastructure.
+module "batch_task" {
+  source = "../../modules/ecs-service"
+
+  service_name             = "batch"
+  container_name           = "batch"
+  environment              = var.environment
+  cluster_arn              = module.ecs_cluster.cluster_arn
+  cluster_name             = module.ecs_cluster.cluster_name
+  vpc_id                   = module.network.vpc_id
+  private_app_subnet_ids   = module.network.private_app_subnet_ids
+  security_group_ids       = [module.network.app_security_group_id]
+  image_uri                = "${module.ecr.repository_urls["batch-service"]}@${var.image_digests["batch-service"]}"
+  ecr_repository_arn       = module.ecr.repository_arns["batch-service"]
+  permissions_boundary_arn = var.permissions_boundary_arn
+  create_task_role_policy  = true
+  task_role_policy_json    = data.aws_iam_policy_document.batch_runtime.json
+
+  create_service       = false
+  attach_load_balancer = false
+  enable_autoscaling   = false
+}
+```
+
+The module is never applied directly. Operators and CI reach it transitively
+through `terraform -chdir=infra/envs/<env> ...`.
+
+
+## 7. Inputs and outputs
+
+The generated region represents all 56 inputs and all 17 outputs declared by
+the sibling HCL.
+
+`target_group_arn` is the hard service-routing contract: `infra/modules/alb`
+attaches it to the listener rule that module owns. `container_name` and the
+revision-qualified `task_definition_arn` are the hard run-task contracts:
+`infra/modules/step-functions-batch` uses them for `ContainerOverrides` and
+`ecs:RunTask`.
+
+Assumptions: the region between the markers below is generated from
+`versions.tf`, `variables.tf`, `main.tf`, and `outputs.tf`. Hand-editing a row
+would be overwritten locally and rejected by the check-only CI drift gate.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -149,3 +416,224 @@ tflint --chdir=infra/modules/ecs-service --config="$(pwd)/infra/.tflint.hcl"
 | <a name="output_task_role_arn"></a> [task\_role\_arn](#output\_task\_role\_arn) | ARN string of the IAM role the APPLICATION assumes at run time, as<br/>distinct from execution\_role\_arn below, which ECS assumes in order to<br/>start the task. Consumed by every sibling module that must grant this one<br/>service access to a resource it owns: infra/modules/sqs in a queue policy,<br/>infra/modules/kms in a key policy, infra/modules/secrets in a secret<br/>resource policy, infra/modules/s3-datasets in a bucket policy. This ARN is<br/>therefore the identity least privilege is expressed against -- main.tf<br/>writes no policy onto this role, so what the service may reach is exactly<br/>what a caller grants to this ARN and nothing besides. Never null: both<br/>roles are created for all eight instantiations. |
 | <a name="output_task_role_name"></a> [task\_role\_name](#output\_task\_role\_name) | Name string -- not the ARN -- of the same application task role. Consumed<br/>by an environment root that attaches a further policy to the role after<br/>this module returns, since the Terraform resources that attach a policy<br/>take a role name while the resource policies that grant to a role take the<br/>ARN above. Never null. |
 <!-- END_TF_DOCS -->
+
+
+## 8. Deployment strategy: rolling only
+
+AAP §0.2.2 is explicit:
+
+> “Blue-green and canary deployment. Rolling ECS service deployment only.”
+
+The ECS service uses the native `ECS` deployment controller with a minimum
+healthy percentage of 100 and a maximum percentage of 200 by default. A full
+replacement set can become healthy before outgoing tasks stop, within the one
+target group.
+
+Alternatives Considered: blue-green through a `CODE_DEPLOY` controller was
+rejected because it requires a second target group, a CodeDeploy application,
+a deployment group, and an AppSpec traffic-shifting configuration. Canary
+deployment uses the same CodeDeploy traffic-shifting machinery and therefore
+adds the same resource family. Neither strategy is represented in this module.
+
+Roll forward means updating the root's image reference and applying a reviewed
+environment plan; ECS performs a rolling task replacement. When enabled, the
+deployment circuit breaker returns a failed rollout to the last known-good task
+set.
+
+Assumptions: the circuit breaker is part of the rolling controller, not
+blue-green under another name. It uses no second target group, alternate task
+set, or weighted traffic shift.
+
+The AAP uses `terraform -chdir=infra/envs/<env> destroy` as shorthand for a
+full-environment rollback. That is an operator teardown, not a service-revision
+rollback and never an `infra-ci` step. The
+[teardown runbook](../../../docs/runbooks/teardown.md) uses a reviewed
+`plan -destroy` and saved-plan apply, removes the environment in reverse
+dependency order, and retains or removes `infra/bootstrap` last. The
+[deployment runbook](../../../docs/runbooks/deploy.md) contains the rollout and
+health-verification contract.
+
+Trade-offs: rolling replacement avoids a second fleet and traffic-shifting
+control plane, but it offers no independently addressable green environment.
+The 100/200 bounds accept temporary replacement capacity so serving capacity
+does not fall while new tasks become healthy.
+
+
+## 9. Module boundaries
+
+| Concern | Owning module |
+|---|---|
+| ALB, HTTPS listener, per-service listener rules | `infra/modules/alb`; this module owns only the target group |
+| ECS cluster and Container Insights | `infra/modules/ecs-cluster` |
+| ECR repositories, scan-on-push, lifecycle policy | `infra/modules/ecr` |
+| VPC, subnets, NAT, interface/gateway endpoints, security groups | `infra/modules/network` |
+| Customer-managed keys | `infra/modules/kms` |
+| Secrets Manager entries and generated credentials | `infra/modules/secrets` |
+| Batch state machines and their execution roles | `infra/modules/step-functions-batch` |
+| Queues and dead-letter queues | `infra/modules/sqs` |
+| Non-service log groups, dashboards, alarms, SNS | `infra/modules/observability` |
+| HTTP API, Cognito JWT authorizer, VPC Link | `infra/modules/api-gateway-http` |
+| SPA delivery path | `infra/modules/cloudfront-spa` |
+
+Assumptions: every dependency is supplied as a variable by the environment
+root, never by a sibling `module` call inside this module. That boundary keeps
+the dependency graph visible at the composition layer and prevents a reusable
+module from selecting an environment on its caller's behalf.
+
+Refactoring Rationale: the target group is the seam with `infra/modules/alb`.
+This module owns the container port, health path, protocol, and target type
+needed to define the group; `alb` owns the listener and attaches
+`target_group_arn` as the rule's forward target. Moving the group into `alb`
+would make that module duplicate workload details it otherwise does not need.
+
+
+## 10. Security posture
+
+* Both ECS roles carry the required same-account permissions boundary.
+* The execution role names the selected ECR repository, log group, parameters,
+  secrets, and KMS keys. It does not receive a broad managed execution policy.
+* The application task role receives only the capabilities selected for that
+  workload: caller-composed business access, exact send/receive queue sets,
+  reviewed managed policies, and collector-only telemetry export.
+* The application container runs as a non-root user with a read-only root
+  filesystem. Fargate does not expose privileged mode, and the task definition
+  deliberately omits that unsupported field.
+* Tasks use private application subnets, security groups supplied by the
+  network module, and `assign_public_ip = false`.
+* Runtime values that require protection are resolved from Parameter Store or
+  Secrets Manager. Tracked `terraform.tfvars` files carry non-secret sizing,
+  retention, and environment configuration.
+
+Refactoring Rationale: AAP §0.7.8 does not pretend RACF has a cloud analogue.
+The target maps its control objective to least-privilege task identities and a
+managed user pool rather than claiming a syntax-level port.
+
+Assumptions: the only wildcard **resources** in the role policies accompany
+APIs that do not support resource scoping: ECR authorization-token retrieval
+and X-Ray ingestion. No wildcard IAM **action** is present; image pull,
+configuration read, queue use, logging, KMS, and business permissions all name
+their permitted actions.
+
+Refactoring Rationale: a public IP is withheld rather than offered as an
+opt-out variable. The network module supplies private routes and VPC endpoints
+for the AWS services tasks consume, so a single caller cannot bypass the
+application-tier boundary.
+
+Assumptions: deployment authentication uses short-lived OIDC-federated
+credentials. Database credentials, seed credentials, and application client
+secrets are generated or rotated into Secrets Manager by the composed
+infrastructure; no resolved credential belongs in source.
+
+
+## 11. Environment parameterization
+
+For this module, `dev` and `prod` vary on three capacity/retention axes:
+
+| Axis | Module inputs |
+|---|---|
+| Task count | `desired_count`, `min_capacity`, `max_capacity` |
+| Task size | `task_cpu`, `task_memory` |
+| Log retention | `log_retention_in_days` |
+
+The environment value also namespaces names and tags, but it does not select a
+different resource graph. Both environment roots call the same module block
+and feed the same workload map.
+
+Assumptions: AAP §0.4.1.6 requires the roots to differ in sizing and retention,
+never topology. A missing sidecar, target group, security control, or scaling
+resource in only one environment would therefore be a defect rather than an
+environment option.
+
+Trade-offs: shared topology makes the smaller environment exercise the same
+dependency graph, while its reduced capacity cannot prove the larger
+environment's load behaviour. Capacity evidence and topology evidence are
+different claims.
+
+
+## 12. Validation and gates
+
+The infrastructure workflow enforces five Terraform contract gates. The module
+is validated transitively through the environment roots rather than initialized
+as an independent deployment root:
+
+```bash
+# WHAT: check canonical formatting across every Terraform directory without
+#       rewriting reviewed files.
+# WHY : Alternatives Considered: a bare terraform fmt was rejected because it
+#       mutates the checkout and can hide the drift the gate is meant to report.
+terraform fmt -check -recursive infra/
+
+# WHAT: initialize each deployable root without its backend and validate the
+#       complete composed module graph.
+# WHY : Assumptions: provider schemas and child modules are required for
+#       validate, while -backend=false keeps this credential-free and proves
+#       every ecs-service input against real caller values.
+for root in infra/bootstrap infra/envs/dev infra/envs/prod; do
+  terraform -chdir="$root" init -backend=false -lockfile=readonly -input=false
+  terraform -chdir="$root" validate
+done
+
+# WHAT: initialize the pinned AWS ruleset and lint the complete Terraform tree.
+# WHY : Assumptions: the shared configuration checks documented and typed
+#       variables/outputs, required versions/providers, unused declarations,
+#       naming, comment syntax, and standard module structure.
+tflint --init --config="$(pwd)/infra/.tflint.hcl"
+tflint --recursive --config="$(pwd)/infra/.tflint.hcl"
+
+# WHAT: compare every generated README region with its sibling HCL without
+#       writing any file.
+# WHY : Alternatives Considered: regeneration in CI was rejected because a
+#       silent rewrite would turn reviewable contract drift into an unreviewed
+#       mutation.
+for dir in infra/bootstrap infra/modules/* infra/envs/dev infra/envs/prod; do
+  terraform-docs --config "$(pwd)/infra/.terraform-docs.yml" \
+    --output-check "$dir"
+done
+
+# WHAT: emit the complete Checkov report, then hard-fail on the reviewed
+#       material-security policy set.
+# WHY : Trade-offs: the offline scanner cannot select HIGH/CRITICAL severities
+#       reliably, so explicit check identifiers prevent an empty selection from
+#       returning a false-green result.
+checkov -d infra --framework terraform --soft-fail \
+  --skip-path '\.terraform' --compact --output json
+material_checks_csv="<material-security-check-ids>"
+checkov -d infra --framework terraform --check "$material_checks_csv" \
+  --skip-path '\.terraform' --compact --output json
+```
+
+Assumptions: transitive validation is why every referenced input must be
+declared in `variables.tf`; an undeclared reference surfaces through the
+calling root. TFLint checks the reverse direction by rejecting declarations
+that nothing consumes.
+
+The workflow also runs a separate, hard gitleaks scan over migration-owned
+tracked files and verifies that every bounded policy-scan exception retains the
+condition that justified it. Those checks complement the five Terraform
+contract gates; they do not replace any of them.
+
+Assumptions: the workload-isolation policy is satisfied by construction. The
+application container has a non-root user, Fargate exposes no privileged mode,
+every container has `awslogs` configuration, and neither role contains a
+wildcard action. `readonly_root_filesystem` defaults to `true`; required JVM
+scratch paths are explicit ephemeral mounts rather than a writable image root.
+
+This repository authors and statically validates the package. A live
+`terraform apply` and any resulting cost remain operator actions outside this
+documentation gate.
+
+
+## 13. Related documents
+
+* [Infrastructure package overview](../../README.md)
+* [Remote-state bootstrap](../../bootstrap/README.md)
+* [ADR-002: Compute platform](../../../docs/adr/ADR-002-compute-platform.md)
+* [Service catalog](../../../docs/architecture/service-catalog.md)
+* [COBOL-to-service traceability](../../../docs/architecture/cobol-to-service-traceability.md)
+* [Deployment runbook](../../../docs/runbooks/deploy.md)
+* [Teardown runbook](../../../docs/runbooks/teardown.md)
+* [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+* [Migration guide](../../../MIGRATION_README.md)
+
+Assumptions: every link above resolves from this module directory and names an
+authored contract, not a prospective file.

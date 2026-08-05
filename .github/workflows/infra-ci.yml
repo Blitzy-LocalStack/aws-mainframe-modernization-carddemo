@@ -237,32 +237,51 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
+          """Verify that each bounded Checkov exception retains its control.
+
+          Parameters:
+              None.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If an exception or compensating control is absent.
+          """
+
           from pathlib import Path
 
           api = Path("infra/modules/api-gateway-http/main.tf").read_text()
           sqs = Path("infra/modules/sqs/main.tf").read_text()
           step = Path("infra/modules/step-functions-batch/main.tf").read_text()
+          cognito = Path("infra/modules/cognito/main.tf").read_text()
           observability = Path("infra/modules/observability/main.tf").read_text()
           datasets = Path("infra/modules/s3-datasets/main.tf").read_text()
-          dev = Path("infra/envs/dev/main.tf").read_text()
-          prod = Path("infra/envs/prod/main.tf").read_text()
 
           assert "#checkov:skip=CKV_AWS_309:" in api
-          assert 'resource "aws_apigatewayv2_route" "public_auth"' in api
+          assert 'resource "aws_apigatewayv2_route" "public"' in api
           assert 'authorization_type = "NONE"' in api
           assert 'for_each = toset(var.public_route_keys)' in api
 
-          assert 'resource "aws_sqs_queue_policy" "security"' in sqs
+          assert 'resource "aws_sqs_queue_policy" "tls_only"' in sqs
           assert '"aws:SecureTransport" = "false"' in sqs
           assert 'resource "aws_sqs_queue_redrive_allow_policy" "exact_source"' in sqs
           assert 'redrivePermission = "byQueue"' in sqs
 
-          assert 'sid       = "ObserveAndStopTasksInCluster"' in step
+          assert 'sid       = "ObserveAndStopTasksInApprovedCluster"' in step
           assert 'actions   = ["ecs:DescribeTasks", "ecs:StopTask"]' in step
           assert 'variable = "ecs:cluster"' in step
-          assert 'sid    = "ManageVendedLogDelivery"' in step
+          assert 'sid    = "DeliverExecutionLogs"' in step
           assert '"logs:CreateLogDelivery"' in step
           assert step.count('resources = ["*"]') >= 2
+
+          # Assumptions: the two CKV2_AWS_57 exceptions live in this module.
+          # One has an API-driven client-secret rotation bridge; the other is a
+          # one-time seed credential bounded by temporary-password validity.
+          assert cognito.count("checkov:skip=CKV2_AWS_57:") == 2
+          assert 'resource "aws_secretsmanager_secret" "app_client"' in cognito
+          assert 'resource "terraform_data" "app_client_secret_rotation"' in cognito
+          assert "add-user-pool-client-secret" in cognito
+          assert 'resource "aws_secretsmanager_secret" "seed_user"' in cognito
+          assert 'temporary_password_validity_days = var.temporary_password_validity_days' in cognito
 
           assert observability.count("checkov:skip=CKV_AWS_145:") == 1
           assert 'sse_algorithm = "AES256"' in observability
@@ -271,11 +290,6 @@ jobs:
           assert datasets.count("checkov:skip=CKV_AWS_35:") == 1
           assert 'resource "aws_cloudtrail" "dataset_object_access"' in datasets
           assert 'enable_log_file_validation    = true' in datasets
-
-          for root in (dev, prod):
-              assert root.count("checkov:skip=CKV2_AWS_57:") == 1
-              assert 'resource "aws_cloudwatch_event_rule" "service_tls_available"' in root
-              assert 'resource "aws_lambda_invocation" "service_tls_initial"' in root
           PY
 
       # Trade-offs: the offline Checkov distribution does not carry policy

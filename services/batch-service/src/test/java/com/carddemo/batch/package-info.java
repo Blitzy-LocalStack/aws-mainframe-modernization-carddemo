@@ -2,11 +2,16 @@
  * Test root of the batch bounded context, and the one test tree in this reactor whose results are
  * checked against committed reference output rather than against transcribed prose alone.
  *
- * <h2>What the three subpackages hold</h2>
+ * <h2>What the four subpackages hold</h2>
  *
- * <p>Three subpackages, and no fourth:</p>
+ * <p>Four subpackages, and no fifth:</p>
  *
  * <ul>
+ *   <li><b>{@code com.carddemo.batch.dto}</b> -- no-container contract tests over values that cross
+ *       the process boundary. A test here compares a production value with the independent
+ *       declaration that supplies or consumes it; the first such comparison holds the
+ *       {@code BatchJobName} tokens against the {@code --job=} values accepted by
+ *       {@code com.carddemo.batch.BatchApplication}.</li>
  *   <li><b>{@code com.carddemo.batch.service}</b> -- unit tests over the four
  *       transcribed-business-rule services of the production package of the same name. A test here
  *       needs neither a database nor a container: with the repositories supplied as test doubles,
@@ -23,26 +28,34 @@
  *       a test double cannot disagree with a query the way a database can.</li>
  * </ul>
  *
+ * <p>Refactoring Rationale: the roster expands from three packages to four because
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/dto/BatchJobNameTest.java}
+ * compares two independently authored declarations at the process boundary, while a service test
+ * checks one transcribed business rule. Naming that distinction here keeps the closed roster true
+ * after the contract test receives its own package and prevents the new package from becoming an
+ * ungoverned exception to this charter.</p>
+ *
  * <p>Alternatives Considered: dividing the tree some other way, or leaving the list open. The
- * division above is by the environment a test needs rather than by the feature it covers, and it is
- * the division that keeps the fast tests fast: grouping a rule test beside a repository test would
- * put both behind the container start-up the second one requires, so the rule tests would stop
- * being runnable in the inner loop and would be run less often as a result. Leaving the list open
- * was rejected because the question a test author has to answer is "which of these does my test
- * belong in", and an open list answers it by inventing a fourth home, at which point the same
- * behaviour can be asserted in two places and the two can drift apart.</p>
+ * division first separates tests by the environment they need, then separates the no-container
+ * tier by the independent evidence an assertion checks. That division keeps the fast tests fast:
+ * grouping a rule test beside a repository test would put both behind the container start-up the
+ * second one requires, so the rule tests would stop being runnable in the inner loop and would be
+ * run less often as a result. Leaving the list open was rejected because the question a test author
+ * has to answer is "which of these does my test belong in", and an open list answers it by
+ * inventing a fifth home, at which point the same behaviour can be asserted in two places and the
+ * two can drift apart.</p>
  *
  * <p>This subtree carries one charter per package and no more: this one, and one in each of those
- * three subpackages, so four in all. This directory itself holds no test class, no shared base
+ * four subpackages, so five in all. This directory itself holds no test class, no shared base
  * class, no helper, no fixture and no resource -- everything that executes lives one level down, in
  * the subpackage whose environment it needs.</p>
  *
  * <p>Alternatives Considered: a shared base class or assertion helper at this level, which is where
- * one would naturally go if all three subpackages came to need it. Rejected, because such a helper
- * sits at the one level none of the three owns, and an assertion moved into it can afterwards be
+ * one would naturally go if all four subpackages came to need it. Rejected, because such a helper
+ * sits at the one level none of the four owns, and an assertion moved into it can afterwards be
  * weakened by an edit to the helper that reads as ordinary maintenance rather than as the
  * relaxation of a parity assertion that it would in fact be. Duplicating a few lines of set-up
- * across three subpackages is the accepted cost of keeping each assertion visible in the file that
+ * across four subpackages is the accepted cost of keeping each assertion visible in the file that
  * depends on it.</p>
  *
  * <p>Assumptions: no charter file exists at {@code com/} or at {@code com/carddemo/} under this
@@ -113,10 +126,10 @@
  * business date as process arguments, so there is no request for such a test to send. The
  * production charter fixes a subpackage map for this context that contains no {@code api}
  * directory, so a controller test would be asserting against a package the plan does not create.
- * And {@code services/batch-service/pom.xml} declares no web starter, no API documentation
- * starter, no security starter and no resource-server starter, so a class referring to a controller
- * or to a mock web layer would not compile in this module at all. Writing the tier anyway would
- * cost a red build to discover what the dependency list already states.</p>
+ * And {@code services/batch-service/pom.xml} carries web and actuator solely for the health probe,
+ * while declaring no API documentation, security or resource-server starter. The health route has
+ * no controller contract to test, and adding a mock-web controller tier would invent an invocation
+ * path that production does not expose.</p>
  *
  * <p>No layering rule is declared or configured anywhere in this tree, and no
  * {@code archunit.properties} belongs in it.</p>
@@ -160,7 +173,7 @@
  * stand-in either, because it would document an absence the construct is incapable of having.</p>
  *
  * <p>Assumptions: that exemption is this compilation unit's alone and does not travel into the
- * three subpackages, where a test class, a test method and a private helper alike do have
+ * four subpackages, where a test class, a test method and a private helper alike do have
  * parameters, return values and thrown types to document. The obligation there rests on the rule's
  * docstring-elements clause, on the house convention the oracle suite states for every new test,
  * fixture builder, helper and mock, and on the shared ruleset's own at-clause validation, which

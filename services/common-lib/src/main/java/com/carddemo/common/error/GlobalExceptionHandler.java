@@ -231,7 +231,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> onInvalidBody(MethodArgumentNotValidException failure,
             HttpServletRequest request) {
 
-        List<FieldValidationFlag.FieldError> fieldErrors = new ArrayList<>();
+        List<ApiError.FieldError> fieldErrors = new ArrayList<>();
         for (FieldError rejected : failure.getBindingResult().getFieldErrors()) {
             // WHY : Assumptions: a rejected value of null and a rejected value of blank are told apart
             //       here, because the baseline tells them apart. Lines 18 and 19 of
@@ -244,7 +244,7 @@ public class GlobalExceptionHandler {
             FieldValidationFlag state = isNeverSupplied(rejected.getRejectedValue())
                     ? FieldValidationFlag.BLANK
                     : FieldValidationFlag.NOT_OK;
-            fieldErrors.add(new FieldValidationFlag.FieldError(rejected.getField(), state,
+            fieldErrors.add(new ApiError.FieldError(rejected.getField(), state,
                     messageOf(rejected)));
         }
 
@@ -279,20 +279,23 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> onInvalidParameter(HandlerMethodValidationException failure,
             HttpServletRequest request) {
 
-        List<FieldValidationFlag.FieldError> fieldErrors = new ArrayList<>();
+        List<ApiError.FieldError> fieldErrors = new ArrayList<>();
         for (var parameterResult : failure.getParameterValidationResults()) {
             String field = parameterResult.getMethodParameter().getParameterName();
+            // WHY : Assumptions: a class compiled without parameter names reports null here, but the
+            //       method-parameter index is still available. The indexed fallback stays non-empty,
+            //       as ApiError.FieldError requires, and preserves one identity per rejection just as
+            //       every expansion at app/cpy/CSSETATY.cpy lines 17 to 27 receives a concrete screen
+            //       field identity; dropping the entry would instead report a validation failure with
+            //       nothing for the caller to act on.
+            String fieldIdentity = field == null
+                    ? "parameter[" + parameterResult.getMethodParameter().getParameterIndex() + "]"
+                    : field;
             for (MessageSourceResolvable resolvable : parameterResult.getResolvableErrors()) {
-                // WHY : Assumptions: the parameter name is used as the field identity, and it can be
-                //       absent -- a class compiled without parameter names reports null here. The empty
-                //       string is substituted rather than the whole entry dropped, because an entry
-                //       whose field a client cannot resolve is still evidence that a parameter was
-                //       rejected, whereas dropping it would report a validation failure with an empty
-                //       array and nothing for the caller to act on.
                 FieldValidationFlag state = isNeverSupplied(parameterResult.getArgument())
                         ? FieldValidationFlag.BLANK
                         : FieldValidationFlag.NOT_OK;
-                fieldErrors.add(new FieldValidationFlag.FieldError(field == null ? "" : field, state,
+                fieldErrors.add(new ApiError.FieldError(fieldIdentity, state,
                         resolvedMessageOf(resolvable)));
             }
         }

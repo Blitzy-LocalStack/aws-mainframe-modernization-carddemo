@@ -1,0 +1,158 @@
+# =============================================================================
+# ui/.prettierrc
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Prettier configuration for the CardDemo SPA. It fixes the formatting applied
+#   to supported TypeScript, TSX, JSON, YAML, HTML and Markdown files discovered
+#   under ui/, and it is the configuration resolved by the `format`
+#   (`prettier --check .`) and `format:write` (`prettier --write .`) scripts
+#   declared in ui/package.json. The `format` script is a required push and
+#   pull-request step in .github/workflows/ui-ci.yml, so the values below are a
+#   build contract rather than an editor preference: a value that disagrees
+#   with the committed tree fails that job.
+# Parameters:
+#   Not applicable. This file declares formatter options and takes no inputs.
+# Return values:
+#   Not applicable. Configuration resolution produces no application value.
+# Exceptions or errors:
+#   Invalid YAML prevents configuration resolution; the format gate surfaces
+#   that non-zero exit rather than ignoring it.
+#
+# WHY (non-obvious design decisions):
+#   - Alternatives Considered: this file is YAML, not JSON. Prettier resolves an
+#     extensionless `.prettierrc` as either, and JSON was rejected because
+#     strict JSON admits no comments, which would move every rationale below
+#     away from the option it explains and so break the adjacency the
+#     explainability rule requires. ui/package.json demonstrates that cost
+#     directly: being strict JSON, it cannot annotate its pins in place and has
+#     to collect their rationale in a separate `carddemoDependencyRationale`
+#     key. The filename stays extensionless because the AAP names that exact
+#     path; validation resolves it with the pinned Prettier before commit rather
+#     than assuming the extensionless file is effective.
+#   - Alternatives Considered: eslint-config-prettier and eslint-plugin-prettier
+#     are deliberately absent, so formatting and linting stay two independent
+#     checks. Neither package is in the pinned dependency set and `npm ci`
+#     installs strictly from ui/package-lock.json, so importing one would leave
+#     the module unresolved and fail the lint step after install. Keeping the
+#     checks apart also means a formatting disagreement can never justify
+#     relaxing a `jsdoc/require-*` rule in ui/eslint.config.js, which enforces
+#     the explainability rule. That separation is safe because the ESLint config
+#     enables no stylistic rule at all -- no indent, quote, semicolon,
+#     comma-dangle or line-length rule -- so there is nothing for Prettier to
+#     contradict.
+#   - Assumptions: every value below already equals Prettier's default in the
+#     pinned version, and each is asserted anyway for two specific reasons.
+#     First, Prettier changes its own defaults across major versions: 2.0
+#     changed trailingComma, arrowParens and endOfLine, and 3.0 changed
+#     trailingComma a second time, so an unset option silently reformats the
+#     whole tree on an upgrade and turns a dependency bump into a tree-wide
+#     diff. Second, an option this file omits can still be supplied by a
+#     contributor's editor-level Prettier settings, so omitting a value does not
+#     fix it -- it only moves the decision somewhere unreviewable.
+#   - Trade-offs: the values match the tree exactly as already committed, so
+#     adopting them reformats nothing. The alternative was to impose a different
+#     house style -- a wider printWidth and single quotes were both considered --
+#     which would have rewritten between twelve and seventeen files authored
+#     elsewhere in this tree, including the rule-mandated ui/eslint.config.js,
+#     for no behavioural gain. Matching the committed state was chosen as the
+#     lower-risk option; the cost is that this file reads as unadventurous,
+#     which is the intended outcome for a formatter.
+#   - Trade-offs: only options with a consequence worth stating are set here.
+#     bracketSpacing, proseWrap, quoteProps, htmlWhitespaceSensitivity,
+#     embeddedLanguageFormatting and singleAttributePerLine are left unset
+#     because their defaults suit this tree and asserting them would add
+#     rationale obligations carrying no information. `parser` is unset because
+#     Prettier infers it per file and a global value would break the Markdown
+#     and YAML files this configuration also covers; `plugins` is unset because
+#     no Prettier plugin is in the pinned dependency set; `overrides` is unset
+#     because no file type here needs different treatment.
+# =============================================================================
+
+# Assumptions: Prettier never breaks a string literal, so no width can corrupt
+# the verbatim message catalog in ui/src/messages/messages.ts, whose constants
+# preserve their declared COBOL widths -- PIC X(75) for CCARD-ERROR-MSG and
+# CCARD-RETURN-MSG (app/cpy/CVCRD01Y.cpy:28-29), PIC X(50) for
+# CCDA-MSG-THANK-YOU and CCDA-MSG-INVALID-KEY (app/cpy/CSMSG01Y.cpy:18-21), and
+# PIC X(40) for the three screen titles (app/cpy/COTTL01Y.cpy:18-24). That file
+# already contains a 205-character line and still passes the check at this
+# width, which is the evidence for the claim rather than an inference from it.
+# The one-entry-per-line diffability the catalog needs when it is read against
+# those copybooks comes from the object literal being multi-line, not from the
+# width, so the width is genuinely independent of message fidelity. 80 is
+# therefore chosen because it is the width the tree is already formatted to;
+# a wider value would rewrite twelve files and buy no fidelity.
+printWidth: 80
+
+# Assumptions: indentation is spaces so that one level occupies the same width
+# in every viewer. A tab renders at whatever tab stop the reader has configured,
+# which would make both the indent and the remaining budget against printWidth
+# above viewer-dependent -- unhelpful in a tree whose message and report values
+# are read in column-aligned form against fixed-width copybook layouts.
+useTabs: false
+
+# Assumptions: two spaces per level is the indent the committed tree uses, and
+# with useTabs above it makes the indent exactly two characters rather than a
+# tab-stop-dependent distance, which is what makes the printWidth budget mean
+# the same thing to every reader and to the CI check.
+tabWidth: 2
+
+# Assumptions: semicolons are always printed to remove the hazard of automatic
+# semicolon insertion, where a statement that begins with `(` or `[` is parsed
+# as a continuation of the previous line rather than as a new statement. The
+# alternative, omitting semicolons, relies on Prettier inserting a defensive
+# leading semicolon on exactly those lines; printing them everywhere removes the
+# class of problem instead of handling it.
+semi: true
+
+# Assumptions: double quotes match how this tree is actually written. Its
+# authored modules use double-quoted import specifiers essentially without
+# exception, so `true` here would not express an existing convention -- it would
+# overturn one, and would fail the format gate on seventeen files. Prettier
+# still switches to the other quote character for any string that would
+# otherwise need escaping, so no message constant containing a double quote is
+# made harder to read by this setting.
+singleQuote: false
+
+# Assumptions: JSX attribute values are double-quoted, matching HTML attribute
+# convention and ui/index.html, whose attributes are double-quoted throughout,
+# so a reader moving between the entry document and a component meets one
+# convention. Note this is deliberately the same side as singleQuote above:
+# projects commonly split the two, using single quotes in code and double in
+# JSX, but this tree is uniformly double-quoted in both positions and the
+# setting records that uniformity rather than inventing a split.
+jsxSingleQuote: false
+
+# Trade-offs: a trailing comma is printed wherever it is valid, which makes
+# appending an entry to a multi-line list a one-line diff instead of a two-line
+# one -- the added line, without a second line whose only change is a comma
+# gained. That materially improves review of the long literal tables in this
+# tree, such as the message catalog and the theme token map, at the cost of a
+# comma that some readers find visually redundant. This is also the option
+# Prettier has changed most: none to es5 at 2.0, then es5 to all at 3.0, so it
+# is the value most worth stating explicitly rather than inheriting.
+trailingComma: "all"
+
+# Trade-offs: a sole arrow-function parameter keeps its parentheses. Adding a
+# type annotation, a default or a second parameter then changes only the text
+# inside parentheses that already exist, instead of also adding them -- so the
+# diff shows the change and nothing else. Current screen entry points are
+# function declarations, while typed table cell renderers and other inline
+# callbacks use arrows, so the option governs those callbacks without claiming
+# to affect declarations. The cost is slight visual noise on short callbacks;
+# the alternative, omitting them, was Prettier's default before 2.0 and was
+# changed for this reason.
+arrowParens: "always"
+
+# Assumptions: line endings are normalised to LF because this application is
+# built and served on Linux -- ui/nginx.conf configures the static server it
+# runs behind -- and Linux is a non-negotiable target constraint for this
+# migration. The concrete failure mode this prevents is a file committed with
+# CRLF from a Windows checkout: it looks correct locally and fails
+# `prettier --check .` in CI, and in the general case a CRLF terminator on a
+# shebang line stops the script running inside a container. Fixing it here
+# removes the whole class of problem at the formatter, rather than depending on
+# every contributor's git autocrlf setting being right. The alternative,
+# Prettier's pre-2.0 default, preserved whatever endings a file already had,
+# which means leaving this unset amounts to deferring to the committer's
+# operating system.
+endOfLine: "lf"

@@ -190,79 +190,40 @@
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- WHY : Assumptions: this is a ONE-SHOT task, not a server. Every job here
-               is started by a Step Functions state through the synchronous
-               ecs:runTask.sync integration, which passes the job token and the
-               business date as container command overrides, waits for the task
-               to REACH A TERMINAL STATE, and reads its exit status. An embedded
-               servlet container is a non-daemon listener: it keeps the JVM alive
-               after the last job step has finished, so the task never stops, the
-               state never completes, and the nightly chain stalls at the step
-               that ran correctly. That is not a cost to weigh against a
-               convenience. It breaks the invocation contract outright, which is
-               why the web starter is absent rather than merely discouraged.
-         WHY : Assumptions: leaving both starters out is also the MECHANISM, not
-               just the intent. With no servlet API and no reactive web stack on
-               the classpath, Spring Boot deduces WebApplicationType.NONE by
-               itself, runs the context to completion and exits, so no
-               spring.main.web-application-type property is needed and none is
-               set. A property would be a second, silently overridable
-               expression of the same decision.
-         WHY : Alternatives Considered: keeping the actuator for an HTTP health
-               probe, which is what the other eight modules do and what an
-               earlier revision of this file did. Rejected on two independent
-               grounds. First, an actuator with no web server serves nothing over
-               HTTP, so the dependency would sit in the build with no consumer.
-               Second, and decisively, health is not the right question to ask of
-               this container: there is no steady state to be healthy IN. Its
-               outcome is the process exit status (0 clean, 4 soft warn with
-               rejects, 8 or more hard failure), which the invoking state reads
-               directly and routes on, and which
-               src/main/java/com/carddemo/batch/package-info.java documents as
-               the whole of this module's outcome contract. Adding a periodic
-               probe alongside it would advertise a liveness guarantee this
-               image does not provide.
-         WHY : Trade-offs: this module therefore diverges from the shared
-               eight-service convention of an /actuator/health target, and that
-               divergence is deliberate and matched elsewhere: the batch
-               instantiation of infra/modules/ecs-service sets
-               attach_load_balancer and create_service to false, so no target
-               group and no long-running service exists to probe it, and the
-               edge modules publish no batch route. A reader comparing this POM
-               against a sibling service POM should find these two starters
-               missing and read this block rather than restore them. -->
+    <!-- WHY : Assumptions: the actuator exists only to provide the health target
+               required by services/batch-service/Dockerfile. No business
+               controller, administrative trigger or API contract is introduced,
+               and application.yml exposes only the health endpoint. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- WHY : Trade-offs: an embedded servlet container is carried solely while
+               the argument-driven job is running so the actuator can answer the
+               image health probe. A marker-file or process-only shell probe was
+               evaluated and rejected because it cannot report an unreachable
+               datasource, while the actuator database indicator can. The cost
+               is a listener in an otherwise one-shot process; BatchApplication
+               closes the context and calls System.exit with the job status, so
+               that listener cannot keep a completed task alive. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
 
     <!-- ====================================================================
          WHY THIS MODULE DECLARES NO SECURITY STARTER
          ==================================================================== -->
 
-    <!-- WHY : Assumptions: an authorization filter chain defends a LISTENER, and
-               this module opens none. Both starters install their chains from
-               autoconfiguration that is conditional on a servlet web
-               application, so with the web starter absent above they contribute
-               no filter, no chain and no bean: they would be weight in the image
-               and, worse, a reader auditing this file would conclude a surface
-               was defended when the artifact defending it never activates.
-         WHY : Alternatives Considered: declaring the web and actuator starters
-               so the container could be probed over HTTP, and then declaring
-               these two so that surface would deny by default. Rejected because
-               it accepts a listener in order to secure it. The concern behind it
-               is real and is answered one level further in: with no listener at
-               all there is no path for an unauthenticated caller in the private
-               application tier to reach this task, so the actuator data, the
-               metrics and any endpoint a later change might add are unreachable
-               rather than merely denied. The edge agrees with this: the batch
-               prefix is refused by a validation in
-               infra/modules/api-gateway-http/variables.tf, so neither the edge
-               nor the interior publishes a route here.
-         WHY : Trade-offs: an operator endpoint cannot be added to this module
-               without first adding the web starter, and adding it would mean
-               reversing the one-shot lifecycle argument recorded above. That is
-               the intended cost. The one invocation path stays the state
-               machine's synchronous run-task call, which carries the job name
-               and the business date as container command arguments, so there is
-               no second authorization surface to design and no second argument
-               source that could disagree with the first. -->
+    <!-- WHY : Alternatives Considered: security and resource-server starters
+               were evaluated for the health listener and rejected. The module
+               publishes no business or administrative route, application.yml
+               exposes health only with details disabled, and the edge publishes
+               no batch route. Adding authentication solely to a liveness probe
+               would require the container HEALTHCHECK to hold a credential,
+               violating the image's credential-free contract without protecting
+               any operation that changes state. -->
 
     <!-- ====================================================================
          PERSISTENCE
@@ -547,20 +508,11 @@
            -http creates no route for this module and refuses one by validation;
            the module README states the same, so they cannot disagree.
 
-           Refactoring Rationale: an earlier revision of this block also claimed
-           "and no security starters", and paired it with the assertion that the
-           actuator endpoint is "reachable solely inside the task's own network
-           namespace". That second claim was simply untrue. The listener binds
-           the container's network interface, not its loopback, because the
-           task definition and the target-group convention both expect a probe
-           reachable over the network; so the surface was reachable from the
-           whole private application tier with no filter chain in front of it.
-           A SecurityConfig class IS now shipped under src and both security
-           starters ARE declared, for the reasons recorded at their
-           declarations. What remains true is that this module publishes no
-           BUSINESS endpoint: the chain permits exactly the health endpoints the
-           two probes request and denies every other path, so the module gained
-           an access control rather than an API.
+           Assumptions: no security starter and no SecurityConfig class are
+           shipped. The only HTTP surface is the actuator health route, its
+           details are disabled, and the container probe supplies no credential.
+           Job selection remains exclusively in the command arguments consumed
+           by BatchApplication, so the listener cannot trigger or alter a job.
          ==================================================================== -->
 
   </dependencies>

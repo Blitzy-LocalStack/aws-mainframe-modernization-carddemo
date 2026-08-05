@@ -1,26 +1,429 @@
-# Aurora PostgreSQL module
+# `infra/modules/aurora-postgresql/` — Aurora PostgreSQL (Serverless v2)
 
-This module creates one Aurora PostgreSQL Serverless v2 cluster writer in
-isolated subnets, an RDS-managed master secret under the Secrets Manager key,
-database parameters and the canonical non-secret SSM connection parameters.
+**Purpose.** This module provisions the single Aurora PostgreSQL Serverless v2
+cluster that carries every record datastore of the migrated CardDemo
+application — one writer instance in the isolated data subnets, encrypted at
+rest with a customer-managed key, with automated backups, a DB subnet group, a
+cluster parameter group, engine log exports and the non-secret connection
+parameters its consumers read at startup. It provisions the cluster and the
+database inside it, and nothing that lives *inside* that database.
 
-## Design decisions
+**Source of truth.** Three sources govern this document, in this order:
 
-**Alternatives Considered:** a read replica was rejected because reporting uses
-read-only security-barrier views against the writer and the baseline defines no
-replica-lag semantics to preserve.
+1. the four Terraform files beside it — `versions.tf`, `variables.tf`,
+   `main.tf` and `outputs.tf` — which are authoritative for every input,
+   output, resource and version constraint. Section 7 is generated from them;
+2. decision **D3**, recorded in
+   [`ADR-003-datastore-targets.md`](../../../docs/adr/ADR-003-datastore-targets.md),
+   which chose Aurora PostgreSQL Serverless v2 for all record data;
+3. the mainframe baseline under `app/jcl/` and `app/csd/`, which is
+   **reference-only** — cited throughout to ground a decision, and never
+   modified. The COBOL path still runs and remains the behavioural oracle for
+   functional parity; this migration adds a path beside it rather than removing
+   one.
 
-**Trade-offs:** development may use a zero minimum and accept resume latency;
-production holds capacity above zero. The module owns the range and conditional
-auto-pause validation so both roots share one invariant.
 
-## Validation
+---
+
+
+## 1. Why this README exists
+
+This document is **rule-mandated, not migration-mandated**. A reusable
+Terraform module needs no README to plan or apply, so its presence is a
+deliberate obligation rather than a courtesy.
+
+Rule 1, *Explainability*, requires that generated code document both what it
+does and **why** each non-obvious decision was made. Every other language in
+this repository has somewhere to put that: a Javadoc block, a JSDoc comment, a
+Python docstring. **HCL has no docstring construct.** The obligation is
+therefore split into two halves, and this file is one of them:
+
+| Half | Carrier | What it guarantees |
+|---|---|---|
+| Mechanical | [`infra/.tflint.hcl`](../../.tflint.hcl) and [`infra/.terraform-docs.yml`](../../.terraform-docs.yml) | `terraform_documented_variables` and `terraform_documented_outputs` fail any variable or output declared without a `description`; the generator then lifts those descriptions into section 7 and the drift check keeps them current |
+| Prose | **this README** | The reasoning a table cannot hold: why the capacity rules are coupled, why there is no reader instance, where the schema boundary falls, and what the ten VSAM clusters this replaces actually guaranteed |
+
+Neither half is sufficient alone. A tree of `description` strings with nothing
+publishing them is unread; a published table nobody keeps honest is worse than
+none, because a reader trusts it.
+
+Assumptions: Rule 1 and existing house style agree completely here, so
+nothing had to be reconciled. `tests/README.md` §12 already imposes the
+identical obligation on the COBOL test suite — a docstring stating Purpose,
+Parameters, Returns and Exceptions, plus inline comments documenting at least
+one of Alternatives Considered, Refactoring Rationale, Assumptions or
+Trade-offs — and closes it with "This is a hard review gate." This document
+extends an established convention to a new tree; it does not import a new one.
+The convention itself is written down once, in
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
+
+
+---
+
+
+## 2. What this module provisions
+
+Six resources, in dependency order. The generated table in section 7 is the
+authoritative list; this one adds the reason each exists.
+
+| Resource | Role |
+|---|---|
+| `random_id.final_snapshot_suffix` | Supplies the unique suffix in the final-snapshot identifier. A snapshot identifier is unique per account and outlives the cluster, so a fixed name would collide with the snapshot left by a previous teardown |
+| `aws_db_subnet_group.this` | Pins the cluster into the **isolated** data-tier subnets — those with no route to the internet in either direction, neither to an internet gateway nor through a NAT gateway |
+| `aws_rds_cluster_parameter_group.this` | Carries the two transport-security parameters the module refuses to let a caller weaken, plus any reviewed override |
+| `aws_rds_cluster.this` | The cluster: Serverless v2 capacity, storage encrypted with a customer-managed key, automated backups, engine log exports to CloudWatch Logs |
+| `aws_ssm_parameter.connection` | Publishes the **non-secret** host, port and database values consumers resolve at startup |
+| `aws_rds_cluster_instance.this` | Exactly **one** instance, the writer, at `instance_class = "db.serverless"` and `publicly_accessible = false` |
+
+Four properties of the cluster are worth stating explicitly, because each is
+either easy to get wrong or easy to mistake for an accident.
+
+Assumptions: Serverless v2 is selected by `engine_mode = "provisioned"`
+together with a `serverlessv2_scaling_configuration` block — *not* by
+`engine_mode = "serverless"`, which selects Aurora Serverless **v1**, a
+different and older product. The argument reads as though it contradicts the
+intent, which is exactly why it is called out here rather than left to be
+inferred again.
+
+Refactoring Rationale: `storage_encrypted` is fixed `true` against the
+customer-managed key supplied in `kms_key_arn`, and `backup_retention_period`
+is bounded to 1–35 days with no value that disables it. Neither is offered as a
+lowerable knob. Section 8 records what the baseline datasets guaranteed
+instead, which is what makes these two settings a correction rather than a
+port.
+
+Assumptions: the master credential is **not an input to this module.** RDS
+generates and owns it — `manage_master_user_password` is set, and
+`master_user_secret_kms_key_id` points at the *secrets* customer-managed key
+rather than the cluster's data key, so that permission to read a credential and
+permission to read the data it protects are separately grantable. The module
+publishes only that secret's ARN, as `master_user_secret_arn`. No credential
+appears in any variable, output, plan or state entry here, and consumers resolve
+the value from Secrets Manager at runtime.
+
+Trade-offs: the cluster parameter group defaults to exactly two parameters —
+`rds.force_ssl` set to `1`, so the engine refuses an unencrypted connection, and
+`password_encryption` set to `scram-sha-256`, so no service credential is stored
+as a weaker verifier. No performance tuning ships; everything else runs the
+engine defaults for the chosen family. An override **replaces** the map rather
+than merging into it, so a root that adds a tuning parameter must restate both
+security parameters, and a `validation` block rejects a map that omits either.
+The cost is that the override is slightly awkward to use; the benefit is that a
+security parameter cannot be dropped by forgetting it.
+
+
+---
+
+
+## 3. This is a module, not a root
+
+**There is no `terraform init`, `plan` or `apply` for this directory.** It
+declares no `provider`, `terraform` or `backend` block — a module cannot carry a
+backend at all — and it is never applied on its own. It is called by
+`infra/envs/dev` and `infra/envs/prod`, and each of those roots owns provider
+configuration, region, default tags and remote state.
+
+The call below is the real one, from `infra/envs/dev/main.tf`.
+
+Assumptions: every external value arrives as an **input variable** wired by the
+root. This module never reaches into a sibling module, reads a sibling's
+resources by name, or resolves a value by naming convention.
+
+```hcl
+module "aurora" {
+  source = "../../modules/aurora-postgresql"
+
+  name_prefix                  = var.name_prefix
+  environment                  = var.environment
+  isolated_subnet_ids          = module.network.isolated_data_subnet_ids
+  security_group_ids           = [module.network.data_security_group_id]
+  kms_key_arn                  = module.kms.aurora_key_arn
+  secrets_kms_key_arn          = module.kms.secrets_key_arn
+  engine_version               = var.aurora_engine_version
+  parameter_group_family       = var.aurora_parameter_group_family
+  port                         = module.network.database_port
+  min_capacity                 = var.aurora_min_capacity
+  max_capacity                 = var.aurora_max_capacity
+  seconds_until_auto_pause     = var.aurora_seconds_until_auto_pause
+  backup_retention_period      = var.aurora_backup_retention_period
+  preferred_backup_window      = var.aurora_preferred_backup_window
+  preferred_maintenance_window = var.aurora_preferred_maintenance_window
+  deletion_protection          = var.deletion_protection
+  skip_final_snapshot          = var.skip_final_snapshot
+  enable_http_endpoint         = true
+}
+```
+
+Note that `port` is passed from the network module rather than as a second
+literal. Assumptions: the same value has to appear on both sides of a
+matched rule pair — the cluster's listener and the security-group rule that
+admits the application tier. Set on one side only, the cluster still plans,
+still applies and still reports healthy to Terraform while refusing every
+connection.
+
+Where a real deploy happens, and its exact command sequence, is owned by
+[`infra/README.md`](../../README.md) and the
+[deployment runbook](../../../docs/runbooks/deploy.md): the state backend is
+bootstrapped once per account, then one environment root at a time is
+initialised, planned to a saved plan file and applied. Teardown reverses that
+order, with the backend removed last, and is owned by the
+[teardown runbook](../../../docs/runbooks/teardown.md).
+
+Trade-offs: those sequences are deliberately **not** repeated here. A duplicated
+command drifts from the original and then misleads.
+
+
+### 3.1 The gates this directory does pass
+
+Four whole-tree checks cover this module. All four are read-only: none of them
+rewrites a committed file.
 
 ```bash
-terraform -chdir=infra/modules/aurora-postgresql init -backend=false
+# WHAT: load the pinned toolchain, then check canonical HCL formatting across
+#       the whole package without rewriting a single file.
+# WHY : Trade-offs: `-check` reports drift and exits non-zero, where a bare
+#       `terraform fmt` silently rewrites the tree -- which in CI would let a formatting
+#       regression pass as green because the command "fixed" it and then
+#       succeeded.
+. /etc/profile.d/00-carddemo-toolchain.sh
+terraform fmt -check -recursive infra
+
+# WHAT: install providers and validate this module's configuration with no
+#       backend and no remote state.
+# WHY : Assumptions: `validate` refuses to run in an uninitialised directory,
+#       but a plain `init` would want credentials and an already-bootstrapped account.
+#       `-backend=false` gives `validate` everything it needs, which is what
+#       lets a contributor with no AWS access review this module.
+terraform -chdir=infra/modules/aurora-postgresql init -backend=false -input=false
 terraform -chdir=infra/modules/aurora-postgresql validate
+
+# WHAT: lint this module against the shared rule set.
+# WHY : Assumptions: HCL has no docstring construct, so this is the mechanical
+#       half of the documentation gate: `terraform_documented_variables` and
+#       `terraform_documented_outputs` fail any variable or output declared
+#       without a `description`, and `terraform_unused_declarations` fails one
+#       that no longer has a consumer.
 tflint --chdir=infra/modules/aurora-postgresql --config="$(pwd)/infra/.tflint.hcl"
+
+# WHAT: verify that the generated region in section 7 still matches the HCL
+#       beside it. This is a CHECK and changes nothing on disk.
+# WHY : Alternatives Considered: the generator runs in `inject` mode, so
+#       `--output-check` compares what WOULD be written against what is committed
+#       and fails on a mismatch.
+#       Regenerating in CI and committing the result was rejected: it converts
+#       a review gate into a silent mutation, repairing the drift so the author
+#       never learns the published contract was wrong.
+terraform-docs --config infra/.terraform-docs.yml --output-check infra/modules/aurora-postgresql
 ```
+
+The fourth gate is the policy scan, run over the whole `infra` tree by the
+infrastructure CI workflow rather than per module. Its expectations for a data
+tier — storage encrypted with a customer-managed key, no public accessibility,
+automated backups enabled, engine logs exported, deletion protection where the
+scanner expects it — are **satisfied by construction, not by suppression.**
+That is a measured claim rather than a slogan: this module's four `.tf` files
+carry **zero** scanner-suppression comments. Six sibling modules do carry
+bounded, individually-reviewed exceptions; this one needs none, because each
+expectation corresponds to an argument that is fixed or validated here.
+
+Trade-offs: all four gates are static. The module is authored and
+statically validated only. Applying a root against a live AWS account remains
+an operator action outside this scope, and no claim is made here that a cluster
+has been created, connected to, benchmarked, load-tested or assessed against a
+compliance standard.
+
+
+---
+
+
+## 4. The capacity invariant
+
+Serverless v2 capacity has five rules, and they are coupled: two of them fire
+only in the presence of a third. Assumptions: every one of them belongs to
+the provider and the engine rather than to this module's preferences, and each
+is enforced at `terraform validate` — before any plan reaches AWS — so a
+misconfiguration is a named error rather than a half-provisioned data tier.
+
+| # | Rule | Enforced at |
+|---|---|---|
+| 1 | Capacity ranges from **0 to 256** Aurora Capacity Units | `variables.tf` — `min_capacity` and `max_capacity` range validations |
+| 2 | Capacity moves in **half-unit** increments | `variables.tf` — a multiple-of-`0.5` validation on each |
+| 3 | The maximum must be **at least** the minimum | `variables.tf` — a cross-variable validation hosted on `max_capacity` |
+| 4 | When the minimum is **0**, the maximum must be **at least 1** | `variables.tf` — a conditional validation on `max_capacity` |
+| 5 | When the minimum is **0**, the auto-pause delay becomes **mandatory**, as a whole number of seconds from **300 to 86,400** | `variables.tf` — a range validation plus a conditional validation on `seconds_until_auto_pause` |
+
+Every `error_message` names the constraint that was violated and the input to
+change, which is the HCL form of Rule 1's *Exceptions* element: a reader who
+hits one of these should not have to open the file to learn which value is
+wrong.
+
+Assumptions: rule 3 is hosted on `max_capacity` rather than on
+`min_capacity` because only one of the pair may reference the other without
+creating a validation dependency cycle, and keeping `min_capacity` free of
+outgoing references is what lets rules 4 and 5 also read it. Rules 4 and 5 are
+deliberately **two** validations rather than one combined block: both fire only
+when the minimum is zero, and a single message would have to name two different
+inputs, leaving the operator to work out which to change.
+
+Assumptions: rule 5 is the one most likely to be missed, because nothing
+about a `null` default suggests another input can make it compulsory. A cluster
+told to scale to zero with no auto-pause delay set does not fail obviously — it
+simply never pauses, silently keeping the capacity it was told to release.
+Catching that at `validate` turns a silent misconfiguration into a named one.
+
+Two constraints sit outside the validation blocks because Terraform cannot
+check them:
+
+- **The engine minor version must support scaling to zero.** Not every
+  PostgreSQL minor release does. `engine_version` is required with no default
+  precisely so that the choice is an explicit, reviewed line in one file.
+- **The provider must be recent enough.** Provider 5.80.0 introduced the zero
+  minimum and 5.81.0 introduced the auto-pause-seconds argument, so 5.81.0 is
+  the effective full-feature floor. `versions.tf` constrains the AWS provider
+  to `~> 6.56`, which clears it comfortably.
+
+Trade-offs: a cluster that has auto-paused takes on the order of fifteen
+seconds to resume, and that cost is paid on the first connection after an idle
+period. It is immaterial to the nightly batch chain, which is a scheduled
+workload that absorbs a one-off resume before its first step; it is a real
+hazard for interactive use, where it surfaces as an apparently hung first query.
+That asymmetry is the whole reason the two environments differ: `dev` is
+permitted a minimum of zero and accepts the resume, while `prod` holds its
+minimum above zero and never pauses. The delay chosen within the 300-to-86,400
+window decides how often the resume is paid at all — a short delay pauses
+eagerly and saves the most while resuming most often — and the module takes no
+position on where in that window the balance sits, because the answer differs
+between a batch-only cluster and one somebody is developing against.
+
+
+---
+
+
+## 5. No read replica
+
+There is **no reader instance**, no Aurora Global Database, no
+`replication_source_identifier` and no cross-region resource in this module.
+That is a decision, and it is recorded here so a future reader does not read the
+absence as an oversight.
+
+Alternatives Considered: a read replica was evaluated and rejected. The
+reporting service reads through read-only cross-schema **views** against the
+writer, under a dedicated database role holding `SELECT`-only grants, and it
+owns no tables of its own — so a replica would add cost and replica-lag
+semantics for no parity benefit. There is no lag behaviour in the baseline to
+preserve, and introducing one would create a class of observable staleness that
+the golden-master comparison would correctly flag. Multi-region and
+disaster-recovery topology are likewise out of scope: the target is
+single-region, three-availability-zone only.
+
+**One consequence a consumer must not misread.** Aurora publishes a **reader
+endpoint** whether or not a reader instance exists, and this module exports it.
+With exactly one instance behind it, that endpoint resolves to the same writer.
+It adds no capacity and gives no isolation from writer load, so no consumer may
+treat it as a lag-free scale-out read path. It is exported for the reporting
+service's read-only role, and for nothing else.
+
+
+---
+
+
+## 6. What this module does **not** do
+
+**This module provisions the cluster and the database, and creates no database
+objects inside it.** This is the boundary most likely to be misunderstood, so it
+is stated flatly: there is no `postgresql` provider here, no `null_resource`, no
+provisioner and no SQL string anywhere.
+
+| Not created here | Created by |
+|---|---|
+| The eight schemas — `auth`, `account`, `card`, `ledger`, `reference`, `batch` and `authorization`, plus the read-only cross-schema views the reporting service reads through | [`data-migration/sql/V0__schemas_and_roles.sql`](../../../data-migration/sql/V0__schemas_and_roles.sql) and the per-service Flyway migrations at `services/*/src/main/resources/db/migration/V1__<schema>.sql` |
+| Service roles and their grants | The same two, per the [data-migration runbook](../../../docs/runbooks/data-migration.md) |
+| Tables, indexes and constraints | The per-service Flyway migrations |
+| The Aurora security group and both halves of its matched rule pair | `infra/modules/network` |
+| The customer-managed keys | `infra/modules/kms` |
+| The master credential | RDS itself — see section 2 |
+
+A consumer that expects a schema to exist because the cluster does will not find
+one.
+
+Alternatives Considered: one deliberate exception to database-per-service
+purity is worth knowing about while reading this module, because it explains why
+a single cluster is correct rather than a compromise. Transaction posting
+commits the transaction, the category balance and the account as one unit of
+work, so the batch service runs against this same cluster under a dedicated
+database role holding narrowly-scoped cross-schema **write** grants on
+`ledger.*` and `account.*` only. A transactional-outbox-plus-compensating-
+reversal design was considered and rejected: it would introduce observable
+partial-posting states that do not exist in the baseline — a posted transaction
+with an unposted balance — which would break golden-master parity outright. The
+**grants** that express this are the migration scripts' business, not this
+module's; nothing here can widen or narrow them.
+
+Refactoring Rationale: `IDCAMS BLDINDEX` is **retired rather than ported.**
+The baseline built each alternate index as a separate, schedulable job step
+(`app/jcl/CARDFILE.jcl:110`, `app/jcl/XREFFILE.jcl:100`,
+`app/jcl/TRANFILE.jcl:109`, `app/jcl/TRANIDX.jcl:52`). PostgreSQL maintains an
+index transactionally and has no separate build step to schedule, so there is
+nothing left to orchestrate. The secondary indexes that replace those alternate
+indexes are created by the per-service Flyway migrations — not here.
+
+
+---
+
+
+## 7. Inputs and outputs
+
+The generated tables below are the contract. This section adds what a table
+cannot say: where each input comes from, and who consumes each output.
+
+**The consumed contract.**
+
+Assumptions: ten inputs are required and carry no default, because each is
+either an environment decision or a value only the calling root can supply.
+`isolated_subnet_ids` and `security_group_ids` come from the
+`network` module — the *isolated* data-tier subnets, deliberately not the
+private application subnets that carry the ECS tasks, and at least two of them
+because a DB subnet group must span two availability zones. `kms_key_arn` and
+`secrets_kms_key_arn` both come from the `kms` module and are deliberately
+different keys, one for the data and one for the credential. `engine_version`
+and `parameter_group_family` are required together, because the family must
+match the engine's **major** version and the two are only safe when set and
+reviewed in the same change. `min_capacity` and `max_capacity` are required
+because capacity is one of the few axes on which the environments differ.
+`name_prefix` and `environment` compose every resource name.
+
+**The defined contract.**
+
+Assumptions: twelve outputs are published. Their consumption stories differ in
+ways that matter:
+
+- `writer_endpoint` is the single address every read and every write resolves
+  to. The calling root publishes it into Parameter Store and each service reads
+  it there at startup through its Spring profile; batch tasks receive it the
+  same way, through Step Functions container overrides. Assumptions: no
+  service, container image or `.tfvars` file may hard-code it, because it is
+  unknown until apply and changes if the cluster is ever replaced.
+- `reader_endpoint` carries the caveat in section 5.
+- `cluster_resource_id`, **not** `cluster_arn`, is the value an IAM
+  database-authentication policy needs inside its resource ARN, and the value by
+  which Performance Insights metrics are addressed. It is also stable across a
+  rename of the cluster identifier, which the ARN is not.
+- `cluster_arn` and `cluster_identifier` confer nothing on their own. The ARN is
+  what an `rds:Describe*`, snapshot or tagging policy names; the identifier is
+  what appears in the console, on an invoice line and in a CloudTrail event, and
+  is what the runbooks and the batch-window SSM steps use. Nothing is reachable
+  at either value.
+- `master_user_secret_arn` is a **reference to where the credential lives,
+  never the credential.** A root uses it to grant one task role
+  `secretsmanager:GetSecretValue` on that one secret, together with `kms:Decrypt`
+  on the secrets key. Both grants are required, and the second is deliberately
+  the secrets key rather than the cluster's data key.
+- `connection_parameter_names` and `connection_parameter_arns` name the
+  non-secret host, port and database parameters, for the ETL configuration
+  resolver and for the IAM policy that lets a task read them.
+- `security_group_ids` and `db_subnet_group_name` are echoed back so a consumer
+  composing a matching rule has the effective value without re-deriving it.
+  Exporting them grants nothing: `infra/modules/network` owns those groups.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -99,3 +502,195 @@ tflint --chdir=infra/modules/aurora-postgresql --config="$(pwd)/infra/.tflint.hc
 | <a name="output_security_group_ids"></a> [security\_group\_ids](#output\_security\_group\_ids) | Identifiers of the security groups attached to the cluster, echoed back<br/>from the module's input so that a consumer composing the application<br/>tier's matching egress rule has the effective value without re-deriving<br/>it. infra/modules/network OWNS these groups and both halves of the rule<br/>pair; this module only attaches what it is handed, so nothing about a<br/>group's rules can be changed through this output. |
 | <a name="output_writer_endpoint"></a> [writer\_endpoint](#output\_writer\_endpoint) | DNS name of the cluster's writer endpoint, which is the single address<br/>every read and every write in the platform resolves to. The calling<br/>environment root publishes this into SSM Parameter Store, and each<br/>service reads it there at startup through its Spring profile to compose<br/>SPRING\_DATASOURCE\_URL; batch tasks receive it the same way, through Step<br/>Functions container overrides. No service, container image or tfvars file<br/>may hard-code it. Unknown until apply, and it changes if the cluster is<br/>ever replaced -- which is the reason consumers resolve it at startup<br/>rather than baking it in at build time. |
 <!-- END_TF_DOCS -->
+
+
+---
+
+
+## 8. The baseline this replaces
+
+Refactoring Rationale: this section exists so the count is measured once and
+never re-derived. Every path below is reference-only: read to ground a decision,
+never modified.
+
+### 8.1 Ten VSAM KSDS base clusters
+
+Each was created by an in-stream `IDCAMS DEFINE CLUSTER` step. `KEYS` is
+*(length offset)*, so `KEYS(11 0)` is an eleven-byte key at offset zero.
+
+| Dataset | Definition | `KEYS` | `RECORDSIZE` | `SHAREOPTIONS` |
+|---|---|---|---|---|
+| ACCTDATA | `app/jcl/ACCTFILE.jcl:36` | `(11 0)` | `(300 300)` | `(2 3)` |
+| CARDDATA | `app/jcl/CARDFILE.jcl:50` | `(16 0)` | `(150 150)` | `(2 3)` |
+| CARDXREF | `app/jcl/XREFFILE.jcl:39` | `(16 0)` | `(50 50)` | `(2 3)` |
+| CUSTDATA | `app/jcl/CUSTFILE.jcl:46` | `(9 0)` | `(500 500)` | `(2 3)` |
+| DISCGRP | `app/jcl/DISCGRP.jcl:36` | `(16 0)` | `(50 50)` | `(2 3)` |
+| TCATBALF | `app/jcl/TCATBALF.jcl:36` | `(17 0)` | `(50 50)` | `(2 3)` |
+| TRANCATG | `app/jcl/TRANCATG.jcl:36` | `(6 0)` | `(60 60)` | `(2 3)` |
+| TRANSACT | `app/jcl/TRANFILE.jcl:49` | `(16 0)` | `(350 350)` | `(2 3)` |
+| TRANTYPE | `app/jcl/TRANTYPE.jcl:36` | `(2 0)` | `(60 60)` | `(1 4)` |
+| USRSEC | `app/jcl/DUSRSECJ.jcl:64` | `(8,0)` | `(80,80)` | — |
+
+`TRANTYPE` is the only dataset with different share options, and `USRSEC` is the
+only one that specifies none.
+
+### 8.2 Three alternate indexes, four definitions
+
+All three are `NONUNIQUEKEY` with `UPGRADE`.
+
+| Index | Definition | `KEYS` |
+|---|---|---|
+| `CARDDATA.VSAM.AIX` — cards by account | `app/jcl/CARDFILE.jcl:83` | `(11 16)` |
+| `CARDXREF.VSAM.AIX` — cross-reference by account | `app/jcl/XREFFILE.jcl:72` | `(11,25)` |
+| `TRANSACT.VSAM.AIX` — transactions by processing timestamp | `app/jcl/TRANIDX.jcl:25` **and** `app/jcl/TRANFILE.jcl:82` | `(26 304)` |
+
+### 8.3 Four definitions that must not inflate the count
+
+These are not part of the ten, and are listed so a recount does not land on
+fourteen: `app/jcl/CBEXPORT.jcl:30` (`EXPORT.DATA`),
+`app/jcl/CREASTMT.JCL:29` (`TRXFL.VSAM.KSDS`), `app/jcl/ESDSRRDS.jcl:65` and
+`:99` (a `USRSEC` ESDS and RRDS demonstration pair) and
+`app/jcl/DEFCUST.jcl:35` (`AWS.CUSTDATA.CLUSTER`).
+
+### 8.4 Two counting hazards, both measured
+
+Assumptions: both of these were measured rather than estimated, and both
+would otherwise have to be derived again by the next reader who verifies the
+figure.
+
+- ⚠️ **A naive `grep "DEFINE CLUSTER"` finds only nine of the ten base
+  clusters.** `app/jcl/DUSRSECJ.jcl:64` writes `DEFINE    CLUSTER` with multiple
+  spaces, as do `app/jcl/CREASTMT.JCL:29` and `app/jcl/ESDSRRDS.jcl:65` and
+  `:99`. Use `grep -rnE "DEFINE +CLUSTER" app/`, which finds sixteen statements
+  where the single-space form finds twelve.
+- ⚠️ **There are three distinct alternate indexes but four `DEFINE
+  ALTERNATEINDEX` statements** — the `TRANSACT` index is defined identically
+  twice, at `app/jcl/TRANIDX.jcl:25` and `app/jcl/TRANFILE.jcl:82`. The
+  `TRANSACT` **base cluster** is likewise defined twice, at
+  `app/jcl/TRANFILE.jcl:49` and again at `app/jcl/TRANBKP.jcl:54`, which is the
+  sixteenth statement and the reason the statement count exceeds the dataset
+  count by more than the four above.
+
+### 8.5 Why "encrypted, with automated backups" is a correction, not a port
+
+⭐ Refactoring Rationale: this is the strongest reason the target differs
+from the baseline rather than reproducing it. The CICS resource definition
+declares eight VSAM `FILE` resources, and **all eight carry an identical
+durability posture**: `JOURNAL(NO)`, `JNLREAD(NONE)`, **`RECOVERY(NONE)`**,
+**`FWDRECOVLOG(NO)`**, `BACKUPTYPE(STATIC)`, `READINTEG(UNCOMMITTED)` and
+`UPDATEMODEL(LOCKING)`.
+
+| Resource | `DEFINE FILE` | `JOURNAL(NO)` | `RECOVERY(NONE)` / `FWDRECOVLOG(NO)` |
+|---|---|---|---|
+| ACCTDAT | `app/csd/CARDDEMO.CSD:1` | `:7` | `:9` |
+| CARDAIX | `app/csd/CARDDEMO.CSD:13` | `:19` | `:21` |
+| CARDDAT | `app/csd/CARDDEMO.CSD:25` | `:31` | `:33` |
+| CCXREF | `app/csd/CARDDEMO.CSD:37` | `:44` | `:46` |
+| CUSTDAT | `app/csd/CARDDEMO.CSD:50` | `:57` | `:59` |
+| CXACAIX | `app/csd/CARDDEMO.CSD:63` | `:70` | `:72` |
+| TRANSACT | `app/csd/CARDDEMO.CSD:76` | `:82` | `:84` |
+| USRSEC | `app/csd/CARDDEMO.CSD:88` | `:94` | `:96` |
+
+No journalling, no recovery, no forward-recovery log and no encryption at rest
+anywhere. So `storage_encrypted`, the customer-managed key and the
+non-disableable backup retention in section 2 are not preserving a baseline
+guarantee — they are **supplying one the baseline never had.** Stating it as a
+port would misrepresent both systems.
+
+### 8.6 Eight resources, ten clusters — the reconciliation
+
+A reader will meet both figures and should not have to reconcile them twice. Two
+of those eight CICS `FILE` resources point at `.AIX.PATH` datasets rather than at
+base clusters — `CARDAIX` at `app/csd/CARDDEMO.CSD:14` names
+`CARDDATA.VSAM.AIX.PATH`, and `CXACAIX` at `:65` names
+`CARDXREF.VSAM.AIX.PATH`. Those two are alternate-index access paths surfaced to
+CICS as files, not datasets in their own right, which is why the verified
+base-cluster figure is **ten** and the CICS resource figure is **eight**.
+
+
+---
+
+
+## 9. Environment parameterization
+
+Assumptions: `dev` and `prod` differ only in sizing, retention and
+protection, and **never in topology.** Both run the same six resources, the same
+one writer, the same isolated placement and the same encryption. That narrowness
+is deliberate: an environment that differs structurally cannot be a rehearsal
+for the other.
+
+| Axis | `dev` | `prod` |
+|---|---|---|
+| Minimum capacity | `0` — may pause | above zero — never pauses |
+| Maximum capacity | sized down | sized up |
+| Auto-pause delay | required, because the minimum is zero | supplied but inert |
+| Backup retention | short | long |
+| Deletion protection | `false` | `true` |
+| Final snapshot | skipped | taken |
+
+Trade-offs: deletion protection is deliberately **off** in `dev`, and that
+is not a weakening by neglect. A cluster that cannot be deleted cannot be torn
+down, and clean teardown is an acceptance criterion — the stack must provision
+cleanly and `destroy` must remove it cleanly — not a convenience. The same
+reasoning drives `skip_final_snapshot` in `dev`: teardown should leave nothing
+behind to pay for or clean up. `prod` inverts both, keeping a last recoverable
+copy and refusing deletion. The accepted cost is that a `dev` cluster is easy to
+destroy; the benefit is that the teardown path in the
+[teardown runbook](../../../docs/runbooks/teardown.md) is exercised rather than
+theoretical.
+
+Assumptions: **no secret value appears in any `.tfvars` file.** The
+environment parameter files carry capacity, retention, windows and flags only.
+The master credential is generated at apply time and written to Secrets Manager
+by RDS, and deployment authenticates by short-lived federated role assumption
+rather than a stored key. That is the mechanism that makes "no secrets
+committed" structurally true rather than merely observed: there is no place in
+this module's contract where a credential could be written down, so none can be.
+
+
+---
+
+
+## 10. Troubleshooting
+
+| Symptom | Cause and resolution |
+|---|---|
+| `validate` fails naming `min_capacity` or `max_capacity` | A capacity rule from section 4. The message names the violated constraint and the single input to change; capacity must be 0–256 in half-unit steps, and the maximum may not be below the minimum |
+| `validate` fails saying the auto-pause delay must be set | Rule 5: the minimum is zero, so `seconds_until_auto_pause` is mandatory. Supply a whole number of seconds from 300 to 86,400, or raise the minimum above zero |
+| `validate` fails saying the maximum must be at least 1 | Rule 4, the other half of the zero-minimum coupling. Raise `max_capacity` to at least one ACU |
+| `apply` rejects a zero minimum that `validate` accepted | The engine minor version does not support scaling to zero. Terraform cannot check this; choose an `engine_version` whose minor release supports it, or hold the minimum above zero |
+| `apply` rejects the cluster parameter group | `parameter_group_family` does not match the **major** version of `engine_version`. The two are set together in the environment root; correct both in one change |
+| `validate` fails comparing the two KMS ARNs | The cross-ARN precondition in `main.tf`: the data key and the secrets key must name the same partition, region and account. Both come from the `kms` module, so the defect is in the root's wiring rather than in either ARN |
+| `destroy` refuses to remove the cluster | Deletion protection is on. That is expected in `prod`; in `dev` it means the flag was overridden. If the failure instead names a missing snapshot identifier, `skip_final_snapshot` is `false` and a final snapshot is being taken — expected in `prod` |
+| The first connection after an idle period appears to hang | The cluster auto-paused and is resuming, which takes on the order of fifteen seconds. Expected wherever the minimum is zero. Raise the minimum above zero for an interactive workload, or lengthen the auto-pause delay |
+| CI reports this README out of date | A `.tf` file changed and section 7 was not regenerated. Run the generator without `--output-check` from the repository root, review the regenerated table, and commit it in the same change as the cause. CI is check-only and will not fix it |
+| `tflint` reports a missing `description` or an unused declaration | A new `variable` or `output` was added without a description, or one no longer has a consumer. Both are the mechanical half of Rule 1 and both are gating |
+
+
+---
+
+
+## 11. References
+
+- [`infra/README.md`](../../README.md) — the package overview, the module index
+  and the authoritative deploy and teardown staging
+- [`ADR-003-datastore-targets.md`](../../../docs/adr/ADR-003-datastore-targets.md)
+  — decision D3, with the options considered, the cost implications and the
+  risks accepted
+- [Deployment runbook](../../../docs/runbooks/deploy.md) and
+  [teardown runbook](../../../docs/runbooks/teardown.md) — the exact command
+  sequences, which this document cross-links rather than duplicates
+- [Data-migration runbook](../../../docs/runbooks/data-migration.md) — the
+  schema, role and grant creation that sits outside this module's boundary
+- [`data-model-and-schema-mapping.md`](../../../docs/architecture/data-model-and-schema-mapping.md)
+  — the field-by-field mapping from the copybook layouts to PostgreSQL columns
+- [`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+  — the documentation convention this file is written to
+
+> **Explainability rule (mandatory).** Every new variable, output, resource
+> argument and document in this module must carry documentation stating
+> **Purpose, Parameters, Returns, and Exceptions** — for HCL, that is the file
+> header block plus a `description` on every variable and output — and its
+> inline comments must explain **why** (documenting at least one of Alternatives
+> Considered, Refactoring Rationale, Assumptions, or Trade-offs) — never restate
+> what the code does. This is a hard review gate.

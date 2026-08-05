@@ -1,0 +1,216 @@
+# =============================================================================
+# services/reporting-service/src/main/resources/application-dev.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The dev profile overlay for the CardDemo reporting bounded context, the
+#   migration target of COBOL programs CORPT00C, CBTRN03C, CBSTM03A and
+#   CBSTM03B. It overrides VALUES ONLY, on keys that application.yml beside
+#   it already declares, and it introduces no key that is absent there. Six
+#   keys are set, across the only axes a profile in this project may vary:
+#   log verbosity, connection-pool sizing, streaming fetch size and actuator
+#   health detail.
+#
+#   Nothing here changes topology and nothing here changes security posture.
+#   The datasource is still Aurora PostgreSQL resolved from the platform, the
+#   read-only cross-schema views are still reached through the same
+#   SELECT-only role and the same connection search path, the single TLS
+#   listener and its port are untouched, and identity still arrives as a
+#   validated token whose group claims common-lib maps to authorities. A
+#   defect reproduced in dev is therefore reproducible in prod, because the
+#   only difference between the two environments is the value of these six
+#   keys.
+#
+#   No endpoint, credential, identifier, bucket name or region appears below,
+#   and no stand-in for one. Every such value stays an unresolved placeholder
+#   in application.yml and is injected by the platform at deployment.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: the dev cluster is provisioned with a minimum capacity of
+#     zero, and Aurora pauses an instance only while no connection initiated
+#     by user activity exists. That one platform rule is what makes pool
+#     sizing a correctness question in this file rather than a tuning one: a
+#     pool holding any connection open keeps the cluster awake for the whole
+#     time the environment sits unused, which cancels the reason for
+#     provisioning a zero minimum at all.
+#   - Trade-offs: three settings a dev overlay conventionally carries are
+#     deliberately NOT restated here, because for each one the base value is
+#     already correct for dev and repeating it would assert a decision this
+#     file has not made. The pool acquisition timeout stays as application.yml
+#     sets it -- draining the pool to empty means the first caller after an
+#     idle period pays a resume, so that wait must be long enough to contain
+#     it, and shortening it in the one profile whose cluster actually pauses
+#     would fail precisely the request that triggers the resume. The idle and
+#     lifetime ceilings stay as the base sets them, because with a floor of
+#     zero the base idle ceiling already retires the last connection and lets
+#     the pool reach empty. The actuator exposure list stays closed, because
+#     widening what a process publishes is not a change in sizing and this
+#     overlay has no standing to make one.
+#   - Alternatives Considered: a logging back-end configuration file, the
+#     conventional way to vary verbosity per environment. Rejected on the
+#     ground application.yml already records: the whole configuration is
+#     expressed as properties, and such a file in this folder would take over
+#     the appender chain wholesale, so the console pattern carrying the
+#     correlation identifier would silently stop applying.
+#   - Assumptions: this file has no mechanical documentation gate.
+#     config/checkstyle/checkstyle.xml sets fileExtensions to java, so no
+#     linter in this project inspects a .yml file for documentation, and
+#     docs/CODE_DOCUMENTATION_STANDARD.md records the same limit for YAML.
+#     The obligation rests on that written standard and on review, and no
+#     comment here claims a gate enforces something it does not.
+# =============================================================================
+
+# WHY : Trade-offs:
+#       Dev accepts a log volume prod will not. Both levels below are raised so
+#       a report or statement run reads as a sequence of handler and service
+#       lines that can be checked against the golden masters under
+#       tests/golden/reporting/ and tests/golden/statement/happy_path/ (both
+#       REFERENCE-ONLY), rather than being inferred from a stack trace after
+#       the fact. The cost is per request and unbounded in aggregate, and log
+#       ingestion is billed by the gigabyte, which is why this sits in the dev
+#       overlay and not in application.yml.
+logging:
+  # WHY : Assumptions:
+  #       The level pins application.yml sets on categories this file
+  #       does not name stay in force BY OMISSION -- not restating them is what
+  #       preserves them -- so nothing below lowers a category that would print
+  #       identity material or a bound statement parameter.
+  level:
+    # WHY : Alternatives Considered:
+    #       Leaving this at the base WARN and raising only the project package.
+    #       Rejected because the misconfiguration this environment actually
+    #       produces is invisible under it: application.yml imports
+    #       configuration with the optional prefix, so a wrong prefix resolves
+    #       nothing and startup continues on unresolved placeholders. The line
+    #       recording what each import resolved comes from the framework's own
+    #       configuration machinery rather than from the project package. At
+    #       WARN that line never prints, and the fault then presents later as
+    #       an unrelated failure somewhere else.
+    #
+    # WHY : Trade-offs:
+    #       INFO rather than DEBUG. DEBUG here would lower every framework
+    #       package this service neither owns nor diagnoses, leaving the lines
+    #       worth reading a minority of the output.
+    root: INFO
+    # WHY : Trade-offs:
+    #       DEBUG is what makes the transcribed COBOL paragraph logic
+    #       inspectable -- which validation branch a request took, and which
+    #       report preset it resolved. The correlation identifier alone cannot
+    #       show that, because it identifies a request without describing the
+    #       path followed inside it. Prod keeps this at INFO for the ingestion
+    #       reason above.
+    com.carddemo: DEBUG
+
+# WHY : Assumptions:
+#       Every key below re-opens a path application.yml already
+#       declares under the same name, so this block replaces values and adds
+#       nothing. The datasource URL, its credentials and its TLS terms are not
+#       among them and stay exactly where the base leaves them.
+spring:
+  # WHY : Assumptions:
+  #       This pool is the read side of a SELECT-only role, and every
+  #       borrow it serves is a cursor walk rather than a keyed read, so one
+  #       connection is held for the length of a whole report or statement
+  #       rather than for a single statement.
+  datasource:
+    # WHY : Trade-offs:
+    #       This pool is sized DOWN from the base rather than up, which
+    #       inverts the usual direction of a dev overlay. One Aurora cluster is
+    #       shared with the seven peer services, and a dev cluster sits at the
+    #       bottom of its capacity range, so its connection budget is far
+    #       smaller than the figure the base was sized against. A pool left at
+    #       the base width would exhaust that budget before a single statement
+    #       query finished, and the symptom would surface in the other seven
+    #       services as refused connections rather than here, which is the
+    #       harder fault to trace.
+    hikari:
+      # WHY : Alternatives Considered:
+      #       Mirroring the base ceiling so dev and prod behave alike under
+      #       load. Rejected because the two clusters do not have the same
+      #       connection budget, so matching the number reproduces a prod-width
+      #       pool against a fraction of a prod database. A burst queueing on a
+      #       narrow pool is visible in the pool's own metrics, where a small
+      #       cluster refusing connections to its other tenants is not.
+      maximum-pool-size: 2
+      # WHY : Assumptions:
+      #       Aurora pauses only while no connection initiated by user
+      #       activity exists, and the base floor of one holds exactly such a
+      #       connection open for as long as the process runs. Keeping the base
+      #       value would therefore not merely delay the pause, it would prevent
+      #       it for the whole life of the task, and the zero minimum this
+      #       environment is provisioned with would never take effect at all.
+      #
+      # WHY : Trade-offs:
+      #       Draining to empty means the next caller pays a fresh
+      #       handshake, and a resume as well if the cluster did pause. That is
+      #       accepted, and it is the reason the acquisition timeout in
+      #       application.yml is left at its base value rather than tightened.
+      minimum-idle: 0
+  # WHY : Assumptions:
+  #       Only one entry in the persistence property map is touched.
+  #       The base settings this file does not name -- the view-binding flag
+  #       and the schema-management mode among them -- stay in force by
+  #       omission, so this module still cannot emit schema statements even
+  #       accidentally.
+  jpa:
+    # WHY : Assumptions:
+    #       This map is an untyped passthrough handed to the
+    #       persistence provider, not a set of typed framework properties, so
+    #       each key must be spelled exactly as the provider expects it; a
+    #       misspelling binds silently and the setting is simply never applied.
+    properties:
+      # WHY : Trade-offs:
+      #       The value below is halved from the base, trading round
+      #       trips for the heap a single open cursor holds, because a dev task
+      #       runs with a smaller memory reservation than a prod one and the
+      #       per-cursor high-water mark matters more there than the fetch
+      #       count.
+      hibernate:
+        # WHY : Assumptions:
+        #       This is a transport batch size and NOT a cap. It bounds
+        #       how many rows cross the wire per fetch, never how many rows a
+        #       report or statement may contain. Both preconditions for a
+        #       server-side cursor still hold unchanged: the value stays
+        #       positive, and application.yml keeps automatic commit disabled.
+        #       Without that condition the driver buffers the entire result set
+        #       on the client and reintroduces the in-memory materialisation
+        #       this setting exists to avoid.
+        jdbc:
+          # WHY : Alternatives Considered:
+          #       A value equal to one of the statement
+          #       table bounds documented for the baseline generator. Rejected
+          #       deliberately, so that no reader can mistake a transport
+          #       figure for one of those bounds; the bounds themselves are
+          #       recorded in
+          #       docs/architecture/cobol-to-service-traceability.md.
+          fetch_size: 100
+
+# WHY : Assumptions:
+#       The dev load balancer is internal and the actuator path is not
+#       routed through the public front door, so the payload widened below is
+#       reachable only from inside the private network. This is the one setting
+#       application.yml explicitly leaves to this file, noting that the
+#       development overlay may widen it and the production overlay does not.
+management:
+  # WHY : Assumptions:
+  #       Only the health endpoint's detail breadth is touched. The
+  #       exposure list, which decides WHICH endpoints answer at all, is not
+  #       restated and so stays exactly as the base closes it.
+  endpoint:
+    # WHY : Trade-offs:
+    #       A detail payload names the datasource and the schemas the
+    #       connection reaches, which turns a "why is the pool empty"
+    #       investigation from a guess into a reading. That disclosure is
+    #       acceptable inside a private network and is NOT acceptable in prod,
+    #       where anything able to reach the probe path could read the data-tier
+    #       layout from it. PROD KEEPS never.
+    health:
+      # WHY : Alternatives Considered:
+      #       When-authorized, the middle setting, which
+      #       looks like the cautious choice. Rejected because both pollers of
+      #       this endpoint are unauthenticated -- the load balancer target
+      #       group and the container health check, neither of which can present
+      #       a token -- so when-authorized would return the same bare status as
+      #       never while appearing to be configured. That is the worse outcome
+      #       because it misleads the next reader instead of merely restricting
+      #       them.
+      show-details: always

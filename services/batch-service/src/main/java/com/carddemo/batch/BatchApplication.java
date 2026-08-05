@@ -184,14 +184,12 @@ import org.springframework.context.ConfigurableApplicationContext;
  *
  * <h2>What this class is not</h2>
  *
- * <p>This module is argument-driven and it is not a server. It publishes no controller, no interface
- * contract and no route, and its {@code pom.xml} declares neither a web starter nor an actuator, so
- * the framework deduces a non-web application from the empty classpath with no property asserting
- * it. A job runs to completion, the process exits, and the invoking state reads the status. Nothing
- * in this class may turn the task into a long-running process, because an embedded listener is
- * non-daemon: it would hold the interpreter open after the final step had finished, the task would
- * never reach a terminal state, and the nightly chain would stall on a step that had in fact
- * succeeded.</p>
+ * <p>This module is argument-driven and publishes no business controller, interface contract or
+ * administrative route. Its web and actuator starters exist solely so the Dockerfile can probe
+ * datasource-aware health while a job runs. Trade-offs: carrying that listener adds a server to a
+ * one-shot process, but this class closes the context and calls {@link System#exit(int)} with the
+ * translated job result, so the listener cannot keep a completed task alive. Job selection remains
+ * exclusively in the command arguments and no HTTP request can start work.</p>
  *
  * <p>Assumptions: standard output belongs to the running job and is not touched here. Transaction
  * posting emits two counter lines whose spacing is part of the observable contract:

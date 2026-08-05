@@ -23,7 +23,7 @@
 #   infra/envs/prod/main.tf, which is what keeps the only differences between the
 #   two environments visible in their own terraform.tfvars files.
 #
-# Parameters -- twelve required, fifteen optional:
+# Parameters -- twelve required, sixteen optional:
 #   environment                     string       REQUIRED. Names every resource.
 #   kms_key_arn                     string       REQUIRED. Encrypts the log
 #                                                groups and the topic.
@@ -65,6 +65,8 @@
 #                                   number       Stale-reply alarm threshold.
 #   access_log_bucket_force_destroy bool         Teardown behavior for the
 #                                                shared access-log destination.
+#   rotation_lambda_function_names  set(string)  Rotation functions whose
+#                                                errors raise alarms.
 #
 #   Each block below carries the full `type` and `description` that tflint's
 #   terraform_typed_variables and terraform_documented_variables rules require;
@@ -148,7 +150,7 @@ variable "environment" {
 # already created other resources.
 #
 # WHY the name and the default match the rest of the tree instead of being chosen
-# here (Assumption): every directory under infra/ takes its prefix through a
+# here. Assumptions: every directory under infra/ takes its prefix through a
 # variable of this name with this default, which is what lets a root pass one
 # value to every module it calls.
 variable "name_prefix" {
@@ -162,8 +164,8 @@ variable "name_prefix" {
   }
 }
 
-# WHY an empty default reads as complete here rather than as an oversight
-# (Assumption): the baseline tag set is not this module's to supply. Each calling
+# WHY an empty default reads as complete here rather than as an oversight.
+# Assumptions: the baseline tag set is not this module's to supply. Each calling
 # root configures `default_tags` on its own `provider "aws"` block and the
 # provider merges that map into every taggable resource it creates, so the log
 # groups, alarms and topic carry the root's common tags whether or not this
@@ -294,6 +296,10 @@ variable "vpc_flow_log_group_name" {
   }
 }
 
+# WHY : Trade-offs: null keeps the global-metric widget optional without
+#       requiring every caller to configure a provider alias that this module
+#       never uses for resources or alarms. Supplying an identifier enables only
+#       the widget and preserves the module's single-provider contract.
 variable "cloudfront_distribution_id" {
   description = "Optional CloudFront distribution identifier shown on the dashboard. Null omits the widget; no CloudFront alarm is created because global distribution metrics require a different provider region."
   type        = string
@@ -310,7 +316,7 @@ variable "cloudfront_distribution_id" {
 # -----------------------------------------------------------------------------
 
 variable "kms_key_arn" {
-  description = "ARN of the customer-managed key the log groups and notification topic are encrypted with. Required rather than optional because all eight CICS VSAM FILE resources are configured without recovery or journalling, so customer-controlled encryption is a target property that must not become skippable."
+  description = "ARN of the customer-managed key the log groups and notification topic are encrypted with. Required rather than optional because all eight CICS VSAM FILE resources are configured without recovery or journalling, so customer-controlled encryption is a target property that must not become skippable. Alternatives Considered: allowing null to select the services' managed-encryption fallback was rejected because it would make that target property optional and diverge from both environment roots, which provide a customer-managed key."
 
   type = string
 
@@ -331,7 +337,7 @@ variable "kms_key_arn" {
 # -----------------------------------------------------------------------------
 
 variable "log_retention_days" {
-  description = "Days the log groups this module creates retain events. This is one of the retention values the dev and prod roots are permitted to set differently without changing the stack's shape, and it is the direct analogue of how long a mainframe job log was kept before it aged off the spool."
+  description = "Days the log groups this module creates retain events. Retention is always set explicitly and never falls back to the service's unlimited default: 29 of the 38 baseline JCL members route job logs with MSGCLASS=0, so finite retention is part of the migration contract rather than an implicit service setting. This is one of the retention values the dev and prod roots are permitted to set differently without changing the stack's shape, and it is the direct analogue of how long a mainframe job log was kept before it aged off the spool."
   type        = number
   default     = 30
 
@@ -447,8 +453,8 @@ variable "alarm_email_endpoints" {
   # credential, but it is personal data and it changes with staffing rather than
   # with the architecture, so it belongs in a root's tfvars or in a subscription
   # created outside Terraform. The topic still exists with no subscriber, which
-  # is deliberate: alarms publish to it and the messages are retained by the
-  # topic's own delivery semantics, so subscribing later loses no future alarm.
+  # is deliberate: alarm publication remains wired, and adding a subscriber
+  # changes delivery without changing the alarm resources.
   #
   # WHY email and not a chat or paging integration. Alternatives Considered: a
   # richer integration was considered and rejected for this module. Every such
@@ -510,9 +516,9 @@ variable "alarm_period_seconds" {
     #       whole minutes up to a day. An arbitrary number such as 45 is rejected
     #       by the service during apply, and a value below 60 additionally
     #       requires the metric itself to be published at high resolution, which
-    #       none of the metrics this module watches is; the smaller values are
-    #       kept in the set anyway so a future high-resolution metric needs no
-    #       change here.
+    #       none of the metrics this module watches is; the smaller values remain
+    #       in the set so admitting a high-resolution metric needs no change to
+    #       this validation contract.
     condition     = contains([1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600, 21600, 86400], var.alarm_period_seconds)
     error_message = "alarm_period_seconds must be one of the periods CloudWatch accepts: 1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600, 21600 or 86400."
   }
@@ -606,6 +612,10 @@ variable "reply_queue_age_threshold_seconds" {
   }
 }
 
+# WHY : Trade-offs: false makes a non-empty access-log bucket stop teardown
+#       rather than silently deleting its audit trail. A caller can opt in to
+#       destructive cleanup explicitly when preserving those objects is not the
+#       desired teardown contract.
 variable "access_log_bucket_force_destroy" {
   description = "Whether Terraform may remove the shared ALB and S3 access-log destination while it still contains current or noncurrent objects. False preserves the audit trail and makes an operator purge it explicitly before teardown."
   type        = bool

@@ -1,141 +1,328 @@
 # `infra/modules/kms/` — Customer-managed encryption keys
 
-**Purpose.** This module creates four customer-managed KMS keys, one policy
-resource and one alias per key. The keys separate Aurora records, shared
-object/log/notification data, Secrets Manager values and SQS payloads into
-independent cryptographic policy boundaries.
+**Purpose.** This module provisions the four customer-managed KMS keys the
+CardDemo target stack encrypts itself with — one for the Aurora PostgreSQL
+cluster, one for the versioned S3 dataset bucket and the object, log and alert
+data carried alongside it, one for Secrets Manager, and one for the SQS queue
+set. Each key is created with automatic rotation of its key material enabled, an
+alias of the form `alias/<name-prefix>-<data-class>-<environment>`, and a key
+policy that reserves administration to the account root while granting
+cryptographic use only to the principals its caller names.
 
-This README is the mandatory Explainability carrier for the module's HCL.
-Terraform has no docstring construct, so the typed variables, output
-descriptions and adjacent rationale in the four `.tf` files provide the
-mechanical half of Rule 1 while this document provides the prose half. See the
-[documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
+**Source of truth.** Every claim below about the module's behaviour is taken from
+the four `.tf` files in this directory — `versions.tf`, `variables.tf`, `main.tf`
+and `outputs.tf`. Every claim about the mainframe baseline is cited to a path and
+a line under `app/**`, which this migration reads as reference material and never
+modifies. The input and output tables are deliberately not written by hand here:
+they are generated from those same `.tf` files into
+[the generated reference](#generated-terraform-reference) below, so this prose
+and that table cannot disagree without the drift gate reporting it.
 
-## Why four keys
+**Why this README exists.** HCL has no docstring construct, so the project's
+Explainability obligation for Terraform is met in two halves. Inside the `.tf`
+files, a file-header block, a `description` on every variable and output, and a
+why-comment on each non-obvious argument carry the mechanical half. A `README.md`
+in every module directory carries the prose half, and this file is that half —
+which is the honest answer to why a module of four repeated resource patterns is
+documented at this length. See the
+[code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
 
-**Alternatives Considered:** one shared key for the complete stack would incur
-one monthly key charge and require one policy instead of four. It was rejected
-because the single policy would authorize every data class, so one mistaken
-principal or condition would reach database records, dataset objects, secrets
-and queue payloads together.
+## Why four keys rather than one
 
-**Trade-offs:** four keys incur four monthly key charges and four policies to
-review. The accepted benefit is a policy boundary per data class: a change to
-the queue key cannot grant access to database records, and a change to the
-Secrets Manager key cannot grant access to dataset generations.
+**Alternatives Considered.** One shared customer-managed key for the whole stack
+is the obvious simplification, and on price it wins outright: KMS bills per key
+per month plus per request, so one key is one monthly key charge instead of four.
+It is rejected on a mechanism, not on a preference. One key has exactly one key
+policy, so a single mistaken principal, a missing condition or a compromise of
+that one key reaches all four data classes at once — the relational records, the
+dataset objects and logs, the stored credentials, and the queue payloads. Four
+keys give each data class its own policy and its own independent rotation, so the
+same mistake is confined to one class: an over-broad grant added to the queue
+key cannot decrypt database ciphertext, and a grant added to the Secrets Manager
+key cannot read a dataset generation.
 
-## Measured source context
+**Trade-offs.** The cost accepted for that boundary is four monthly key charges
+instead of one, four key policies to review instead of one, and four ARNs for a
+calling root to wire instead of one. Naming the cost matters: a rationale that
+reports only the benefit is not a rationale. The per-data-domain reasoning and
+its full cost analysis — including why service-managed keys were rejected — are
+owned by
+[ADR-008 — security and identity](../../../docs/adr/ADR-008-security-and-identity.md)
+and are not re-derived here.
 
-The immutable CICS definition contains eight VSAM `FILE` resources at
-`app/csd/CARDDEMO.CSD:1,13,25,37,50,63,76,88`. Those eight resources specify
-`JOURNAL(NO)` at lines 7, 19, 31, 44, 57, 70, 82 and 94, and
-`RECOVERY(NONE)` at lines 9, 21, 33, 46, 59, 72, 84 and 96.
+## The measured source context
 
-**Refactoring Rationale:** the target adds encryption at rest and explicit
-policy boundaries to the VSAM replacement data path while leaving the source
-path unchanged. This statement is scoped to the VSAM tier: the authorization
-extension's Db2 index enables image copy at
-`app/app-authorization-ims-db2-mq/ddl/XAUTHFRD.ddl:4` with `COPY YES`.
-The migration adds a path; it does not remove one. The broader identity and
-data-handling treatment is documented in
-[security and identity](../../../docs/architecture/security-and-identity.md).
+The baseline CICS resource definition `app/csd/CARDDEMO.CSD` is 505 lines and
+defines **eight** VSAM `FILE` resources, at lines 1 (`ACCTDAT`), 13 (`CARDAIX`),
+25 (`CARDDAT`), 37 (`CCXREF`), 50 (`CUSTDAT`), 63 (`CXACAIX`), 76 (`TRANSACT`)
+and 88 (`USRSEC`). All eight declare `JOURNAL(NO)` — at lines 7, 19, 31, 44, 57,
+70, 82 and 94 — and all eight declare `RECOVERY(NONE)` together with
+`FWDRECOVLOG(NO)`, at lines 9, 21, 33, 46, 59, 72, 84 and 96. Each stanza also
+sets `JNLREAD(NONE) JNLSYNCREAD(NO) JNLUPDATE(NO) JNLADD(NONE)`, at lines 8, 20,
+32, 45, 58, 71, 83 and 95. These are factual configuration properties of a
+deliberately simple demonstration application, recorded here by path and line
+because they are what this module's existence answers.
 
-## Key and consumer map
+**Refactoring Rationale.** The eight VSAM file resources express no recovery and
+no journalling of file activity, and the tier has no encryption-at-rest
+construct at all, so there is no baseline rotation behaviour for this module to
+reproduce. That is precisely why rotation is an invariant of the module rather
+than a caller preference: the target supplies both properties the replacement
+data path needs — encryption at rest under a key this repository declares, and
+automatic rotation of that key's material — where the tier being replaced
+expressed neither. Without this citation, four rotating keys would read as an
+unexplained addition; with it, they are a documented answer to a measured
+starting point.
 
-| Key | Protected target data | Primary consumers |
+**Scope of that claim.** The statement above is scoped to the **VSAM tier** and
+must not be read more widely, because the baseline is not uniform. The
+authorization extension's Db2 tier does enable image copy: the index definition
+`app/app-authorization-ims-db2-mq/ddl/XAUTHFRD.ddl` is four lines and line 4
+reads `COPY YES;`. The wider identity and data-handling treatment is owned by
+[security and identity](../../../docs/architecture/security-and-identity.md),
+which carries the same reconciliation.
+
+Nothing under `app/**` is changed by this module or by anything else in this
+migration. The z/OS and AWS Mainframe Modernization deployment paths remain
+exactly as they are — the migration adds a path, it does not remove one.
+
+## What each key protects, and which module consumes it
+
+| Key | Data it protects | Consuming sibling module(s) |
 |---|---|---|
-| Aurora | Relational account, card, customer, ledger and authorization records. Source contracts include exact money at `app/cpy/CVACT01Y.cpy:7`, CVV at `app/cpy/CVACT02Y.cpy:7`, and national/government identifiers at `app/cpy/CVCUS01Y.cpy:17-18`. | `aurora-postgresql` |
-| S3 | Ten dataset-generation families, the CloudFront SPA origin, CloudFront log delivery, explicitly named CloudWatch log groups and the encrypted alarm topic. | `s3-datasets`, `cloudfront-spa`, `network`, `step-functions-batch`, `observability` |
-| Secrets Manager | Generated database credentials, Cognito client material and seed-user bootstrap values. The source password field at `app/cpy/CSUSR01Y.cpy:21` is not carried forward. | `secrets`, `cognito`, `aurora-postgresql` |
-| SQS | All five application queues and their five dead-letter queues. | `sqs` |
+| Aurora | The relational record tier: account, customer, card, ledger, reference and authorization rows, the cluster's automated backups and its managed master-credential secret. The source contracts include exact money at `app/cpy/CVACT01Y.cpy:7` (`ACCT-CURR-BAL PIC S9(10)V99`), the card verification value at `app/cpy/CVACT02Y.cpy:7` (`CARD-CVV-CD PIC 9(03)`), which no endpoint returns, and the national and government identifiers at `app/cpy/CVCUS01Y.cpy:17-18` (`CUST-SSN PIC 9(09)` and `CUST-GOVT-ISSUED-ID PIC X(20)`), which are stored encrypted and returned masked. | `aurora-postgresql`, via its `storage_encrypted` cluster and `kms_key_id` |
+| S3 | The ten dataset-generation families that replace the baseline generation data groups, the single-page application origin, CloudFront log delivery, the explicitly named CloudWatch log groups and the encrypted alert topic. | `s3-datasets`, `cloudfront-spa`, and the log-group consumers `network`, `ecs-service`, `api-gateway-http`, `step-functions-batch`, `observability` |
+| Secrets Manager | The generated database credential and the seed-user bootstrap values, all created at provisioning time rather than committed. This is the key that answers `app/cpy/CSUSR01Y.cpy:21`, where the baseline declares `SEC-USR-PWD PIC X(08)`, an eight-character password held in plain text: the target carries no password field forward at all. | `secrets`, `cognito` |
+| SQS | Queue message payloads at rest, across all six queues and their six dead-letter queues. | `sqs` |
 
-**Assumptions:** each consuming module receives the appropriate key ARN from an
-environment root. This module does not call siblings, so a dependency cycle
-cannot be introduced by a consumer feeding back its resource identity for an
-exact key-policy condition. Key creation and policy application are separate
-resources specifically to permit that acyclic feedback edge.
+**Assumptions.** The queue count is six rather than the five the target messaging
+design names, because the implemented queue module splits the inquiry request by
+owning service — account inquiry and date conversion each get their own request
+queue while sharing one reply queue. Six is therefore the number this module's
+`sqs_key_arn` description publishes, and the count is stated here to match the
+module it actually encrypts rather than the summary design. The split itself is
+owned by the `sqs` module, not by this one.
 
-## Policy model
+**Assumptions.** Each consuming module receives the key ARN it needs from an
+environment root, never by calling this module itself. That is what allows key
+creation and key-policy application to be separate resources here: a consumer can
+be created with the key ARN first, and its resulting exact resource identity can
+then narrow the final key policy through an encryption-context input, without the
+two modules forming a dependency cycle Terraform would refuse to graph.
 
-The account root retains administrative key-policy authority. Cryptographic use
-is separately constrained by exact role ARNs, service principals, service
-context and resource-specific encryption context:
+## The policy model
 
-- Aurora use is bound to the database resource identifiers supplied by the
-  environment root.
+Every one of the four key policies is composed from two kinds of statement.
+Administration is reserved to the account-root principal. Cryptographic use is
+granted separately and narrowly, qualified by exact role ARNs, by service
+principal, by service path, and by resource-specific encryption context:
+
+- Aurora use is bound to the cluster resource identifiers the environment root
+  supplies.
 - S3, CloudFront, CloudWatch Logs and SNS use is bound to exact bucket,
-  distribution, log-delivery, log-group or topic ARNs.
+  distribution, log-delivery-source, log-group or topic ARNs.
 - Secrets Manager use is bound to exact secret ARNs.
-- SQS use is bound to exact same-account queue role ARNs and the regional SQS
+- SQS use is bound to exact same-account role ARNs and the regional queue
   service path.
 
-**Assumptions:** role lists default to empty because a root may create keys
-before task roles exist. Empty lists do not create wildcard grants; later
-composition supplies exact principals and contexts. No default contains an
-account identifier or ARN.
+**Assumptions.** Naming the account root as the administrative principal is a
+deliberate dependency on two documented KMS behaviours rather than a default.
+First, a key policy must leave an administrative path in place, or the key
+becomes unmanageable by anyone; the account-root statement is also what permits
+an operator running `terraform destroy` to schedule each key for deletion, so
+clean teardown depends on it. Second, `resources = ["*"]` inside a key policy
+scopes to *that key alone* and is not the account-wide wildcard the same
+expression would mean in an identity policy — which is why the statement is not
+an over-broad grant despite how it reads.
 
-**Trade-offs:** key ARNs and IDs are not marked sensitive outputs. They are
-resource identifiers rather than key material, and keeping them visible lets a
-plan reviewer detect a data class wired to the wrong key. Authorization remains
-in the key and IAM policies, not in output redaction.
+**Assumptions.** The four trusted-principal lists each default to an empty list
+so the keys can be created before the task roles that use them exist. Those roles
+come from the `ecs-service` module, which itself consumes these key ARNs, so
+requiring a non-empty list would make the grant a precondition of the key the
+grant depends on. An empty default installs no wildcard grant — it installs no
+use grant at all — and no default in this module holds an ARN. The empty defaults
+are load-bearing, not placeholders left unfinished.
 
-## Module boundary and usage
+**Trade-offs.** The key ARNs and key identifiers are published as ordinary
+outputs and are not marked `sensitive`. They are resource identifiers, not key
+material, and leaving them legible lets a reviewer read a plan and see which data
+class is wired to which key — the single most useful thing a reviewer can check
+here. The compromise accepted is that these identifiers appear in plan output and
+in state; authorization is enforced by the key and IAM policies, never by
+redacting an identifier.
 
-This directory is a called module, not a Terraform root:
+## Calling the module
+
+This directory is a called module, never a Terraform root. Both environment roots
+consume it from source:
 
 ```hcl
 module "kms" {
   source = "../../modules/kms"
 
-  environment = var.environment
+  environment                 = var.environment
+  cloudfront_distribution_arn = var.cloudfront_distribution_arn
 }
 ```
 
-The calling `dev` and `prod` roots own provider configuration, default tags and
-state backends. This module therefore has no `backend` block, no provider
-configuration body and no sibling `module` block. Environment differences are
-limited to caller-owned parameters such as the deletion window; both
-environments retain the same four-key topology.
+Only `environment` and `cloudfront_distribution_arn` are required; every other
+input has a default. The call sites are `infra/envs/dev/main.tf` and
+`infra/envs/prod/main.tf`.
 
-The module contains no key material, secret value, credential, committed AWS
-account identifier or literal resource ARN. Account and Region identity are
-resolved during planning, trusted principals arrive through typed variables,
-and created key identifiers flow outward through outputs.
+Three things are absent from this module by design, and each is the constraint a
+contributor is most likely to breach:
 
-## Validation
+- **No `backend` block.** A called module has no state of its own, and Terraform
+  honours a backend only in a root module — one declared here would be reported
+  as ignored configuration. State is configured per environment in
+  `infra/envs/dev/backend.tf` and `infra/envs/prod/backend.tf`.
+- **No `provider` block body.** The calling root owns provider configuration,
+  including the region and the `default_tags` these keys inherit. A second
+  configuration for the same provider inside a called module would stop the
+  root's region and tags reaching these resources and would make Terraform reject
+  `count`, `for_each` and `depends_on` on the module block itself. `versions.tf`
+  therefore *requires* the AWS provider without *configuring* it.
+- **No `module` call to a sibling.** This module calls nothing. It publishes key
+  ARNs outward and receives narrowing context inward, which is what keeps the
+  graph acyclic.
 
-Run these checks from the repository root:
+**This module is never applied directly.** `terraform validate` reaches it
+transitively: CI initialises and validates `infra/bootstrap`, `infra/envs/dev`
+and `infra/envs/prod` with `-backend=false`, and validating a root parses every
+module it calls. Lint and the documentation drift check reach this directory
+directly, because both run across `infra/modules/*`.
+
+## What differs between `dev` and `prod`
+
+The two environment roots are required to be identical in shape and to differ
+only in sizing and retention values, so **both environments get the same four
+keys with rotation enabled**. The one lever this module exposes to that
+difference is `deletion_window_in_days`, set per environment in
+`infra/envs/dev/terraform.tfvars` and `infra/envs/prod/terraform.tfvars`.
+
+**Trade-offs.** The two ends of that window buy different things. A short window
+lets `terraform destroy` release the keys sooner and stops a torn-down
+environment leaving keys behind in a pending-deletion state that still bills; a
+long window preserves more time in which a key deleted by mistake can be
+recovered, because past its window a key is gone and every ciphertext under it is
+permanently unreadable. A differing window does **not** make the two
+environments topologically different — it is a retention value, which is exactly
+the category the two roots are permitted to disagree on.
+
+No `multi_region` argument is set on any key, so every key is single-Region.
+Multi-Region and disaster-recovery topology are out of scope for this migration:
+the target is one region with three availability zones, and a Multi-Region key
+would provision a replica capability nothing consumes.
+
+## Zero secrets, as a structural property
+
+This module contains no key material, no secret value, no credential, no AWS
+account identifier and no literal resource ARN — and that is a property of how it
+is built, not a habit to be maintained:
+
+- Account and partition identity are resolved at plan time from caller-identity,
+  region and partition data sources, so the administrative principal is composed
+  rather than written.
+- Trusted principals and narrowing contexts arrive as typed, validated caller
+  inputs.
+- The key ARNs travel **outward as outputs**, never inward as source-committed
+  inputs.
+
+**Assumptions.** The reason no default carries a specimen ARN — not even as a
+worked example of the expected shape — is that an ARN embeds an AWS account
+identifier, and committing no secret to the repository is a non-negotiable
+constraint of this project that admits no exception. The expected shape is
+conveyed by each input's `type`, `description` and `validation` regex instead.
+Alias *names* such as `alias/carddemo-aurora-dev` do appear, because an alias
+name is architecture rather than a secret. See
+[security and identity](../../../docs/architecture/security-and-identity.md).
+
+## Validating this module
+
+Run from the repository root:
 
 ```bash
-. /etc/profile.d/00-carddemo-toolchain.sh
+# WHAT: check this module's HCL against canonical formatting without rewriting
+#       a single byte of it.
+# WHY : `-check` reports drift and exits non-zero, whereas a bare
+#       `terraform fmt` rewrites files in place -- which in CI would let a
+#       formatting regression pass as green, because the command repaired the
+#       tree and then succeeded.
 terraform fmt -check -recursive infra/modules/kms
+
+# WHAT: parse and type-check the module's configuration with no state backend
+#       and no credentials.
+# WHY : `validate` refuses to run in an uninitialised directory, so `init` must
+#       precede it, and `-backend=false` is what lets it run offline -- this
+#       directory has no backend of its own to configure. The GATING path is
+#       the transitive one: CI validates the three roots, and validating a root
+#       parses every module it calls.
 terraform -chdir=infra/modules/kms init -backend=false -input=false
 terraform -chdir=infra/modules/kms validate
+
+# WHAT: run the HCL lint gate over this directory.
+# WHY : the config is given as an absolute path because tflint resolves a
+#       relative --config against the directory named by --chdir rather than
+#       against the shell's working directory, so a relative path silently
+#       finds no configuration and lints with default rules.
 tflint --chdir=infra/modules/kms --config="$(pwd)/infra/.tflint.hcl"
+
+# WHAT: compare the generated region of this README against the module's HCL,
+#       writing nothing at all.
+# WHY : this is the drift gate in check-only mode. A stale README exits
+#       non-zero and stays stale until a human resolves it deliberately; an
+#       auto-fix step that regenerated the file and committed it back would
+#       turn a review gate into a silent mutation, leaving the author unaware
+#       that the contract they published was wrong.
 terraform-docs --config infra/.terraform-docs.yml --output-check infra/modules/kms
 ```
 
-Formatting, validation, linting and generated-document drift are gating checks.
-Rotation and policy scope are expressed by resources and policy conditions
-rather than by scanner suppressions.
+### The gates that govern this module
 
-**Trade-offs:** no `prevent_destroy` lifecycle is set because the target
-acceptance criteria require an environment root to be destroyable. KMS still
-enforces its configured deletion window, so destruction schedules key deletion
-rather than erasing key material immediately.
+All four run in
+[`.github/workflows/infra-ci.yml`](../../../.github/workflows/infra-ci.yml) with
+no `continue-on-error` and no tolerated return code — each one is **gating**:
 
-The module is authored and statically validated. Applying a root against a live
-AWS account remains an operator action outside this scope; no claim is made that
-a key has been created, rotated, audited or assessed against a compliance
-standard.
+| Gate | Command | Reaches this module |
+|---|---|---|
+| Formatting | `terraform fmt -check -recursive infra/` | Directly |
+| Parse and type check | `terraform init -backend=false` then `terraform validate`, per root | Transitively, through both environment roots |
+| HCL lint | `tflint --recursive --config infra/.tflint.hcl` | Directly |
+| Documentation drift | `terraform-docs --config infra/.terraform-docs.yml --output-check` | Directly |
 
-See the [infrastructure guide](../../README.md), the
-[deployment runbook](../../../docs/runbooks/deploy.md), and the
-[documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
+A severity-thresholded policy scan runs alongside them. The two findings it
+raises against a KMS module are key rotation and over-broad key policy, and both
+are **satisfied by construction rather than by suppression**: rotation is wired
+to `enable_key_rotation` on all four keys and the input refuses any value but
+`true`, and each policy grants use only to named principals under an encryption
+context. This module carries no scanner suppression of any kind — no
+`checkov:skip`, no `tflint-ignore`.
+
+## The boundary of what has been done here
+
+This module is **authored and statically validated** — formatting, parse and type
+check, lint, generated-documentation drift and policy scan. Running
+`terraform apply` against a live AWS account is an operator action outside this
+scope. No key has been created, no key has rotated, and nothing here has been
+penetration-tested, audited, or assessed against any compliance standard; no
+conformance claim of any kind is made.
+
+**Trade-offs.** No `prevent_destroy` lifecycle guard is set on any key. The
+accepted risk is a key destroyed by an unintended `terraform destroy`. It is
+accepted because a guard would make the project's own acceptance criterion —
+that an environment tears down cleanly — unsatisfiable: the run would halt on the
+guarded key and leave the rest of the environment half-removed, to be finished by
+hand. Deletion is still not immediate, because the configured deletion window
+schedules removal rather than erasing key material at once. The teardown
+procedure is in
+[the teardown runbook](../../../docs/runbooks/teardown.md).
 
 ## Generated Terraform reference
 
-The block below is generated by terraform-docs v0.20.0 from this module's HCL.
+The block below is generated from this module's `.tf` files by terraform-docs
+0.20.0 under [`infra/.terraform-docs.yml`](../../.terraform-docs.yml), and its
+freshness is gated. It is the only inputs and outputs listing in this document;
+no second table competes with it.
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -216,3 +403,15 @@ The block below is generated by terraform-docs v0.20.0 from this module's HCL.
 | <a name="output_sqs_key_arn"></a> [sqs\_key\_arn](#output\_sqs\_key\_arn) | ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply, the split account/date inquiry requests, the shared inquiry reply and the error sink. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on all six queues and their six dead-letter queues. |
 | <a name="output_sqs_key_id"></a> [sqs\_key\_id](#output\_sqs\_key\_id) | Bare identifier -- not the ARN -- of the key that encrypts the queue payloads, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN. |
 <!-- END_TF_DOCS -->
+
+## Related documents
+
+| Document | What it owns that this file does not |
+|---|---|
+| [`infra/` package guide](../../README.md) | Prerequisites, the directory layout, the full module index and the tree-wide validation commands |
+| [ADR-008 — security and identity](../../../docs/adr/ADR-008-security-and-identity.md) | Decision D8: the per-data-domain key split, the rejection of service-managed keys, and the cost analysis behind both |
+| [ADR-009 — IaC tool](../../../docs/adr/ADR-009-iac-tool.md) | Decision D9: why Terraform, and why `plan` and `destroy` are the reviewable artifacts this module is written against |
+| [Security and identity](../../../docs/architecture/security-and-identity.md) | Encryption in transit and at rest across the stack, the identity treatment, the IAM boundaries, and the VSAM-versus-Db2 baseline reconciliation cited above |
+| [Deploy runbook](../../../docs/runbooks/deploy.md) | The authoritative deploy command sequence, which this file does not duplicate |
+| [Teardown runbook](../../../docs/runbooks/teardown.md) | The authoritative teardown sequence and the deletion-window consequences of removing these keys |
+| [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The convention this document is written to, including the HCL split and the `# WHAT:` / `# WHY :` idiom |

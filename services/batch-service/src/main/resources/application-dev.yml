@@ -70,10 +70,10 @@
 #     numbers for every record in the feed.
 #
 # Deliberate omissions, so that each absence reads as a decision:
-#   - No management.* and no server.*, even though all three authored peer
-#     overlays set management.endpoints.web.exposure.include. This module
-#     declares neither the actuator nor the web starter, so both namespaces would
-#     bind to nothing and be accepted without complaint.
+#   - No management.* and no server.* override. Port 8080, health-only exposure
+#     and hidden health details are topology fixed by application.yml and the
+#     Dockerfile; a profile that changed them would make the same image probe a
+#     different contract by environment.
 #   - No logback-spring.xml and no retention key: retention is a property of the
 #     CloudWatch log group infra/modules/observability provisions, not of this
 #     artifact. The container writes to stdout/stderr and the log driver collects.
@@ -86,9 +86,9 @@
 #     2024-01-15000001 in tests/golden/interest/happy_path/transact.expected. A
 #     canonical format here would satisfy one golden and break the other.
 #   - No rounding, scale or spring.jackson.* key; no springdoc.* and no
-#     spring.security.*, since this module publishes no contract and serves no
-#     request; and no statement_timeout, for the reason recorded at the session
-#     bounds below.
+#     spring.security.*, since this module publishes no business contract and the
+#     health request carries no application payload; and no statement_timeout,
+#     for the reason recorded at the session bounds below.
 #
 #   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
 #   docstring construct, so this header is the module-entry-point equivalent and

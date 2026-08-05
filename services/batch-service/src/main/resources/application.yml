@@ -4,10 +4,10 @@
 # Purpose:
 #   Base, profile-independent Spring Boot configuration for batch-service, the
 #   BATCH bounded context of the CardDemo mainframe-to-microservices migration.
-#   It settles the values every environment shares: the datasource and its
-#   connection pool, the ordered schema search path, Flyway migration of the one
-#   schema this module owns, persistence-provider behaviour, job-launch policy
-#   and log levels.
+#   It settles the values every environment shares: the health-only HTTP surface,
+#   the datasource and its connection pool, the ordered schema search path,
+#   Flyway migration of the one schema this module owns, persistence-provider
+#   behaviour, job-launch policy and log levels.
 #
 #   application-dev.yml EXISTS and is an OVERLAY on this document;
 #   application-prod.yml DOES NOT EXIST YET. This document is consequently the
@@ -21,13 +21,11 @@
 #   which for `prod` is a forward one; a reader can confirm the current state with
 #   `ls services/batch-service/src/main/resources`.
 #
-#   This module is NOT a server. Every invocation is a short-lived container
-#   task started by one state of the nightly orchestration, which passes the job
-#   name and the business date as container command arguments, waits for the
-#   task to reach a terminal state, and reads its process exit status. The task
-#   runs exactly one job and exits. Nothing in this file may turn it into a
-#   long-running process, and the two decisions that guarantee it are recorded
-#   under WHY below.
+#   This module is argument-driven rather than request-driven. Every invocation
+#   is a short-lived container task whose command arguments select one job; the
+#   only listener exists so the Dockerfile can probe actuator health while that
+#   job runs. There is no business route or administrative trigger, and
+#   BatchApplication closes the context and exits with the job's process status.
 #
 #   The seven jobs are named as classes at
 #   src/main/java/com/carddemo/batch/package-info.java L77 to L82:
@@ -38,9 +36,9 @@
 #
 # Inputs (the "parameters" this document consumes):
 #   Property namespaces it owns and is the only declarer of:
-#     spring.application.name  spring.config.import  spring.cloud.aws
+#     server.port  spring.application.name  spring.config.import  spring.cloud.aws
 #     spring.lifecycle  spring.datasource[.hikari]  spring.flyway  spring.jpa
-#     spring.batch.job  spring.sql.init  logging.level
+#     spring.batch.job  spring.sql.init  management  logging.level
 #   Injected environment variables, every one resolved at run time and none
 #   carrying a value committed to this repository:
 #     SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME,
@@ -72,7 +70,7 @@
 #   than a prefix property; exactly one non-distributed datasource and therefore
 #   the single auto-configured transaction manager, which is what keeps the
 #   three-write posting unit of work at app/cbl/CBTRN02C.cbl:440-442 one atomic
-#   commit; and no listening socket of any kind.
+#   commit; and a health-only actuator response on port 8080 for the image probe.
 #
 # Fails when (the "exceptions" a reader must know about):
 #   - Flyway core reaches the classpath without its PostgreSQL companion. Per
@@ -105,20 +103,15 @@
 #     something committed here.
 #
 # Deliberate omissions, so that each absence reads as a decision:
-#   - No server.* and no management.*: this module declares neither a web nor an
-#     actuator starter, so both namespaces would bind to nothing. Detail under
-#     WHY below.
-#   - No spring.main.web-application-type: the empty web classpath already
-#     settles it, and a property would be a second, silently overridable
-#     expression of the same decision (services/batch-service/pom.xml:208-214).
-#   - No spring.security.* and no springdoc.*: no security starter, no
-#     controller and no published contract ship in this module, so there is no
-#     request to authorise and no API to advertise.
-#   - No spring.jackson.*: no Jackson auto-configuration is on this classpath,
-#     and money must stay exact fixed point end to end -- NUMERIC(11,2) in the
-#     database for the S9(09)V99 amounts at app/cpy/CVTRA05Y.cpy:10 and
-#     app/cpy/CVTRA01Y.cpy:9, BigDecimal at scale 2 in Java, never a binary
-#     floating-point type. No key here may weaken that.
+#   - No spring.main.web-application-type override: the web stack must remain
+#     active so the actuator route answers the Dockerfile probe.
+#   - No spring.security.* and no springdoc.*: no security starter, controller or
+#     published business contract ships in this module; management exposure is
+#     narrowed to health and cannot trigger a job.
+#   - No spring.jackson.* override: the web starter supplies Jackson transitively
+#     for actuator infrastructure, but this module publishes no business payload.
+#     Money remains NUMERIC(11,2) in the database and BigDecimal scale 2 in Java,
+#     never a binary floating-point value, and no key here may weaken that.
 #   - No rounding or scale default: app/cbl/CBACT04C.cbl:464-465 computes
 #     ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200 with NO ROUNDED phrase, so the
 #     reference statement discards its surplus digits. That behaviour belongs to
@@ -160,23 +153,17 @@
 # -----------------------------------------------------------------------------
 # WHY (non-obvious design decisions):
 #
-#   Assumptions: this module has NO web server and NO actuator, and that is what
-#     makes the one-shot lifecycle work rather than merely describing it.
-#     services/batch-service/pom.xml declares neither starter and argues the
-#     point at its lines 193-237: an embedded servlet container is a non-daemon
-#     listener, so it keeps the JVM alive after the last job step has finished,
-#     the task never stops, the invoking state never completes, and the nightly
-#     chain stalls at the step that ran correctly. Consequently server.port and
-#     the whole management namespace are absent here. They are not merely
-#     unnecessary; with no web module and no actuator on the classpath they bind
-#     to nothing, and a property that binds to nothing is accepted in silence,
-#     which is the least diagnosable defect this file could carry.
-#   Alternatives Considered: setting server.port with a health-only actuator
-#     surface and pairing them with a container health probe, which is the shape
-#     every request-serving peer in this reactor takes. Rejected here because it
-#     would advertise a liveness guarantee this image cannot provide -- there is
-#     no steady state for a run-and-exit task to be healthy IN. Its outcome is
-#     the process exit status, which the invoking state reads directly.
+#   Trade-offs: the web and actuator starters are carried solely so the
+#     Dockerfile can probe datasource-aware health while a job is running.
+#     A process-only or marker-file probe was evaluated and rejected because it
+#     reports a live JVM even when the datasource is unreachable. The accepted
+#     cost is a listener in an otherwise one-shot task; BatchApplication closes
+#     the context and calls System.exit with the job result, so the listener does
+#     not convert a completed job into a long-running service.
+#   Assumptions: only actuator health is exposed, with details disabled. No
+#     controller, administrative trigger or edge route exists, so job selection
+#     remains exclusively in the Step Functions command arguments and the HTTP
+#     surface cannot start or alter work.
 #   Eight further decisions are argued at the keys that carry them rather than
 #     summarised twice here: the two keys spring.batch still exposes and the
 #     absent script initialiser; the eager AWS client construction that makes a
@@ -211,6 +198,12 @@
 #     be resubmitted by hand from the top with no record of what had already
 #     completed.
 # =============================================================================
+
+# WHY : Assumptions: services/batch-service/Dockerfile exposes port 8080 and its
+#       health command probes that exact port. No second management port is used,
+#       so the listener and probe cannot drift onto different sockets.
+server:
+  port: 8080
 
 spring:
 
@@ -631,12 +624,11 @@ spring:
       #   of a feed.
       ddl-auto: validate
 
-    # Assumptions: there is no web request scope in this module at all, so
-    #   there is no view to render and no request boundary for a persistence
-    #   context to outlive. The setting is declared anyway because its default
-    #   is on and the framework logs a warning when it is left unset; stating
-    #   it removes a warning that would otherwise appear in every task's log
-    #   and invite a reader to look for the request handling that produces it.
+    # Assumptions: there is no persistence-backed business request in this
+    #   module. The actuator health request needs no open entity manager, so a
+    #   persistence context must not outlive the batch transaction that owns it.
+    #   The setting is explicit because the framework default is on and otherwise
+    #   logs a warning that implies a view-rendering path this module does not have.
     open-in-view: false
 
     # Trade-offs: this key echoes statements through the provider directly to
@@ -745,6 +737,30 @@ spring:
       #   than as a silent skip; this key keeps a script from becoming that
       #   second creator.
       mode: never
+
+# WHY : Trade-offs: the actuator web surface is narrowed to health even though
+#       the Prometheus registry is present. A run-and-exit task may finish between
+#       scrape intervals, so pull metrics are not a dependable record; the durable
+#       batch_run ledger and container logs carry that role instead.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+  endpoint:
+    health:
+      # WHY : Assumptions: a probe needs only the aggregate status. Suppressing
+      #       details prevents datasource topology or failure diagnostics from
+      #       being returned to any caller that can reach the task port.
+      show-details: never
+
+  health:
+    db:
+      # WHY : Assumptions: datasource health remains enabled so an unreachable
+      #       database makes the Dockerfile probe fail instead of presenting a
+      #       healthy JVM in front of a dependency the selected job cannot use.
+      enabled: true
 
 logging:
   level:

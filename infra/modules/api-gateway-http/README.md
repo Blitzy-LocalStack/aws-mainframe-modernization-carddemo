@@ -1,26 +1,543 @@
-# API Gateway HTTP module
+# api-gateway-http
 
-This module creates the public HTTP API, exact Cognito JWT authorizer, private
-VPC Link integration, route inventory, CORS policy and KMS-encrypted access
-logs.
+Terraform module provisioning the public edge of the migrated CardDemo system:
+the single internet-facing entry point through which a browser reaches the
+services that replace the CICS online transactions.
 
-## Design decisions
+**Source of truth.** The shape of this module is fixed by the migration's
+infrastructure catalogue, which specifies it as an HTTP API, a Cognito JWT
+authorizer and a VPC Link, and by two of the migration's recorded decisions —
+D6 (API and user interface) and D8 (security and identity). The behaviour it
+fronts is specified by the COBOL baseline under `app/**`, which this document
+cites by path and line and never modifies.
 
-**Refactoring Rationale:** sign-on, challenge and refresh must be callable
-before a token exists, so only those exact POST routes are public. User
-administration and every other route retain JWT and scope enforcement.
+> Where this README and this module's `.tf` files disagree, **the `.tf` files
+> are authoritative.** The README is corrected to match the code, never the
+> other way round. Everything inside the terraform-docs markers near the end of
+> this file is generated from those files and drift-checked in CI, so the two
+> halves cannot diverge silently; the hand-written prose above it carries the
+> reasoning no generator can produce.
 
-**Assumptions:** the root supplies a dedicated VPC Link security group and a
-server name covered by the internal ALB certificate. That makes the private hop
-TLS-authenticated without widening the application task group.
+**Why this file exists.** HCL has no docstring construct. The project's
+explainability rule is therefore discharged for Terraform in two halves: a
+file-header comment block, a `description` on every variable and output, and a
+why-comment on each non-obvious argument make up the in-code half, and a
+`README.md` in every module directory makes up the prose half. This document is
+that prose half — it is the one file in this folder owed to a project rule
+rather than to any migration requirement. The rule governs newly authored code
+only; the reference-only baseline carries no such obligation.
 
-## Validation
+That obligation reaches this Markdown through three explicit links: the project
+requires an analogous explanation where a language has no docstring construct;
+the infrastructure documentation contract requires a purpose-and-source-of-
+truth opening plus named rationale for non-obvious choices; and
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+binds Markdown rationale to the four plain-text, plural category names used
+below.
 
-```bash
-terraform -chdir=infra/modules/api-gateway-http init -backend=false
-terraform -chdir=infra/modules/api-gateway-http validate
-tflint --chdir=infra/modules/api-gateway-http --config="$(pwd)/infra/.tflint.hcl"
+Its layout follows the register of
+[`tests/README.md`](../../../tests/README.md) — numbered `## <n>.` headings,
+horizontal rules between sections, and a single blank line around every heading
+— rather than the two-blank-line, fence-free form of
+[`CONTRIBUTING.md`](../../../CONTRIBUTING.md), because this document needs
+fenced examples and generated tables and that is the house document which has
+them.
+
+---
+
+## 1. What this module provisions
+
+Eleven resources that only make sense as a set, in the order they appear in
+[`main.tf`](main.tf):
+
+1. `aws_apigatewayv2_api.this` — the HTTP API, which also carries the
+   cross-origin contract a browser preflights against.
+2. `aws_apigatewayv2_authorizer.jwt` — the Cognito JWT authorizer, which takes
+   the caller's bearer token from the `Authorization` header and validates it
+   against the pool issuer and the accepted audience.
+3. `aws_security_group.vpc_link` — a security group dedicated to the VPC Link,
+   created here rather than shared with the application tasks.
+4. `aws_vpc_security_group_egress_rule.vpc_link_to_alb_https` — the link's only
+   egress: TCP 443 to the load balancer's group.
+5. `aws_vpc_security_group_ingress_rule.alb_from_vpc_link_https` — the matching
+   ingress on the load balancer, admitting that one group and nothing else.
+6. `aws_apigatewayv2_vpc_link.this` — the private path into the application
+   subnets.
+7. `aws_apigatewayv2_integration.alb` — one `HTTP_PROXY` integration onto the
+   internal listener, reached over TLS.
+8. `aws_apigatewayv2_route.service` — the authorizer-guarded routes, one
+   instance per published route key.
+9. `aws_apigatewayv2_route.public` — the closed set of routes that must answer
+   before a token exists (§1.1).
+10. `aws_cloudwatch_log_group.access` — the destination for the stage's access
+    log.
+11. `aws_apigatewayv2_stage.this` — the single stage, which binds access
+    logging and the throttle limits to everything above.
+
+The request path, end to end:
+
+```mermaid
+graph LR
+    B["Browser SPA<br/>(CloudFront-hosted)"] -->|HTTPS + bearer token| A["API Gateway<br/>HTTP API"]
+    A --> Z{{"Cognito JWT authorizer:<br/>issuer, audience, scope"}}
+    Z -->|"rejected: 401 at the edge"| X["No service reached"]
+    Z -->|accepted| I["One HTTP_PROXY<br/>integration"]
+    I --> L["VPC Link<br/>(private app subnets)"]
+    L -->|TLS 443| ALB["Internal ALB<br/>HTTPS listener"]
+    ALB -->|per-service rules| S["Spring Boot services<br/>on ECS Fargate<br/>(each re-validates the token)"]
 ```
+
+Seven of the eight migrated services are published here — auth, accounts,
+cards, transactions, reference, authorizations and reports. `batch-service` is
+deliberately absent because it has no load-balancer target to route to; it is
+reached only by the batch orchestrator's synchronous run-task call.
+Assumptions: that absence is enforced rather than merely intended — the
+authorized route list carries a validation rejecting any `/batch` route
+outright, and the public route list admits no path prefix other than `/auth`.
+
+### 1.1 How the authorizer guarantee is enforced
+
+Every route built from the authorized route list carries the JWT authorizer and
+a required scope. That is not left to an author's care: the resource declares a
+`lifecycle` postcondition asserting that its own `authorization_type` resolved
+to `JWT` and that an authorizer id is attached, so an edit that detached the
+authorizer fails the apply with a message naming the offending route key and
+redirecting the author to the public route list.
+
+Exactly three route keys are published without the authorizer, and they are the
+operations that issue or renew a token: sign-on, challenge and refresh. That
+set is closed by two input validations. The first admits only those three exact
+method-and-path literals, refusing `ANY` and every greedy matcher. The second
+requires the public and authorized lists to be disjoint, because an HTTP API
+accepts each route key once and a key in both lists would otherwise publish one
+path twice with conflicting protection.
+
+Alternatives Considered: attaching the authorizer to sign-on as well, so that
+"every route is authorized" would hold with no exception at all. It deadlocks
+the surface — sign-on is the operation that mints the token every other route
+requires, so demanding a token to reach it means no caller can ever obtain one.
+Trade-offs: those three routes are the residual exposure this design accepts,
+and it is narrowed rather than waved away — a closed literal allow-list,
+restricted to `POST` on exact paths, each given a per-route throttle an order of
+magnitude tighter than the authorized default, and each forced to emit its own
+metrics so abuse is visible per route.
+
+---
+
+## 2. Why an HTTP API with a JWT authorizer at the edge
+
+Two recorded decisions meet in this module.
+
+### 2.1 Decision D6 — REST/JSON, over an HTTP API
+
+Alternatives Considered: gRPC was evaluated for the service surface and not
+chosen. REST/JSON is directly consumable by a browser SPA and by the existing
+external integrations, whereas gRPC would require a proxy for browser traffic
+with no offsetting gain — the migration would take on a translation hop and
+still be speaking JSON to the browser on the far side of it.
+
+Alternatives Considered: within API Gateway, a REST API (the v1 product) was
+evaluated against an HTTP API (v2) and not chosen. An HTTP API has a native JWT
+authorizer, so validating a Cognito access token requires no Lambda authorizer
+function to write, deploy, grant permissions to and pay for on every request;
+and its per-request charge is lower. The v1 capabilities that account for its
+price — request and response transformation, per-method models and validators,
+and WAF association at the stage — are ones this edge does not use: each
+service owns its own request validation, and the only mapping performed here is
+a single header stamp (§8.1).
+
+Recorded in [ADR-006](../../../docs/adr/ADR-006-api-and-ui.md).
+
+### 2.2 Decision D8 — authenticate at the edge
+
+Authenticating at the edge means the services validate an already-signed token
+instead of each implementing its own sign-on.
+
+Refactoring Rationale: this replaces a specific mechanism, and the mechanism is
+the whole point. The baseline online programs are pseudo-conversational — the
+task ends at every screen turn, so continuity between turns travels in a
+communication area that the terminal echoes back on the next turn, including
+the user type that decides whether the administrative menu is reachable.
+Because that area is storage the client returns, a client could in principle
+assert its own user type. In the target the client cannot assert anything: the
+group claim sits inside a token signed by the user pool, the authorizer
+verifies that signature against the issuer and audience before the request
+leaves the edge, and a caller who edits the claim invalidates the signature.
+
+Assumptions: the required scope does work that the issuer and audience checks
+do not. A user pool mints both access tokens and identity tokens, signed by the
+same issuer for the same audience, so issuer and audience alone admit either
+one. Only an access token carries a `scope` claim, so requiring the pool's
+interactive sign-in scope rejects the identity token — which describes who the
+user is and is not an authorization credential.
+
+The edge authorizer does not replace per-service validation. Each service is
+also an OAuth2 resource server and validates the same token independently.
+Assumptions: the threat that makes the duplication worth its cost is a caller
+already inside the VPC reaching the internal load balancer directly, which
+bypasses the edge entirely; without the second check, that caller would be
+unauthenticated against every service.
+
+### 2.3 Why the VPC Link exists
+
+The load balancer is internal and publishes no public listener, and a VPC Link
+is the only way an HTTP API reaches it.
+
+Alternatives Considered: giving the load balancer a public listener and
+pointing the API at it, or letting the browser call it directly. Both are
+rejected on the same concrete ground — a publicly reachable listener exposes
+the service tier and lets a caller reach the services without passing the
+authorizer, which is exactly the property §2.2 exists to establish.
+Assumptions: the link places its network interfaces in the private application
+subnets, alongside the tasks they serve, so the hop never traverses a public
+subnet; and reachability is narrowed to a single group pair, because this
+module creates a dedicated security group whose only egress is 443 to the load
+balancer's group and owns the matching ingress rule rather than widening the
+application task group.
+
+Recorded in [ADR-008](../../../docs/adr/ADR-008-security-and-identity.md).
+
+### 2.4 One integration, an exact origin list, and a `$default` stage
+
+Alternatives Considered: one integration per service, so each bounded context
+had its own target. Rejected as duplication with no added control — the
+internal load balancer already performs per-service dispatch from its own
+listener rules, so a second copy of that routing table here would have to be
+kept in step with it, and a disagreement between the two would present as a
+request arriving at the wrong service. One integration keeps the dispatch
+decision in exactly one place.
+
+Alternatives Considered: a wildcard cross-origin allow-list. Rejected because a
+wildcard would let any site a signed-in user happens to visit issue
+cross-origin calls to this API from their browser. The allow-list therefore
+holds exact origins supplied by the caller — in practice the distribution
+serving the SPA — and the module validates their shape rather than accepting a
+free-form string.
+
+Assumptions: the stage is named `$default`, the reserved name for a stage that
+serves requests with no stage path segment, which keeps the published base URL
+free of a stage prefix so the endpoint the SPA is configured with is the
+endpoint clients call. Trade-offs: a single stage means environment separation
+comes from deploying the whole module twice rather than from two stages on one
+API. That is consistent with `dev` and `prod` being separate Terraform roots,
+and it avoids one API whose two stages would share an authorizer, a throttle
+budget and a log group.
+
+---
+
+## 3. The identity contract it enforces
+
+The authorizer validates tokens minted by the user pool the `cognito` module
+creates. The mapping from the baseline's own authorization model is direct:
+
+| Baseline | Target |
+|---|---|
+| `SEC-USR-TYPE` value `'A'`, declared `PIC X(01)` at [`app/cpy/CSUSR01Y.cpy:L22`](../../../app/cpy/CSUSR01Y.cpy) | Cognito group `carddemo-admin` |
+| `SEC-USR-TYPE` value `'U'`, the same field | Cognito group `carddemo-user` |
+| The online program's own test of that field | The `cognito:groups` claim, converted to Spring Security authorities by `common-lib`'s `JwtRoleConverter` |
+
+Administrative routes are guarded by the claim, never by a client-supplied
+field. Assumptions: the claim is trustworthy precisely because it is inside the
+signed token the authorizer has already verified, which is the substitution
+§2.2 describes.
+
+Assumptions: one baseline field is deliberately not carried forward. The user
+record declares an eight-character password at
+[`app/cpy/CSUSR01Y.cpy:L21`](../../../app/cpy/CSUSR01Y.cpy). The target keeps
+only a subject reference to the pool and no password column at all, so this
+edge never handles a credential of its own. That decision belongs to
+[ADR-008](../../../docs/adr/ADR-008-security-and-identity.md) and is not
+re-argued here.
+
+---
+
+## 4. Baseline lineage
+
+This module is net-new — the transformation plan records no source file for it,
+because the baseline expresses its public surface in a CICS resource definition
+rather than in program code. The nearest analogue is nonetheless exact.
+[`app/csd/CARDDEMO.CSD`](../../../app/csd/CARDDEMO.CSD) defines eighteen
+`DEFINE TRANSACTION(<id>) … PROGRAM(<name>)` pairs between L306 and L480, from
+`CAUP` → `COACTUPC` (L306 and L308) through `CU03` → `COUSR03C` (L479–L480),
+and that set of pairs was the region's dispatch surface — the role the route
+table plays here. Among them, L378–L379 defines `TRANSACTION(CC00)` with
+`PROGRAM(COSGN00C)`, the sign-on transaction reached with no prior identity,
+which is the position the JWT authorizer and the pre-token sign-on route occupy
+in the target. Each of those eighteen stanzas also carries
+`RESSEC(NO) CMDSEC(NO)` — for example at L314 and at L486 — so resource- and
+command-level security were both switched off in that region. These are
+checkable facts about a working system that keeps running: the migration adds a
+path, it does not remove one, and `app/**` is cited by path and line and never
+edited.
+
+---
+
+## 5. Usage
+
+This is a **module, not a root.** It is never applied directly. An environment
+root calls it, and it is validated transitively when that root is initialised
+and validated.
+
+```hcl
+# WHAT: call the edge module from an environment root, wiring every
+#       cross-module value from the sibling module that produces it.
+# WHY : (1) every value below is a reference rather than a literal, so no
+#       account-specific identifier — issuer, client id, listener, subnets or
+#       groups — is ever written into this tree; (2) the two throttle inputs
+#       and the retention input are left at their defaults here because they
+#       are the levers on which dev and prod are allowed to differ, so a root
+#       passes them only where it needs a value other than the default.
+module "api_gateway" {
+  source = "../../modules/api-gateway-http"
+
+  name_prefix                 = var.name_prefix
+  environment                 = var.environment
+  cognito_issuer_uri          = module.cognito.issuer_uri
+  cognito_app_client_ids      = [module.cognito.user_pool_client_id]
+  route_authorization_scopes  = module.cognito.interactive_route_authorization_scopes
+  alb_listener_arn            = module.alb.https_listener_arn
+  private_app_subnet_ids      = module.network.private_app_subnet_ids
+  vpc_id                      = module.network.vpc_id
+  alb_security_group_id       = module.network.alb_security_group_id
+  spa_cors_allow_origins      = [local.spa_origin]
+  log_retention_days          = var.log_retention_days
+  access_log_kms_key_arn      = module.kms.s3_key_arn
+  integration_tls_server_name = local.internal_service_dns_name
+}
+```
+
+Three things this folder deliberately does not contain:
+
+- **No `provider` block.** Provider configuration — region, credentials,
+  `default_tags` — belongs to the calling root. Assumptions: a provider block
+  inside a shared module would fight the caller's own configuration and would
+  stop the module being instantiated against an aliased provider, so a second
+  instance elsewhere could not be expressed at all.
+- **No `backend` block.** State belongs to the calling root, which points at
+  the remote-state backend that `infra/bootstrap` provisions. A module has no
+  state of its own to configure.
+- **No `terraform.tfvars`.** Values belong to `infra/envs/dev` and
+  `infra/envs/prod`. That is what keeps this folder a pure function of its
+  inputs and keeps the two environments differing only in the parameters they
+  pass.
+
+Trade-offs: the first of those has a consequence for tagging that is easy to
+miss. Because there is no provider block here there is no provider
+`default_tags` to inherit, so `tags` is the only tag channel available and is
+merged onto each taggable resource individually. Five of the eleven resources
+accept tags — the API, the dedicated security group, the VPC Link, the log
+group and the stage. The two security-group rules, the authorizer, the
+integration and both route resources expose no `tags` argument at all, so their
+absence from the tag set is the provider's shape rather than an omission here.
+
+### 5.1 Where the operator commands live
+
+There is no `terraform apply` to run in this directory, and none is documented
+here. The deploy sequence — bootstrap the remote state once, then initialise,
+plan to a saved file, and apply that saved file for one environment root — and
+the teardown sequence, which runs in reverse with the bootstrap removed last,
+live in [`infra/README.md`](../../README.md),
+[`docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md) and
+[`docs/runbooks/teardown.md`](../../../docs/runbooks/teardown.md).
+Assumptions: those documents hold the single copy on purpose. Repeating an
+apply sequence in nineteen module READMEs would create nineteen copies to keep
+in step, and the first one to fall behind would be the one an operator happened
+to open.
+
+---
+
+## 6. Inputs it consumes, and where each comes from
+
+Every cross-module value arrives as a variable, supplied by the environment
+root. The generated Inputs table below the marker is the exhaustive contract —
+each name, type, default and whether it is required. This section records
+provenance instead: which sibling produces a value, and what it controls.
+
+| Input | Produced by | What it controls |
+|---|---|---|
+| `cognito_issuer_uri` | `cognito` | The issuer whose signature the authorizer validates a token against |
+| `cognito_app_client_ids` | `cognito` | The accepted audience; a token minted for another client is rejected |
+| `route_authorization_scopes` | `cognito` | The scope every authorized route requires, which is what rejects an identity token |
+| `alb_listener_arn` | `alb` | The private integration's target — the internal HTTPS listener |
+| `private_app_subnet_ids` | `network` | Where the VPC Link places its network interfaces |
+| `vpc_id` | `network` | The VPC in which the VPC Link's dedicated security group is created |
+| `alb_security_group_id` | `network` | The group this module's egress rule targets, and whose matching ingress rule it owns |
+| `spa_cors_allow_origins` | `cloudfront-spa` | The exact browser origins permitted to call this API |
+| `access_log_kms_key_arn` | `kms` | The customer-managed key encrypting the access-log group |
+| `integration_tls_server_name` | the environment root | The name verified against the certificate the internal listener presents |
+| `log_retention_days`, the four throttle limits, `detailed_metrics_enabled` | the environment root | The narrow set of levers on which `dev` and `prod` differ |
+| `name_prefix`, `environment`, `tags` | the environment root | Naming and tagging of every resource this module creates |
+| `route_keys`, `public_route_keys`, the CORS method, header, expose and max-age inputs, `integration_timeout_milliseconds`, `stage_name` | defaults in this module | The published surface and the edge's protocol behaviour; a root may override without editing the module |
+
+Alternatives Considered: resolving these by `data` lookup, or calling the
+sibling modules from here. Both are rejected. A lookup would couple this folder
+to another module's internal resource names, so a rename next door would break
+this module, and it would make the folder unplannable without live credentials
+because a lookup has to reach the account. Nesting the sibling calls here would
+make this module own resources it does not create, and would stop it being
+reusable against infrastructure it did not build.
+
+Trade-offs: passing everything in makes the argument list long and moves the
+wiring out to the root. Accepted for two returns — the whole dependency graph
+is readable in one file rather than inferred across sixteen modules, and this
+module stays usable against a pre-existing user pool or load balancer.
+
+---
+
+## 7. What it publishes
+
+Nine outputs, each described in [`outputs.tf`](outputs.tf) and tabulated below
+the marker. They fall into three groups:
+
+- **The address.** `api_endpoint_url` is the base HTTPS URL, read from the
+  stage's `invoke_url` so it already carries any stage path segment. It is the
+  only address the browser SPA is configured with.
+- **Identifiers for work done elsewhere.** `api_id`, `stage_name`,
+  `authorizer_id`, `vpc_link_id` and `vpc_link_security_group_id` name this
+  module's resources so dashboards, alarms, metric dimensions and any
+  additional rule can reference them without rediscovering them.
+  Assumptions: `stage_name` is read back from the created stage rather than
+  echoed from the input that asked for it, so the published value is the value
+  that exists.
+- **Observability and audit handles.** `access_log_group_name` and
+  `access_log_group_arn` let the observability inventory and the key policy
+  name the log group precisely. `public_route_keys` publishes the
+  unauthenticated surface as a list, read back from the routes actually
+  created, so that exposure is auditable from the outputs rather than only by
+  reading the HCL.
+
+Module outputs are the only source of runtime endpoints and identifiers in this
+migration: **no service hard-codes an endpoint.** The environment root writes
+this endpoint to Parameter Store, and the SPA reads it through its documented
+environment variables — which is what allows `ui/.env.example` to list a
+variable name with no value beside it.
+
+Assumptions: none of the nine is marked `sensitive`, and that is deliberate
+rather than overlooked. None is a credential; the endpoint is public by
+construction, since being callable from a browser is its entire purpose; and an
+operator has to be able to read these with `terraform output` to configure a
+SPA build. Marking them sensitive would redact them from plan output and from
+`terraform output` while protecting nothing.
+
+---
+
+## 8. Validation gates
+
+This module is covered by the gating checks in
+[`.github/workflows/infra-ci.yml`](../../../.github/workflows/infra-ci.yml).
+None of them tolerates a failure: that workflow contains no `|| true`, no
+`continue-on-error` and no ignored exit code.
+
+| Gate | Mechanism |
+|---|---|
+| Formatting | `terraform fmt -check -recursive` over the package — reports drift and rewrites nothing |
+| Syntax and schema | the **calling root's** `terraform init -backend=false` then `terraform validate`; this module is validated transitively, never in isolation |
+| Lint | `tflint` against [`../../.tflint.hcl`](../../.tflint.hcl), which fails any variable or output carrying no `description` |
+| Documentation drift | `terraform-docs` in check-only mode against [`../../.terraform-docs.yml`](../../.terraform-docs.yml) — a stale generated region fails the build and is never silently rewritten |
+| Committed secrets | a scan across migration-owned source |
+| Bounded policy exceptions | a step asserting that each declared policy-scan exception is still present, together with the conditions that justified it |
+| Policy scan | Checkov, version-pinned, across the whole `infra/` tree against an explicit material-security baseline |
+
+### 8.1 How the policy properties are satisfied
+
+Assumptions: the properties the scan looks for on this directory are satisfied
+structurally rather than by suppression — each is an unconditional argument on
+a resource, so dropping one requires deleting a visible line.
+
+- **Access logging.** The stage's `access_log_settings` writes to the log group
+  this module owns. The format is thirteen named fields: the request and
+  extended request identifiers, request time, route key, method, protocol,
+  status, response length and latency, the integration's status, latency and
+  error message, and the caller's source IP.
+- **The correlation seam.** The integration stamps `x-request-id` with the
+  edge's own request identifier on the way to the load balancer, and the access
+  log records that same identifier. That is what lets an edge log line join to
+  the service log lines for one request, which each service's
+  `CorrelationIdFilter` then carries into its own logs.
+- **What the log deliberately omits.** No `Authorization` header, no token, no
+  claim, and no request or response body. Assumptions: this group records every
+  request crossing the internet boundary and already retains the caller's
+  source IP, so adding a credential or a payload would turn a traffic log into
+  a store of secrets and personal data.
+- **Throttling.** The stage's `default_route_settings` sets a burst depth and a
+  steady rate from inputs, because those are `dev`/`prod` levers, and each
+  public route additionally receives a tighter per-route override (§1.1).
+- **TLS on both hops.** The client-facing endpoint is HTTPS-only, and the
+  integration verifies a server name against the certificate the internal
+  listener presents, so neither leg is plaintext.
+- **Encryption of the log group.** A customer-managed key is optional in `dev`
+  and required in `prod`, enforced by a `lifecycle` precondition on the log
+  group rather than by convention. Assumptions: a customer-managed key is what
+  makes reading that request history a separately revocable `kms:Decrypt`
+  grant, instead of an ambient consequence of holding CloudWatch Logs read
+  access.
+
+### 8.2 The one declared exception
+
+One scanned property is not met by every route here, and it is declared rather
+than silenced: the check that every route carries an authorizer. The three
+pre-token routes of §1.1 cannot carry one, so [`main.tf`](main.tf) holds a
+single scoped `checkov:skip` for that one check, on that one resource, with its
+justification written on the same line.
+
+Assumptions: that skip is not a way to quiet the scanner. Its presence, and the
+conditions that make it acceptable — that the public routes come from a
+`for_each` over the validated input, and that their authorization type is the
+explicit `NONE` — are themselves asserted by the workflow's bounded-exception
+step, so removing the justification, widening the exception to a second check,
+or moving it to another resource each fail the build. It is the only
+policy-scan suppression in this module, and there is no `tflint-ignore`
+anywhere in it.
+
+---
+
+## 9. Cost shape
+
+Pricing dimensions and drivers only. No figures are quoted here, and none
+should be inferred:
+
+- **The HTTP API is charged per request,** with no charge for an idle API, so
+  cost tracks use. That suits a workload whose online traffic follows office
+  hours and falls away outside them.
+- **The VPC Link is charged per hour for as long as it exists,** independently
+  of traffic. It is the one component here with a floor, and that floor is the
+  price of keeping the load balancer private (§2.3).
+- **The access-log group is charged for ingestion and for storage.** That is
+  why retention is an input rather than a constant, and it is one of the narrow
+  set of levers on which the two environments are allowed to differ.
+- **Per-route metrics are billed per metric.** Trade-offs: detailed metrics are
+  on by default and forced on for the public routes, which multiplies the
+  metric count by the number of route keys. Accepted, because per-route latency
+  and error rates are what make an edge problem attributable to one bounded
+  context, and the pre-token routes are the ones whose abuse most needs to be
+  visible.
+
+---
+
+## 10. Scope boundary
+
+**Authored and statically validated only.** This module has been formatted,
+validated, linted, drift-checked and policy-scanned. It has **not** been
+applied to a live AWS account, **not** been benchmarked, and **not** been load
+tested. Running `terraform apply` against a real account, and the cost that
+incurs, is an operator action outside the scope of this work.
+
+Deliberately not in this module, each with its reason:
+
+| Not here | Why |
+|---|---|
+| Custom domain, ACM certificate, Route 53 record | The infrastructure catalogue specifies an HTTP API, a Cognito JWT authorizer and a VPC Link for this module and nothing further; the endpoint it publishes is the address clients use |
+| WAF association, usage plan, API key | Not in that specification. A usage plan and API keys also address a different problem — metering named third-party consumers — from the one this edge has, where callers are browser sessions identified by token |
+| Lambda authorizer | The native JWT authorizer covers the requirement with no function to write, deploy, permission and pay for (§2.1) |
+| Account-level CloudWatch Logs role for API Gateway | That setting is account-wide, and this module may be instantiated more than once in one account, so setting it here would mean two instances contending over a single account-level value. It belongs to the environment root or the `observability` module |
+| Blue-green and canary deployment | Out of scope for the migration as a whole; service deployment is rolling only |
+| Multi-region and disaster-recovery topology | Out of scope; single region, three availability zones |
+
+The COBOL baseline under `app/**`, the existing test suite under `tests/**`,
+`scripts/**` and `samples/**` are reference-only and unmodified. This document
+cites the baseline by path and line and changes nothing in it.
+
+---
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -98,3 +615,20 @@ tflint --chdir=infra/modules/api-gateway-http --config="$(pwd)/infra/.tflint.hcl
 | <a name="output_vpc_link_id"></a> [vpc\_link\_id](#output\_vpc\_link\_id) | Identifier of the VPC Link, from `aws_apigatewayv2_vpc_link.this.id`. Names the private path this API takes into the application subnets to reach the internal load balancer, which is what keeps every service off the public internet. Consumed by a caller adding a further private integration that should reuse this link rather than provision a second one. |
 | <a name="output_vpc_link_security_group_id"></a> [vpc\_link\_security\_group\_id](#output\_vpc\_link\_security\_group\_id) | Identifier of the dedicated security group this module creates for the VPC Link. Its only egress is TCP 443 to the internal ALB security group, whose matching ingress rule this module also owns. |
 <!-- END_TF_DOCS -->
+
+---
+
+## References
+
+| Document | What it covers |
+|---|---|
+| [`infra/README.md`](../../README.md) | The infra package guide: directory layout, module index, version constraints, static validation, and the exact deploy and teardown command sequences |
+| [`infra/.tflint.hcl`](../../.tflint.hcl) | The HCL lint gate — the mechanical half of the documentation obligation |
+| [`infra/.terraform-docs.yml`](../../.terraform-docs.yml) | The generated-documentation gate, including the marker contract this file honours |
+| [`docs/adr/ADR-006-api-and-ui.md`](../../../docs/adr/ADR-006-api-and-ui.md) | Decision D6 — API style and user interface |
+| [`docs/adr/ADR-008-security-and-identity.md`](../../../docs/adr/ADR-008-security-and-identity.md) | Decision D8 — networking, security and identity |
+| [`docs/architecture/security-and-identity.md`](../../../docs/architecture/security-and-identity.md) | The full network and identity inventory |
+| [`docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md) | Exact operator deploy commands |
+| [`docs/runbooks/teardown.md`](../../../docs/runbooks/teardown.md) | Exact operator teardown commands |
+| [`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this file follows, including the four rationale labels |
+| [`MIGRATION_README.md`](../../../MIGRATION_README.md) | Top-level build, deploy, run, migrate data, validate and roll back guide |

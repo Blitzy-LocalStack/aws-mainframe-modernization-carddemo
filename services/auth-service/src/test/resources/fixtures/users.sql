@@ -1,0 +1,118 @@
+-- =============================================================================
+-- services/auth-service/src/test/resources/fixtures/users.sql
+-- -----------------------------------------------------------------------------
+-- WHAT: Supplies the canonical base rows for keyed reads, mutations, and
+--       constraint checks against the Flyway-created auth.users table.
+--       Consumers: UserRepositoryIT loads this file as a forward contract;
+--       AuthControllerTest, UserControllerTest, and UserServiceTest mirror its
+--       literals in Java builders without loading SQL.
+--       Load result: five deterministic rows spanning both A and U user types.
+--       Failure modes: a repeated cognito_sub is rejected by UNIQUE, a user_type
+--       outside A/U is rejected by CHECK, and an over-width user_id is rejected
+--       by the CHAR(8) primary-key contract.
+--
+-- WHY (non-obvious design decisions):
+--       (1) Alternatives Considered: JSON was rejected because it cannot carry
+--       adjacent comments, and fixed-width text was rejected because this
+--       service loads relational target rows rather than copybook records.
+--       Trade-offs: SQL couples the fixture to PostgreSQL syntax, while making
+--       the file directly loadable and keeping every rationale beside its data.
+--       (2) Refactoring Rationale: the rows preserve the target shape instead of
+--       duplicating the 80-byte source record. The departure is deliberate:
+--       auth-service performs no fixed-width decoding, the online CICS flow has
+--       no golden master, CSUSR01Y.cpy L17-L23 contains only PIC X fields and no
+--       monetary or encoded-decimal value, and tests/README.md L540-L542 requires
+--       copybook layouts to remain single-sourced rather than reimplemented.
+--       Assumptions: app/cpy files provide provenance; V1__auth.sql alone defines
+--       the load contract consumed here.
+--       (3) Alternatives Considered: tests/fixtures/README.md L59-L64 uses a
+--       companion document because static text records cannot carry comments.
+--       SQL can, so another README would duplicate rationale and break Rule 1's
+--       adjacency requirement.
+--       Trade-offs: in-file explanation makes this fixture longer, but removes
+--       a second artifact that could drift away from the rows it describes.
+--       (4) Assumptions: this header and the adjacent rationale blocks are the
+--       SQL analogue of a docstring. Purpose and consumers describe the input
+--       contract, Load result describes the return analogue, and Failure modes
+--       describes the error analogue required by Rule 1.
+--       (5) Assumptions: this is a review gate, not a linter gate.
+--       config/checkstyle/checkstyle.xml L185 limits Checkstyle to Java, while
+--       config/checkstyle/suppressions.xml L216-L251 is only a defensive path
+--       guard. tests/README.md L549 makes review mandatory, so authoring
+--       discipline is the only protection for this SQL.
+--       (6) Assumptions: CSUSR01Y.cpy L17-L23 is provenance only. Its verified
+--       offsets are 0, 8, 28, 48, 56, and 57 for a total of 80 bytes; bytes
+--       48-55 are INERT SPACES in any provenance rendering and have no target
+--       value. The inherited 68/69 claim is rejected because 69 + 23 = 92,
+--       which exceeds the record length.
+--       (7) Assumptions: COCOM01Y.cpy L26-L28, not CSUSR01Y.cpy L22,
+--       authorizes A for administrator and U for user. CSUSR01Y has no 88-level
+--       values, so it establishes width but not the closed domain.
+--       (8) Refactoring Rationale: the target declines parity with the legacy
+--       cleartext authenticator declared at CSUSR01Y.cpy L21, compared at
+--       COSGN00C.cbl L223, written at COUSR01C.cbl L157, and returned to the
+--       screen at COUSR02C.cbl L169. Cognito owns authentication and only its
+--       subject reference persists; the COBOL is untouched and divergence D-4
+--       remains registered.
+--       (9) Assumptions: PostgreSQL blank-pads CHAR values but not VARCHAR
+--       values. The mapper trims user_id and user_type on read; every identifier
+--       here is already exactly eight characters, so no cursor comparison is
+--       ambiguous.
+--       (10) Assumptions: U means user in COCOM01Y.cpy L28 but update in the
+--       list-screen selection path at COUSR00C.cbl L74/L189-L190; D at L200 is
+--       the other selection action. This table carries only the user-domain
+--       meaning and has no selection column.
+--       (11) Assumptions: first and last names stay separate, following
+--       CSUSR01Y.cpy L19-L20 and COUSR00.CPY L84/L90. The concatenated
+--       USER-NAME PIC X(25) at COUSR00C.cbl L62 belongs to the dead declaration
+--       block at L56-L62 and is not modeled.
+-- =============================================================================
+
+-- Alternatives Considered: TRUNCATE TABLE was rejected because its ACCESS
+-- EXCLUSIVE lock buys no sequence reset or cascade for this one-table schema.
+-- A predicate-scoped DELETE was also rejected because a surviving sibling row
+-- would make the selected fixture cease to be the complete test data set.
+-- Trade-offs: removing every existing row makes users.sql and users-keyset.sql
+-- mutually exclusive; each test must load exactly one. V1__auth.sql has no seed
+-- INSERT, so the removal can affect only fixture-created rows.
+DELETE FROM auth.users;
+
+-- Assumptions: naming all five columns makes a future schema addition fail
+-- loudly instead of shifting a literal into a different positional column.
+-- Alternatives Considered: five independent INSERT statements were rejected
+-- because a later constraint failure would leave a misleading partial fixture.
+-- Trade-offs: one multi-row statement is atomic and one row per line keeps
+-- value-level review practical, at the cost of a longer statement.
+-- Assumptions: each UUID is an RFC-4122 version-4-shaped synthetic subject. The
+-- a1 suffix identifies this file, counters 01-05 make values distinct under the
+-- NOT NULL UNIQUE contract, and no value corresponds to a real user pool.
+-- Assumptions: five rows stay below the baseline page size of ten, making the
+-- complete set a natural short first page while covering both A and U.
+-- Assumptions: BASE plus an ascending four-digit suffix gives exact eight-byte
+-- identifiers whose lexical and numeric orders agree; KSET and b2 remain
+-- reserved for users-keyset.sql.
+-- Trade-offs: BASE sorting before KSET is only a diagnostic aid in failure
+-- output. The preceding unqualified DELETE, not the prefix, provides isolation.
+-- Assumptions: Sample and Fixture name tokens are ASCII-only synthetic data,
+-- remain below VARCHAR(20), and cannot be mistaken for migrated people.
+INSERT INTO auth.users (user_id, first_name, last_name, user_type, cognito_sub) VALUES
+    ('BASE0001', 'SampleAdmin',    'FixtureOne',   'A', '00000000-0000-4000-8000-00000000a101'),
+    ('BASE0002', 'SampleUser',     'FixtureTwo',   'U', '00000000-0000-4000-8000-00000000a102'),
+    ('BASE0003', 'SampleReader',   'FixtureThree', 'U', '00000000-0000-4000-8000-00000000a103'),
+    ('BASE0004', 'SampleOperator', 'FixtureFour',  'A', '00000000-0000-4000-8000-00000000a104'),
+    ('BASE0005', 'SampleViewer',   'FixtureFive',  'U', '00000000-0000-4000-8000-00000000a105');
+
+--
+-- WHAT: Registers state that is deliberately absent from this fixture.
+-- WHY : Assumptions: (1) no cleartext authentication material or derived
+--       verifier exists; only the synthetic Cognito subject reference remains;
+--       (2) no lifecycle timestamp, audit state, or deletion marker is part of
+--       the five-column target; (3) no application or engine-managed row
+--       revision token exists; (4) no positional paging metadata or
+--       index-derived pagination exists, and the display-only counter at
+--       COUSR00.CPY L60 never drives a query; (5) no list-screen selection
+--       marker is persisted; (6) no schema, role, privilege, or structure-
+--       changing statement appears because V0__schemas_and_roles.sql and
+--       V1__auth.sql own those concerns; (7) no binary or EBCDIC content appears
+--       because this is reviewable ASCII SQL; and (8) no floating-point or
+--       monetary value exists in this bounded context.
