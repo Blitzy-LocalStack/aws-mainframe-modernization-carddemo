@@ -298,6 +298,7 @@ data "aws_iam_policy_document" "access_logs" {
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "access_logs" {
+  #checkov:skip=CKV_AWS_145:Elastic Load Balancing log delivery writes this destination through a service principal that is not a grantee on the observability KMS key; encrypting it with that key would require widening the key policy to a delivery service for a bucket that holds no application record. AES256 keeps the objects encrypted at rest, and public-access blocking, enforced bucket ownership, versioning and the exact-source bucket policy are the compensating controls.
   count = local.create_access_logs_bucket ? 1 : 0
 
   bucket = local.access_logs_bucket_name
@@ -329,6 +330,34 @@ resource "aws_s3_bucket_public_access_block" "access_logs" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# WHY : Assumptions: log delivery names every object uniquely, so versioning here
+#       is a protection against an object being deleted or replaced after the
+#       fact rather than against a delivery overwrite, and in normal operation it
+#       accrues no noncurrent copies at all. That is what makes this destination
+#       describable as an audit trail, against a baseline whose eight CICS file
+#       definitions each declared `RECOVERY(NONE)` with journalling disabled.
+# WHY : Alternatives Considered: leaving the bucket unversioned, which an earlier
+#       revision did. Rejected because a delivered access record could then be
+#       removed with nothing left to show it had existed -- and because a bucket
+#       offered as the load balancer's audit trail should not be the one object
+#       store in this package that cannot survive a deletion.
+# WHY : Trade-offs: no noncurrent-version expiry rule accompanies this, unlike the
+#       destination in infra/modules/observability. Adding one would require this
+#       module to take a retention input it does not have and both environment
+#       roots to supply it; because delivery never replaces an object, the
+#       noncurrent class stays empty in normal operation and the rule would bound
+#       a set that does not grow. If this bucket ever gains a producer that
+#       rewrites objects, that rule becomes necessary in the same change.
+resource "aws_s3_bucket_versioning" "access_logs" {
+  count = local.create_access_logs_bucket ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {

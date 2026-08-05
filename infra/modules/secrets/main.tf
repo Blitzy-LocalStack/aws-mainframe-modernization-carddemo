@@ -456,6 +456,7 @@ resource "aws_secretsmanager_secret_version" "service" {
 }
 
 resource "aws_secretsmanager_secret_rotation" "service" {
+  #checkov:skip=CKV_AWS_304:The rotation interval is 30 days -- the module default, the default in both environment roots and the value both terraform.tfvars files set -- which is inside the interval this check requires. The finding appears only in a whole-tree scan, where the scanner cannot render var.rotation_automatically_after_days across the module boundary and compares the unresolved reference instead; the same check passes when this module is scanned on its own.
   for_each = local.service_secret_names
 
   secret_id           = aws_secretsmanager_secret.service[each.key].id
@@ -506,6 +507,7 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 #       function. Renewing a certificate is therefore an ordinary apply.
 # =============================================================================
 resource "aws_secretsmanager_secret" "service_tls_certificate" {
+  #checkov:skip=CKV2_AWS_57:A rotation function cannot mint a certificate. Renewing this material means issuing a new certificate from the environment certificate authority and re-importing it, which is an ordinary apply performed by the caller that owns the authority -- as the section header above records. Attaching a rotation schedule would name a function that could only re-write the value it was given.
   # WHY : Assumptions: the TLS pair is created only when a caller supplies imported
   #       material. An environment root that issues its own certificate -- both roots
   #       in this package do, from the `tls` provider -- owns that secret itself and
@@ -535,6 +537,7 @@ resource "aws_secretsmanager_secret" "service_tls_certificate" {
 }
 
 resource "aws_secretsmanager_secret" "service_tls_private_key" {
+  #checkov:skip=CKV2_AWS_57:This entry is the private key paired with the certificate above and shares its lifecycle, so it is renewed by the same operator-issued re-import rather than by a rotation function. Rotating the key independently of its certificate would produce a pair that no longer matches and a listener that cannot complete a handshake.
   count = local.create_service_tls_secrets ? 1 : 0
 
   name        = local.service_tls_private_key_secret_name

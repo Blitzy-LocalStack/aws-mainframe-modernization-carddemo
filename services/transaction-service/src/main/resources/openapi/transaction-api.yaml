@@ -1,0 +1,2004 @@
+# =============================================================================
+# services/transaction-service/src/main/resources/openapi/transaction-api.yaml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The hand-authored OpenAPI 3.1 contract of record for transaction-service,
+#   the LEDGER bounded context of the CardDemo mainframe-to-microservices
+#   migration. It is the document the browser SPA's transaction client is
+#   written against, and the document this module's controller tests agree
+#   with. It is served as a static classpath resource: application.yml adds
+#   `classpath:/openapi/` to spring.web.resources.static-locations at L601 and
+#   pins springdoc.swagger-ui.url to /transaction-api.yaml at L621, so this
+#   file -- not an annotation-scanned document -- is what the browser view
+#   presents as authoritative.
+#
+#   This contract publishes exactly four operation groups, one per CICS
+#   transaction this service replaces. The names are taken verbatim from the
+#   transaction inventory table in the root README.md:
+#     CT00  Transaction List  COTRN00C  README.md L298  app/csd/CARDDEMO.CSD L419 to L420
+#     CT01  Transaction View  COTRN01C  README.md L299  app/csd/CARDDEMO.CSD L429 to L430
+#     CT02  Transaction Add   COTRN02C  README.md L300  app/csd/CARDDEMO.CSD L439 to L440
+#     CB00  Bill Payment      COBIL00C  README.md L302  app/csd/CARDDEMO.CSD L337 to L338
+#
+#   The COBOL under app/** is the behavioural specification for every shape
+#   below. It is read and cited by path and line, and it is never modified.
+#   Where the migrated behaviour differs from the baseline, the divergence is
+#   stated here rather than introduced silently.
+#
+#   Field widths, types and nullability derive from app/cpy/CVTRA05Y.cpy, the
+#   350-byte TRAN-RECORD layout, which is the normative wire and storage
+#   contract for this context. app/cpy/CVTRA06Y.cpy declares the same fourteen
+#   fields at the same widths under a DALYTRAN- prefix, and app/cpy/CVTRA01Y.cpy
+#   declares the 50-byte transaction-category-balance record.
+#
+#   NO SECRET, CREDENTIAL, HOST NAME, CONNECTION STRING OR RESOURCE IDENTIFIER
+#   APPEARS ANYWHERE IN THIS FILE. The single server entry is a relative path
+#   supplied through a server variable, every example value is drawn from the
+#   committed app/data/ASCII seed data, and no dependency version of any kind
+#   is emitted -- versions live in the POMs.
+#
+#   Verification caveat, stated because overclaiming it would be worse than
+#   omitting it: all four programs this contract migrates are online CO*
+#   programs. tests/README.md records at L83 to L85 that online CO* CICS
+#   programs cannot run end to end without a CICS runtime, which the runner
+#   does not have, and that only their extractable field-validation logic is
+#   unit tested. There is therefore NO golden-master oracle for any of these
+#   four paths. Parity rests on transcription fidelity against the cited
+#   source lines, and every user-visible string below is reproduced
+#   character for character from the line it is attributed to.
+#
+#   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. That
+#   standard forbids a statement-level WHAT: comment in a .yaml file at L841
+#   and places purpose in a file-header block instead, so purpose is stated
+#   here once and every inline comment below carries a canonical rationale
+#   label and nothing else, in the form its L779 template and L785 to L787
+#   note prescribe: one labelled line directly above the key it explains.
+# -----------------------------------------------------------------------------
+# WHY (non-obvious design decisions):
+#
+#   Alternatives Considered: paging by an offset, a page number or a row count
+#     is rejected outright, and no such parameter, property or prose appears
+#     anywhere below. Under concurrent insertion the number of rows preceding a
+#     position changes beneath a reader between one request and the next, so a
+#     page positioned by counting omits some rows and presents others twice; a
+#     key already read keeps its place in the ordering whatever is inserted
+#     around it. The concurrency is attested by the baseline itself, not
+#     assumed: app/cbl/COBIL00C.cbl L212 to L217 reads the highest transaction
+#     key and increments it across six statements -- MOVE HIGH-VALUES at L212,
+#     STARTBR at L213, READPREV at L214, ENDBR at L215, MOVE at L216, ADD 1 at
+#     L217 -- with nothing holding a lock across them, and app/cbl/COTRN02C.cbl
+#     repeats the idiom at L444 and L449. Two concurrent callers can therefore
+#     read the same maximum and insert either side of a browse in flight.
+#     app/csd/CARDDEMO.CSD reinforces it at L78, where FILE(TRANSACT) is
+#     defined READINTEG(UNCOMMITTED).
+#   Assumptions: the baseline browse state is ALREADY a cursor over keys, so
+#     the substitution is one-to-one rather than an approximation. The proof is
+#     inside this very service: app/cbl/COTRN00C.cbl declares
+#     CDEMO-CT00-TRNID-FIRST at L63, CDEMO-CT00-TRNID-LAST at L64 and
+#     CDEMO-CT00-NEXT-PAGE-FLG at L66, and its two paging paths seek off those
+#     keys at L236 to L252 and L258 to L275. Nothing in that block counts rows
+#     already consumed. The general precedent is the card list at
+#     app/cbl/COCRDLIC.cbl L230 to L244.
+#   Refactoring Rationale: no session cookie, no server-side cursor handle and
+#     no continuation header appears below. All four transactions are defined
+#     TWASIZE(0) -- app/csd/CARDDEMO.CSD L337 to L338, L419 to L420, L429 to
+#     L430 and L439 to L440 -- so no Transaction Work Area held anything
+#     between screen turns and every continuation value travelled in the
+#     DFHCOMMAREA, a buffer the client echoed back. Moving those values into
+#     the response body ends the dependency on a client returning a buffer
+#     intact: the server reads each cursor back off the next request and
+#     verifies its seal. Identity comes from validated JWT claims rather than
+#     from the client-echoed CDEMO-USER-TYPE, and the CDEMO-PGM-CONTEXT
+#     re-entry discriminator disappears entirely, because a stateless handler
+#     that answers with a field-error array has no first-entry-versus-re-entry
+#     distinction to make.
+#   Alternatives Considered: transporting money as a JSON number, rejected on a
+#     measurable loss rather than a preference. A JSON number carries no scale
+#     and most clients parse it into an IEEE-754 binary64 value, which destroys
+#     exactness at the boundary the user actually sees. Every monetary value
+#     below is therefore a string, which is what
+#     services/common-lib/src/main/java/com/carddemo/common/money/MoneyModule.java
+#     emits at L324 through Money.toPlainString().
+#   Trade-offs: no unmasked primary account number and no card verification
+#     value appears in any response, under any status code. What is given up is
+#     full-PAN visibility on the list and view responses, which the 3270
+#     screens did show -- app/cpy-bms/COTRN01.CPY declares CARDNUMI PIC X(16)
+#     at L72. It is given up because no operation in this service is the
+#     administrative card-detail endpoint, so no unmasked path belongs here;
+#     a caller needing the full number asks the service that owns cards.
+#   Assumptions: this contract is one self-contained document. No $ref leaves
+#     it, because springdoc serves this single classpath resource and the SPA
+#     client is written against it as one artifact; a schema-level reference
+#     into another service's contract would also make this published API
+#     change whenever that one did.
+# =============================================================================
+
+openapi: 3.1.1
+
+info:
+  title: CardDemo Transaction Service API
+  summary: Transaction list, view and add, and full-balance bill payment for the CardDemo ledger.
+  description: >-
+    The published HTTP surface of the CardDemo LEDGER bounded context. It
+    replaces four CICS transactions with stateless request handling: CT00
+    Transaction List (app/cbl/COTRN00C.cbl), CT01 Transaction View
+    (app/cbl/COTRN01C.cbl), CT02 Transaction Add (app/cbl/COTRN02C.cbl) and
+    CB00 Bill Payment (app/cbl/COBIL00C.cbl).
+
+
+    Amounts are exact fixed-point decimals carried as JSON strings, never as
+    JSON numbers. Transaction identifiers, card numbers and account
+    identifiers are digits-only fixed-width strings, never integers, because
+    the committed seed data is zero-padded and an integer type would discard
+    leading digits. Primary account numbers are masked to their last four
+    digits in every response, and no card verification value appears anywhere.
+
+
+    Browse results are paged by sealed keyset cursor. There is no offset, page
+    number or total count in this contract, and one operation only -- the
+    transaction list -- is paged.
+
+
+    Verification caveat: all four source programs are online CO* CICS
+    programs, which tests/README.md L83 to L85 records as impossible to run
+    end to end without a CICS runtime, so no golden-master oracle exists for
+    these paths. Parity rests on transcription fidelity against the cited
+    source lines.
+  # WHY : Assumptions: this is the version of the CONTRACT, not of any dependency
+  #       and not of the build. It is stated independently of the module
+  #       coordinate in services/transaction-service/pom.xml because a contract
+  #       and an artifact revise for different reasons: a snapshot rebuild that
+  #       changes no observable shape must not appear to clients as a new API,
+  #       and springdoc serves this file verbatim, so whatever is written here
+  #       is what a client sees.
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+# WHY : Assumptions: the single entry is a RELATIVE path expressed through a
+#       server variable, and deliberately carries no scheme and no host. The
+#       browser client resolves its own origin from the VITE_API_BASE_URL build
+#       variable read at ui/src/api/client.ts L19 and applied as the axios
+#       baseURL at L124, so a host written here would either contradict that
+#       build variable or commit a deployment endpoint to source control, which
+#       the no-secrets constraint forbids. The path is a variable rather than a
+#       bare "/" so that a gateway stage prefix can be substituted without
+#       editing this document.
+servers:
+  - url: "{basePath}"
+    description: >-
+      The deployment-relative root this contract is served beneath. Requests are
+      issued against the origin the client is configured with, and this value
+      contributes only the path prefix in front of the operation paths below.
+    variables:
+      basePath:
+        default: "/"
+        description: >-
+          Path prefix in front of every operation path. It is "/" when the
+          service is reached directly, and is set to the stage or route prefix
+          when an API gateway fronts it.
+
+# WHY : Assumptions: there are exactly four tags because there are exactly four
+#       source programs, and each tag name is the operation name recorded in the
+#       root README.md transaction inventory rather than a name invented here.
+#       Using the inventory's own wording keeps the traceability matrix a
+#       lookup rather than a translation.
+tags:
+  - name: Transaction List
+    description: >-
+      Keyset-paged browse over the ledger, migrated from CICS transaction CT00
+      and app/cbl/COTRN00C.cbl. Named after the inventory row at README.md L298.
+  - name: Transaction View
+    description: >-
+      Retrieval of one transaction by identifier, migrated from CICS transaction
+      CT01 and app/cbl/COTRN01C.cbl. Named after the inventory row at
+      README.md L299.
+  - name: Transaction Add
+    description: >-
+      Creation of one transaction with a server-assigned identifier, migrated
+      from CICS transaction CT02 and app/cbl/COTRN02C.cbl. Named after the
+      inventory row at README.md L300.
+  - name: Bill Payment
+    description: >-
+      Full-balance payment against an account, migrated from CICS transaction
+      CB00 and app/cbl/COBIL00C.cbl. Named after the inventory row at
+      README.md L302.
+
+# WHY : Refactoring Rationale: one scheme, applied to every operation, replaces
+#       the baseline's sign-on state. The reference system carried the user
+#       identity and the administrator flag in the DFHCOMMAREA, storage the
+#       client echoed back, so a client could in principle assert its own user
+#       type; a signed claim set cannot be asserted by its bearer. No second
+#       scheme is declared -- no API key and no basic authentication -- because
+#       a second admitted credential form would be a second thing to get wrong
+#       at the edge for no capability the first does not already provide.
+security:
+  - bearerAuth: []
+
+paths:
+  /transactions:
+    description: >-
+      The ledger collection. It is browsed by sealed keyset cursor and appended
+      to with a server-assigned identifier, migrated from CICS transactions CT00
+      and CT02 respectively.
+
+    get:
+      tags: [Transaction List]
+      operationId: listTransactions
+      summary: List transactions as one keyset-paged page.
+      description: >-
+        Returns one bounded page of transactions in ascending transaction-id
+        order, migrated from app/cbl/COTRN00C.cbl.
+
+
+        A page holds at most ten rows. That bound is a baseline fact rather than
+        a tuning choice: app/cbl/COTRN00C.cbl fixes it five times, at L290
+        (PERFORM VARYING ... UNTIL WS-IDX > 10), L297 (PERFORM UNTIL WS-IDX >= 11
+        ...), L344 (the same bound on the backward path), L349 (MOVE 10 TO
+        WS-IDX) and L351 (the backward walk counting down until WS-IDX <= 0).
+        The bound is not a request parameter, so a caller cannot widen it.
+
+
+        Paging is by key, never by position. An opening request supplies no
+        parameters. A subsequent request replays one of the two cursors from the
+        previous response together with the direction it belongs to: forward
+        seeks keys strictly greater than the cursor in ascending order, and
+        backward seeks keys strictly less than it in descending order, which is
+        exactly what the baseline READPREV at app/cbl/COTRN00C.cbl L660 does.
+
+
+        Whether a further page follows is settled by reading one row beyond the
+        page and observing whether that row exists, never from a total count.
+        The baseline does the same: after its page loop, app/cbl/COTRN00C.cbl
+        performs one extra read at L308 and sets its next-page indicator true at
+        L310 or false at L312.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Direction"
+      responses:
+        "200":
+          description: >-
+            One page of transactions, with the cursors and availability
+            indicators needed to request the adjacent pages. An exhausted or
+            empty result is this status with an empty item array, not an error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: >-
+            The browse failed. The aggregate message is "Unable to lookup
+            transaction..." verbatim from app/cbl/COTRN00C.cbl L615, which the
+            program also emits at L649 and L683 for its forward and backward paths.
+            Its lower-case t is this program's form and differs from the
+            capitalised form the other three programs emit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+    post:
+      tags: [Transaction Add]
+      operationId: addTransaction
+      summary: Add one transaction with a server-assigned identifier.
+      description: >-
+        Creates one transaction, migrated from app/cbl/COTRN02C.cbl.
+
+
+        The identifier is assigned by the service and is not accepted from the
+        caller. The baseline derives it by reading the highest existing key and
+        incrementing it -- app/cbl/COTRN02C.cbl L444 to L449, into
+        WS-TRAN-ID-N PIC 9(16) declared at L57 -- and the migrated service
+        assigns it the same way from the sequence that owns the column, so a
+        request carrying an identifier would be asserting a value the service
+        alone is entitled to choose.
+
+
+        Exactly one of accountId and cardNumber is required. The baseline
+        evaluates them in that order at L195 to L226: an account identifier that
+        is present is validated numeric at L197 and used to look the card number
+        up through the cross-reference at L206 to L209, a card number that is
+        present is validated numeric at L211 and used to look the account
+        identifier up at L220 to L223, and supplying neither is refused at L226.
+        Whichever is supplied, the card number is what the stored record carries,
+        per the MOVE at L459.
+      requestBody:
+        description: >-
+          The transaction to create, carrying every field the baseline add
+          screen collects and none the service assigns for itself.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionCreateRequest"
+      responses:
+        "201":
+          description: >-
+            The transaction was written. The body carries the assigned
+            identifier and the baseline's own success sentence, and the Location
+            header addresses the new resource.
+          headers:
+            Location:
+              description: >-
+                Absolute path of the created transaction, addressing the view
+                operation for the assigned identifier.
+              required: true
+              schema:
+                type: string
+                description: >-
+                  Path of the created transaction, of the form
+                  /transactions/{transactionId}.
+                examples:
+                  - "/transactions/0000000000683580"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            Neither the supplied account identifier nor the supplied card number
+            resolves through the cross-reference. The aggregate message is
+            "Account ID NOT found..." verbatim from app/cbl/COTRN02C.cbl L593
+            when the account identifier was supplied, and "Card Number NOT
+            found..." verbatim from L626 when the card number was.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        # WHY : Refactoring Rationale: two CICS conditions collapse into this one
+        #       status because the baseline itself gave them one outcome.
+        #       app/cbl/COTRN02C.cbl L735 (WHEN DFHRESP(DUPKEY)) and L736 (WHEN
+        #       DFHRESP(DUPREC)) fall through to a single shared handler, whose
+        #       first act at L738 is to move one message, "Tran ID already
+        #       exist...", into the message line. Reporting them as two statuses
+        #       would invent a distinction the baseline does not draw and would
+        #       force a client to branch on something no message tells it apart.
+        "409":
+          description: >-
+            The assigned identifier already exists. The aggregate message is
+            "Tran ID already exist..." verbatim from app/cbl/COTRN02C.cbl L738,
+            singular verb included, and it is the response for both of the
+            duplicate conditions the baseline handles together at L735 and L736.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The write, or one of the lookups preceding it, failed for a reason the
+            caller cannot correct. The aggregate message is one of "Unable to Add
+            Transaction..." verbatim from app/cbl/COTRN02C.cbl L745 when the write
+            itself failed, "Unable to lookup Acct in XREF AIX file..." from L600
+            when the account-id form could not be resolved through the
+            cross-reference, "Unable to lookup Card # in XREF file..." from L633
+            when the card-number form could not be, or "Unable to lookup
+            Transaction..." from L664 and L693 when reading the highest existing
+            identifier failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/{transactionId}:
+    description: >-
+      One transaction addressed by its identifier, migrated from CICS
+      transaction CT01.
+    parameters:
+      - $ref: "#/components/parameters/TransactionId"
+
+    get:
+      tags: [Transaction View]
+      operationId: viewTransaction
+      summary: View one transaction by identifier.
+      description: >-
+        Returns the thirteen record fields the baseline view screen displays,
+        migrated from app/cbl/COTRN01C.cbl. The thirteen are the thirteen MOVE
+        statements at L178 to L190, in the order the record declares them.
+
+
+        The identifier is a path parameter rather than a request body or a query
+        argument because it IS the selection context. The baseline carried it in
+        the DFHCOMMAREA as CDEMO-CT01-TRN-SELECTED and copied it into the input
+        field on entry when the list screen had set it -- app/cbl/COTRN01C.cbl
+        L103 to L107 -- and selection context that arrives in the request path
+        makes each request self-describing and therefore independently
+        authorizable.
+      responses:
+        "200":
+          description: >-
+            The transaction, with its card number masked to the last four digits
+            and its amount carried as an exact decimal string.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionDetail"
+        "400":
+          description: >-
+            The identifier is absent or is not sixteen digits. The aggregate
+            message is "Tran ID can NOT be empty..." verbatim from
+            app/cbl/COTRN01C.cbl L149 when it is absent, with the emphatic
+            capitalisation of NOT preserved as the baseline writes it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            No transaction carries that identifier. The aggregate message is
+            "Transaction ID NOT found..." verbatim from app/cbl/COTRN01C.cbl
+            L285.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        # WHY : Assumptions: the lookup-failure sentence exists in TWO cases across
+        #       these four programs and stays two constants, never one. The
+        #       capitalised "Unable to lookup Transaction..." is emitted by
+        #       app/cbl/COTRN01C.cbl L292, app/cbl/COTRN02C.cbl L664 and L693, and
+        #       app/cbl/COBIL00C.cbl L463 and L492, while the lower-case "Unable
+        #       to lookup transaction..." is emitted by app/cbl/COTRN00C.cbl L615,
+        #       L649 and L683. Folding them into one constant would change what a
+        #       user reads on one of the two sets of screens, and choosing which
+        #       set to change would be an arbitrary decision affecting eight
+        #       source lines.
+        "500":
+          description: >-
+            The read failed for a reason other than absence. The aggregate
+            message is "Unable to lookup Transaction..." verbatim from
+            app/cbl/COTRN01C.cbl L292, whose capital T is the view program's form;
+            the list operation emits the lower-case "Unable to lookup
+            transaction..." from app/cbl/COTRN00C.cbl L615, and the two are not
+            interchangeable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # WHY : Refactoring Rationale: this path carries ONE operation and gets NO
+  #       paged list and NO page envelope, correcting a reading of
+  #       app/cbl/COBIL00C.cbl L439 to L503 as a browse that becomes a paged
+  #       query. It is not a browse. Grepping the whole 572-line program for
+  #       READNEXT returns nothing, and grepping it for GTEQ returns nothing --
+  #       against six and one respectively in app/cbl/COTRN00C.cbl -- so its
+  #       STARTBR at L441, READPREV at L472 and ENDBR at L501 have no forward
+  #       read to pair with and no greater-or-equal positioning option. They
+  #       exist solely to serve the highest-key sequence at L210 to L219, whose
+  #       end-of-file branch at L487 to L488 moves ZEROS into the key as an
+  #       empty sentinel. Its relational equivalent is a maximum over the key
+  #       column, not a page, so a page envelope here would describe an
+  #       operation no source program justifies.
+  /bill-payments:
+    description: >-
+      Full-balance payments against an account, migrated from CICS transaction
+      CB00. The collection is appended to and is deliberately not browsable.
+
+    post:
+      tags: [Bill Payment]
+      operationId: payAccountBalanceInFull
+      summary: Pay an account's entire current balance, or preview what would be paid.
+      description: >-
+        Pays the whole of an account's current balance, migrated from
+        app/cbl/COBIL00C.cbl.
+
+
+        The payment is full-balance only and the request carries no amount. The
+        baseline moves the entire account balance into the transaction amount at
+        L224 (MOVE ACCT-CURR-BAL TO TRAN-AMT) and subtracts that same amount
+        back out of the balance at L234, so the amount is derived rather than
+        chosen and there is no partial-amount input field on the screen to
+        migrate. A non-positive balance is refused at L198 with "You have
+        nothing to pay...".
+
+
+        The confirmation field selects between previewing and paying, which is
+        why one operation serves both. The baseline makes that choice inside a
+        single EVALUATE at L173 to L191 within one transaction and one input
+        set: Y or y confirms and posts, N or n declines, and a blank or
+        low-values confirmation reads the account and shows the balance with the
+        prompt "Confirm to make a bill payment..." at L237. Splitting the
+        preview into its own operation would invent an endpoint the baseline
+        does not have, and reading the balance from this service would reach
+        across into the context that owns accounts.
+
+
+        The posted transaction is almost entirely constant. The baseline fixes
+        the type code to 02 at L220, the category code to 2 at L221, the source
+        to POS TERM at L222, the description to BILL PAYMENT - ONLINE at L223,
+        the merchant identifier to 999999999 at L226, the merchant name to BILL
+        PAYMENT at L227 and both the merchant city and zip to N/A at L228 and
+        L229, and it takes the card number from the cross-reference at L225.
+        None of those is a request field.
+      requestBody:
+        description: >-
+          The account to pay and the confirmation that selects between previewing
+          the payable balance and posting the payment.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BillPaymentRequest"
+      responses:
+        # WHY : Refactoring Rationale: a withheld confirmation answers 200 with no
+        #       payment made, rather than 201 or an error, because the baseline
+        #       treats it as a normal turn of the same transaction. At L182 to
+        #       L184 a blank or low-values confirmation performs
+        #       READ-ACCTDAT-FILE and falls through to display the balance at
+        #       L193 to L194, and at L236 to L239 an unconfirmed request is
+        #       answered with the confirm prompt. Answering an error there would
+        #       report a failure where the baseline reports a prompt.
+        "200":
+          description: >-
+            The confirmation was withheld, so no payment was made. The body
+            reports the balance that would be paid and, when the confirmation
+            was blank, the prompt "Confirm to make a bill payment..." verbatim
+            from app/cbl/COBIL00C.cbl L237.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillPaymentPreview"
+        "201":
+          description: >-
+            The payment was posted and the account balance was reduced by the
+            amount paid. The body carries the assigned transaction identifier,
+            the amount paid and the resulting balance, and the Location header
+            addresses the transaction that was written.
+          headers:
+            Location:
+              description: >-
+                Absolute path of the transaction the payment wrote, addressing
+                the view operation for the assigned identifier.
+              required: true
+              schema:
+                type: string
+                description: >-
+                  Path of the transaction written by the payment, of the form
+                  /transactions/{transactionId}.
+                examples:
+                  - "/transactions/0000000000683581"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillPaymentResponse"
+        "400":
+          description: >-
+            The account identifier is absent or not numeric, or the confirmation
+            is a value the baseline does not accept. The aggregate message is
+            "Acct ID can NOT be empty..." verbatim from app/cbl/COBIL00C.cbl
+            L161, or "Invalid value. Valid values are (Y/N)..." verbatim from
+            L187.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            No account carries that identifier, or it has no cross-reference
+            entry. The aggregate message is "Account ID NOT found..." verbatim
+            from app/cbl/COBIL00C.cbl L361, which the baseline also emits from
+            the update path at L392 and the cross-reference path at L425.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >-
+            The account state refuses the payment. The aggregate message is "You
+            have nothing to pay..." verbatim from app/cbl/COBIL00C.cbl L201 when
+            the balance is not positive, or "Tran ID already exist..." verbatim
+            from L536 when the identifier the payment derived is already taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The payment failed after validation. The aggregate message is one of
+            "Unable to lookup Account..." verbatim from app/cbl/COBIL00C.cbl
+            L368, "Unable to lookup XREF AIX file..." from L432, "Unable to
+            lookup Transaction..." from L463 and L492, "Unable to Add Bill pay
+            Transaction..." from L543, or "Unable to Update Account..." from
+            L399.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        The bearer token the managed identity provider issues and the gateway
+        authorizer validates. Group membership travels in the token's group
+        claim and is converted to service authorities by JwtRoleConverter in
+        com.carddemo.common.security, which is what replaces the baseline's
+        client-echoed CDEMO-USER-TYPE flag.
+
+  parameters:
+
+    # WHY : Assumptions: the name and the shape are fixed by the already-authored
+    #       browser client rather than chosen here. ui/src/api/cards.ts sends
+    #       this parameter as `cursor` at L54, declares it optional at L44, and
+    #       omits it entirely on an opening request at L50 to L52. A different
+    #       name here would leave the SPA's sibling browse call and this contract
+    #       disagreeing on the wire while both still compiling.
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        A sealed cursor token copied from the nextCursor or prevCursor member of
+        a previous response. It is omitted on an opening request, which starts at
+        the beginning of the ordering. It must be replayed exactly as it was
+        received, because it is sealed against tampering and any alteration
+        invalidates it.
+      schema:
+        $ref: "#/components/schemas/CursorToken"
+
+    Direction:
+      name: direction
+      in: query
+      required: false
+      description: >-
+        Which side of the supplied cursor to read. It is meaningful only
+        alongside a cursor, and the browser client sends the two together or
+        neither. Forward reading seeks keys strictly greater than the cursor in
+        ascending order; backward reading seeks keys strictly less than it in
+        descending order.
+      schema:
+        $ref: "#/components/schemas/PageDirection"
+
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      description: >-
+        The sixteen-digit identifier of the transaction to address, as it appears
+        in the transactionId member of a list row.
+      schema:
+        $ref: "#/components/schemas/TransactionId"
+
+  responses:
+
+    BadRequest:
+      description: >-
+        The request was refused by field validation. The body carries the
+        aggregate sentence and one entry per offending field, each entry naming
+        the field and carrying that field's verbatim baseline message.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Unauthorized:
+      description: >-
+        No bearer token was presented, or the token presented could not be
+        validated. No field entries accompany this status, because nothing about
+        the request body was examined.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Forbidden:
+      description: >-
+        The token was valid but its group claim does not carry the authority this
+        operation requires.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    InternalServerError:
+      description: >-
+        The operation failed for a reason the caller cannot correct. The
+        aggregate message is carried verbatim from the baseline paragraph that
+        detected the failure, and the correlation identifier in the body is the
+        key to the operational record that holds the diagnostic detail this
+        response deliberately withholds.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+  schemas:
+
+    # -------------------------------------------------------------------------
+    # Primitive field types.
+    # -------------------------------------------------------------------------
+
+    # WHY : Assumptions: the COPYBOOK is the normative wire and storage contract
+    #       for this context, so every width below is the PICTURE width of the
+    #       named field in app/cpy/CVTRA05Y.cpy and none is a number chosen here.
+    #       Naming the copybook and the field in each description is what makes a
+    #       width auditable rather than something a reader has to trust: the
+    #       fourteen declared widths are 16, 2, 4, 10, 100, 11, 9, 50, 50, 10, 16,
+    #       26, 26 and 20 at one-based offsets 1, 17, 19, 23, 33, 133, 144, 153,
+    #       203, 253, 263, 279, 305 and 331, and they sum to exactly the 350 bytes
+    #       the copybook's own header states as the record length at L2.
+    #       app/cpy/CVTRA06Y.cpy L5 to L18 declares the same fourteen fields at
+    #       the same widths under a DALYTRAN- prefix, so the two agree
+    #       field for field and only the name prefix differs.
+    # WHY : Assumptions: the fourteenth field is DROPPED and appears in no schema.
+    #       FILLER PIC X(20) at app/cpy/CVTRA05Y.cpy L18 is padding that carries
+    #       the record to its fixed 350-byte length -- all 300 records of
+    #       app/data/ASCII/dailytran.txt hold twenty spaces at one-based bytes 331
+    #       to 350 -- so it holds no value a caller could act on. Publishing it
+    #       would invite a client to read or write bytes that mean nothing, and
+    #       the same applies to the FILLER PIC X(22) that closes the 50-byte
+    #       record at app/cpy/CVTRA01Y.cpy L10.
+
+    # WHY : Assumptions: a string, never an integer, and the committed seed data
+    #       is why rather than the copybook alone. app/cpy/CVTRA05Y.cpy L5
+    #       declares TRAN-ID PIC X(16), a character field, and in the 300 records
+    #       of app/data/ASCII/dailytran.txt -- each exactly 350 bytes -- ALL 300
+    #       of the identifiers at one-based offset 1 to 16 are zero-padded, for
+    #       example 0000000000683580, 0000000001774260 and 0000000006292564. An
+    #       integer or number type would discard leading zeros on every single
+    #       record and no round trip would survive.
+    TransactionId:
+      type: string
+      description: >-
+        A transaction identifier: exactly sixteen decimal digits, zero-padded on
+        the left. Declared TRAN-ID PIC X(16) at app/cpy/CVTRA05Y.cpy L5, stored
+        as transaction_id CHAR(16) at
+        services/transaction-service/src/main/resources/db/migration/V1__ledger.sql
+        L126, and assigned by the service rather than supplied by a caller.
+      minLength: 16
+      maxLength: 16
+      pattern: "^[0-9]{16}$"
+      examples:
+        - "0000000000683580"
+
+    # WHY : Trade-offs: the response carries the masked form only, so a client
+    #       cannot display or re-key the full number from anything this service
+    #       returns. That is given up deliberately: the baseline view screen did
+    #       show all sixteen characters, declared CARDNUMI PIC X(16) at
+    #       app/cpy-bms/COTRN01.CPY L72, but no operation here is the
+    #       administrative card-detail endpoint and so no unmasked path belongs
+    #       in this contract. The masking is applied by the mapper, which is why
+    #       the type is an ordinary string rather than something claiming to
+    #       enforce it.
+    MaskedCardNumber:
+      type: string
+      description: >-
+        A primary account number masked to its last four digits, rendered as
+        twelve asterisks followed by those four digits. The unmasked field is
+        declared TRAN-CARD-NUM PIC X(16) at app/cpy/CVTRA05Y.cpy L15; the
+        sixteen-character form never leaves this service.
+      minLength: 16
+      maxLength: 16
+      pattern: "^[*]{12}[0-9]{4}$"
+      examples:
+        - "************6232"
+
+    # WHY : Assumptions: a string for the same reason as the transaction
+    #       identifier, measured on the same data. app/cpy/CVTRA05Y.cpy L15
+    #       declares TRAN-CARD-NUM PIC X(16), and 30 of the 300 card numbers at
+    #       one-based offset 263 to 278 of app/data/ASCII/dailytran.txt begin
+    #       with a zero -- 0927987108636232, 0500024453765740 and
+    #       0923877193247330 among them -- as do 5 of the 50 in
+    #       app/data/ASCII/carddata.txt. A numeric type loses that leading digit
+    #       and turns a valid card number into a fifteen-digit one.
+    CardNumber:
+      type: string
+      description: >-
+        A primary account number as supplied on a request: exactly sixteen
+        decimal digits, leading zeros significant. Declared TRAN-CARD-NUM PIC
+        X(16) at app/cpy/CVTRA05Y.cpy L15 and stored as card_num CHAR(16) at
+        V1__ledger.sql L220. It appears on requests only; responses carry the
+        masked form.
+      minLength: 16
+      maxLength: 16
+      pattern: "^[0-9]{16}$"
+      examples:
+        - "0927987108636232"
+
+    # WHY : Assumptions: eleven digits as a string, measured rather than assumed.
+    #       app/cpy-bms/COBIL00.CPY L60 declares ACTIDINI PIC X(11) and
+    #       app/cpy-bms/COTRN02.CPY L60 declares the same, and ALL 50 of the
+    #       account identifiers at one-based offset 1 to 11 of
+    #       app/data/ASCII/acctdata.txt are zero-padded -- 00000000001 and its
+    #       successors -- so an integer type would discard leading zeros on every
+    #       record in the file. The baseline validates the field with a NOT
+    #       NUMERIC test at app/cbl/COTRN02C.cbl L197, which is a digits-only
+    #       check on characters, not a numeric conversion.
+    AccountId:
+      type: string
+      description: >-
+        An account identifier: exactly eleven decimal digits, zero-padded on the
+        left. Declared ACTIDINI PIC X(11) at app/cpy-bms/COBIL00.CPY L60, and
+        held as account_id BIGINT at V1__ledger.sql L557 where the leading zeros
+        are restored by the declared width on the way out.
+      minLength: 11
+      maxLength: 11
+      pattern: "^[0-9]{11}$"
+      examples:
+        - "00000000001"
+
+    # WHY : Alternatives Considered: typing money as a JSON number, rejected
+    #       because a JSON number carries no scale and most clients parse it into
+    #       an IEEE-754 binary64 value, which cannot hold most two-place decimals
+    #       exactly and so destroys exactness at the boundary the user actually
+    #       sees. A string preserves the scale and the sign, and it is what
+    #       MoneyModule L324 emits through Money.toPlainString(). The reference
+    #       data shows why the sign has to survive: the amount at one-based bytes
+    #       133 to 143 of app/data/ASCII/dailytran.txt is zoned decimal with a
+    #       trailing sign overpunch, so 0000005047G is positive and 0000009190}
+    #       is negative, and 50 of the 300 records carry a negative overpunch.
+    TransactionAmount:
+      type: string
+      description: >-
+        A signed transaction amount as an exact decimal string with exactly two
+        fractional digits and no exponent. Declared TRAN-AMT PIC S9(09)V99 at
+        app/cpy/CVTRA05Y.cpy L10, stored as amount NUMERIC(11,2) at
+        V1__ledger.sql L178, and carried in Java as
+        com.carddemo.common.money.Money, whose scale is 2 and whose general
+        rounding mode is HALF_UP. Nine integer digits are admissible, so the
+        magnitude bound is 999999999.99.
+      maxLength: 13
+      pattern: "^-?[0-9]{1,9}\\.[0-9]{2}$"
+      examples:
+        - "50.47"
+        - "-91.90"
+
+    # WHY : Assumptions: the account balance admits TEN integer digits where a
+    #       transaction amount admits nine, so it is a separate type rather than
+    #       a reuse. app/cbl/COBIL00C.cbl L56 declares WS-CURR-BAL PIC
+    #       +9999999999.99, the fourteen character positions
+    #       app/cpy-bms/COBIL00.CPY L66 renders as CURBALI PIC X(14), and
+    #       Money.MAX_MAGNITUDE is 9999999999.99 to match. Reusing the
+    #       nine-digit transaction bound here would reject a balance the baseline
+    #       can hold.
+    AccountBalance:
+      type: string
+      description: >-
+        A signed account balance as an exact decimal string with exactly two
+        fractional digits and no exponent. Ten integer digits are admissible,
+        matching WS-CURR-BAL PIC +9999999999.99 at app/cbl/COBIL00C.cbl L56 and
+        the fourteen-position rendering CURBALI PIC X(14) at
+        app/cpy-bms/COBIL00.CPY L66.
+      maxLength: 14
+      pattern: "^-?[0-9]{1,10}\\.[0-9]{2}$"
+      examples:
+        - "1234.56"
+        - "0.00"
+
+    # WHY : Assumptions: twenty-six characters, not an RFC 3339 instant, because
+    #       the field is declared TRAN-ORIG-TS PIC X(26) at app/cpy/CVTRA05Y.cpy
+    #       L16 and TRAN-PROC-TS PIC X(26) at L17, and the committed data holds
+    #       exactly that form: record 1 of app/data/ASCII/dailytran.txt carries
+    #       "2022-06-10 19:27:53.000000" at one-based bytes 279 to 304. The
+    #       separator is a space and there is no zone designator, so declaring
+    #       date-time here would assert an offset the stored value does not
+    #       carry. TimestampFormatter in com.carddemo.common.time emits this
+    #       form.
+    Timestamp26:
+      type: string
+      description: >-
+        A twenty-six-character local timestamp of the form
+        YYYY-MM-DD HH:MM:SS.mmmmmm, space-separated and with microsecond
+        precision and no zone designator. Declared PIC X(26) at
+        app/cpy/CVTRA05Y.cpy L16 and L17 and stored as TIMESTAMP(6) at
+        V1__ledger.sql L229 and L245.
+      minLength: 26
+      maxLength: 26
+      pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}$"
+      examples:
+        - "2022-06-10 19:27:53.000000"
+
+    # WHY : Assumptions: ten characters, and a DIFFERENT type from the
+    #       twenty-six-character timestamp above even though both land in the
+    #       same record field. The add screen declares TORIGDTI PIC X(10) at
+    #       app/cpy-bms/COTRN02.CPY L102 and TPROCDTI PIC X(10) at L108, calls
+    #       them dates in its own messages -- "Orig Date can NOT be empty..." at
+    #       app/cbl/COTRN02C.cbl L284 and "Orig Date - Not a valid date..." at
+    #       L401 -- and moves them into the X(26) record fields at L464 and L465,
+    #       where an alphanumeric MOVE left-justifies and pads with sixteen
+    #       spaces. Accepting a twenty-six-character value here would accept
+    #       something the screen cannot express; requiring one would reject
+    #       everything the screen can send.
+    DateOnly10:
+      type: string
+      description: >-
+        A ten-character calendar date of the form YYYY-MM-DD, as the add screen
+        collects it. Declared TORIGDTI and TPROCDTI PIC X(10) at
+        app/cpy-bms/COTRN02.CPY L102 and L108, validated by the date-edit rules
+        the baseline reaches through app/cbl/CSUTLDTC.cbl, and stored
+        left-justified within the twenty-six-character record field.
+      minLength: 10
+      maxLength: 10
+      pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+      examples:
+        - "2022-06-10"
+
+    # WHY : Assumptions: the shape is fixed by
+    #       services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java,
+    #       which declares VERSION "v1" at L81, a maximum length of 256 at L92,
+    #       and the accepted shape as a compiled pattern at L121 to L122. The
+    #       token is SEALED, not a raw key: L172 to L179 of PageResponse.java
+    #       records that an earlier design let the raw composite key serve as the
+    #       cursor, which would have serialised a primary account number into
+    #       every page of a browse and handed it to the client to replay. Its
+    #       payload is bound with an HMAC to the query and the subject it was
+    #       issued for, so a client cannot construct, decode or retarget one.
+    CursorToken:
+      type: string
+      description: >-
+        An opaque sealed keyset cursor issued by this service. It carries a
+        version prefix, a base64url payload and a base64url authentication code,
+        separated by full stops, and it is meaningful only to the service that
+        sealed it. A caller stores it and replays it unaltered; it is never
+        parsed, composed or compared by a client.
+      maxLength: 256
+      pattern: "^v1\\.[A-Za-z0-9_-]{1,200}\\.[A-Za-z0-9_-]{43}$"
+
+    # WHY : Assumptions: the two member values are the two the already-authored
+    #       browser client sends, declared as the union "next" | "previous" at
+    #       ui/src/api/cards.ts L45 with "next" as its default. Naming them
+    #       forward and backward here would read more naturally and would leave
+    #       the SPA sending values this contract rejects.
+    PageDirection:
+      type: string
+      description: >-
+        Which side of a supplied cursor to read. Reading next seeks keys strictly
+        greater than the cursor in ascending order; reading previous seeks keys
+        strictly less than it in descending order, which is the migrated form of
+        the baseline READPREV at app/cbl/COTRN00C.cbl L660.
+      enum: [next, previous]
+      default: next
+
+    # WHY : Refactoring Rationale: this catalog is published for clients and is
+    #       deliberately a member of NO response, which is why no $ref points at
+    #       it. The baseline emits these sentences into its message line when a
+    #       paging attempt reaches a boundary, but a stateless page carries
+    #       hasNext and hasPrev, which already say what the sentence said, and a
+    #       request past the end returns an empty page rather than a failure.
+    #       Adding a message member to the page envelope would break its
+    #       component-for-component agreement with PageResponse.java. Publishing
+    #       the five strings here instead lets the browser client render them
+    #       verbatim without re-deriving them from COBOL, and keeps them under
+    #       review whenever this contract is reviewed.
+    PageBoundaryMessage:
+      type: string
+      description: >-
+        The catalog of page-boundary sentences the baseline emits, published so a
+        client can render them verbatim. Five distinct sentences exist and none is
+        a synonym of another. This schema is referenced by no response on purpose:
+        the page envelope's hasNext and hasPrev indicators are what a client
+        branches on, and it selects the sentence to display from this catalog.
+      maxLength: 75
+      # WHY : Assumptions: FIVE constants, and they stay five. app/cbl/COTRN00C.cbl
+      #       emits distinct sentences at L248, L270, L608, L642 and L676, and
+      #       three of the five are about reaching the top while differing in
+      #       wording -- "You are already at the top of the page..." at L248,
+      #       "You are at the top of the page..." at L608 and "You have reached
+      #       the top of the page..." at L676. A grep across the program confirms
+      #       these are the only five. Merging any of them would change what a
+      #       user reads, which is a behavioural change and not a tidy-up.
+      enum:
+        - "You are already at the top of the page..."
+        - "You are already at the bottom of the page..."
+        - "You are at the top of the page..."
+        - "You have reached the bottom of the page..."
+        - "You have reached the top of the page..."
+
+    # -------------------------------------------------------------------------
+    # Resource shapes.
+    # -------------------------------------------------------------------------
+
+    TransactionSummary:
+      type: object
+      description: >-
+        One row of the transaction list, carrying the four values the baseline
+        list screen renders per row plus the identifier the row is selected by.
+        The baseline populates a row at app/cbl/COTRN00C.cbl L381 to L445, moving
+        the identifier, a derived date, the description and the edited amount into
+        the row's four map fields.
+      required: [transactionId, originTimestamp, description, amount]
+      additionalProperties: false
+      properties:
+        transactionId:
+          allOf:
+            - $ref: "#/components/schemas/TransactionId"
+          description: >-
+            The identifier of this row, and the value to place in the path of the
+            view operation. The baseline moves it into the row's TRNIDnnI field
+            and, for the first and tenth rows, into the two cursor fields as well.
+        # WHY : Refactoring Rationale: the row carries the full twenty-six-character
+        #       origin timestamp, replacing the eight-character date column the
+        #       screen rendered. That column was derived, not stored: app/cbl/
+        #       COTRN00C.cbl L384 to L388 takes TRAN-ORIG-TS, slices the last two
+        #       digits of the year with WS-TIMESTAMP-DT-YYYY(3:2), and assembles
+        #       WS-CURDATE-MM-DD-YY, whose group at app/cpy/CSDAT01Y.cpy L30 to
+        #       L35 is MM/DD/YY with a TWO-DIGIT year. Carrying that form on the
+        #       wire would ship a value from which the century cannot be
+        #       recovered, so the contract carries the source field and the client
+        #       formats it for display.
+        originTimestamp:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp26"
+          description: >-
+            When the transaction originated. The baseline list row displays this
+            value reduced to an eight-character MM/DD/YY date; the full stored
+            value is carried here so no client has to guess a century.
+        # WHY : Assumptions: the description is carried at its full copybook width
+        #       of 100, not at the 26 the list row rendered. TDESCnnI is PIC X(26)
+        #       on the map -- app/cpy-bms/COTRN00.CPY L90 for the first row -- so
+        #       an alphanumeric MOVE at app/cbl/COTRN00C.cbl L395 truncates the
+        #       X(100) record field to fit the screen. The copybook is the
+        #       normative contract, so the API carries the whole value and lets
+        #       the client truncate for its own column width; truncating here
+        #       would discard 74 characters no consumer could recover.
+        description:
+          allOf:
+            - $ref: "#/components/schemas/TransactionDescription"
+          description: >-
+            What the transaction was for, at the full width the record declares.
+            The baseline list row renders only its first 26 characters.
+        # WHY : Assumptions: the amount is carried at the record's nine integer
+        #       digits, not the eight the screen's edited field holds. WS-TRAN-AMT
+        #       is PIC +99999999.99 at app/cbl/COTRN00C.cbl L56 -- twelve
+        #       positions, eight integer digits -- while the stored TRAN-AMT is
+        #       S9(09)V99 at app/cpy/CVTRA05Y.cpy L10. The edited field is
+        #       narrower than the record it renders, so honouring the screen width
+        #       here would silently refuse the largest amounts the ledger can hold.
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/TransactionAmount"
+          description: >-
+            The signed amount, at the full precision the record declares rather
+            than the narrower precision the screen's edited field renders.
+
+    # WHY : Assumptions: SEVEN members, mirroring
+    #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
+    #       L210 to L217 component for component, because that record is what the
+    #       service serialises and this document has to describe what the service
+    #       actually sends. It carries no annotation altering a property name, so
+    #       each component name below is the component name there. An earlier
+    #       plan for that record had four members -- items, firstKey, lastKey and
+    #       hasNext -- and describing four here would leave the contract silent
+    #       about three members every response carries. The browser client's own
+    #       interface at ui/src/api/cards.ts L28 to L33 declares only those four,
+    #       which stays correct because a client reading a subset of a JSON
+    #       object is unaffected by the members it ignores.
+    # WHY : Trade-offs: there is no member naming how many rows a full page holds
+    #       and none naming an absolute page ordinal. app/cbl/COTRN00C.cbl L65
+    #       declares CDEMO-CT00-PAGE-NUM PIC 9(08) and the baseline does maintain
+    #       it -- incrementing it at L306 to L307 and testing it at L245 -- but it
+    #       is display-only and never participates in a key comparison, and a
+    #       cursor positioned by key cannot derive an absolute ordinal without
+    #       enumerating everything ahead of it, which is the enumeration this
+    #       design exists to avoid. What is given up is the ability to tell a user
+    #       they are on page four of anything. The page size is likewise absent
+    #       because the baseline disagrees with itself about it: seven rows in the
+    #       card list against ten here.
+    TransactionPage:
+      type: object
+      description: >-
+        One page of transactions together with everything a caller needs to walk
+        to the adjacent pages. Row identities and request positions are separate
+        members: firstKey and lastKey identify rows the caller received, while
+        nextCursor and prevCursor are the positions a further request is issued
+        from.
+      required: [items, hasNext, hasPrev]
+      additionalProperties: false
+      properties:
+        # WHY : Assumptions: the bound of ten is a BASELINE FACT, not a tuning
+        #       choice, and the one program establishes it five separate times.
+        #       app/cbl/COTRN00C.cbl L290 walks the row table with UNTIL WS-IDX >
+        #       10, L297 reads forward with UNTIL WS-IDX >= 11, L344 repeats the
+        #       first bound on the backward path, L349 primes the backward walk
+        #       with MOVE 10 TO WS-IDX, and L351 counts it down with UNTIL WS-IDX
+        #       <= 0. Because the number is the screen's row capacity rather than
+        #       a preference, it is not a request parameter and a caller cannot
+        #       widen it; a different value here would return more rows than the
+        #       screen this operation replaces could ever show.
+        items:
+          type: array
+          description: >-
+            The rows of this page, in ascending transaction-id order, at most ten
+            of them. An exhausted or empty result is an empty array rather than a
+            null, so a caller never has to distinguish the two.
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/TransactionSummary"
+        firstKey:
+          description: >-
+            The sealed token identifying the first row in items, or null exactly
+            when the page carries no rows. The baseline keeps the same value in
+            CDEMO-CT00-TRNID-FIRST, declared at app/cbl/COTRN00C.cbl L63 and set
+            from the first row at L392 to L393.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        # WHY : Assumptions: lastKey identifies the last row the caller ACTUALLY
+        #       RECEIVED and never the surplus row read to settle hasNext. That
+        #       had to be chosen rather than inherited, because the two baseline
+        #       browse screens disagree: the card list overwrites its stored last
+        #       key with the probe row's key, so it retains a key for a row the
+        #       terminal never displayed, whereas this service's own program does
+        #       not -- app/cbl/COTRN00C.cbl sets CDEMO-CT00-TRNID-LAST inside the
+        #       tenth row's branch at L437 to L439, and its probe read at L308
+        #       runs after the page loop has finished and never touches that
+        #       field. A token naming a row the caller never received cannot be
+        #       verified by that caller.
+        lastKey:
+          description: >-
+            The sealed token identifying the last row in items, or null exactly
+            when the page carries no rows. It names a row the caller received, not
+            the extra row read to establish whether a further page follows. The
+            baseline keeps the same value in CDEMO-CT00-TRNID-LAST at
+            app/cbl/COTRN00C.cbl L64.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        # WHY : Assumptions: the two cursors are separate members from the two row
+        #       identities, and PageResponse.java L194 to L202 states why: a page
+        #       whose rows were all filtered away after being read has a scan
+        #       position and no last row, so the position a further request is
+        #       issued from cannot always be the identity of a row. Each cursor is
+        #       present exactly when its own availability indicator is true and
+        #       absent otherwise, and it normally equals the row identity beside
+        #       it.
+        nextCursor:
+          description: >-
+            The sealed position a forward request is issued from, present exactly
+            when hasNext is true and null otherwise. A forward request replays it
+            as the cursor parameter with direction next, and the query then seeks
+            keys strictly greater than it in ascending order.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        prevCursor:
+          description: >-
+            The sealed position a backward request is issued from, present exactly
+            when hasPrev is true and null otherwise. A backward request replays it
+            as the cursor parameter with direction previous, and the query then
+            seeks keys strictly less than it in descending order.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        # WHY : Assumptions: hasNext is established by asking the store for one row
+        #       beyond the page and observing whether that row exists, never from
+        #       a tally of rows or pages. The baseline does exactly this: after
+        #       its page loop app/cbl/COTRN00C.cbl performs one further read at
+        #       L308 and sets NEXT-PAGE-YES at L310 or NEXT-PAGE-NO at L312, the
+        #       condition names declared at L67 and L68 against
+        #       CDEMO-CT00-NEXT-PAGE-FLG at L66. That surplus row is never placed
+        #       in items.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page follows this one, discovered by reading one row
+            beyond the page. When it is false, a forward request would return no
+            rows and the baseline answers the attempt with "You are already at the
+            bottom of the page..." from app/cbl/COTRN00C.cbl L270.
+        # WHY : Assumptions: hasPrev is stated by the service from the request it
+        #       answered, not inferred from the page's own contents -- it is false
+        #       for an opening request, which supplied no cursor, and true for any
+        #       page reached from a neighbouring one. PageResponse.java L206 to
+        #       L208 fixes that semantic. Inferring it from the mere presence of a
+        #       first row would make the opening page of every result claim a
+        #       predecessor that does not exist, which is precisely why that
+        #       record takes the value as stated rather than deriving one.
+        hasPrev:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. It is false for an opening request,
+            and when it is false the baseline answers a backward attempt with "You
+            are already at the top of the page..." from app/cbl/COTRN00C.cbl L248.
+
+    TransactionDescription:
+      type: string
+      description: >-
+        Free text describing a transaction, at the width the record declares:
+        TRAN-DESC PIC X(100) at app/cpy/CVTRA05Y.cpy L9, stored as description
+        VARCHAR(100) at V1__ledger.sql L166. The view screen renders 60
+        characters of it and the list row 26, both narrower than the record.
+      maxLength: 100
+      examples:
+        - "BILL PAYMENT - ONLINE"
+
+    TransactionTypeCode:
+      type: string
+      description: >-
+        The transaction type code: two characters. Declared TRAN-TYPE-CD PIC X(02)
+        at app/cpy/CVTRA05Y.cpy L6 and stored as type_cd CHAR(2) at
+        V1__ledger.sql L132. The domain is owned by the reference context, so no
+        enumeration is asserted here.
+      minLength: 2
+      maxLength: 2
+      examples:
+        - "01"
+
+    # WHY : Assumptions: four digits as a string, because the record declares
+    #       TRAN-CAT-CD PIC 9(04) at app/cpy/CVTRA05Y.cpy L7 and the committed
+    #       data is zero-padded to that width -- record 1 of
+    #       app/data/ASCII/dailytran.txt carries "0001" at one-based bytes 19 to
+    #       22. The baseline validates the field with a NOT NUMERIC test at
+    #       app/cbl/COTRN02C.cbl L331, a digits-only check on characters, and
+    #       V1__ledger.sql L146 stores it as category_cd CHAR(4) rather than as a
+    #       number for the same reason.
+    TransactionCategoryCode:
+      type: string
+      description: >-
+        The transaction category code: exactly four decimal digits, zero-padded on
+        the left. Declared TRAN-CAT-CD PIC 9(04) at app/cpy/CVTRA05Y.cpy L7 and
+        stored as category_cd CHAR(4) at V1__ledger.sql L146.
+      minLength: 4
+      maxLength: 4
+      pattern: "^[0-9]{4}$"
+      examples:
+        - "0001"
+
+    TransactionSource:
+      type: string
+      description: >-
+        Where the transaction entered the system. Declared TRAN-SOURCE PIC X(10)
+        at app/cpy/CVTRA05Y.cpy L8 and stored as source CHAR(10) at
+        V1__ledger.sql L156. The baseline writes POS TERM for both an added
+        transaction's default and a bill payment, at app/cbl/COBIL00C.cbl L222.
+      maxLength: 10
+      examples:
+        - "POS TERM"
+
+    # WHY : Assumptions: nine digits as a string, following the same measurement as
+    #       the other identifiers. app/cpy/CVTRA05Y.cpy L11 declares
+    #       TRAN-MERCHANT-ID PIC 9(09), record 1 of app/data/ASCII/dailytran.txt
+    #       carries "800000000" at one-based bytes 144 to 152, and the baseline
+    #       validates it with a NOT NUMERIC test at app/cbl/COTRN02C.cbl L432.
+    #       V1__ledger.sql L187 stores it as merchant_id BIGINT, so the declared
+    #       width here is what restores the padding on the way out; the
+    #       already-authored view DTO likewise declares it a string.
+    MerchantId:
+      type: string
+      description: >-
+        The merchant identifier: exactly nine decimal digits, zero-padded on the
+        left. Declared TRAN-MERCHANT-ID PIC 9(09) at app/cpy/CVTRA05Y.cpy L11 and
+        held as merchant_id BIGINT at V1__ledger.sql L187. A bill payment writes
+        the fixed value 999999999, per app/cbl/COBIL00C.cbl L226.
+      minLength: 9
+      maxLength: 9
+      pattern: "^[0-9]{9}$"
+      examples:
+        - "800000000"
+
+    # WHY : Assumptions: the fourteen members and their names mirror the
+    #       already-authored
+    #       services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionDetailResponse.java
+    #       L315 to L344 component for component, because that record is what this
+    #       operation serialises. Its order is the record's own declaration order
+    #       from app/cpy/CVTRA05Y.cpy L5 to L17 rather than the order the baseline
+    #       happened to move the fields to the screen in, so a reader comparing
+    #       this schema against the copybook reads both top to bottom.
+    TransactionDetail:
+      type: object
+      description: >-
+        One transaction in full: the thirteen record fields the baseline view
+        screen displays, plus the message line that screen carries. The thirteen
+        are the thirteen MOVE statements at app/cbl/COTRN01C.cbl L178 to L190,
+        counted in the source and confirmed to be exactly thirteen.
+      required:
+        - transactionId
+        - typeCode
+        - categoryCode
+        - source
+        - description
+        - amount
+        - merchantId
+        - merchantName
+        - merchantCity
+        - merchantZip
+        - cardNumber
+        - originTimestamp
+        - processTimestamp
+      additionalProperties: false
+      properties:
+        transactionId:
+          allOf:
+            - $ref: "#/components/schemas/TransactionId"
+          description: >-
+            The identifier of this transaction, moved to the screen at
+            app/cbl/COTRN01C.cbl L178.
+        typeCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionTypeCode"
+          description: >-
+            The transaction type code, moved to the screen at
+            app/cbl/COTRN01C.cbl L180.
+        categoryCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionCategoryCode"
+          description: >-
+            The transaction category code, moved to the screen at
+            app/cbl/COTRN01C.cbl L181.
+        source:
+          allOf:
+            - $ref: "#/components/schemas/TransactionSource"
+          description: >-
+            Where the transaction entered the system, moved to the screen at
+            app/cbl/COTRN01C.cbl L182.
+        description:
+          allOf:
+            - $ref: "#/components/schemas/TransactionDescription"
+          description: >-
+            What the transaction was for, moved to the screen at
+            app/cbl/COTRN01C.cbl L184, where the map field TDESCI PIC X(60) at
+            app/cpy-bms/COTRN01.CPY L96 renders 60 of the record's 100 characters.
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/TransactionAmount"
+          description: >-
+            The signed amount. The baseline edits it into WS-TRAN-AMT at
+            app/cbl/COTRN01C.cbl L177 and moves the edited form to the screen at
+            L183; this contract carries the record's own precision instead of the
+            edited field's narrower eight integer digits.
+        merchantId:
+          allOf:
+            - $ref: "#/components/schemas/MerchantId"
+          description: >-
+            The merchant identifier, moved to the screen at app/cbl/COTRN01C.cbl
+            L187.
+        merchantName:
+          type: string
+          description: >-
+            The merchant's name, at the record's declared width. Declared
+            TRAN-MERCHANT-NAME PIC X(50) at app/cpy/CVTRA05Y.cpy L12 and stored
+            as merchant_name VARCHAR(50) at V1__ledger.sql L195. Moved to the
+            screen at app/cbl/COTRN01C.cbl L188, where MNAMEI PIC X(30) at
+            app/cpy-bms/COTRN01.CPY L126 renders 30 of the 50.
+          maxLength: 50
+          examples:
+            - "BILL PAYMENT"
+        merchantCity:
+          type: string
+          description: >-
+            The merchant's city, at the record's declared width. Declared
+            TRAN-MERCHANT-CITY PIC X(50) at app/cpy/CVTRA05Y.cpy L13 and stored
+            as merchant_city VARCHAR(50) at V1__ledger.sql L199. Moved to the
+            screen at app/cbl/COTRN01C.cbl L189, where MCITYI PIC X(25) at
+            app/cpy-bms/COTRN01.CPY L132 renders 25 of the 50.
+          maxLength: 50
+          examples:
+            - "N/A"
+        merchantZip:
+          type: string
+          description: >-
+            The merchant's postal code. Declared TRAN-MERCHANT-ZIP PIC X(10) at
+            app/cpy/CVTRA05Y.cpy L14 and stored as merchant_zip CHAR(10) at
+            V1__ledger.sql L206. Moved to the screen at app/cbl/COTRN01C.cbl L190.
+          maxLength: 10
+          examples:
+            - "N/A"
+        cardNumber:
+          allOf:
+            - $ref: "#/components/schemas/MaskedCardNumber"
+          description: >-
+            The card the transaction was made on, masked to its last four digits.
+            The baseline moves all sixteen characters to the screen at
+            app/cbl/COTRN01C.cbl L179; this contract carries the masked form only.
+        originTimestamp:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp26"
+          description: >-
+            When the transaction originated, moved to the screen at
+            app/cbl/COTRN01C.cbl L185.
+        # WHY : Assumptions: NULLABLE, because the reference data proves the field
+        #       is legitimately empty before posting. TRAN-PROC-TS is declared PIC
+        #       X(26) at app/cpy/CVTRA05Y.cpy L17, and in
+        #       app/data/ASCII/dailytran.txt ALL 300 records carry twenty-six
+        #       spaces at one-based bytes 305 to 330 -- the pre-posting feed has no
+        #       processing timestamp yet. Declaring it required would make every
+        #       record in the committed seed data unrepresentable. The batch
+        #       context that posts a transaction is what fills it, which is why
+        #       V1__ledger.sql L245 can declare the column NOT NULL for posted
+        #       rows while this response still admits its absence.
+        processTimestamp:
+          description: >-
+            When the transaction was processed, or null when it has not been
+            processed yet. Moved to the screen at app/cbl/COTRN01C.cbl L186.
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp26"
+            - type: "null"
+        returnMessage:
+          $ref: "#/components/schemas/ReturnMessage"
+
+    # WHY : Assumptions: seventy-five characters, and NULLABLE, both taken from
+    #       app/cpy/CVCRD01Y.cpy. L28 declares CCARD-ERROR-MSG PIC X(75) and L29
+    #       declares CCARD-RETURN-MSG PIC X(75), and L30 attaches the condition
+    #       name CCARD-RETURN-MSG-OFF with VALUE LOW-VALUES to the return message
+    #       alone. Low values and spaces are NOT interchangeable there: an absent
+    #       message and a message that is present but empty are different states,
+    #       so absence maps to null and is not folded into the empty string.
+    #       ApiError.MESSAGE_RENDERING_WIDTH is 75 for the same reason.
+    # WHY : Trade-offs: three other message widths exist in the baseline and none
+    #       of them is this one. Fifty characters govern the shared constants at
+    #       app/cpy/CSMSG01Y.cpy L18 and L20, seventy-two the abend message at
+    #       app/cpy/CSMSG02Y.cpy L28, and seventy-eight the map fields ERRMSGI and
+    #       ERRMSGO -- app/cpy-bms/COTRN00.CPY L372 and L728,
+    #       app/cpy-bms/COTRN01.CPY L144 and L272, app/cpy-bms/COTRN02.CPY L144
+    #       and L272, app/cpy-bms/COBIL00.CPY L78 and L140. Choosing 75 accepts
+    #       that a longer sentence a map could have rendered will not fit this
+    #       field. The eighty-character WS-MESSAGE at app/cbl/COTRN01C.cbl L38 is
+    #       deliberately NOT a fourth wire width: L217 moves it into an X(78) map
+    #       field, so the program itself truncates two bytes, which makes it a
+    #       work field rather than a contract.
+    ReturnMessage:
+      description: >-
+        The single-sentence message line a screen carried, or null when no message
+        is set. It is reproduced character for character from the copybook or
+        program constant that supplies it, trailing ellipsis included. Null means
+        no message; an empty string means a message that is present and empty, and
+        the two are distinct.
+      oneOf:
+        - type: string
+          description: >-
+            The message text, at the seventy-five-character width
+            app/cpy/CVCRD01Y.cpy L29 declares.
+          maxLength: 75
+        - type: "null"
+
+    # WHY : Assumptions: exactly one of accountId and cardNumber, expressed as a
+    #       schema constraint rather than left to prose, because the baseline
+    #       evaluates them as mutually exclusive alternatives and derives the one
+    #       it was not given. app/cbl/COTRN02C.cbl L196 takes the account-id
+    #       branch when that field is not blank and fills the card number in from
+    #       the cross-reference at L209; L210 takes the card-number branch and
+    #       fills the account id in at L223; L224 to L226 refuses a request
+    #       carrying neither with "Account or Card Number must be entered...".
+    #       Requiring both would reject a request the baseline accepts, and
+    #       requiring neither would admit one it refuses.
+    TransactionCreateRequest:
+      type: object
+      description: >-
+        The fields the baseline add screen collects, migrated from
+        app/cbl/COTRN02C.cbl. The transaction identifier is absent by design: the
+        service assigns it, per L444 to L451. The confirmation field the screen
+        used at L184 is absent too, because a confirmation is a terminal
+        interaction step and an HTTP request either asks for the write or does not.
+      required:
+        - typeCode
+        - categoryCode
+        - source
+        - description
+        - amount
+        - originDate
+        - processDate
+        - merchantId
+        - merchantName
+        - merchantCity
+        - merchantZip
+      additionalProperties: false
+      oneOf:
+        - required: [accountId]
+          description: >-
+            The account-id form. The card number is resolved from the
+            cross-reference, as the baseline does at app/cbl/COTRN02C.cbl L206 to
+            L209.
+          not:
+            required: [cardNumber]
+        - required: [cardNumber]
+          description: >-
+            The card-number form. The account identifier is resolved from the
+            cross-reference, as the baseline does at app/cbl/COTRN02C.cbl L220 to
+            L223.
+          not:
+            required: [accountId]
+      properties:
+        accountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: >-
+            The account to attribute the transaction to, supplied instead of a
+            card number. A value that is not eleven digits is refused with
+            "Account ID must be Numeric..." verbatim from app/cbl/COTRN02C.cbl
+            L199.
+        cardNumber:
+          allOf:
+            - $ref: "#/components/schemas/CardNumber"
+          description: >-
+            The card to attribute the transaction to, supplied instead of an
+            account identifier. A value that is not sixteen digits is refused with
+            "Card Number must be Numeric..." verbatim from app/cbl/COTRN02C.cbl
+            L213.
+        typeCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionTypeCode"
+          description: >-
+            The transaction type code. An absent value is refused with "Type CD
+            can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L254, and a
+            non-numeric one with "Type CD must be Numeric..." from L325.
+        categoryCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionCategoryCode"
+          description: >-
+            The transaction category code. An absent value is refused with
+            "Category CD can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
+            L260, and a non-numeric one with "Category CD must be Numeric..." from
+            L331.
+        source:
+          allOf:
+            - $ref: "#/components/schemas/TransactionSource"
+          description: >-
+            Where the transaction entered the system. An absent value is refused
+            with "Source can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
+            L266.
+          minLength: 1
+        description:
+          allOf:
+            - $ref: "#/components/schemas/TransactionDescription"
+          description: >-
+            What the transaction was for. An absent value is refused with
+            "Description can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
+            L272.
+          minLength: 1
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/TransactionAmount"
+          description: >-
+            The signed amount. An absent value is refused with "Amount can NOT be
+            empty..." verbatim from app/cbl/COTRN02C.cbl L278. The baseline parses
+            the screen field with FUNCTION NUMVAL-C at L456 into WS-TRAN-AMT-N PIC
+            S9(9)V99 declared at L58, which is the nine-integer-digit bound this
+            type carries.
+        originDate:
+          allOf:
+            - $ref: "#/components/schemas/DateOnly10"
+          description: >-
+            The date the transaction originated. An absent value is refused with
+            "Orig Date can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
+            L284, and an unparseable one with "Orig Date - Not a valid date..."
+            from L401.
+        processDate:
+          allOf:
+            - $ref: "#/components/schemas/DateOnly10"
+          description: >-
+            The date the transaction is to be processed. An absent value is
+            refused with "Proc Date can NOT be empty..." verbatim from
+            app/cbl/COTRN02C.cbl L290, and an unparseable one with "Proc Date -
+            Not a valid date..." from L421.
+        merchantId:
+          allOf:
+            - $ref: "#/components/schemas/MerchantId"
+          description: >-
+            The merchant identifier. An absent value is refused with "Merchant ID
+            can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L296, and a
+            non-numeric one with "Merchant ID must be Numeric..." from L432.
+        merchantName:
+          type: string
+          description: >-
+            The merchant's name, at the width TRAN-MERCHANT-NAME PIC X(50) declares
+            at app/cpy/CVTRA05Y.cpy L12. An absent value is refused with "Merchant
+            Name can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L302.
+          minLength: 1
+          maxLength: 50
+        merchantCity:
+          type: string
+          description: >-
+            The merchant's city, at the width TRAN-MERCHANT-CITY PIC X(50) declares
+            at app/cpy/CVTRA05Y.cpy L13. An absent value is refused with "Merchant
+            City can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L308.
+          minLength: 1
+          maxLength: 50
+        merchantZip:
+          type: string
+          description: >-
+            The merchant's postal code, at the width TRAN-MERCHANT-ZIP PIC X(10)
+            declares at app/cpy/CVTRA05Y.cpy L14. An absent value is refused with
+            "Merchant Zip can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
+            L314.
+          minLength: 1
+          maxLength: 10
+
+    TransactionCreated:
+      type: object
+      description: >-
+        Confirmation that a transaction was written, carrying the identifier the
+        service assigned and the baseline's own success sentence.
+      required: [transactionId, returnMessage]
+      additionalProperties: false
+      properties:
+        transactionId:
+          allOf:
+            - $ref: "#/components/schemas/TransactionId"
+          description: >-
+            The identifier the service assigned to the new transaction, and the
+            value the Location header addresses.
+        # WHY : Assumptions: the sentence is assembled, not a single constant, so it
+        #       is reproduced as the baseline builds it. app/cbl/COTRN02C.cbl L728
+        #       to L733 concatenates "Transaction added successfully. " and " Your
+        #       Tran ID is " around the identifier and appends a full stop, which
+        #       is why the rendered text carries a double space before "Your" and
+        #       the identifier is delimited by space rather than by size.
+        returnMessage:
+          type: string
+          description: >-
+            The success sentence, assembled exactly as app/cbl/COTRN02C.cbl L728
+            to L733 assembles it: "Transaction added successfully. " followed by
+            " Your Tran ID is ", the assigned identifier, and a full stop.
+          maxLength: 75
+          examples:
+            - "Transaction added successfully.  Your Tran ID is 0000000000683580."
+
+    # WHY : Assumptions: TWO members and NO amount. The payment is full-balance
+    #       only: app/cbl/COBIL00C.cbl L224 moves the whole of ACCT-CURR-BAL into
+    #       TRAN-AMT and L234 computes the balance back down by that same amount,
+    #       so the amount is derived from the account rather than chosen by the
+    #       caller, and the baseline screen has no partial-amount field to
+    #       migrate. Admitting an amount here would create a payment the reference
+    #       system cannot make and would let a caller leave a residual balance the
+    #       baseline always zeroes.
+    BillPaymentRequest:
+      type: object
+      description: >-
+        The account to pay and the confirmation that decides whether to pay it.
+        There is no amount member, because the amount is always the account's
+        entire current balance.
+      required: [accountId, confirmation]
+      additionalProperties: false
+      properties:
+        accountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: >-
+            The account whose balance is to be paid. An absent value is refused
+            with "Acct ID can NOT be empty..." verbatim from app/cbl/COBIL00C.cbl
+            L161.
+        confirmation:
+          allOf:
+            - $ref: "#/components/schemas/Confirmation"
+          description: >-
+            Whether to post the payment. A confirming value posts it; a declining
+            or unset value returns the payable balance without posting.
+
+    # WHY : Assumptions: four accepted values, both cases of each letter, because
+    #       the baseline accepts both cases explicitly. app/cbl/COBIL00C.cbl
+    #       evaluates the field at L173 to L191 with separate WHEN arms for 'Y' at
+    #       L174 and 'y' at L175, and for 'N' at L178 and 'n' at L179, and refuses
+    #       anything else at L185 to L187. Normalising to upper case here would
+    #       silently accept a value the baseline distinguishes at a source-line
+    #       level, and admitting only upper case would reject one it accepts.
+    #       app/cbl/COTRN02C.cbl uses the same convention and the same message at
+    #       L184.
+    Confirmation:
+      type: string
+      description: >-
+        A single-character confirmation, as the baseline screens collect it:
+        declared CONFIRMI PIC X(1) at app/cpy-bms/COBIL00.CPY L72. Y or y confirms
+        and N or n declines. Any other value is refused with "Invalid value. Valid
+        values are (Y/N)..." verbatim from app/cbl/COBIL00C.cbl L187.
+      enum: ["Y", "y", "N", "n"]
+      examples:
+        - "Y"
+
+    BillPaymentPreview:
+      type: object
+      description: >-
+        What a bill payment would pay, returned when the confirmation was withheld
+        and nothing was written. It mirrors the baseline turn at
+        app/cbl/COBIL00C.cbl L182 to L194, which reads the account and displays its
+        balance without posting.
+      required: [accountId, payableBalance, paid]
+      additionalProperties: false
+      properties:
+        accountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: The account the preview was requested for.
+        payableBalance:
+          allOf:
+            - $ref: "#/components/schemas/AccountBalance"
+          description: >-
+            The balance that a confirmed request would pay in full. The baseline
+            moves the same value to its display field at app/cbl/COBIL00C.cbl L193
+            to L194.
+        paid:
+          type: boolean
+          description: >-
+            Always false on this response. It is stated explicitly rather than
+            implied by the status code so that a client logging or replaying the
+            body alone cannot mistake a preview for a payment.
+          const: false
+        returnMessage:
+          $ref: "#/components/schemas/ReturnMessage"
+
+    BillPaymentResponse:
+      type: object
+      description: >-
+        The outcome of a posted bill payment: the transaction that was written, the
+        amount it paid, and the balance the account was left with.
+      required: [transactionId, accountId, cardNumber, amountPaid, currentBalance, paid]
+      additionalProperties: false
+      properties:
+        transactionId:
+          allOf:
+            - $ref: "#/components/schemas/TransactionId"
+          description: >-
+            The identifier of the transaction the payment wrote. The baseline
+            derives it at app/cbl/COBIL00C.cbl L212 to L219 and writes the record
+            at L233.
+        accountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: The account that was paid.
+        cardNumber:
+          allOf:
+            - $ref: "#/components/schemas/MaskedCardNumber"
+          description: >-
+            The card the payment transaction was written against, masked to its
+            last four digits. The baseline takes the unmasked number from the
+            cross-reference at app/cbl/COBIL00C.cbl L225.
+        amountPaid:
+          allOf:
+            - $ref: "#/components/schemas/AccountBalance"
+          description: >-
+            The amount paid, which is the balance the account carried before the
+            payment. The baseline moves exactly that value into the transaction
+            amount at app/cbl/COBIL00C.cbl L224.
+        # WHY : Assumptions: the resulting balance is reported because the baseline
+        #       computes and stores it -- app/cbl/COBIL00C.cbl L234 subtracts the
+        #       amount from the balance and L235 writes the account back -- so it
+        #       is a value the operation produces rather than one invented for this
+        #       response. Reporting it also spares a caller a follow-up read into
+        #       the account context, which this service does not own.
+        currentBalance:
+          allOf:
+            - $ref: "#/components/schemas/AccountBalance"
+          description: >-
+            The balance the account carries after the payment, as computed at
+            app/cbl/COBIL00C.cbl L234 and stored at L235.
+        paid:
+          type: boolean
+          description: >-
+            Always true on this response, stated explicitly so a body read on its
+            own is unambiguous about whether money moved.
+          const: true
+        returnMessage:
+          $ref: "#/components/schemas/ReturnMessage"
+
+    # -------------------------------------------------------------------------
+    # The problem shape. Every member below mirrors
+    # services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java
+    # L140 to L151 component for component, because that record is what every
+    # migrated service serialises on a failure and this document has to describe
+    # what the service actually sends. No annotation there alters a property
+    # name, so each name below is the component name there, and its two enum
+    # members serialise as their declared constant names.
+    # -------------------------------------------------------------------------
+
+    # WHY : Refactoring Rationale: the aggregate sentence and the per-field array
+    #       are separate members because the baseline fills them under different
+    #       rules and one collection would lose one of the two. The aggregate
+    #       sentence latches to the FIRST failure -- app/cpy/CSUTLDPY.cpy writes it
+    #       only inside an IF WS-RETURN-MSG-OFF test, so a later failure leaves it
+    #       alone -- while the per-field markers are set unconditionally and
+    #       therefore accumulate. Deriving the sentence by joining the array would
+    #       report the last failure, or all of them, where the baseline reports the
+    #       first.
+    # WHY : Refactoring Rationale: the per-field array is the migrated form of the
+    #       templated red-highlight copybook app/cpy/CSSETATY.cpy L17 to L27, whose
+    #       test at L18 and L19 is the FLG-*-NOT-OK or FLG-*-BLANK disjunction and
+    #       whose effect at L21 to L22 is to move DFHRED into the field's colour
+    #       attribute, with a literal asterisk added at L23 to L25 when the field
+    #       is blank. Its L20 additionally requires CDEMO-PGM-REENTER, gating the
+    #       highlight on the pseudo-conversational re-entry flag. The migrated
+    #       service has no such flag, so the error presentation is driven purely by
+    #       this array in the response body and by nothing the server remembers
+    #       between requests.
+    ApiError:
+      type: object
+      description: >-
+        The problem shape every operation in this contract returns on a failure. It
+        carries a stable machine-readable code, a human-readable aggregate sentence
+        reproduced verbatim from the baseline paragraph that detected the failure,
+        and one entry per offending field.
+      required: [code, secondaryCode, severity, subsystem, status, correlationId, path, timestamp, fieldErrors]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: >-
+            The stable machine-readable identifier for the failure, matched on by
+            clients and by operational tooling and never reworded. It is the
+            migrated counterpart of the nine-character ERR-CODE-1 the baseline's
+            structured error record declares, and ApiError.CODE_WIDTH is 9 to match.
+          maxLength: 9
+        secondaryCode:
+          type: string
+          description: >-
+            The subordinate machine-readable identifier qualifying code, the
+            counterpart of ERR-CODE-2, or the empty string when the failure has no
+            second code.
+          maxLength: 9
+        message:
+          $ref: "#/components/schemas/ReturnMessage"
+        severity:
+          allOf:
+            - $ref: "#/components/schemas/Severity"
+          description: The operational level of the failure.
+        subsystem:
+          allOf:
+            - $ref: "#/components/schemas/Subsystem"
+          description: The part of the platform the failure arose in.
+        # WHY : Assumptions: the status is restated inside the body even though the
+        #       response envelope already carries it, because a body that has been
+        #       logged or archived away from its envelope has to remain
+        #       self-describing. ApiError.java declares the same member for the
+        #       same reason.
+        status:
+          type: integer
+          format: int32
+          description: >-
+            The HTTP status this response carries, restated inside the body so a
+            logged or archived payload is self-describing without its envelope.
+          minimum: 400
+          maximum: 599
+        correlationId:
+          type: string
+          description: >-
+            The identity of the unit of work that failed, inherited from the
+            inbound request rather than invented, or the empty string when the
+            request carried none. It is the key to the operational record holding
+            the diagnostic detail this response withholds.
+          maxLength: 20
+        path:
+          type: string
+          description: >-
+            The request path that failed, so a client reporting a problem does not
+            have to reconstruct which call produced it, or the empty string when no
+            path is available.
+        timestamp:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp26"
+          description: >-
+            The instant of the failure, in the same twenty-six-character form the
+            record layout uses for its own timestamps.
+        # WHY : Assumptions: an entry's presence is itself the evidence of an error,
+        #       so the array holds only offending fields and never a clean one. The
+        #       nested FieldError refuses the valid state outright, matching the
+        #       single disjunction at app/cpy/CSSETATY.cpy L18 and L19, which keeps
+        #       the array's length equal to the number of offending fields.
+        fieldErrors:
+          type: array
+          description: >-
+            One entry per offending field, each naming the field and carrying that
+            field's verbatim baseline message. It is an empty array when the failure
+            is not a field-validation failure, never a null.
+          items:
+            $ref: "#/components/schemas/FieldError"
+        abend:
+          description: >-
+            The structured abend detail, present only when the failure is an abend
+            and null otherwise.
+          oneOf:
+            - $ref: "#/components/schemas/AbendDetail"
+            - type: "null"
+
+    FieldError:
+      type: object
+      description: >-
+        One offending field and the reason it was refused, mirroring the nested
+        FieldError record at ApiError.java L432. The SPA renders each entry as a
+        form-item error state with the message as its help text.
+      required: [field, state, message]
+      additionalProperties: false
+      properties:
+        field:
+          type: string
+          description: >-
+            The name of the offending member, as it appears in the request schema,
+            so a client can attach the message to the control that produced it.
+          minLength: 1
+        state:
+          allOf:
+            - $ref: "#/components/schemas/FieldValidationState"
+          description: >-
+            Which of the two failing validation states the field is in.
+        message:
+          type: string
+          description: >-
+            The field's message, reproduced character for character from the
+            baseline line that emits it, trailing ellipsis and emphatic
+            capitalisation of NOT included.
+          minLength: 1
+          maxLength: 75
+          examples:
+            - "Type CD can NOT be empty..."
+
+    # WHY : Assumptions: the two failing states only. FieldValidationFlag in
+    #       com.carddemo.common.validation declares three constants, but the
+    #       FieldError record rejects the valid one, because admitting it would
+    #       make the array's length stop equalling the number of offending fields
+    #       and would give a client two contradictory signals at once. The two that
+    #       remain are the two arms of the app/cpy/CSSETATY.cpy L18 and L19
+    #       disjunction, and the blank arm is the one that additionally earned the
+    #       literal asterisk marker at L23 to L25.
+    FieldValidationState:
+      type: string
+      description: >-
+        Why a field was refused: NOT_OK when a supplied value failed a rule, BLANK
+        when a required value was absent. The baseline distinguishes the same two
+        at app/cpy/CSSETATY.cpy L18 and L19 and treats the blank case specially by
+        also writing an asterisk into the field.
+      enum: [NOT_OK, BLANK]
+
+    Severity:
+      type: string
+      description: >-
+        The operational level of a failure, drawn from the baseline's own four-value
+        domain rather than a newly invented ladder.
+      enum: [LOG, INFO, WARNING, CRITICAL]
+
+    Subsystem:
+      type: string
+      description: >-
+        The part of the platform a failure arose in, drawn from the baseline's own
+        six-value domain. A failure in this service is normally APPLICATION or
+        RELATIONAL; the remaining members exist because the domain is shared across
+        every migrated service.
+      enum: [APPLICATION, CICS, IMS, RELATIONAL, QUEUE, OBJECT_STORE]
+
+    # WHY : Assumptions: four members at four declared widths, mirroring
+    #       app/cpy/CSMSG02Y.cpy, whose ABEND-DATA group runs from L21 to L29 and
+    #       declares ABEND-CODE PIC X(4) at L22, ABEND-CULPRIT PIC X(8) at L24,
+    #       ABEND-REASON PIC X(50) at L26 and ABEND-MSG PIC X(72) at L28. That file
+    #       is 35 lines long in total, so those are the only widths it declares.
+    AbendDetail:
+      type: object
+      description: >-
+        The structured abend detail, the migrated form of the ABEND-DATA group at
+        app/cpy/CSMSG02Y.cpy L21 to L29. It is present only on an abend, and it
+        carries no diagnostic text scraped from an exception.
+      required: [abendCode, abendCulprit, abendReason, abendMsg]
+      additionalProperties: false
+      properties:
+        abendCode:
+          type: string
+          description: >-
+            The abend code, at the width ABEND-CODE PIC X(4) declares at
+            app/cpy/CSMSG02Y.cpy L22.
+          maxLength: 4
+        abendCulprit:
+          type: string
+          description: >-
+            What abended, at the width ABEND-CULPRIT PIC X(8) declares at
+            app/cpy/CSMSG02Y.cpy L24.
+          maxLength: 8
+        abendReason:
+          type: string
+          description: >-
+            Why it abended, at the width ABEND-REASON PIC X(50) declares at
+            app/cpy/CSMSG02Y.cpy L26.
+          maxLength: 50
+        abendMsg:
+          type: string
+          description: >-
+            The abend message, at the width ABEND-MSG PIC X(72) declares at
+            app/cpy/CSMSG02Y.cpy L28. This is the seventy-two-character regime and
+            is not the seventy-five-character message line.
+          maxLength: 72

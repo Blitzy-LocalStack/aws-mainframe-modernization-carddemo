@@ -54,14 +54,18 @@
 #       this document is written to be overridden by. Both EXIST, so the
 #       statements below about what an overlay may differ in are constraints those
 #       two files are held to rather than forward-looking ones.
+#     - openapi/transaction-api.yaml, the hand-authored contract of record. It
+#       EXISTS, so the extra static-resource location below publishes it and the
+#       Swagger view's pinned url resolves to it rather than to a 404. Its four
+#       operation groups are the CT00, CT01, CT02 and CB00 transactions listed
+#       above, and it is the document the controllers this module will carry are
+#       held to.
 #   NOT YET AUTHORED, so the statements about them remain target contracts:
-#     - openapi/transaction-api.yaml, the hand-authored contract of record,
-#       together with the com.carddemo.transaction.config classes that bind these
-#       keys and the controllers a generated document would be derived from.
-#       Until that file lands, the extra static-resource location and the
-#       springdoc keys below publish nothing and the Swagger view's pinned url
-#       resolves to a 404; the contract-versus-generated comparison they exist to
-#       make possible cannot yet be made.
+#     - the com.carddemo.transaction.config classes that bind these keys, and the
+#       controllers a generated document would be derived from. Until they land
+#       the contract-versus-generated comparison the springdoc keys below exist
+#       to make possible cannot yet be made, because there is no generated
+#       document to compare the contract against.
 #     - ui/src/api/transactions.ts, the browser client to be written against
 #       that contract. It is named below as the reason the hand-authored document
 #       wins over a generated one; that reason holds as a target contract, not as
@@ -602,13 +606,12 @@ spring:
 #       hand-authored contract, so publishing a second, generated description of
 #       the same endpoints would leave a client author with two documents and no
 #       rule for which one wins. The contract pinned here is therefore the
-#       hand-authored openapi/transaction-api.yaml, which will be reachable at
-#       the path below because the static-locations list above publishes the
+#       hand-authored openapi/transaction-api.yaml, which is reachable at the
+#       path below because the static-locations list above publishes the
 #       classpath folder holding it, and disable-swagger-default-url stops the
 #       view falling back to the generated one and presenting it as
-#       authoritative. Until that contract lands the pinned url resolves to a
-#       404, which is the intended staged state and not a misconfiguration. The
-#       generated endpoint is left at
+#       authoritative. That contract has landed, so the pinned url resolves to
+#       it. The generated endpoint is left at
 #       its default rather than switched off, because it earns its keep as the
 #       thing to compare against when an implementation and the contract are
 #       suspected of having diverged.

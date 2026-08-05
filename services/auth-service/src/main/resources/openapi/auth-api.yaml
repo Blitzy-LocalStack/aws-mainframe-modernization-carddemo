@@ -1,0 +1,1874 @@
+# =============================================================================
+# services/auth-service/src/main/resources/openapi/auth-api.yaml
+# -----------------------------------------------------------------------------
+# Purpose: this document is the committed OpenAPI 3.1 contract of record for the
+#       CardDemo auth bounded context. It is the artifact ui/src/api/auth.ts is
+#       written against, and the document springdoc serves at /v3/api-docs from
+#       this service's live controllers must agree with it. A difference between
+#       the two is a defect in whichever one moved; it is not a tolerated
+#       variation and it is not something to reconcile at runtime. The contract
+#       covers six operations: the sign-on token exchange migrated from
+#       app/cbl/COSGN00C.cbl, and the four user-administration operations
+#       migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and
+#       COUSR03C.cbl, whose shared list view contributes the fifth.
+#
+# WHY (non-obvious design decisions):
+#       (1) Assumptions: the comment conventions in this file. Header and block
+#       preambles use the aligned "# WHAT:" / "# WHY :" pair whose continuation
+#       lines indent to the marker plus seven spaces, so both colons sit in one
+#       column and a body reads as one paragraph. Rationale attached to a single
+#       element instead uses a labelled comment at that element's own
+#       indentation, continued at the marker plus three spaces, matching the
+#       sibling application.yml and db/migration/V1__auth.sql in this same
+#       resources tree. Two conventions rather than one is deliberate: the wide
+#       indent marks a block-level statement and the narrow one marks a remark
+#       about the key beneath it, so a reader can tell the scope of a comment
+#       from its shape alone. Only four rationale labels appear anywhere in this
+#       file -- Alternatives Considered, Refactoring Rationale, Assumptions and
+#       Trade-offs -- because those are the four the project's Explainability
+#       rule enumerates, and mixing in a variant spelling would make the set
+#       unsearchable.
+#       (2) Refactoring Rationale: the five user-administration operations are
+#       published under /api/v1/auth/users rather than under a top-level
+#       /api/v1/users collection, and this is the one place this contract's paths
+#       differ from the figure quoted in the migration plan. A top-level
+#       /api/v1/users prefix is not reachable on the provisioned environment: the
+#       edge publishes seven context prefixes, and auth-service's is /api/v1/auth
+#       alone -- see the ALB rule paths at infra/envs/dev/main.tf line 72 and
+#       infra/envs/prod/main.tf line 72, and the route-key list at
+#       infra/modules/api-gateway-http/variables.tf lines 375 to 376. The same
+#       module states the intended arrangement outright at lines 634 to 637:
+#       POST /api/v1/auth/signon is unauthenticated, and every other path under
+#       /api/v1/auth, "including the user administration endpoints", stays on the
+#       authorized route. Publishing a prefix the load balancer has no rule for
+#       would produce a contract whose operations answer nowhere, which the
+#       acceptance criterion that the business flows work end to end on the
+#       provisioned environment does not permit. Every method, authority, schema
+#       and message text below is exactly as specified; only the reachable prefix
+#       is used.
+#       (3) Trade-offs: exactly six operations are contracted here, while the
+#       edge additionally publishes POST /api/v1/auth/challenge and
+#       POST /api/v1/auth/refresh as pre-token routes -- the closed set validated
+#       at infra/modules/api-gateway-http/variables.tf lines 683 to 690. Those
+#       two are deliberately outside this document, because the sign-on
+#       challenge and token-renewal flows are a separate contract with their own
+#       request and reply shapes, and describing them from the route key alone
+#       would put a guess into the artifact the browser client is generated from.
+#       The cost is that this document is not the whole edge surface for /auth;
+#       the gain is that everything it does describe is derived from a migrated
+#       program rather than inferred. The omission is recorded here so a reader
+#       comparing this file against the route table sees a decision rather than
+#       an oversight.
+#       (4) Refactoring Rationale: no password is carried anywhere except the
+#       sign-on request, which forwards it to the identity provider and keeps
+#       nothing. The baseline handled the credential three ways and this contract
+#       ends all three: it was stored in the record, at
+#       app/cpy/CSUSR01Y.cpy line 21 ("05 SEC-USR-PWD PIC X(08)."); it was
+#       compared in the clear, at app/cbl/COSGN00C.cbl line 223
+#       ("IF SEC-USR-PWD = WS-USER-PWD"); and it was written back onto the 3270
+#       screen, at app/cbl/COUSR02C.cbl line 169
+#       ("MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI"), so the update screen
+#       displayed every user's password to whoever opened it. The sibling
+#       migration db/migration/V1__auth.sql creates no password column, so there
+#       is nothing for a create, update or read operation here to accept or
+#       return. This is the one place where fidelity to the baseline is declined
+#       rather than preserved, and it is declined openly.
+#       (5) Assumptions: this contract is not verifiable by the repository's
+#       golden-master suite. tests/README.md lines 83 to 85 record that the
+#       online CO* CICS programs cannot run end to end without a CICS runtime,
+#       which is absent on the runner, and that only their extractable
+#       field-validation logic is unit-tested. That glob covers all five auth
+#       programs, so no executable oracle exists for the HTTP-facing behaviour
+#       described here and none is claimed. What IS directly verifiable is the
+#       message text: every literal quoted below was read from the cited program
+#       line and is reproduced character for character, so this document is
+#       itself the assertion point for message fidelity.
+#       (6) Assumptions: message strings are carried literally, one at a time,
+#       with no normalising rule applied to any of them. Spacing before an
+#       ellipsis is not derivable and must not be guessed: COSGN00C's messages
+#       carry a space before it, COUSR00C's carry none, and COUSR01C, COUSR02C
+#       and COUSR03C are mixed inside a single file, their validation errors
+#       carrying none while their prompts and successes carry one. Inferring a
+#       house rule and applying it would silently alter observable output on
+#       whichever side of the split lost, so each literal is keyed to its
+#       originating program and line and copied as it stands.
+#       (7) Assumptions: the observable message field in this context is 78
+#       characters wide, not 75. It is "ERRMSGI PIC X(78)" in all five symbolic
+#       maps -- app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372,
+#       COUSR01.CPY line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84 -- and
+#       none of these five programs copies the templated field-highlight book, so
+#       the narrower 75-character figure that belongs to the shared
+#       CCARD-ERROR-MSG field does not govern here. The longest string this
+#       contract carries is 44 characters
+#       ("You are already at the bottom of the page..." at
+#       app/cbl/COUSR00C.cbl line 273), so it fits both widths with room to
+#       spare and no message is ever truncated to fit a field.
+#       (8) Assumptions: field widths are asserted from two independent readings
+#       apiece, which is why they are stated as constraints rather than as
+#       guidance. The 80-byte record at app/cpy/CSUSR01Y.cpy lines 17 to 23 gives
+#       the user identifier 8, both names 20 and the type 1; the symbolic maps
+#       give the same widths at app/cpy-bms/COSGN00.CPY lines 72 and 78,
+#       COUSR01.CPY lines 60, 66, 72, 78 and 84, COUSR02.CPY lines 60, 66, 72, 78
+#       and 84, and COUSR03.CPY lines 60, 66, 72 and 78. The A/U value set is
+#       taken from app/cpy/COCOM01Y.cpy lines 26 to 28, where CDEMO-USER-TYPE
+#       carries the two condition names; it is NOT taken from
+#       app/cpy/CSUSR01Y.cpy line 22, which declares the field's width but
+#       enumerates no values.
+#       (9) Assumptions: nothing in the shared kernel is redeclared here as a
+#       parallel type. ApiError, its per-field error array, its abend aggregate
+#       and the keyset page envelope are described exactly as
+#       services/common-lib publishes them, on the same principle the reference
+#       suite states for record layouts at tests/README.md lines 540 to 542 --
+#       a layout is resolved through one include path and never duplicated. A
+#       second, subtly different error or paging shape declared locally would
+#       compile, serve and disagree with the eight services that share the
+#       originals.
+# =============================================================================
+
+openapi: 3.1.1
+
+info:
+  title: CardDemo Auth API
+  version: 1.0.0
+  summary: Sign-on and user administration for the CardDemo auth bounded context.
+  description: >-
+    Migrated surface of the CardDemo sign-on transaction and the four
+    user-administration transactions that the CICS resource definition
+    registered as CC00, CU00, CU01, CU02 and CU03
+    (app/csd/CARDDEMO.CSD lines 378, 449, 459, 469 and 479). Sign-on exchanges a
+    user identifier and password for tokens minted by the configured Cognito
+    user pool; the remaining five operations administer the rows of the auth
+    schema's users table and are restricted to the carddemo-admin authority.
+    Pseudo-conversational state is gone: no operation accepts or returns a
+    communication area, identity is read from the signed token on every request,
+    and the selected user travels in the request path.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+# WHAT: declare the single server entry as a substitutable variable rather than
+#       as any environment's address.
+# WHY : (1) Assumptions: the edge address is a Terraform output consumed at
+#       deploy time, never a value committed to source -- no service hard-codes
+#       an endpoint. The browser client resolves the same origin from its own
+#       build-time VITE_API_BASE_URL, so a literal host written here would be a
+#       second, competing source for one value. (2) Trade-offs: the default is
+#       the reserved, permanently unresolvable example.invalid name rather than a
+#       plausible-looking hostname. A plausible default is worse than an obvious
+#       placeholder, because a tool that silently used it would attempt a real
+#       connection to somebody's host; a name reserved never to resolve fails
+#       immediately and unmistakably, at the cost of the document not being
+#       directly executable until the variable is supplied.
+servers:
+  - url: "{edgeOrigin}"
+    description: >-
+      Origin of the HTTP API that fronts this service. Supplied per environment
+      from infrastructure outputs; the default below is a deliberately
+      unresolvable placeholder and is not an address of any deployment.
+    variables:
+      edgeOrigin:
+        default: "https://auth-api.example.invalid"
+        description: >-
+          Scheme and host of the environment's API edge, without a trailing
+          slash. Every path in this document is absolute and already carries the
+          /api/v1 prefix that the edge route keys publish.
+
+tags:
+  - name: Sign-On
+    description: >-
+      The token exchange migrated from app/cbl/COSGN00C.cbl. Reachable without a
+      token, because it is the operation that issues one.
+  - name: User Administration
+    description: >-
+      List, create, read, update and delete over the auth schema's users table,
+      migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and
+      COUSR03C.cbl. Every operation requires the carddemo-admin authority.
+
+# WHAT: apply the bearer scheme to every operation by default.
+# WHY : Assumptions: a document-level default makes the unauthenticated
+#       operation the explicit exception rather than the silent norm, so an
+#       operation added later without a security block inherits the
+#       authenticated posture instead of being published open. The sign-on
+#       operation overrides this with an empty requirement, which is the only
+#       override in the document.
+security:
+  - bearerAuth: []
+
+# WHAT: the six operations of this context, in the order a user meets them --
+#       sign on, list users, create one, read one, update one, delete one.
+# WHY : (1) Assumptions: each operation is stateless. The baseline carried
+#       continuity between screen turns in the communication area declared at
+#       app/cpy/COCOM01Y.cpy lines 19 to 44, and that structure decomposes into
+#       four separate mechanisms here rather than being ported: its navigation
+#       fields become the browser's own route history, its identity fields become
+#       claims in the signed token, its selection fields become path parameters,
+#       and its re-entry discriminator (CDEMO-PGM-CONTEXT with the two condition
+#       names at lines 29 to 31) disappears entirely, because an operation that
+#       returns a field-error array has no first-entry-versus-re-entry
+#       distinction left to make. (2) Refactoring Rationale: the identity move is
+#       a correction and not merely a relocation. CDEMO-USER-TYPE at lines 26 to
+#       28 lived in storage the client echoed back on the next request, so a
+#       client could in principle return a type it was never issued; the group
+#       claim that replaces it is signed by the user pool and the client cannot
+#       assert anything at all. (3) Assumptions: control transfer between screens
+#       is a client concern now. The sign-on program's branch to one of two menu
+#       programs -- XCTL to 'COADM01C' at app/cbl/COSGN00C.cbl lines 231 to 234
+#       and to 'COMEN01C' at lines 236 to 239 -- becomes a route change the
+#       browser performs after reading the group claim out of the token it just
+#       received, so no operation here returns a next-screen instruction.
+#       (4) Trade-offs: every operation below states its own security requirement
+#       even though the document-level default already supplies the same value to
+#       four of the five, so the requirement is written twice for those. The
+#       duplication is accepted because the two protect against opposite
+#       mistakes: the document default covers an operation added later whose
+#       author forgets a security block, while the explicit per-operation
+#       declaration survives an edit to that default. Neither alone is enough,
+#       and an operation's authentication posture is the last thing in this
+#       contract that should be inferable only from a value declared elsewhere.
+paths:
+
+  /api/v1/auth/signon:
+
+    post:
+      tags: [Sign-On]
+      operationId: signOn
+      summary: Exchange a user identifier and password for access tokens.
+      description: >-
+        Migrated from app/cbl/COSGN00C.cbl. Submits the credential to the
+        configured Cognito user pool and returns the token set on success. This
+        is the only operation in this document reachable without a bearer token,
+        because it is the operation that issues one; it is published at the edge
+        as the unauthenticated route POST /api/v1/auth/signon.
+
+
+        Two behavioural divergences from the baseline are documented rather than
+        hidden. First, comparison is case-sensitive on the password. The baseline
+        pushed both submitted fields through FUNCTION UPPER-CASE before it read
+        the file and before it compared
+        (app/cbl/COSGN00C.cbl lines 132 to 136, where the password fold's target
+        WS-USER-PWD sits on line 136), which made it case-insensitive in both
+        fields; the identity provider that now performs the comparison is
+        case-sensitive on the password, and folding the password to restore the
+        old behaviour would weaken the credential rather than preserve a feature.
+        Second, an unknown user and a wrong password are no longer publicly
+        distinguishable: both return the 401 below carrying
+        "Wrong Password. Try again ...". The baseline told them apart, and that
+        distinction is given up deliberately because the pool is configured to
+        return uniform user-existence errors.
+      security: []
+      requestBody:
+        required: true
+        description: >-
+          The two credential fields of the sign-on screen, at the widths the
+          symbolic map declares.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignOnRequest"
+      responses:
+        "200":
+          description: >-
+            The credential was accepted. The body carries the tokens the pool
+            minted and the identifier they were minted for; the caller sends the
+            access token as a bearer token on every other operation in this
+            document.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignOnResponse"
+        "400":
+          # Assumptions: this status covers the two presence checks the baseline
+          #   performs before it reads the file, at app/cbl/COSGN00C.cbl lines
+          #   118 to 127, where a field that is SPACES or LOW-VALUES produces its
+          #   own message and homes the cursor to that field. Both are structural
+          #   input faults rather than credential rejections, which is why they
+          #   are separated from the 401 below: a caller can correct a 400 from
+          #   the response alone, whereas a 401 tells it only that the pair was
+          #   refused.
+          description: >-
+            A submitted field was absent or blank. The fieldErrors array carries
+            one entry per offending field, keyed userId or password, and each
+            entry's message is the corresponding baseline literal:
+            "Please enter User ID ..." (app/cbl/COSGN00C.cbl line 120) or
+            "Please enter Password ..." (line 125). Both retain the space before
+            the ellipsis exactly as the program writes it.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          # Trade-offs: one status carries what the baseline expressed as two
+          #   outcomes, and the merge is a deliberate loss. The baseline reached
+          #   "Wrong Password. Try again ..." only after a successful read whose
+          #   password comparison failed (app/cbl/COSGN00C.cbl line 223) and
+          #   reached "User not found. Try again ..." on the distinct
+          #   record-not-found response at line 249, so an unauthenticated caller
+          #   could learn whether a user identifier existed. What is bought by
+          #   merging them is that user enumeration through this endpoint stops;
+          #   what is given up is a diagnostic the baseline showed the operator.
+          #   The second literal is retained in this contract rather than deleted
+          #   because it remains reachable under an explicitly selected legacy
+          #   provider posture, and because deleting it would lose the
+          #   traceability link to line 249.
+          description: >-
+            The credential was refused. The message is
+            "Wrong Password. Try again ..." (app/cbl/COSGN00C.cbl lines 242 to
+            243, where the literal continues onto line 243) for both an unknown
+            user identifier and an incorrect password, because the pool returns
+            uniform user-existence errors. Under an explicitly selected legacy
+            provider posture that distinguishes the two, an unknown identifier
+            instead returns "User not found. Try again ..." (line 249). No
+            fieldErrors entry accompanies either message, because attributing the
+            failure to one of the two submitted fields is the disclosure this
+            status exists to withhold.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          # Assumptions: the baseline's WHEN OTHER arm at app/cbl/COSGN00C.cbl
+          #   line 254 handles every file response that is neither success nor
+          #   not-found, so it is the arm an infrastructure fault arrives on
+          #   rather than a credential fault. Its migrated counterpart is any
+          #   provider or integration failure -- the pool being unreachable, the
+          #   request signature being rejected, a challenge the flow cannot
+          #   complete -- and it deliberately does not reuse the 401 message,
+          #   because telling a caller its password was wrong when the pool was
+          #   simply unreachable would send it to reset a working credential.
+          description: >-
+            The credential could not be evaluated. The message is
+            "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254). The
+            body carries a correlation identifier and, where the failure was an
+            abend, the externally safe abend aggregate described under
+            AbendDetail; it never carries a provider diagnostic.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+
+  /api/v1/auth/users:
+
+    get:
+      tags: [User Administration]
+      operationId: listUsers
+      summary: List users one bounded page at a time, positioned by key.
+      description: >-
+        Migrated from app/cbl/COUSR00C.cbl, whose browse filled a ten-row screen
+        and reported whether another row followed. Requires the carddemo-admin
+        authority. A page holds at most ten rows and that size is set by the
+        contract rather than chosen by the caller. Paging is by key in one
+        direction at a time: send no cursor for the first page, then send the
+        lastKey of the page you hold to move forward or its firstKey to move
+        back, with direction naming which of the two you sent.
+
+
+        Reaching an end of the file is a success, never a failure. A request that
+        lands on the last page returns 200 with hasNext false, and a request that
+        cannot move at all -- because the caller asked to go back from the first
+        page or forward from the last -- returns 200 with the boundary page
+        unchanged and the relevant availability indicator false. The baseline
+        distinguished these two situations by message and this contract keeps
+        them distinguishable by response: an arrival moved and reports a boundary,
+        whereas a refused move returns the page the caller already had.
+      security:
+        - bearerAuth: []
+      parameters:
+        # Alternatives Considered: positioning a page by an ordinal or a row
+        #   offset, which is the obvious shape and is rejected on a specific
+        #   defect. Under concurrent insertion the number of rows preceding a
+        #   position changes between one request and the next, so an offset-paged
+        #   reader silently skips some rows and shows others twice, while a key
+        #   already read keeps its place in the ordering no matter what is
+        #   inserted around it. The baseline's own browse was already a cursor
+        #   over keys, so this is a one-for-one substitution rather than an
+        #   approximation: it stored the page's last key and first key as real key
+        #   values (app/cbl/COUSR00C.cbl lines 435 and 389) and held no count of
+        #   rows consumed anywhere.
+        # Assumptions: both cursors are EXCLUSIVE -- the row they name is not
+        #   returned again. The baseline established this with an extra read
+        #   issued before each page was filled: one further READNEXT at line 289,
+        #   guarded by "IF EIBAID NOT = DFHENTER AND DFHPF7 AND DFHPF3" on line
+        #   288, and the mirrored READPREV at line 343 guarded by only two keys on
+        #   line 342. Each steps past the cursor record itself, so a page begins
+        #   at the row after the one the caller named.
+        # Assumptions: a cursor is an opaque sealed token minted by this service,
+        #   not a user identifier. It carries the key inside an authenticated
+        #   payload bound to the query and the subject it was issued to, so a
+        #   caller cannot mint one naming a row it was never shown, and it expires.
+        #   Its shape is a version marker, a payload and a code separated by
+        #   periods; treat it as text to be echoed unchanged and never parse or
+        #   construct one.
+        - name: lastKey
+          in: query
+          required: false
+          description: >-
+            Sealed cursor identifying the last row of the page the caller
+            currently holds, echoed back verbatim from that page's lastKey to
+            move forward. Omit it for the first page. Send it only with direction
+            next; sending both cursors at once is rejected because the two name
+            opposite ends and only one can be the position to read from.
+          schema:
+            $ref: "#/components/schemas/CursorToken"
+        - name: firstKey
+          in: query
+          required: false
+          description: >-
+            Sealed cursor identifying the first row of the page the caller
+            currently holds, echoed back verbatim from that page's firstKey to
+            move back. Omit it for the first page. Send it only with direction
+            previous.
+          schema:
+            $ref: "#/components/schemas/CursorToken"
+        # Alternatives Considered: accepting a page number, which the baseline
+        #   screen genuinely had and which this contract still refuses. The field
+        #   exists as PAGENUMI PIC X(8) at app/cpy-bms/COUSR00.CPY line 60 and as
+        #   CDEMO-CU00-PAGE-NUM PIC 9(08) at app/cbl/COUSR00C.cbl line 70, but it
+        #   is display only: it is moved to the screen at lines 327 and 376 and is
+        #   never used to position a read. Its single control-flow use is the
+        #   guard at line 248 that decides whether the "already at the top"
+        #   message is shown. Accepting it as a parameter would therefore invent
+        #   positioning semantics the baseline never had, and an absolute ordinal
+        #   cannot be honoured by a key-positioned query without enumerating every
+        #   row ahead of the cursor -- which is the enumeration this design exists
+        #   to avoid.
+        - name: direction
+          in: query
+          required: false
+          description: >-
+            Which cursor was supplied and therefore which way to read: next reads
+            keys strictly greater than lastKey in ascending order, previous reads
+            keys strictly less than firstKey in descending order. Defaults to
+            next, which with no cursor supplied returns the first page.
+          schema:
+            type: string
+            enum: [next, previous]
+            default: next
+      responses:
+        "200":
+          # Assumptions: a cursor naming a row that no longer exists is NOT a
+          #   not-found condition. The baseline's read on the supplied key keys on
+          #   DFHRESP(NOTFND) at app/cbl/COUSR00C.cbl line 600 and falls through
+          #   to a CONTINUE, treating the position as the start of the file rather
+          #   than as an error, so a caller holding a cursor to a since-deleted
+          #   user is repositioned instead of being refused. A cursor that is
+          #   malformed, altered or expired is a different matter and is refused
+          #   with 400, because that one cannot be opened at all.
+          # Assumptions: reaching or failing to leave an end of the file is a 200
+          #   in every case, never a 4xx, and the baseline's five boundary
+          #   messages fall into two classes that must not be merged. A GUARD is a
+          #   move that never happened, because the caller was already at that end:
+          #   "You are already at the top of the page..." (line 251, gated by the
+          #   page-number test on line 248) and
+          #   "You are already at the bottom of the page..." (line 273, the longest
+          #   string in this context at 44 characters). An ARRIVAL is a move that
+          #   did happen and landed on an end:
+          #   "You are at the top of the page..." (line 603),
+          #   "You have reached the bottom of the page..." (line 637) and
+          #   "You have reached the top of the page..." (line 671). All five are in
+          #   app/cbl/COUSR00C.cbl and none carries a space before its ellipsis.
+          #   The two classes stay distinguishable in the response rather than by
+          #   message: a guard returns the same page the caller already held, while
+          #   an arrival returns a different page whose availability indicator for
+          #   the direction travelled is now false.
+          # Alternatives Considered: returning these five as the response message
+          #   so the browser could display them without deciding which applies.
+          #   Rejected because a caller can already tell the five apart from the
+          #   direction it asked for, the indicator it held before the request, and
+          #   the indicator it holds after -- and because putting a sentence in a
+          #   SUCCESS body would make every ordinary page carry a message field
+          #   that is usually empty. The browser's own message catalog holds the
+          #   five literals, which is where every user-visible string in the
+          #   migrated system lives.
+          description: >-
+            One page of at most ten rows in ascending user-identifier order,
+            together with the two cursors for continuing in either direction and
+            the two availability indicators. An exhausted or fully filtered page
+            carries an empty items array rather than an error.
+
+
+            This status also covers both boundary situations the baseline reported
+            by message. A move that could not happen because the caller was
+            already at that end returns the page it already held -- the baseline's
+            "You are already at the top of the page..." and
+            "You are already at the bottom of the page...". A move that happened
+            and landed on an end returns the new page with that direction's
+            indicator false -- the baseline's
+            "You are at the top of the page...",
+            "You have reached the bottom of the page..." and
+            "You have reached the top of the page...". Neither situation is an
+            error, and none of these five strings carries a space before its
+            ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageResponse"
+        "400":
+          description: >-
+            A supplied cursor could not be opened -- it was malformed, altered,
+            expired, or presented for a different query or subject than it was
+            issued for -- or both cursors were supplied at once, or direction did
+            not name one of the two permitted values. The fieldErrors array
+            identifies the offending parameter by name.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          # Assumptions: the baseline reaches this arm from three separate places
+          #   -- the WHEN OTHER of each of its three reads, at
+          #   app/cbl/COUSR00C.cbl lines 610, 644 and 678 -- and writes the same
+          #   literal at all three, so one status with one message is the faithful
+          #   mapping rather than a flattening of distinct outcomes.
+          description: >-
+            The user file could not be read. The message is
+            "Unable to lookup User..." (app/cbl/COUSR00C.cbl lines 610, 644 and
+            678), with no space before the ellipsis, as the program writes it.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+    post:
+      tags: [User Administration]
+      operationId: createUser
+      summary: Create one user row.
+      description: >-
+        Migrated from app/cbl/COUSR01C.cbl. Requires the carddemo-admin
+        authority. The body carries the five values the auth schema's users table
+        holds; it carries no password, because this service creates no credential
+        -- see the create-request schema for the full rationale. On success the
+        response is 201 with the created row and a Location header naming it.
+
+
+        The success message the baseline composed --
+        "User " followed by the identifier and then " has been added ..."
+        (app/cbl/COUSR01C.cbl lines 255 to 258, the literal on line 257) -- is not
+        returned as a field. The browser client holds every user-visible string in
+        its own catalog and composes that sentence from the identifier it receives,
+        which is where the two thank-you strings and the screen titles also live;
+        a server-rendered sentence would be a second source for one string and the
+        two could disagree. Failure messages ARE returned, because which branch
+        failed is knowledge only this service has.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: >-
+          The new row's values, in the order the create screen validates them.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: >-
+            The row was created. The body is the stored row as a subsequent read
+            would return it, and the Location header addresses it.
+          headers:
+            Location:
+              description: >-
+                Absolute path of the created row, of the form
+                /api/v1/auth/users/{userId}, so a caller need not compose the
+                address itself.
+              required: true
+              schema:
+                type: string
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          # Assumptions: the order of entries in fieldErrors is the order the
+          #   baseline validated in, because the first error a user sees is
+          #   observable behaviour. Its cascade short-circuits in physical screen
+          #   order at app/cbl/COUSR01C.cbl lines 120, 126, 132 and 144 -- first
+          #   name, last name, user identifier, then user type -- and the
+          #   create-request schema's property order reproduces exactly that
+          #   sequence.
+          description: >-
+            A required value was absent or outside its domain. Each fieldErrors
+            entry is keyed by the logical field -- firstName, lastName, userId,
+            userType or cognitoSub -- and carries the baseline literal for that
+            field: "First Name can NOT be empty..."
+            (app/cbl/COUSR01C.cbl line 120),
+            "Last Name can NOT be empty..." (line 126),
+            "User ID can NOT be empty..." (line 132) or
+            "User Type can NOT be empty..." (line 144). None of these four
+            carries a space before its ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          # Assumptions: the baseline folds two distinct file responses into one
+          #   handler -- WHEN DFHRESP(DUPKEY) at app/cbl/COUSR01C.cbl line 260 and
+          #   WHEN DFHRESP(DUPREC) at line 261 fall through together -- so one
+          #   status with one message is what the baseline actually produced, not
+          #   a simplification of it. The condition is now enforced by the primary
+          #   key on auth.users, so the outcome cannot be lost to a race between
+          #   a check and an insert.
+          # Trade-offs: the message is reproduced with its grammatical error
+          #   intact -- "User ID already exist...", missing the s, at line 263.
+          #   Correcting it would silently change a string a client may match on
+          #   or a user may recognise, and an externally observable string is part
+          #   of the interface whether or not it reads well. The cost is that this
+          #   contract publishes a visible mistake; the gain is that the migration
+          #   changes no observable output it was not asked to change.
+          description: >-
+            A row with the submitted user identifier already exists. The message
+            is "User ID already exist..." (app/cbl/COUSR01C.cbl line 263),
+            reproduced exactly as the program writes it, including the missing s
+            and with no space before the ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The row could not be written. The message is
+            "Unable to Add User..." (app/cbl/COUSR01C.cbl line 270), with no
+            space before the ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+
+  /api/v1/auth/users/{userId}:
+
+    # Assumptions: the selected user travels in the path on all three operations
+    #   below, which is what replaces the baseline's input field on the screen
+    #   (USRIDINI PIC X(8) at app/cpy-bms/COUSR02.CPY line 60 and
+    #   app/cpy-bms/COUSR03.CPY line 60) and the selection column on the list
+    #   screen. Putting it in the path makes every request self-describing and
+    #   therefore independently authorisable, which a value carried in a
+    #   round-tripped buffer was not.
+    parameters:
+      - $ref: "#/components/parameters/UserIdPath"
+
+    get:
+      tags: [User Administration]
+      operationId: getUser
+      summary: Read one user row.
+      description: >-
+        Migrated from the record-load path shared by app/cbl/COUSR02C.cbl and
+        app/cbl/COUSR03C.cbl, and it serves both their screens. Requires the
+        carddemo-admin authority. In the baseline this load was
+        PROCESS-ENTER-KEY at app/cbl/COUSR02C.cbl line 143, which blanked the
+        four editable fields (lines 157 to 164) and then refilled them from the
+        record just read (lines 166 to 172); here it simply returns the row.
+
+
+        One structural difference is deliberate. The delete screen's load read the
+        record for update -- EXEC CICS READ carrying the UPDATE option, at
+        app/cbl/COUSR03C.cbl lines 269 to 278 with UPDATE on line 275 -- and so
+        held a lock while the operator decided. This operation takes no lock, because a stateless
+        request cannot hold one across a user's think-time and a lock held that
+        way is the failure mode the design removes. Nothing is lost by it: the
+        sibling migration db/migration/V1__auth.sql records why no version column
+        or conflict outcome is needed, namely that the baseline never carried a
+        before-image across a screen turn on this file.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: >-
+            The stored row. Identical in shape to the create and update responses,
+            so one client type covers all three.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          description: >-
+            The path segment was blank or wider than eight characters. The message
+            is "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148 and
+            182, and app/cbl/COUSR03C.cbl lines 147 and 179), keyed userId in the
+            fieldErrors array, with no space before the ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            No row carries the requested identifier. The message is
+            "User ID NOT found..." (app/cbl/COUSR02C.cbl line 342 and
+            app/cbl/COUSR03C.cbl line 289), with no space before the ellipsis.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The row could not be read. The message is
+            "Unable to lookup User..." (app/cbl/COUSR02C.cbl line 349 and
+            app/cbl/COUSR03C.cbl line 296).
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+    put:
+      tags: [User Administration]
+      operationId: updateUser
+      summary: Update the mutable values of one user row.
+      description: >-
+        Migrated from app/cbl/COUSR02C.cbl, whose update arm is the
+        UPDATE-USER-INFO paragraph at line 177, reached from the save key, while
+        its load arm is PROCESS-ENTER-KEY at line 143. Requires the
+        carddemo-admin authority. The path carries which row to change and the
+        body carries only what may change, so the identifier appears once per
+        request and cannot be contradicted between the two.
+
+
+        A body that matches the stored row in every field is refused with 400.
+        That is the baseline's behaviour, not an addition: it compared each
+        submitted field against the record, and where nothing differed it took the
+        else branch at app/cbl/COUSR02C.cbl line 237 and wrote
+        "Please modify to update ..." in red at lines 239 to 241. The colour is
+        what settles the status, because that same message field is written in
+        three colours in this program -- red at line 241, neutral at line 338 and
+        green at line 371 -- so red marks it as a rejection rather than as advice.
+
+
+        The success message the baseline composed --
+        "User " followed by the identifier and then " has been updated ..."
+        (lines 372 to 375, the literal on line 374) -- is not returned as a field,
+        for the reason given on the create operation.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: >-
+          The three values this operation may change, in the order the update
+          screen validates them.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: >-
+            The row as stored after the change.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          # Assumptions: fieldErrors is ordered as the baseline validated, whose
+          #   cascade for this screen runs at app/cbl/COUSR02C.cbl lines 188, 194
+          #   and 206 once the identifier check at line 182 has become the path
+          #   parameter and the password check at line 200 has gone with the
+          #   credential. The update-request schema's property order is exactly
+          #   those three survivors.
+          # Assumptions: the baseline validated the identifier TWICE -- once on
+          #   Enter at lines 146 to 151 and again on the save key at lines 180 to
+          #   185 -- because each screen turn resubmitted the whole map and either
+          #   arm could be reached first. One check suffices here, since the value
+          #   arrives in the path and is validated before the operation runs at
+          #   all.
+          # Assumptions: the key naming an offending field is the logical field,
+          #   derived from where the baseline homed the cursor. Those targets are
+          #   per-branch and not uniform -- its catch-all arm homes to the first
+          #   name field at lines 210 to 212 rather than to the field that
+          #   actually failed -- so the key reports the field at fault rather than
+          #   reproducing a cursor position a browser has no use for.
+          description: >-
+            A submitted value was absent or outside its domain, or every value
+            matched the stored row. Each fieldErrors entry is keyed firstName,
+            lastName or userType and carries that field's baseline literal:
+            "First Name can NOT be empty..." (app/cbl/COUSR02C.cbl line 188),
+            "Last Name can NOT be empty..." (line 194) or
+            "User Type can NOT be empty..." (line 206). The unchanged-body case
+            instead carries the aggregate message
+            "Please modify to update ..." (line 239) with no field attribution,
+            because no single field is at fault. Note the spacing difference
+            between the two kinds: the three validation literals carry no space
+            before the ellipsis and the aggregate one does, exactly as the program
+            writes them.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            No row carries the identifier in the path. The message is
+            "User ID NOT found..." (app/cbl/COUSR02C.cbl lines 342 and 379).
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The change could not be written. The message is
+            "Unable to Update User..." (app/cbl/COUSR02C.cbl line 386).
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+    delete:
+      tags: [User Administration]
+      operationId: deleteUser
+      summary: Delete one user row, with the deletion explicitly confirmed.
+      description: >-
+        Migrated from app/cbl/COUSR03C.cbl. Requires the carddemo-admin
+        authority. The row is identified by the path and the deletion must be
+        confirmed by the query parameter below; a request without that
+        confirmation deletes nothing.
+
+
+        The success message the baseline composed --
+        "User " followed by the identifier and then " has been deleted ..."
+        (app/cbl/COUSR03C.cbl lines 318 to 321, the literal on line 320) -- is not
+        returned, both for the reason given on the create operation and because a
+        204 carries no body at all.
+      security:
+        - bearerAuth: []
+      parameters:
+        # Refactoring Rationale: the baseline made deleting a two-step act. Its
+        #   load arm read the record and then invited a second, different
+        #   keystroke -- "Press PF5 key to delete this user ..." in neutral at
+        #   app/cbl/COUSR03C.cbl lines 283 and 284 -- so displaying a user and
+        #   destroying one were never the same operation. That safeguard cannot
+        #   survive as a keystroke over HTTP, and dropping it would mean a
+        #   prefetch, a retried request or a crawler following a link could
+        #   destroy a row: navigation must never delete. Requiring an explicit
+        #   affirmative parameter reconstructs the two-step act from the
+        #   information a single request carries -- the caller must have decided
+        #   to delete in order to have sent it.
+        # Alternatives Considered: carrying the confirmation in a request body,
+        #   which was rejected because a body on DELETE has no defined semantics
+        #   and intermediaries are permitted to drop it, so the safeguard could
+        #   vanish in transit and the deletion would proceed unconfirmed. A
+        #   required query parameter cannot be silently discarded: if it is
+        #   missing the request is refused.
+        # Assumptions: the value must be true, not merely present. Accepting any
+        #   value would let confirmed=false delete a row, which is the exact
+        #   opposite of what the caller wrote.
+        - name: confirmed
+          in: query
+          required: true
+          description: >-
+            Explicit confirmation that the row named in the path is to be
+            destroyed. Must be the boolean true; absent or false is refused with
+            400 and nothing is deleted.
+          schema:
+            type: boolean
+            const: true
+      responses:
+        "204":
+          # Alternatives Considered: returning 200 with the deleted row, which
+          #   was rejected because it would hand back a representation of
+          #   something that no longer exists and invite a client to cache or
+          #   redisplay it. 204 states the outcome and nothing more.
+          description: >-
+            The row was deleted. No body, by design.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+        "400":
+          description: >-
+            The confirmation was absent or was not true, or the path segment was
+            blank or wider than eight characters. In the confirmation case the
+            fieldErrors array carries a single entry keyed confirmed and nothing
+            is deleted; in the identifier case the entry is keyed userId and
+            carries "User ID can NOT be empty..."
+            (app/cbl/COUSR03C.cbl lines 147 and 179).
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            No row carries the identifier in the path. The message is
+            "User ID NOT found..." (app/cbl/COUSR03C.cbl lines 289 and 325).
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          # Refactoring Rationale: the message on this branch says Update on a
+          #   delete failure. That is what the baseline writes -- the literal at
+          #   app/cbl/COUSR03C.cbl line 332 is "Unable to Update User...", the
+          #   same string this program's sibling writes at
+          #   app/cbl/COUSR02C.cbl line 386 -- and it reads as a copy of the
+          #   update program's handler that was never reworded for its new home.
+          # Trade-offs: it is carried across as it stands rather than reworded to
+          #   say Delete. Message fidelity was chosen over readability because the
+          #   string is externally observable: a client matching on it, or an
+          #   operator recognising it from the terminal, would both be broken by a
+          #   change this migration was not asked to make. The cost is a message
+          #   that names the wrong verb; the alternative was an undocumented
+          #   divergence in observable output, which is worse. It is documented,
+          #   not fixed.
+          description: >-
+            The row could not be deleted. The message is
+            "Unable to Update User..." (app/cbl/COUSR03C.cbl line 332) -- the word
+            Update, on the delete path, exactly as the program writes it.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+
+components:
+
+  # WHAT: the single authentication scheme every operation but sign-on requires.
+  # WHY : (1) Assumptions: authority comes from the signed cognito:groups claim
+  #       and from nothing else. The shared kernel's JwtRoleConverter reads that
+  #       claim and grants carddemo-admin for the baseline's 'A' user type and
+  #       carddemo-user for 'U', which are the two values app/cpy/COCOM01Y.cpy
+  #       lines 26 to 28 enumerate, and the group names it recognises are the
+  #       literals the Cognito module provisions. No request field, header or body
+  #       value can add an authority. (2) Assumptions: all five
+  #       user-administration operations require carddemo-admin, and the evidence
+  #       is that every one of the five baseline programs returned to the ADMIN
+  #       menu rather than the general one -- 'COADM01C' at
+  #       app/cbl/COUSR00C.cbl line 126, app/cbl/COUSR01C.cbl line 94,
+  #       app/cbl/COUSR02C.cbl lines 114 and 125, and app/cbl/COUSR03C.cbl lines
+  #       113 and 124. A screen reachable only from the administrator's menu, and
+  #       returning only to it, was administrator-only in effect, so restricting
+  #       the whole family is a transcription of the baseline's reachability
+  #       rather than a new restriction. (3) Trade-offs: the scopes array is
+  #       empty, which is a limitation of the scheme type rather than an absence
+  #       of a scope requirement. A bearer scheme in OpenAPI cannot express
+  #       scopes; the token the service accepts must still carry the pool's
+  #       administrative sign-in scope, and both the edge route authorization and
+  #       this service's own token validator assert it. The requirement is stated
+  #       in the description below so it is not lost.
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Access token minted by the CardDemo Cognito user pool and returned by the
+        sign-on operation, presented as an HTTP bearer credential. The service
+        accepts only an access token, identified by a token_use claim of access:
+        the same pool signs identity tokens with the same key, and an identity
+        token describes a user to a client rather than authorising an API call,
+        so accepting one would be a confusion of purpose. The token must also
+        have been issued to this deployment's app client and must carry the
+        pool's administrative sign-in scope; a Cognito access token carries no
+        audience claim, so the client is checked through its client_id claim
+        instead. Authorities are derived from the cognito:groups claim --
+        carddemo-admin or carddemo-user -- and never from anything the caller
+        supplies in the request.
+
+  # WHAT: the response header every operation returns, declared once.
+  # WHY : Assumptions: the shared kernel's correlation filter names this header on
+  #       both directions of every request and also places the value in the
+  #       logging context, so a caller reporting a problem can quote one
+  #       identifier that ties its request to the service's own records. It is
+  #       declared here once rather than spelled out at each of the twenty-eight
+  #       responses, because a header re-typed that many times is a header that
+  #       will eventually be typed differently.
+  headers:
+    XCorrelationId:
+      description: >-
+        Identity of the unit of work that produced this response. Echoed from the
+        request where the caller supplied one and minted by the service where it
+        did not, at most twenty-four characters. Quote it when reporting a
+        failure; it is the only handle this contract offers into server-side
+        diagnostics, which is deliberate -- no response carries an internal
+        diagnostic code.
+      required: true
+      schema:
+        type: string
+        maxLength: 24
+
+  parameters:
+    UserIdPath:
+      name: userId
+      in: path
+      required: true
+      description: >-
+        Identifier of the user this request addresses. At most eight characters,
+        the width SEC-USR-ID is declared with at app/cpy/CSUSR01Y.cpy line 18 and
+        the width the users table stores it at. No character-class restriction is
+        asserted, because the baseline declares none: the field is PIC X(08), the
+        column is CHAR(8), and inventing a pattern here would refuse identifiers
+        the migrated data may legitimately contain.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 8
+
+  # WHAT: the two error responses that are identical across all five
+  #       user-administration operations.
+  # WHY : Trade-offs: only these two are shared, and the others are written out at
+  #       each operation even though that is more text. The reason is that every
+  #       other failure carries a message literal belonging to a specific program
+  #       line, and those literals differ per operation -- the create conflict
+  #       says one thing, the delete failure another. Sharing those would have
+  #       forced a single generic wording and lost the message fidelity this
+  #       contract exists to record. These two carry no baseline literal at all,
+  #       because the baseline had no analogue for them: a 3270 user reached these
+  #       screens through a signed-on CICS session, so there was no
+  #       missing-credential or wrong-authority path to produce a message for.
+  responses:
+    Unauthorized:
+      description: >-
+        No bearer token was presented, or the token was rejected -- an invalid
+        signature, an expired or not-yet-valid token, the wrong issuer, an
+        identity token where an access token is required, a token issued to a
+        different app client, or a missing required scope. The body names no
+        specific cause, because distinguishing them for an unauthenticated caller
+        would describe the validator's configuration to it.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Forbidden:
+      description: >-
+        The token was valid but its cognito:groups claim does not include
+        carddemo-admin, which every user-administration operation requires. This
+        is distinct from the 401 above: the caller is known, and it is the
+        authority that is missing rather than the credential.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+
+  # WHAT: the payload shapes of this context -- six of its own, and five that
+  #       mirror types the shared kernel owns.
+  # WHY : (1) Assumptions: the five mirrored shapes -- the cursor token, the page
+  #       envelope, the error body, its per-field entry and its abend aggregate --
+  #       describe types published by services/common-lib and are NOT local
+  #       redefinitions of them. A contract cannot reference a Java type, so the
+  #       shape has to be written out here; what must never happen is that the
+  #       written shape drifts from the published one, because a locally invented
+  #       error or paging shape would compile, serve, and disagree with the eight
+  #       services that share the originals. This is the same discipline the
+  #       reference suite states for record layouts at tests/README.md lines 540
+  #       to 542, where a layout is resolved through one include path and never
+  #       duplicated. Every property name and order below is the shared record's
+  #       own. (2) Assumptions: property names are the record component names
+  #       exactly, because no property-naming strategy is configured anywhere in
+  #       this service or in the shared defaults it imports, so the serialiser
+  #       emits component names verbatim. Renaming one here would produce a
+  #       contract the runtime contradicts on the first response.
+  #       (3) Assumptions: the six schemas this context owns take their field
+  #       widths from two independent readings apiece, the 80-byte record at
+  #       app/cpy/CSUSR01Y.cpy lines 17 to 23 and the symbolic maps cited on each
+  #       property, which is why the widths are expressed as constraints a caller
+  #       is held to rather than as documentation. (4) Refactoring Rationale: the
+  #       fixed-length record's padding is not carried across. SEC-USR-FILLER at
+  #       app/cpy/CSUSR01Y.cpy line 23 is twenty-three bytes that exist to make
+  #       the record eighty bytes long; it addresses no data, no program reads it,
+  #       and a JSON payload has no length to pad, so it appears in no schema.
+  schemas:
+
+    SignOnRequest:
+      type: object
+      description: >-
+        The two credential values of the sign-on screen. The password is
+        forwarded to the Cognito user pool for the sole purpose of that exchange
+        and is never persisted, logged or echoed by this service: the auth
+        schema has no column to hold it, and this is the only place in this
+        contract where the word appears at all.
+      additionalProperties: false
+      required: [userId, password]
+      properties:
+        # Assumptions: the two properties are in the order the sign-on screen
+        #   presents and validates them -- identifier then password -- from
+        #   app/cpy-bms/COSGN00.CPY line 72 ("02 USERIDI PIC X(8).") and line 78
+        #   ("02 PASSWDI PIC X(8)."). The baseline's presence checks run in that
+        #   same order at app/cbl/COSGN00C.cbl lines 118 and 123, so a caller
+        #   submitting both fields blank is told about the identifier first, and
+        #   that is observable.
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 8
+          description: >-
+            The signing-on user's identifier, at most eight characters. Must not
+            be blank; the baseline treats SPACES and LOW-VALUES alike as absent
+            at app/cbl/COSGN00C.cbl line 118.
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 8
+          writeOnly: true
+          description: >-
+            The user's password, at most eight characters, the width the baseline
+            record declared at app/cpy/CSUSR01Y.cpy line 21. Write-only: no
+            operation in this contract ever returns it, and the service stores
+            nothing of it. Must not be blank, per the presence check at
+            app/cbl/COSGN00C.cbl line 123.
+
+    SignOnResponse:
+      type: object
+      description: >-
+        The token set the Cognito user pool minted, with the identifier it was
+        minted for. The caller sends accessToken as a bearer credential on every
+        other operation in this document.
+      additionalProperties: false
+      required: [userId, accessToken, idToken, tokenType, expiresIn]
+      properties:
+        # Refactoring Rationale: there is deliberately NO user-type property here,
+        #   and its absence is the security correction this operation carries. The
+        #   baseline put CDEMO-USER-TYPE (app/cpy/COCOM01Y.cpy lines 26 to 28) into
+        #   the communication area, which the client echoed back on the following
+        #   request, so the value the program branched on was one the client had
+        #   most recently held. Returning an equivalent field here would restore
+        #   exactly that: a client could send back a type it was never issued.
+        #   Authority now lives only in the signed cognito:groups claim, which the
+        #   client cannot alter without invalidating the signature.
+        # Alternatives Considered: returning the group list as a display-only
+        #   convenience, so the browser could pick the administrator menu without
+        #   inspecting the token. Rejected because a field shaped like authority
+        #   invites use as authority: nothing in a response body can stop a client
+        #   branching on it, and a later reader would have no way to tell the
+        #   convenience field from the one just removed. The browser already holds
+        #   the signed token and reads the claim from it, which is one source
+        #   rather than two that could disagree.
+        userId:
+          type: string
+          maxLength: 8
+          description: >-
+            The identifier the tokens were issued for, echoed so the client can
+            render it in the screen title band without decoding a token. It
+            carries no authority of any kind.
+        accessToken:
+          type: string
+          description: >-
+            The pool's access token, to be sent as the HTTP bearer credential.
+            This is the only one of the three tokens this API accepts for
+            authorisation.
+        idToken:
+          type: string
+          description: >-
+            The pool's identity token, describing the authenticated user to the
+            client. It is returned because the browser reads its group claim to
+            choose the administrator or general menu, and it is not accepted for
+            authorisation by any operation here.
+        refreshToken:
+          type: ["string", "null"]
+          description: >-
+            The pool's refresh token where the app client is configured to issue
+            one, and null where it is not. It is not accepted by any operation in
+            this document; renewal is a separate pre-token route outside this
+            contract.
+        tokenType:
+          type: string
+          description: >-
+            The credential scheme the tokens are to be presented under, as the
+            pool reports it. Bearer in every currently supported configuration.
+          examples: ["Bearer"]
+        expiresIn:
+          type: integer
+          format: int32
+          minimum: 1
+          description: >-
+            Lifetime of accessToken in seconds from issue, as the pool reports it.
+            The client re-authenticates or renews before it elapses; this service
+            rejects an expired token rather than extending it.
+
+    UserSummary:
+      type: object
+      description: >-
+        One row of the user list, carrying the four values the list screen showed
+        per row. It is a projection for browsing, not the full record: a caller
+        that needs the Cognito subject reads the individual row.
+      additionalProperties: false
+      required: [userId, firstName, lastName, userType]
+      properties:
+        # Assumptions: the four properties are the four the list screen displayed
+        #   per row, at the widths app/cpy-bms/COUSR00.CPY declares for its tenth
+        #   row group -- USRID10I PIC X(8) at line 348, FNAME10I PIC X(20) at line
+        #   354, LNAME10I PIC X(20) at line 360 and UTYPE10I PIC X(1) at line 366.
+        #   The tenth group is cited rather than the first because all ten are
+        #   identical in shape, so any one of them establishes the widths, and the
+        #   tenth additionally establishes the row COUNT: it is the last group the
+        #   map declares, which is what makes ten the whole of the page rather
+        #   than merely the first ten of something longer.
+        # Alternatives Considered: carrying the row's selection marker,
+        #   SEL0001I PIC X(1) at app/cpy-bms/COUSR00.CPY line 72 and its nine
+        #   siblings, through which the operator typed U or D against a row.
+        #   Rejected because it is a screen input rather than data about the user:
+        #   it selected an action, and an action is now expressed by the client
+        #   calling the update or delete operation on that row's identifier
+        #   directly. Carrying it would put a mutable, meaningless field on every
+        #   row of every page.
+        # Assumptions: the screen's other fields are excluded as terminal chrome
+        #   with no analogue -- the shared transaction name, both title lines, the
+        #   current date and time, the program name and the leading FILLER that
+        #   head all five maps, plus the page-number field. The sign-on map's
+        #   APPLIDI at app/cpy-bms/COSGN00.CPY line 60 and SYSIDI at line 66 are
+        #   excluded on the same ground: they identify the CICS region and the
+        #   system serving the terminal, which no REST response has a counterpart
+        #   for.
+        userId:
+          type: string
+          maxLength: 8
+          description: >-
+            The row's identifier, at most eight characters. It is the value a
+            caller puts in the path to read, update or delete that row.
+        firstName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's given name, at most twenty characters, from
+            SEC-USR-FNAME at app/cpy/CSUSR01Y.cpy line 19. Trailing blanks in the
+            fixed-length record were padding and are not part of the value.
+        lastName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's family name, at most twenty characters, from SEC-USR-LNAME
+            at app/cpy/CSUSR01Y.cpy line 20, with padding likewise excluded.
+        userType:
+          type: string
+          minLength: 1
+          maxLength: 1
+          enum: ["A", "U"]
+          description: >-
+            The user's role: A for administrator, U for ordinary user. These two
+            are the whole domain, from the condition names on CDEMO-USER-TYPE at
+            app/cpy/COCOM01Y.cpy lines 26 to 28, and the users table enforces the
+            same pair with a check constraint. A determines whether the account
+            is granted the carddemo-admin authority at sign-on, so it is
+            administrative data rather than a display attribute.
+
+
+    # Refactoring Rationale: the create and update bodies are two separate schemas
+    #   and one is NOT derived from the other, even though the update body's three
+    #   properties are a subset of the create body's five. The baseline validated
+    #   its screens field by field and stopped at the first fault, in physical
+    #   screen order, so which error a user is shown when several fields are wrong
+    #   is observable behaviour and it genuinely differs between the two screens.
+    #   Create runs first name, last name, identifier, then type
+    #   (app/cbl/COUSR01C.cbl lines 120, 126, 132 and 144, over the map order at
+    #   app/cpy-bms/COUSR01.CPY lines 60, 66, 72 and 84). Update runs identifier,
+    #   first name, last name, password, then type (app/cbl/COUSR02C.cbl lines 182,
+    #   188, 194, 200 and 206, over app/cpy-bms/COUSR02.CPY lines 60, 66, 72, 78
+    #   and 84); the identifier has become the path parameter and the password has
+    #   gone with the credential, leaving lines 188, 194 and 206 as exactly the
+    #   three that survive. Deriving one schema from the other with a composition
+    #   keyword would merge two orders into one and silently change which fault a
+    #   caller is told about first on one of the two screens.
+    # Alternatives Considered: a single request schema with the identifier and
+    #   subject marked optional, used by both operations. Rejected on two counts
+    #   beyond the ordering above: it would make the identifier optional on create
+    #   where it is mandatory, and it would make it accepted on update where the
+    #   path already carries it, so a body could name a different user than the
+    #   path and the contract would have to say which wins. Two schemas cannot
+    #   express that contradiction at all.
+
+    CreateUserRequest:
+      type: object
+      description: >-
+        The values a new user row is created from. There is deliberately no
+        password property: the baseline stored an eight-character password in the
+        clear at app/cpy/CSUSR01Y.cpy line 21, compared it in the clear at
+        app/cbl/COSGN00C.cbl line 223, and wrote it back onto the update screen at
+        app/cbl/COUSR02C.cbl line 169, and the migrated design ends all three by
+        making the Cognito user pool the sole holder of the credential. This
+        service therefore creates no credential; provisioning creates the pool
+        account and supplies its subject as cognitoSub below, and the sibling
+        migration db/migration/V1__auth.sql has no column any password property
+        here could be stored in.
+      additionalProperties: false
+      required: [firstName, lastName, userId, userType, cognitoSub]
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: >-
+            The new user's given name, at most twenty characters. Must not be
+            blank; validated first, per app/cbl/COUSR01C.cbl line 120.
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: >-
+            The new user's family name, at most twenty characters. Must not be
+            blank; validated second, per app/cbl/COUSR01C.cbl line 126.
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 8
+          description: >-
+            Identifier for the new row and its primary key, at most eight
+            characters. Must not be blank, per app/cbl/COUSR01C.cbl line 132, and
+            must not already exist -- a duplicate is refused with 409 rather than
+            overwriting the existing row.
+        userType:
+          type: string
+          minLength: 1
+          maxLength: 1
+          enum: ["A", "U"]
+          description: >-
+            The new user's role, A for administrator or U for ordinary user, the
+            whole domain per app/cpy/COCOM01Y.cpy lines 26 to 28. Must not be
+            blank, per app/cbl/COUSR01C.cbl line 144. Choosing A grants that user
+            the carddemo-admin authority at sign-on, including the authority to
+            reach these operations.
+        # Assumptions: this property has no baseline counterpart at all -- it
+        #   exists because identity moved to a managed user pool, and it is what
+        #   makes the mapping between a pool account and a local row total and
+        #   one-to-one. The users table declares it NOT NULL UNIQUE, so a row
+        #   without one could never be authenticated and two rows sharing one would
+        #   resolve a single token to conflicting identities; both are refused by
+        #   the database rather than only by this contract.
+        cognitoSub:
+          type: string
+          format: uuid
+          description: >-
+            The subject identifier of the already-provisioned Cognito account this
+            row represents, as a UUID. Supplied by whatever provisioned that
+            account, because this service does not create pool accounts; it is
+            required, must be unique across rows, and is the only link between a
+            presented token and this row.
+
+    UpdateUserRequest:
+      type: object
+      description: >-
+        The three values an existing user row may change. Two absences are
+        deliberate. There is no identifier property, because the identifier is the
+        primary key and travels in the request path: accepting it in the body too
+        would allow a request whose path and body named different users, and the
+        contract would then have to arbitrate. There is no password property, for
+        the reason given on the create body -- which also means the baseline's
+        "Password can NOT be empty..." branch (app/cbl/COUSR02C.cbl line 200, and
+        its twin at app/cbl/COUSR01C.cbl line 138) has no counterpart anywhere in
+        this contract, since the service neither accepts nor stores a password on
+        create or update. That branch is recorded here as removed rather than left
+        to look overlooked.
+      additionalProperties: false
+      required: [firstName, lastName, userType]
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: >-
+            The user's given name, at most twenty characters. Must not be blank;
+            validated first among the three, per app/cbl/COUSR02C.cbl line 188.
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: >-
+            The user's family name, at most twenty characters. Must not be blank;
+            validated second, per app/cbl/COUSR02C.cbl line 194.
+        userType:
+          type: string
+          minLength: 1
+          maxLength: 1
+          enum: ["A", "U"]
+          description: >-
+            The user's role, A for administrator or U for ordinary user. Must not
+            be blank; validated third, per app/cbl/COUSR02C.cbl line 206. Changing
+            it grants or removes that user's carddemo-admin authority at their
+            next sign-on, so it is the one field here with an authorisation
+            consequence.
+
+    UserResponse:
+      type: object
+      description: >-
+        A complete stored user row, returned by the read, create and update
+        operations so that one client type covers all three. It carries the five
+        columns db/migration/V1__auth.sql defines and nothing else -- notably no
+        password, which that migration has no column for.
+      additionalProperties: false
+      required: [userId, firstName, lastName, userType, cognitoSub]
+      properties:
+        userId:
+          type: string
+          maxLength: 8
+          description: >-
+            The row's identifier and primary key, at most eight characters. Stored
+            blank-padded to a declared width; the padding is a storage artefact and
+            not part of the value.
+        firstName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's given name, at most twenty characters.
+        lastName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's family name, at most twenty characters.
+        userType:
+          type: string
+          minLength: 1
+          maxLength: 1
+          enum: ["A", "U"]
+          description: >-
+            The user's role, A for administrator or U for ordinary user, per
+            app/cpy/COCOM01Y.cpy lines 26 to 28. This is the stored role of the
+            row being described; it says nothing about the authority of the caller
+            that requested it, which comes from that caller's own token.
+        cognitoSub:
+          type: string
+          format: uuid
+          description: >-
+            The Cognito subject identifier this row is bound to. Returned so an
+            administrator can confirm which pool account a row represents, which
+            is the only way to tell two similarly named users apart.
+
+
+    CursorToken:
+      type: string
+      maxLength: 256
+      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      description: >-
+        An opaque, authenticated, expiring position in an ordered result set,
+        minted by this service and echoed back by the caller unchanged. Its three
+        period-separated parts are a version marker, a payload and an
+        authentication code; a caller must not parse, edit or construct one,
+        because the code covers both the payload and a binding naming the query
+        and the subject the token was issued to, so an altered or borrowed token
+        fails to open and is refused with 400. The shape is declared once here and
+        referenced by both cursor parameters, so the two cannot acquire different
+        bounds. It is a string in every direction and never a number.
+
+    PageResponse:
+      type: object
+      description: >-
+        One page of users, positioned by key, together with everything needed to
+        continue in either direction. A page holds at most ten rows -- the invariant
+        size described on hasNext below -- and there is no total count of rows or
+        pages anywhere in this envelope, because supplying one would require
+        counting the whole table on every request that only ever returns ten rows.
+      additionalProperties: false
+      required: [items, firstKey, lastKey, nextCursor, prevCursor, hasNext, hasPrev]
+      properties:
+        # Assumptions: these seven properties, in this order, are the seven
+        #   components of the shared page envelope that services/common-lib
+        #   publishes, so what a caller receives here is that record serialised and
+        #   nothing else. A migration-plan summary of that type quotes an earlier
+        #   four-component shape -- rows, the two row identities and forward
+        #   availability -- and this contract follows the committed type rather
+        #   than the summary, because the runtime serialises the committed type and
+        #   a four-property contract would be contradicted by the first response
+        #   it described.
+        # Refactoring Rationale: the three additional components exist because the
+        #   four-component shape left states reachable that a caller could not act
+        #   on. Separating the two request positions from the two row identities is
+        #   what closes it: a page whose every row was filtered away after being
+        #   read has a scan position but no last row, so under the older shape it
+        #   reported that more rows followed while carrying nothing to continue
+        #   from. Stating backward availability rather than inferring it from the
+        #   presence of a first row removes the matching fault at the other end,
+        #   where the opening page of every set claimed a previous page that did
+        #   not exist.
+        items:
+          type: array
+          maxItems: 10
+          description: >-
+            The rows of this page in ascending user-identifier order, at most ten.
+            Never null: an exhausted page, or one whose rows were all filtered
+            away, carries an empty array instead.
+          items:
+            $ref: "#/components/schemas/UserSummary"
+        # Refactoring Rationale: both row identities are taken from the rows this
+        #   page actually returned, which is a correction to the baseline's
+        #   behaviour on a short page. The baseline wrote its last-row cursor only
+        #   on the tenth row of a full page (app/cbl/COUSR00C.cbl line 435) and its
+        #   first-row cursor only on the first (line 389), so the second through
+        #   ninth rows wrote no cursor at all and a final page of fewer than ten
+        #   rows left the stored last-row value pointing at whatever the previous
+        #   full page had left behind. Deriving both from the first and last
+        #   returned row makes a short page as navigable as a full one. The
+        #   divergence is documented, not fixed in the baseline: no COBOL is
+        #   altered.
+        firstKey:
+          description: >-
+            Sealed cursor identifying the first row returned in items, or null
+            exactly when items is empty -- an empty page has no returned row for a
+            cursor to identify. A caller sends this value back, with direction
+            previous, to read the page before this one.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        lastKey:
+          description: >-
+            Sealed cursor identifying the last row returned in items, or null
+            exactly when items is empty. It identifies the last row the caller
+            actually received and never the surplus row read to settle hasNext. A
+            caller sends this value back, with direction next, to read the page
+            after this one.
+          oneOf:
+            - $ref: "#/components/schemas/CursorToken"
+            - type: "null"
+        nextCursor:
+          type: ["string", "null"]
+          maxLength: 256
+          description: >-
+            The sealed position a forward request is issued from, present exactly
+            when hasNext is true and null otherwise. Normally identical to
+            lastKey; it is a separate property because a page whose rows were all
+            filtered away after being read still has a scan position to continue
+            from while having no last returned row to name.
+        prevCursor:
+          type: ["string", "null"]
+          maxLength: 256
+          description: >-
+            The sealed position a backward request is issued from, present exactly
+            when hasPrev is true and null otherwise. Normally identical to
+            firstKey, and separate for the same filtered-away reason as
+            nextCursor.
+        # Assumptions: forward availability is discovered by reading one row beyond
+        #   the page and observing whether that row exists -- never from a count of
+        #   rows or pages, which this envelope does not carry. That is precisely
+        #   the baseline's own mechanism: after filling its ten-row screen it
+        #   issued one further read at app/cbl/COUSR00C.cbl line 311 and set its
+        #   indicator true at line 313 when a row came back, false at line 315 when
+        #   the read failed, and false again on the separate end-of-file path at
+        #   line 318. The page size of ten is set by the contract and is not a
+        #   caller's choice, on two independent readings: the screen's row table is
+        #   "02 USER-REC OCCURS 10 TIMES." at app/cbl/COUSR00C.cbl line 57, and the
+        #   map itself declares exactly ten row groups at a thirty-line stride,
+        #   from SEL0001I at app/cpy-bms/COUSR00.CPY line 72 through SEL0010I at
+        #   line 342 with that row's four data fields at lines 348, 354, 360 and
+        #   366.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page follows this one. False on the last page and
+            false when this page is empty because the set is exhausted. A caller
+            binds the forward paging control to this value, which is what the
+            baseline's own next-page indicator expressed.
+        hasPrev:
+          type: boolean
+          description: >-
+            Whether a page precedes this one. False for a request that supplied no
+            cursor, since that is by definition the first page, and true for any
+            page reached from a neighbouring one. It is stated by the service from
+            the request it answered, not inferred from this page's contents.
+
+    # WHAT: the error body every failing operation returns, and the two nested
+    #       shapes it carries.
+    # WHY : (1) Assumptions: these three describe the shared error record, its
+    #       per-field entry and its abend aggregate exactly as
+    #       services/common-lib publishes them, including property order, so a
+    #       client written against this contract handles the errors of all eight
+    #       services. (2) Assumptions: no internal diagnostic is exposed by any of
+    #       them, and that is a boundary rather than an omission. The baseline
+    #       programs write their CICS response and reason codes to the operator
+    #       log alongside the user's message -- at app/cbl/COUSR00C.cbl lines 608,
+    #       642 and 676, app/cbl/COUSR02C.cbl lines 347 and 384, and
+    #       app/cbl/COUSR03C.cbl lines 294 and 330 -- and those codes stay on the
+    #       server side of this contract. They describe which platform mechanism
+    #       failed, which tells a caller nothing it can act on and tells an
+    #       attacker something it can. The correlation identifier is what crosses
+    #       the boundary instead: it ties the caller's report to the server's own
+    #       record of the same failure. (3) Assumptions: the media type of every
+    #       error response is application/problem+json while every success is
+    #       application/json, so a client can route a response on its content type
+    #       before parsing it.
+    ApiError:
+      type: object
+      description: >-
+        A failure, described in the shape every CardDemo service returns. It
+        carries a stable code to match on, a human-readable message reproduced
+        from the originating baseline program where that failure has one, the
+        offending fields where the failure is attributable to fields, and the
+        correlation identifier to quote when reporting it.
+      additionalProperties: false
+      required: [code, secondaryCode, severity, subsystem, status, correlationId, path, timestamp, fieldErrors]
+      properties:
+        code:
+          type: string
+          description: >-
+            Stable machine-readable identifier for the failure, matched on by
+            clients and by operational tooling and never reworded. The values this
+            context produces are CARDDEMO-0400 for a validation failure,
+            CARDDEMO-0404 for an absent row, CARDDEMO-0409 for a duplicate
+            identifier and CARDDEMO-0500 for an internal failure.
+        secondaryCode:
+          type: string
+          description: >-
+            Subordinate identifier qualifying code where the failure has a second
+            classification, and the empty string where it has none. Empty rather
+            than absent, so a client need not distinguish a missing property from
+            an unqualified failure.
+        # Assumptions: this property is genuinely nullable and null does NOT mean
+        #   the same thing as the empty string. The baseline can distinguish a
+        #   message field that was never set from one deliberately set to blanks,
+        #   so the shared record keeps both states: null is message-off and empty
+        #   is message-present-but-blank. Collapsing them would merge two
+        #   observable conditions.
+        # Assumptions: message text is carried character for character from the
+        #   program line it originates on, including spacing before an ellipsis,
+        #   which differs per program and even within one program and is therefore
+        #   never normalised -- see the note in this file's header. The field these
+        #   strings were displayed in is 78 characters wide in all five auth maps
+        #   (app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372, COUSR01.CPY
+        #   line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84), and none of the
+        #   five programs copies the templated field-highlight book, so the
+        #   narrower 75-character width belonging to the shared error field does
+        #   not govern this context. The longest string carried here is 44
+        #   characters, so no message is ever shortened to fit either width.
+        message:
+          type: ["string", "null"]
+          maxLength: 78
+          description: >-
+            The human-readable sentence for this failure, reproduced verbatim from
+            its originating program where one exists, or null where the failure
+            has no message. The per-operation responses above name the exact
+            literal each status carries, together with the program and line it was
+            read from.
+        severity:
+          type: string
+          enum: [LOG, INFO, WARNING, CRITICAL]
+          description: >-
+            Operational level of the failure, drawn from the baseline's own
+            four-value domain rather than a newly invented ladder, so an operator
+            reading a migrated failure sees the level the platform would have
+            reported.
+        subsystem:
+          type: string
+          enum: [APPLICATION, CICS, IMS, RELATIONAL, QUEUE, OBJECT_STORE]
+          description: >-
+            Which part of the platform the failure arose in, from the baseline's
+            own six-value domain. Failures from this context are APPLICATION or
+            RELATIONAL; the remaining values exist because the enumeration is
+            shared with services whose failures can arise elsewhere, and pruning
+            it per service would give one name six different meanings.
+          examples: ["APPLICATION"]
+        status:
+          type: integer
+          format: int32
+          minimum: 400
+          maximum: 599
+          description: >-
+            The HTTP status this response carries, restated inside the body so
+            that a logged or archived payload is self-describing once separated
+            from its response envelope.
+        correlationId:
+          type: string
+          maxLength: 24
+          description: >-
+            Identity of the unit of work that failed, the same value as the
+            X-Correlation-Id response header, and the empty string if the request
+            carried none. Quote it when reporting a failure: it is the handle that
+            ties this response to the server-side record, which is what makes
+            withholding internal diagnostics workable rather than merely opaque.
+        path:
+          type: string
+          description: >-
+            The request path that failed, so a client reporting a problem need not
+            reconstruct which call produced it. The empty string where no path is
+            available.
+        timestamp:
+          type: string
+          maxLength: 26
+          description: >-
+            The instant of the failure in the baseline-compatible
+            twenty-six-character form, to microsecond precision, and the empty
+            string where no reading was supplied. It is the time the failure was
+            recorded and is not read from the wall clock when the body is
+            assembled.
+        fieldErrors:
+          type: array
+          description: >-
+            One entry per offending field, in the order the validating code
+            reported them, which is the baseline's physical screen order -- so the
+            first entry is the fault a 3270 user would have been shown first.
+            Never null: it is an empty array when the failure is not attributable
+            to particular fields, as with a conflict or an internal failure.
+          items:
+            $ref: "#/components/schemas/FieldError"
+        abend:
+          description: >-
+            The structured abend aggregate when the failure was an abend, and
+            absent otherwise. Nullable rather than always present because an abend
+            is genuinely absent from most failures rather than empty in them.
+          oneOf:
+            - $ref: "#/components/schemas/AbendDetail"
+            - type: "null"
+
+    FieldError:
+      type: object
+      description: >-
+        One offending field within a failed request: which field, what was wrong
+        with it, and the message the baseline showed for it.
+      additionalProperties: false
+      required: [field, state, message]
+      properties:
+        # Assumptions: the key is the logical field name, derived from where the
+        #   baseline homed the cursor on that branch but not identical to it. The
+        #   cursor targets are per-branch and are not always the field at fault --
+        #   app/cbl/COUSR02C.cbl homes to the first-name field on its catch-all arm
+        #   at lines 210 to 212 regardless of which value was rejected -- so
+        #   reproducing the target would sometimes blame the wrong field. The keys
+        #   this context produces are userId, password, firstName, lastName,
+        #   userType and confirmed.
+        field:
+          type: string
+          description: >-
+            Name of the offending field as it appears in the request: a property of
+            the request body, a path parameter, or a query parameter. The names
+            this context produces are userId, password, firstName, lastName,
+            userType and confirmed.
+        # Assumptions: the three states are the shared validation domain, migrated
+        #   from the baseline's per-field flag convention where a field was either
+        #   acceptable, present but rejected, or not supplied at all. BLANK is kept
+        #   distinct from NOT_OK because the baseline treated them differently on
+        #   screen: a blank field additionally received a literal asterisk marker,
+        #   whereas a rejected value did not. VALID appears in the domain because
+        #   the enumeration is the shared one; an entry in this array is by
+        #   definition not valid.
+        state:
+          type: string
+          enum: [VALID, NOT_OK, BLANK]
+          description: >-
+            Why the field is listed: NOT_OK for a value that was supplied and
+            rejected, BLANK for one that was absent or blank. A caller rendering
+            the baseline's presentation shows the asterisk marker for BLANK only.
+        message:
+          type: string
+          maxLength: 78
+          description: >-
+            The message this field's failure produced, carried verbatim from its
+            originating program line, spacing included. The per-operation responses
+            above list the exact literal each field can produce with its source
+            line.
+
+    AbendDetail:
+      type: object
+      description: >-
+        The externally safe projection of an abend. Its four properties mirror the
+        ABEND-DATA structure at app/cpy/CSMSG02Y.cpy lines 21 to 29, but only the
+        first carries a value: the shared error record projects an abend to this
+        safe form before serialising it, so the culprit and reason are blanked and
+        the message is replaced with a constant sentence. That is deliberate -- the
+        culprit names an internal program and the reason carries a platform
+        diagnostic, and neither is something a client can act on.
+      additionalProperties: false
+      required: [abendCode, abendCulprit, abendReason, abendMsg]
+      properties:
+        abendCode:
+          type: string
+          maxLength: 4
+          description: >-
+            The abend code, at most four characters, from ABEND-CODE at
+            app/cpy/CSMSG02Y.cpy line 22. The one component retained in the
+            external projection, because it classifies the failure without naming
+            any internal component.
+        abendCulprit:
+          type: string
+          maxLength: 8
+          description: >-
+            Always the empty string in a response. The property exists because the
+            shared record's shape includes it, mirroring ABEND-CULPRIT at
+            app/cpy/CSMSG02Y.cpy line 24, but the external projection blanks it
+            rather than naming the failing internal program.
+        abendReason:
+          type: string
+          maxLength: 50
+          description: >-
+            Always the empty string in a response, for the same reason as
+            abendCulprit. It mirrors ABEND-REASON at app/cpy/CSMSG02Y.cpy line 26,
+            whose value is a platform diagnostic that stays on the server side of
+            this contract.
+        abendMsg:
+          type: string
+          maxLength: 72
+          description: >-
+            A constant sentence asking the caller to quote the correlation identifier
+            when reporting the failure. It occupies the position of ABEND-MSG at
+            app/cpy/CSMSG02Y.cpy line 28 and replaces whatever that field held,
+            so the width is preserved while the internal text is not disclosed.
+

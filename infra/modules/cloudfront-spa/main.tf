@@ -760,6 +760,7 @@ resource "aws_s3_bucket_policy" "spa" {
 # =============================================================================
 
 resource "aws_s3_bucket" "logs" {
+  #checkov:skip=CKV_AWS_145:CloudFront standard log delivery cannot write a destination whose default encryption is SSE-KMS, so this bucket carries AES256; the constraint and the rejected alternative are recorded in full on the encryption configuration below. Public-access blocking, enforced bucket ownership, versioning and the delivery-scoped bucket policy are the compensating controls.
   bucket = local.log_bucket_name
 
   # Trade-offs: the same flag and the same reasoning as the origin bucket apply:

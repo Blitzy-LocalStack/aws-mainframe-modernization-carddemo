@@ -1,0 +1,298 @@
+-- =============================================================================
+-- services/auth-service/src/test/resources/fixtures/users-keyset.sql
+-- -----------------------------------------------------------------------------
+-- WHAT: Supplies the contiguous ascending row volume that makes keyset
+--       pagination over the Flyway-created auth.users table observable at the
+--       baseline page size of ten.
+--       Consumer: UserRepositoryIT loads this file as a forward contract and
+--       drives the forward query, the backward query, the size-plus-one probe,
+--       the exact hasNext boundary, the short final page and both empty-cursor
+--       directions from this one block by varying only the cursor.
+--       Load result: twenty-one deterministic rows, KSET0001 through KSET0021,
+--       in strict ascending key order, spanning both the A and U user types.
+--       Failure modes: a repeated cognito_sub is rejected by UNIQUE, a user_type
+--       outside A/U is rejected by CHECK, and an identifier wider than eight
+--       characters is rejected by the CHAR(8) primary-key contract. The fourth
+--       failure mode is the one to watch, because it raises nothing at all: one
+--       stray row shifts every cursor boundary tabulated in (9) below, so the
+--       keyset assertions still run, still pass, and measure the wrong thing.
+--
+-- WHY (non-obvious design decisions):
+--       (1) Alternatives Considered: JSON was rejected because it cannot carry
+--       adjacent comments, and the house fixed-width text format was rejected
+--       because auth-service performs no fixed-width decoding, the online CICS
+--       flow has no golden master, and app/cpy/CSUSR01Y.cpy L17-L23 declares
+--       only PIC X fields, so there is no monetary or encoded-decimal value to
+--       image. tests/README.md L540-L542 requires copybook layouts to stay
+--       single-sourced, so this file cites the layout rather than restating it.
+--       Trade-offs: SQL ties the fixture to PostgreSQL syntax, in exchange for
+--       being directly loadable and for keeping every rationale beside its row.
+--       (2) Alternatives Considered: tests/fixtures/README.md L59-L64 records
+--       rationale in a companion document, but states its own reason plainly -
+--       those fixtures are static .txt files that cannot carry docstrings. SQL
+--       can, so a README here would duplicate rationale and, worse, could not
+--       satisfy the adjacency the rule requires for a per-row boundary note.
+--       Trade-offs: in-file explanation makes this fixture long, and accepts
+--       that length to remove a second artifact that could drift away from the
+--       rows it describes.
+--       (3) Assumptions: this header and the rationale blocks below the closing
+--       ruler are the SQL analogue of a docstring, and the analogue is written
+--       down rather than merely applied so that a reviewer can hold later edits
+--       to the same shape. WHAT and Consumer carry the purpose and the input
+--       contract, Load result carries the return analogue, and Failure modes
+--       carries the error analogue. The rule's single-line relief for trivial
+--       accessors has no analogue for a data file and is not claimed here.
+--       (4) Assumptions: this fixture is MECHANICALLY UNCHECKED, and authoring
+--       discipline is the only protection. config/checkstyle/checkstyle.xml L185
+--       scopes the Checker to fileExtensions java, so no Checkstyle rule reaches
+--       a .sql file at all; config/checkstyle/suppressions.xml L216-L251 is a
+--       defensive path guard that its own comment records as never load-bearing
+--       for fixture data; and tests/README.md L549 makes review the gate
+--       instead. Nothing in the build will report a missing rationale here.
+--       (5) Assumptions: ten rows to a page is a baseline contract rather than a
+--       tunable, and it rests on two LIVE authorities. First, the
+--       POPULATE-USER-DATA paragraph at app/cbl/COUSR00C.cbl L384 opens an
+--       EVALUATE at L386 whose only row branches are WHEN 1 at L387 through
+--       WHEN 10 at L433, closed by WHEN OTHER and CONTINUE at L439-L440.
+--       Second, app/cpy-bms/COUSR00.CPY declares exactly ten row field
+--       families, USRID01I at L78 through USRID10I, each with its own
+--       FNAMEnnI, LNAMEnnI and UTYPEnnI. The OCCURS 10 TIMES declaration at
+--       COUSR00C L56-L57 is NOT relied on: a search for WS-USER-DATA, USER-REC
+--       and USER-NAME returns only the declaration lines L56, L57 and L62 and
+--       no procedure-division reference, so that block is dead and cannot
+--       warrant the count on its own. The card-list screen's count does not
+--       transfer either; each screen carries its own occurrence total.
+--       (6) Assumptions: app/cbl/COUSR00C.cbl L66 copies COCOM01Y and extends
+--       it at L67 with CDEMO-CU00-USRID-FIRST PIC X(08) at L68,
+--       CDEMO-CU00-USRID-LAST PIC X(08) at L69 and CDEMO-CU00-PAGE-NUM
+--       PIC 9(08) at L70. A first-key and last-key pair carried across the
+--       pseudo-conversational gap already IS a keyset cursor, so the target
+--       envelope of firstKey, lastKey and hasNext is a one-to-one mapping
+--       rather than an approximation, and this block is shaped to prove it.
+--       (7) Assumptions: two query shapes read this block. Forward selects
+--       WHERE user_id > lastKey ORDER BY user_id ASC LIMIT size + 1, where the
+--       extra row is a probe that sets hasNext and is then discarded from the
+--       returned items. Backward selects WHERE user_id < firstKey ORDER BY
+--       user_id DESC LIMIT size + 1 and reverses the retained rows in memory to
+--       ascending, which is the direct analogue of READPREV. Both are
+--       deterministic only if the keys totally order, which is why every
+--       identifier below is exactly eight characters with a zero-padded
+--       ascending counter, making lexical order and numeric order the same.
+--       (8) Refactoring Rationale: offset pagination is rejected outright, not
+--       merely disfavoured. Skipping a counted number of rows repeats and drops
+--       rows once a concurrent insert lands inside the range already scanned,
+--       and that is an observable behaviour change which browsing by key does
+--       not have. The baseline never counted rows to find its position either.
+--       Assumptions: the counter fields are display state only. PAGENUMI at
+--       app/cpy-bms/COUSR00.CPY L60 is written to the screen, and
+--       CDEMO-CU00-PAGE-NUM is read at app/cbl/COUSR00C.cbl L248 solely to
+--       decide whether the top-of-list refusal at L251-L252 is due. Neither
+--       computes a row position, so this fixture carries no ordinal at all.
+--       (9) Alternatives Considered: twenty rows were rejected. Twenty reach the
+--       exact hasNext FALSE boundary but cannot also produce a page shorter than
+--       ten, and adding a second twenty-row file to get one would repeat twenty
+--       near-identical rows for no new coverage while risking a primary-key and
+--       cognito_sub collision with this one. Twenty-one reaches every case from
+--       a single block.
+--       Trade-offs: one row past two whole pages looks arbitrary until the
+--       arithmetic is written out, so it is written out here rather than left in
+--       a test class that does not exist yet.
+--       Assumptions: at page size ten this block yields exactly these outcomes,
+--       and every keyset assertion in UserRepositoryIT depends on them holding.
+--       cursor            items returned             probe  flag
+--       empty             KSET0001..KSET0010 (10)    hit    hasNext TRUE
+--       last=KSET0010     KSET0011..KSET0020 (10)    hit    hasNext TRUE
+--       last=KSET0011     KSET0012..KSET0021 (10)    miss   hasNext FALSE
+--       last=KSET0020     KSET0021 (1)               miss   hasNext FALSE
+--       first=KSET0012    KSET0002..KSET0011 (10)    hit    hasPrev TRUE
+--       Probe records whether an eleventh row was found. Line three is the exact
+--       boundary: a full page of ten with nothing at all beyond it. Line four is
+--       the short final page. Line five reads backward, returning KSET0011 down
+--       to KSET0002 in descending order for reversal to ascending, with KSET0001
+--       found as its probe.
+--       (10) Refactoring Rationale: the short final page exists in this block
+--       because the baseline leaves its last-key cursor stale, and this is the
+--       row set that pins that divergence. At app/cbl/COUSR00C.cbl L387-L389 the
+--       WHEN 1 branch is the only writer of CDEMO-CU00-USRID-FIRST, at
+--       L433-L435 the WHEN 10 branch is the only writer of
+--       CDEMO-CU00-USRID-LAST, and L439-L440 make WHEN OTHER do nothing. On a
+--       page of fewer than ten rows WHEN 10 never fires, so the last-key field
+--       keeps whatever value the previous turn left in it. The target declines
+--       parity and sets lastKey from the actual last returned row; the COBOL is
+--       untouched, and the divergence stays registered in
+--       docs/architecture/cobol-to-service-traceability.md.
+--       (11) Assumptions: the two empty-cursor sentinels are asymmetric and both
+--       have to stay observable. app/cbl/COUSR00C.cbl L239-L243 and L262-L266
+--       apply the SAME test, = SPACES OR LOW-VALUES, but substitute DIFFERENT
+--       values: LOW-VALUES when reading backward at L240 and HIGH-VALUES when
+--       reading forward at L263. A single null sentinel in the target would mask
+--       that difference, so the block deliberately makes both ends reachable -
+--       KSET0001 as the first-row boundary an empty backward cursor lands on,
+--       and KSET0021 as the last-row boundary an empty forward cursor walks to.
+--       The two guarded refusals sit at L248 with L251-L252 and at L270 with
+--       L273-L274.
+--       (12) Assumptions: app/cpy/COCOM01Y.cpy L26-L28 is the domain authority,
+--       declaring CDEMO-USER-TYPE PIC X(01) with 88-level values A for
+--       administrator and U for user. app/cpy/CSUSR01Y.cpy L22 establishes the
+--       one-character width only; that copybook declares no 88-level value
+--       anywhere, so it cannot close the domain. app/cpy-bms/COUSR00.CPY L96
+--       independently shows UTYPE01I PIC X(1), not a wider field.
+--       (13) Assumptions: the two name fields stay separate, following
+--       app/cpy/CSUSR01Y.cpy L19-L20 and app/cpy-bms/COUSR00.CPY L84 and L90,
+--       twenty characters each. The concatenated USER-NAME PIC X(25) at
+--       app/cbl/COUSR00C.cbl L62 belongs to the dead block that item (5) names
+--       at L56-L62, and is deliberately not modelled.
+--       (14) Assumptions: PostgreSQL blank-pads CHAR on retrieval and does not
+--       pad VARCHAR, so user_id and user_type come back padded while the two
+--       names do not, and the mapper trims them on read. The literals below are
+--       logical values. Every identifier is exactly eight characters, so the
+--       cursor comparisons in (7) carry no padding ambiguity; a shorter key
+--       would be compared against its padded stored form and could order
+--       differently from the arithmetic in (9).
+--       (15) Assumptions: U carries two unrelated meanings in the baseline and
+--       only one of them belongs here. At app/cpy/COCOM01Y.cpy L28 it means
+--       user. In the list-screen selection path it means update, at
+--       app/cbl/COUSR00C.cbl L74 and L189-L190, with D for delete at L200 and
+--       the refusal literal at L212, over the screen field SEL0001I at
+--       app/cpy-bms/COUSR00.CPY L72. auth.users has no selection column, so
+--       every U below carries the user-type meaning. Mixing the two would
+--       silently change what every list assertion is measuring.
+--       (16) Assumptions: the KSET prefix and the b2 marker inside each
+--       cognito_sub keep this file disjoint from users.sql, which reserves BASE
+--       and a1 for itself. Disjointness is load-bearing because cognito_sub is
+--       NOT NULL UNIQUE and V1__auth.sql seeds no rows, so one duplicated value
+--       rejects the entire load.
+--       Trade-offs: BASE sorting ahead of KSET is a diagnostic aid only - it
+--       makes a mis-load obvious in failure output. It is NOT the isolation
+--       mechanism; the unqualified DELETE below is.
+--       (17) Refactoring Rationale: the target declines parity with the legacy
+--       cleartext authenticator, which is the one place in this migration where
+--       parity is declined outright. The baseline declares it at
+--       app/cpy/CSUSR01Y.cpy L21, compares it directly at app/cbl/COSGN00C.cbl
+--       L223, writes it at app/cbl/COUSR01C.cbl L157 and returns it to the
+--       screen at app/cbl/COUSR02C.cbl L169. Cognito performs authentication, so
+--       only the subject reference persists and there is no column here to fill.
+--       Assumptions: app/cpy/CSUSR01Y.cpy L17-L23 is provenance only. Its
+--       verified offsets are 0, 8, 28, 48, 56 and 57 for eighty bytes in total,
+--       and bytes 48-55 are INERT SPACES in any provenance rendering with no
+--       target value whatsoever. The inherited 68/69 claim is rejected because
+--       69 + 23 is 92, past the record length. The delete path already carries
+--       none of it: app/cpy-bms/COUSR03.CPY L78 holds USRTYPEI PIC X(1) exactly
+--       where L78 of COUSR01.CPY and COUSR02.CPY hold the eight-character entry
+--       field, and app/cbl/COUSR03C.cbl references neither.
+-- =============================================================================
+
+-- Alternatives Considered: TRUNCATE TABLE was rejected because its ACCESS
+-- EXCLUSIVE lock buys nothing here - auth.users is the only table in the schema,
+-- so there is no sequence to reset and no foreign key to cascade. A
+-- predicate-scoped removal of only the KSET rows was rejected for a sharper
+-- reason: it would leave the sibling's rows standing, and the cursor arithmetic
+-- in (9) is valid ONLY IF these twenty-one rows are the entire table content.
+-- One surviving foreign row moves every boundary in that table.
+-- Trade-offs: removing every existing row makes users.sql and users-keyset.sql
+-- mutually exclusive rather than composable. A test loads exactly one of them;
+-- they do not stack, which a reader might otherwise assume. V1__auth.sql
+-- declares no seed INSERT, so this can only ever affect fixture-created rows.
+DELETE FROM auth.users;
+
+-- Assumptions: naming all five columns makes a later schema addition fail loudly
+-- instead of shifting a literal into a neighbouring positional column. These
+-- five are the whole of auth.users exactly as V1__auth.sql declares it.
+-- Alternatives Considered: twenty-one independent INSERT statements were
+-- rejected. One statement is atomic, so a CHECK or UNIQUE violation leaves the
+-- table exactly as the DELETE above found it. Twenty-one statements would stop
+-- part-way and leave a partial volume block, which here is worse than an empty
+-- table: the keyset queries would still succeed against a shorter block, every
+-- boundary in (9) would silently move, and the failure would surface far from
+-- its cause.
+-- Trade-offs: one row per line keeps the rule's adjacency requirement
+-- satisfiable for the boundary rows, at the cost of a longer single statement.
+-- Alternatives Considered: deriving the rows from a series-generating expression
+-- was rejected even though twenty-one rows is exactly the size at which it
+-- tempts. The four keys the cursor arithmetic turns on are the entire point of
+-- this file, and a generated bound would hide them behind an expression a
+-- reader has to evaluate before knowing which keys exist.
+-- Trade-offs: writing every row out literally is repetitive, and the repetition
+-- is accepted so that each boundary key is visible in a diff.
+-- Assumptions: each cognito_sub is a synthetic RFC-4122 version-4-shaped
+-- subject - the third group leads with 4 for the version and the fourth with 8
+-- for the variant. The b2 marker identifies this file, the trailing counter 01
+-- through 21 keeps all twenty-one distinct under NOT NULL UNIQUE and stays
+-- inside 0-9 so it reads as a decimal count while remaining valid hexadecimal,
+-- and the leading zero groups make every value unmistakably fabricated, so none
+-- can be mistaken for a subject issued by a real user pool.
+-- Assumptions: user_type is A where the counter leaves remainder one on division
+-- by three and U otherwise, giving seven A rows and fourteen U rows. That rule
+-- was chosen so every full ten-row window in (9) is mixed - the first page holds
+-- A at 0001, 0004, 0007 and 0010, the second holds A at 0013, 0016 and 0019, and
+-- the backward window holds A at 0004, 0007 and 0010 - which is what makes an
+-- authority-filtered list assertion measure something. The deliberate one-row
+-- short final page is necessarily single-typed.
+-- Assumptions: the KeysetRow and Window name tokens are ASCII-only synthetic
+-- data, stay inside VARCHAR(20), and cannot be mistaken for migrated people. The
+-- first name carries the row ordinal so a mis-ordered page shows up in a diff,
+-- and the last name names the cursor window a row belongs to so a row returned
+-- from the wrong window is visible without counting rows.
+INSERT INTO auth.users (user_id, first_name, last_name, user_type, cognito_sub) VALUES
+    ('KSET0001', 'KeysetRow01', 'WindowFirstTen',  'A', '00000000-0000-4000-8000-00000000b201'),
+    ('KSET0002', 'KeysetRow02', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b202'),
+    ('KSET0003', 'KeysetRow03', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b203'),
+    ('KSET0004', 'KeysetRow04', 'WindowFirstTen',  'A', '00000000-0000-4000-8000-00000000b204'),
+    ('KSET0005', 'KeysetRow05', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b205'),
+    ('KSET0006', 'KeysetRow06', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b206'),
+    ('KSET0007', 'KeysetRow07', 'WindowFirstTen',  'A', '00000000-0000-4000-8000-00000000b207'),
+    ('KSET0008', 'KeysetRow08', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b208'),
+    ('KSET0009', 'KeysetRow09', 'WindowFirstTen',  'U', '00000000-0000-4000-8000-00000000b209'),
+    -- Assumptions: KSET0010 closes the first page of ten, so it is the lastKey a
+    -- forward cursor carries into line two of (9). It is also the position at
+    -- which the baseline's WHEN 10 branch, at app/cbl/COUSR00C.cbl L433-L435,
+    -- writes its last-key field - the write that never happens on a short page.
+    ('KSET0010', 'KeysetRow10', 'WindowFirstTen',  'A', '00000000-0000-4000-8000-00000000b210'),
+    -- Assumptions: KSET0011 exists to be found as the size-plus-one probe of the
+    -- first page, which is what sets hasNext TRUE on line one of (9). Supplied
+    -- instead as a lastKey it reaches line three, the exact boundary where ten
+    -- rows remain and the probe finds nothing, so hasNext must be FALSE on a
+    -- FULL page - the case a block of twenty rows cannot produce while also
+    -- producing line four.
+    ('KSET0011', 'KeysetRow11', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b211'),
+    ('KSET0012', 'KeysetRow12', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b212'),
+    ('KSET0013', 'KeysetRow13', 'WindowSecondTen', 'A', '00000000-0000-4000-8000-00000000b213'),
+    ('KSET0014', 'KeysetRow14', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b214'),
+    ('KSET0015', 'KeysetRow15', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b215'),
+    ('KSET0016', 'KeysetRow16', 'WindowSecondTen', 'A', '00000000-0000-4000-8000-00000000b216'),
+    ('KSET0017', 'KeysetRow17', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b217'),
+    ('KSET0018', 'KeysetRow18', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b218'),
+    ('KSET0019', 'KeysetRow19', 'WindowSecondTen', 'A', '00000000-0000-4000-8000-00000000b219'),
+    -- Assumptions: KSET0020 closes the second page of ten. Supplied as a lastKey
+    -- it reaches line four of (9), leaving exactly one row beyond it, which is
+    -- the only way this block produces a page shorter than the page size.
+    ('KSET0020', 'KeysetRow20', 'WindowSecondTen', 'U', '00000000-0000-4000-8000-00000000b220'),
+    -- Refactoring Rationale: KSET0021 is the twenty-first row and the reason the
+    -- block is not twenty. Alone it forms the short final page of line four in
+    -- (9). On that page WHEN 10 never fires, so the baseline's last-key field
+    -- still holds KSET0020, the value the preceding full page left in it - which
+    -- is the very cursor that produced this page, so it cannot describe the page
+    -- it accompanies. The target instead sets lastKey to KSET0021, the actual
+    -- last row returned. This row is also the probe that makes hasNext TRUE on
+    -- line two, and the last-row boundary an empty forward cursor walks to under
+    -- the HIGH-VALUES substitution in (11).
+    ('KSET0021', 'KeysetRow21', 'WindowTail',      'U', '00000000-0000-4000-8000-00000000b221');
+
+--
+-- WHAT: Registers the state that is deliberately absent from this fixture.
+-- WHY : Assumptions: (1) no cleartext authentication material and no derived
+--       verifier exists, in any column, literal or identifier; only the
+--       synthetic Cognito subject reference remains, per (17); (2) no lifecycle
+--       timestamp, audit state or deletion marker is part of the five-column
+--       target; (3) no application-managed and no engine-managed row revision
+--       token exists; (4) no positional paging metadata, no ordinal and no
+--       index-derived pagination exists, and the display-only counters named in
+--       (8) never drive a query; (5) no list-screen selection marker is
+--       persisted, so neither selection value from (15) appears as data;
+--       (6) no schema, role, privilege or structure-changing statement appears,
+--       because data-migration/sql/V0__schemas_and_roles.sql owns the schemas
+--       and roles and V1__auth.sql owns this table; (7) no binary and no EBCDIC
+--       content appears, because a fixture has to be reviewable in a diff; and
+--       (8) no floating-point and no monetary value exists, there being none in
+--       this bounded context, with the prohibition standing regardless.
+

@@ -290,6 +290,40 @@ jobs:
           assert datasets.count("checkov:skip=CKV_AWS_35:") == 1
           assert 'resource "aws_cloudtrail" "dataset_object_access"' in datasets
           assert 'enable_log_file_validation    = true' in datasets
+
+          # Assumptions: the three log-delivery destinations below cannot carry
+          # SSE-KMS, because the delivering service would have to be granted use
+          # of the key or, for CloudFront and S3 server access logging, cannot
+          # write an SSE-KMS destination at all. Each exception is therefore
+          # bounded by asserting the AES256 fallback together with the
+          # compensating controls that stand in for the customer key: public
+          # access blocked and versioning enabled, so a delivered record can be
+          # neither read publicly nor deleted without trace.
+          alb = Path("infra/modules/alb/main.tf").read_text()
+          spa = Path("infra/modules/cloudfront-spa/main.tf").read_text()
+          secrets = Path("infra/modules/secrets/main.tf").read_text()
+
+          assert alb.count("checkov:skip=CKV_AWS_145:") == 1
+          assert 'sse_algorithm = "AES256"' in alb
+          assert 'resource "aws_s3_bucket_versioning" "access_logs"' in alb
+          assert 'resource "aws_s3_bucket_public_access_block" "access_logs"' in alb
+
+          assert spa.count("checkov:skip=CKV_AWS_145:") == 1
+          assert 'resource "aws_s3_bucket_versioning" "logs"' in spa
+          assert 'resource "aws_s3_bucket_public_access_block" "logs"' in spa
+
+          # Assumptions: the rotation-interval exception is a cross-module
+          # rendering artifact, not a relaxed control, so it is bounded by
+          # asserting that the interval is still driven by the input whose
+          # default and both tfvars values sit inside the required window. The
+          # two TLS entries hold operator-issued material that no rotation
+          # function can mint, so they are bounded by asserting they remain
+          # caller-supplied rather than acquiring a schedule.
+          assert secrets.count("checkov:skip=CKV_AWS_304:") == 1
+          assert secrets.count("checkov:skip=CKV2_AWS_57:") == 2
+          assert 'automatically_after_days = var.rotation_automatically_after_days' in secrets
+          assert 'resource "aws_secretsmanager_secret_rotation" "service"' in secrets
+          assert 'count = local.create_service_tls_secrets ? 1 : 0' in secrets
           PY
 
       # Trade-offs: the offline Checkov distribution does not carry policy

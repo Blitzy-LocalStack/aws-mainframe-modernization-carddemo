@@ -227,13 +227,22 @@ public record AbendDetail(
      * reads still carries both causes in full. Its width is inside {@link #ABEND_MSG_LENGTH}, so the
      * external form of a detail needs no truncation of its own.</p>
      *
+     * <p>Assumptions: that last property is a constraint on the wording rather than an observation about
+     * it, and the wording is held to it deliberately. This literal measures 69 characters against the
+     * declared 72 of {@code ABEND-MSG PIC X(72)} at {@code app/cpy/CSMSG02Y.cpy} line 28. The margin
+     * matters because {@link #external()} passes this value back through the constructor, which shortens
+     * an over-width component on the right without reporting that it did so: a longer sentence would
+     * therefore reach a client severed mid-word, and the one message whose entire purpose is to tell a
+     * caller how to have the failure investigated would be the one message that arrived unreadable.
+     * Anything added here has to be paid for by removing something else.</p>
+     *
      * <p>Alternatives Considered: composing an external message from the abend code, so a client could
      * read something specific. Rejected because the code already travels as its own component, so the
      * composition would add no information for the client while creating a second place the code is
      * rendered and could drift from the first.</p>
      */
     public static final String EXTERNAL_ABEND_MSG =
-            "The request could not be completed. Quote the correlation identifier when reporting it.";
+            "The request could not be completed. Quote the correlation identifier.";
 
     /**
      * Builds an abend detail, substituting the empty string for any component supplied as
