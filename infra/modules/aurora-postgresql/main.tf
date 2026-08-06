@@ -235,14 +235,20 @@ locals {
   #       perpetual in-place update for a name that only matters at deletion;
   #       (c) deleting the previous snapshot as part of the next apply, rejected
   #       outright because it destroys the last recoverable copy of a financial
-  #       ledger to make a name available. A `random_id` keeps the value in state,
-  #       so it is stable across every apply of one cluster and different for the
-  #       next one -- which is precisely the uniqueness scope the collision needs.
+  #       ledger to make a name available; and (d) a `random_id` resource, which
+  #       carried exactly the right semantics but required a THIRD provider in a
+  #       module whose declared provider set is `hashicorp/aws` alone. The
+  #       built-in `terraform_data` resource below supplies the same property with
+  #       no provider at all: its generated `id` is created once, kept in state,
+  #       and replaced only when `triggers_replace` changes.
   # WHY : Assumptions: the composed name stays inside the RDS 255-character
   #       identifier limit with room to spare: the prefix is capped by
   #       var.name_prefix's own length validation, and the suffix adds sixteen
-  #       hexadecimal characters plus one separator.
-  final_snapshot_identifier = "${var.name_prefix}-aurora-final-${random_id.final_snapshot_suffix.hex}"
+  #       characters plus one separator. The hyphens are stripped from the
+  #       generated identifier before it is truncated because an RDS snapshot
+  #       identifier may not contain two consecutive hyphens, and a truncation that
+  #       ended on one would place a second hyphen next to the separator.
+  final_snapshot_identifier = "${var.name_prefix}-aurora-final-${substr(replace(terraform_data.final_snapshot_suffix.id, "-", ""), 0, 16)}"
 
   # WHY : Refactoring Rationale: these two parameters are re-asserted here even
   #       though variables.tf already refuses a var.cluster_parameters map that
@@ -310,23 +316,22 @@ locals {
 
 # WHY : Assumptions: this resource exists ONLY so that the snapshot name differs
 #       between one incarnation of the cluster and the next; the reasoning, and
-#       the three rejected alternatives, are recorded at
-#       `local.final_snapshot_identifier` above. It creates nothing in AWS.
-# WHY : Assumptions: `keepers` names the cluster identifier, so the suffix is
-#       regenerated exactly when that identifier changes -- and an identifier
-#       change on an RDS cluster is a REPLACEMENT, which means the outgoing
-#       cluster may leave a final snapshot behind under the old name while the
-#       incoming one needs a name of its own. Without the keeper the suffix would
-#       survive the replacement and the second teardown would collide again,
-#       which is the failure this resource was added to remove. A destroy and a
-#       fresh apply are covered without any keeper, because the value goes with
-#       the state.
-resource "random_id" "final_snapshot_suffix" {
-  byte_length = 8
-
-  keepers = {
-    cluster_identifier = local.cluster_identifier
-  }
+#       the four rejected alternatives, are recorded at
+#       `local.final_snapshot_identifier` above. It creates nothing in AWS, and it
+#       needs no provider: `terraform_data` is built into Terraform itself, which
+#       is what lets this module keep the single-provider contract its
+#       versions.tf declares.
+# WHY : Assumptions: `triggers_replace` names the cluster identifier, so the
+#       suffix is regenerated exactly when that identifier changes -- and an
+#       identifier change on an RDS cluster is a REPLACEMENT, which means the
+#       outgoing cluster may leave a final snapshot behind under the old name
+#       while the incoming one needs a name of its own. Without the trigger the
+#       suffix would survive the replacement and the second teardown would
+#       collide again, which is the failure this resource was added to remove. A
+#       destroy and a fresh apply are covered without any trigger, because the
+#       value goes with the state.
+resource "terraform_data" "final_snapshot_suffix" {
+  triggers_replace = local.cluster_identifier
 }
 
 

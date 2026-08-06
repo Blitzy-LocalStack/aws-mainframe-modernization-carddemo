@@ -279,6 +279,50 @@ class AuthApiContractTest {
         assertThat(newPassword.get("writeOnly")).isEqualTo(true);
     }
 
+    /**
+     * Asserts the sign-on schema refuses exactly the whitespace-only values the record's constraints do.
+     *
+     * <p>Refactoring Rationale: the review found the two sides disagreeing. The schema declared
+     * {@code minLength: 1} alone, which admits a value of eight spaces, while
+     * {@link com.carddemo.auth.dto.SignOnRequest} annotates both components {@code @NotBlank}, which
+     * refuses it -- so a caller generating a request from this contract could build a schema-VALID body
+     * the service answers 400. That class of disagreement is the one a published contract exists to
+     * prevent, and it is invisible to a compiler because one side is a number in a document.</p>
+     *
+     * <p>Assumptions: the declared pattern is applied as a PARTIAL match, using {@code find} rather than
+     * {@code matches}, because JSON Schema patterns are unanchored. Asserting it with {@code matches}
+     * would test a rule this contract does not state and would fail on every real identifier.</p>
+     */
+    @Test
+    @DisplayName("the sign-on schema refuses whitespace-only values exactly as @NotBlank does")
+    void signOnSchemaRefusesWhitespaceOnlyValues() {
+        Map<String, Object> properties =
+                mapping(mapping(mapping(mapping(contract, "components"), "schemas"), "SignOnRequest"),
+                        "properties");
+
+        for (String property : List.of("userId", "password")) {
+            Map<String, Object> declared = mapping(properties, property);
+            assertThat(declared.get("pattern"))
+                    .as("%s must carry a non-whitespace pattern, because the record's @NotBlank"
+                            + " constraint refuses a value of spaces that minLength alone admits",
+                            property)
+                    .isNotNull();
+
+            Pattern pattern = Pattern.compile(String.valueOf(declared.get("pattern")));
+            assertThat(pattern.matcher("   ").find())
+                    .as("a value of only spaces must be refused by the schema, as the baseline refuses"
+                            + " it at app/cbl/COSGN00C.cbl lines 118 and 123")
+                    .isFalse();
+            assertThat(pattern.matcher("\t\n ").find()).isFalse();
+            assertThat(pattern.matcher(SAMPLE_USER_ID).find())
+                    .as("a real value must still be admitted")
+                    .isTrue();
+            assertThat(pattern.matcher(" leading space kept ").find())
+                    .as("the rule is presence of a non-whitespace character, not absence of whitespace")
+                    .isTrue();
+        }
+    }
+
     // WHY : Assumptions: the challenge is asserted to exist because its ABSENCE was the defect, not a
     //       shortcoming of its shape. Every seed user is provisioned with a temporary password, so the
     //       first sign-on of every user raises this challenge; with no operation to answer it the
@@ -409,6 +453,29 @@ class AuthApiContractTest {
         assertThat(declared.matcher("8f1c0e42-3a55-4d21-9b7e-6c0f2a9d4471").matches())
                 .as("a thirty-six-character identity is what the filter refuses with 400")
                 .isFalse();
+
+        // WHY : Refactoring Rationale: the published pattern is compared against the filter's own
+        //       public predicate over a vector set rather than being eyeballed. An earlier revision
+        //       published only the bound and the character set, which is BROADER than what the filter
+        //       accepts -- the filter additionally refuses a value made only of digits and the three
+        //       separators carrying thirteen or more digits, because that is the shape of a primary
+        //       account number and this identity is echoed on the response and written to every log
+        //       line. A contract broader than the filter documents requests the service rejects, so a
+        //       client built from it fails at run time on a value the document said was fine.
+        // WHY : Assumptions: the vectors cover both sides of the boundary rather than only the refused
+        //       side. The three separated forms and the contiguous form must be refused; a
+        //       timestamp-like value, a value carrying a letter and a minted-shaped value must be
+        //       accepted, and each of those is a realistic identity a caller or this service supplies.
+        for (String vector : List.of("4111111111111111", "4111-1111-1111-1111",
+                "4111.1111.1111.1111", "4111_1111_1111_1111", "1234567890123",
+                "2022-07-18-0930", "a1b2c3d4e5f6a7b8c9d0e1f2", "CD0123456789ABCDEF012345",
+                "123456789012", "A".repeat(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH))) {
+            assertThat(declared.matcher(vector).matches())
+                    .as("the published pattern must accept exactly what"
+                            + " CorrelationIdFilter.isConformingCorrelationId accepts, and the two"
+                            + " disagree on '%s'", vector)
+                    .isEqualTo(CorrelationIdFilter.isConformingCorrelationId(vector));
+        }
 
         Map<String, Object> requestHeader =
                 mapping(mapping(mapping(contract, "components"), "parameters"),

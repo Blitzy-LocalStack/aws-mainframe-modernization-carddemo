@@ -18,9 +18,11 @@
 --                                          transaction_id, plus
 --                                          idx_transactions_card_num and
 --                                          idx_transactions_proc_ts
---   ledger.daily_transactions              the same 13 columns, no primary key,
---                                          proc_ts nullable
---   ledger.transaction_rejects             3 columns, no primary key
+--   ledger.daily_transactions              the same 13 columns plus an
+--                                          ingest_seq identity column, primary
+--                                          key on ingest_seq, proc_ts nullable
+--   ledger.transaction_rejects             3 columns plus a reject_seq identity
+--                                          column, primary key on reject_seq
 --   ledger.transaction_category_balances   4 columns, three-part composite
 --                                          primary key
 --
@@ -318,9 +320,73 @@ CREATE INDEX idx_transactions_proc_ts
 
 CREATE TABLE ledger.daily_transactions (
 
+    -- Refactoring Rationale: this column is a TARGET-SIDE addition that no
+    --   copybook field corresponds to, and an earlier revision of this file
+    --   excluded exactly such a column "on principle". That exclusion was right
+    --   about the source and wrong about the target, and the distinction is the
+    --   whole reason this column exists. The source genuinely has no key:
+    --   app/cbl/CBTRN02C.cbl L29-L31 selects the feed as ORGANIZATION IS
+    --   SEQUENTIAL with ACCESS MODE IS SEQUENTIAL and no RECORD KEY, and it reads
+    --   front to back on an implicit file position, never holding two records at
+    --   once. But a relational table is a heap with NO inherent order, and two
+    --   consumers the baseline never had require an identity: a persistence
+    --   provider needs one to distinguish two loaded rows at all, and keyset
+    --   paging needs a TOTAL order to express a page boundary.
+    -- Assumptions: the only candidate the 13 copybook columns offer is
+    --   transaction_id, which this feed does not promise to be unique, and a
+    --   cursor over a non-unique column fails in BOTH directions: paging strictly
+    --   past the boundary value (`transaction_id > lastKey`) skips the rest of a
+    --   tied group that straddles a chunk boundary, and paging inclusively returns
+    --   that group twice. Both failures are silent and both lose or duplicate a
+    --   financial record, while the baseline's sequential read processes every
+    --   physical occurrence exactly once. This column restores the one property
+    --   the file had and the heap does not -- a total order over physical arrival
+    --   -- and it is the ONLY way to keep duplicates both representable and
+    --   reachable.
+    -- Assumptions: the value is the row's INGESTION ORDINAL and therefore its
+    --   position in the source stream. A sequential single-writer load assigns it
+    --   in the order it reads, so `ORDER BY ingest_seq` reproduces the order
+    --   `READ ... NEXT RECORD` visited. That order is observable in the baseline:
+    --   app/cbl/CBTRN02C.cbl L202-L219 loops the feed and accumulates a reject
+    --   count whose sequence in the DALYREJS stream is the feed's sequence.
+    -- Alternatives Considered: reading the feed through a non-ORM streaming
+    --   cursor instead, which needs no column because a single open cursor keeps
+    --   its own position. Rejected because a streaming cursor must be held inside
+    --   one transaction for its whole life, which forfeits the chunked commit and
+    --   the restart the target's batch orchestration provides -- and restart is a
+    --   documented improvement over the baseline, which has no checkpoint contract
+    --   at all. Also considered: PostgreSQL's own ctid. Rejected because it is a
+    --   physical location that VACUUM and any row rewrite may change, so a cursor
+    --   built on it can silently skip or repeat after maintenance. Also
+    --   considered: a composite key over the business columns, and a hash of the
+    --   record image. The first cannot be unique, because a sequential feed may
+    --   carry the same record twice and the baseline processes both; the second
+    --   collapses two identical records into one row, which loses a record.
+    -- Alternatives Considered: GENERATED ALWAYS, rejected in favour of BY
+    --   DEFAULT. A staged reload has to be able to reproduce an exact ordinal --
+    --   restoring one S3 generation of the feed must yield the ordinals it had
+    --   when it was written, so a re-drive compares like with like -- and ALWAYS
+    --   refuses a supplied value outright, forcing an OVERRIDING clause into every
+    --   load site. BY DEFAULT still assigns the ordinal for an ordinary append and
+    --   the primary key below still refuses a collision, so nothing is given up
+    --   but the refusal.
+    -- Trade-offs: what this costs is that the table can no longer re-emit a
+    --   byte-identical 350-byte record from its columns alone without ignoring
+    --   this one. That cost is already paid elsewhere and in the same way: the
+    --   version columns the design mandates on accounts, customers and cards are
+    --   equally target-side technical columns with no copybook field, and
+    --   re-emitting a fixed-length record is the record codec's job, which pads
+    --   from the layout declaration rather than from stored columns. The column
+    --   carries no business meaning, is never rendered to a caller and never
+    --   participates in a golden-master comparison, so nothing compared against
+    --   the baseline's own output sees it.
+    ingest_seq      BIGINT GENERATED BY DEFAULT AS IDENTITY,
+
     -- Assumptions: alphanumeric picture with significant leading zeros,
-    --   bytes 1-16; argued at ledger.transactions.transaction_id. It is not
-    --   a primary key here, for the reason given at the end of this table.
+    --   bytes 1-16; argued at ledger.transactions.transaction_id. It is NOT the
+    --   primary key here and it is NOT unique: it is business data the feed
+    --   supplies, for the reason given on ingest_seq above and at the end of this
+    --   table.
     transaction_id  CHAR(16),
 
     -- Assumptions: fixed-width code, bytes 17-18; argued at
@@ -394,23 +460,54 @@ CREATE TABLE ledger.daily_transactions (
     --   semantic rather than structural and has to be expressed as
     --   nullability rather than as a different type. Asserting NOT NULL
     --   here would reject the seed extract in its entirety. Bytes 305-330.
-    proc_ts         TIMESTAMP(6)
+    proc_ts         TIMESTAMP(6),
+
+    -- Assumptions: the primary key is the INGESTION SEQUENCE and emphatically
+    --   not transaction_id, and the distinction is the correctness of the whole
+    --   table. app/cbl/CBTRN02C.cbl L29-L31 selects the feed as ORGANIZATION IS
+    --   SEQUENTIAL with ACCESS MODE IS SEQUENTIAL and declares no RECORD KEY at
+    --   all, and app/jcl/POSTTRAN.jcl L30-L31 supplies it as the physical
+    --   sequential dataset AWS.M2.CARDDEMO.DALYTRAN.PS. The posting job reads it
+    --   front to back and never keys into it, so the source asserts uniqueness
+    --   over nothing it carries. A primary key on transaction_id would therefore
+    --   assert a uniqueness the source does not, and would REFUSE a load of any
+    --   feed that legitimately carried a repeated identifier -- a feed the
+    --   baseline processes without complaint, posting the record twice. All 300
+    --   identifiers in the current extract happen to be distinct, and that is a
+    --   property of one extract rather than a contract, which is exactly why it
+    --   must not become the key.
+    -- Refactoring Rationale: an earlier revision drew the conclusion that the
+    --   table should therefore carry NO key at all, and excluded a surrogate "on
+    --   principle" as a column no copybook field corresponds to. The premise was
+    --   correct and the conclusion did not follow. A keyless heap has no order to
+    --   resume, so the chunked reader ordered and resumed on transaction_id
+    --   instead -- and a strict cursor over a non-unique column drops every
+    --   duplicate that follows a chunk boundary, which is a silent loss of exactly
+    --   the physical occurrences the sequential read is defined to process. The
+    --   surrogate is what makes the source's actual contract expressible: every
+    --   occurrence distinct, none unique by identifier, all in arrival order.
+    -- Refactoring Rationale: keying the ordinal is also what makes the table safe
+    --   for the two consumers the baseline never had. It gives the persistence
+    --   provider an identifier that distinguishes two identical records rather
+    --   than conflating them, and it gives keyset paging a TOTAL order, so a page
+    --   boundary can be expressed as `ingest_seq > :lastKey` with no possibility
+    --   of skipping the remainder of a tied group or returning it twice.
+    -- Trade-offs: the key is a column no copybook field corresponds to, which is
+    --   a departure from this migration's rule that a column traces to a PICTURE
+    --   clause. It is accepted because the alternative is not "no surrogate" but
+    --   "no identity", and a table of financial records with no identity cannot be
+    --   paged or de-duplicated correctly at all.
+    CONSTRAINT pk_daily_transactions PRIMARY KEY (ingest_seq)
 );
 
--- Assumptions: this table has no primary key and no index, and that is
---   the baseline contract rather than an omission. app/cbl/CBTRN02C.cbl
---   L29-L31 selects the feed as `ORGANIZATION IS SEQUENTIAL` with `ACCESS
---   MODE IS SEQUENTIAL` and declares no RECORD KEY clause at all, and
---   app/jcl/POSTTRAN.jcl L30-L31 supplies it as the physical sequential
---   dataset `AWS.M2.CARDDEMO.DALYTRAN.PS`. The posting job reads it front
---   to back and never keys into it. Declaring a primary key on
---   transaction_id would assert a uniqueness the source does not, and would
---   fail a load of any feed that legitimately carried a repeated identifier
---   -- a load the baseline would process without complaint. A surrogate key
---   was excluded for the same reason and because it would be a column no
---   copybook field corresponds to. That all 300 identifiers in the current
---   extract happen to be distinct is a property of one extract, not a
---   contract.
+-- Assumptions: no index on transaction_id, and none on any other copybook
+--   column, and the absence is deliberate rather than an omission. The only
+--   access this table serves is the front-to-back scan the posting loop
+--   performs, which the primary-key index over the ingestion sequence already
+--   orders; the baseline has no keyed path into this dataset to carry across, so
+--   an index on a non-unique business identifier would serve no path this
+--   migration defines, would be maintained on every load row and would be read
+--   by nothing.
 
 
 -- =============================================================================
@@ -443,6 +540,43 @@ CREATE TABLE ledger.daily_transactions (
 -- =============================================================================
 
 CREATE TABLE ledger.transaction_rejects (
+
+    -- Refactoring Rationale: this column is a target-side occurrence sequence
+    --   that corresponds to no field of the inline 430-byte layout, and it
+    --   identifies the REJECT EVENT rather than the record that provoked it. It is
+    --   added for the reason argued at length on
+    --   ledger.daily_transactions.ingest_seq and for one additional reason
+    --   specific to this table. An earlier revision left this table keyless and
+    --   the consuming entity then mapped raw_record -- the 350-byte record image
+    --   -- as its identity, because the persistence provider requires one and no
+    --   other column denotes a record. That made two legitimately duplicate
+    --   rejects indistinguishable to the provider, which would collapse them, and
+    --   it made the identity a value a setter could reassign. Both consequences
+    --   contradict what this table is for: this stream exists to retain the bytes
+    --   that caused a reject, and the same record rejected on two runs is two
+    --   entries -- app/jcl/DALYREJS.jcl L24-L28 keeps five generations of exactly
+    --   that. An occurrence sequence makes each entry addressable without making
+    --   the image unique and without making any mapped identity mutable, and a
+    --   consumer counting rejects per run can then separate the two entries.
+    -- Assumptions: the ordinal is an append position, so `ORDER BY reject_seq`
+    --   reproduces the order app/cbl/CBTRN02C.cbl wrote the entries in. That
+    --   order is observable in the baseline: 2500-WRITE-REJECT-REC at L446 is
+    --   performed inside the same front-to-back loop that reads the feed, so the
+    --   reject stream's sequence is the feed's sequence restricted to the
+    --   rejected records.
+    -- Alternatives Considered: leaving the table keyless and mapping it as a
+    --   read-only projection instead of an entity, which would preserve
+    --   duplicates without adding a column. Rejected because every writer and
+    --   reader of this stream then needs its own bespoke access path, and because
+    --   a keyless table cannot be paged with a total order either -- the same
+    --   defect this column removes from the sibling feed table. Also rejected:
+    --   keying on the record image, which is what made two legitimate duplicate
+    --   entries collapse into one.
+    -- Alternatives Considered: GENERATED ALWAYS, rejected for the reason given on
+    --   the sibling column -- a loader replaying a captured stream, or a staged
+    --   reload of one S3 generation, may need to supply the original ordering
+    --   explicitly.
+    reject_seq   BIGINT GENERATED BY DEFAULT AS IDENTITY,
 
     -- Trade-offs: the rejected record is retained verbatim as one fixed
     --   350-byte value and is deliberately NOT decomposed into the thirteen
@@ -494,19 +628,31 @@ CREATE TABLE ledger.transaction_rejects (
     --   at 42 characters, so every one fits with room to spare and the
     --   declared width is preserved as the contract rather than trimmed to
     --   the observed maximum.
-    reason_desc  VARCHAR(76)
+    reason_desc  VARCHAR(76),
+
+    -- Assumptions: the primary key is the occurrence sequence -- the reject-event
+    --   ordinal and not the record image -- and NO unique constraint exists over
+    --   raw_record or over any combination of the three copybook-derived columns.
+    --   The source has no key of its own: app/cbl/CBTRN02C.cbl L46-L47 selects
+    --   DALYREJS as ORGANIZATION IS SEQUENTIAL with no RECORD KEY, and
+    --   app/jcl/POSTTRAN.jcl L36 gives it RECFM=F -- a flat fixed-length stream
+    --   appended to, never keyed into -- so the source asserts uniqueness over
+    --   nothing. DUPLICATE IMAGES REMAIN LEGITIMATE and are now DISTINGUISHABLE,
+    --   which is the improvement: the same record rejected on two runs is two rows
+    --   with two ordinals rather than one row a reader cannot tell from the other,
+    --   and app/jcl/DALYREJS.jcl L26 keeps five generations of exactly that. The
+    --   surrogate is therefore the ONLY key this table may carry -- a uniqueness
+    --   assertion over the record image would refuse the second of two identical
+    --   rejects, turning a faithful append into a constraint violation.
+    -- Trade-offs: the key is a column no field of the inline layout corresponds
+    --   to. It is accepted for the reason argued in full at
+    --   ledger.daily_transactions.ingest_seq: the alternative is not "no
+    --   surrogate" but "no identity". It carries no business meaning, is never
+    --   rendered to a caller and never participates in a golden-master
+    --   comparison, so the 430-byte reconstruction of an entry is unaffected.
+    CONSTRAINT pk_transaction_rejects PRIMARY KEY (reject_seq)
 );
 
--- Assumptions: no primary key, no unique constraint and no index, because
---   the source has none of the three. app/cbl/CBTRN02C.cbl L46-L47 selects
---   DALYREJS as `ORGANIZATION IS SEQUENTIAL` with no RECORD KEY, and
---   app/jcl/POSTTRAN.jcl L36 gives it `RECFM=F` -- a flat fixed-length
---   stream appended to, never keyed into. Duplicate rows are legitimate
---   here: the same record rejected on two runs is two entries in the
---   stream, and app/jcl/DALYREJS.jcl L26 keeps five generations of exactly
---   that. Any key would have to be a surrogate, which no copybook field
---   corresponds to and which the migration excludes on principle.
---
 -- Assumptions: reason 109 is representable here but the baseline never
 --   writes a row carrying it, and describing it accurately matters because
 --   its text is indistinguishable from 101's. It is set inside

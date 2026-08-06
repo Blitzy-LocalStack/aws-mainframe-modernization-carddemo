@@ -334,7 +334,7 @@ export type MessageTemplatePart =
        * in `COMEN01C` - so the union enumerates them and a fourth form has to be
        * added deliberately rather than arriving unnoticed.
        */
-      readonly delimitedBy: "SIZE" | "SPACE" | "  ";
+      readonly delimitedBy: 'SIZE' | 'SPACE' | '  ';
     };
 
 /**
@@ -368,15 +368,15 @@ export interface MessageTemplate {
  * acceptable because a development bundle is not a shipped artifact.
  */
 export type DiagnosticDetailKind =
-  | "cics-response-and-reason"
-  | "db2-cursor-name"
-  | "db2-sqlcode"
-  | "db2-sqlcode-and-sqlstate"
-  | "db2-sqlcode-and-sqlerrm"
-  | "db2-sqlcode-and-diagnostic-text"
-  | "db2-table-name"
-  | "ims-status-code"
-  | "persistence-mechanism";
+  | 'cics-response-and-reason'
+  | 'db2-cursor-name'
+  | 'db2-sqlcode'
+  | 'db2-sqlcode-and-sqlstate'
+  | 'db2-sqlcode-and-sqlerrm'
+  | 'db2-sqlcode-and-diagnostic-text'
+  | 'db2-table-name'
+  | 'ims-status-code'
+  | 'persistence-mechanism';
 
 /**
  * A baseline message that is deliberately **not** exported as displayable text.
@@ -433,7 +433,7 @@ export interface MainMenuOption {
   /** `CDEMO-MENU-OPT-PGMNAME`; the transfer target, mapped to a route by the router. */
   readonly programName: string;
   /** `CDEMO-MENU-OPT-USRTYPE`: `'A'` restricts the option to administrators. */
-  readonly userType: "A" | "U";
+  readonly userType: 'A' | 'U';
   /** Where the option name was read from. */
   readonly source: SourceRef;
 }
@@ -470,9 +470,9 @@ export interface AdminMenuOption {
 export const SCREEN_TITLES = {
   /** `CCDA-TITLE01` - the organisation line of the title band. */
   TITLE01: {
-    text: "      AWS Mainframe Modernization       ",
+    text: '      AWS Mainframe Modernization       ',
     declaredWidth: 40,
-    source: { file: "app/cpy/COTTL01Y.cpy", lines: [19] },
+    source: { file: 'app/cpy/COTTL01Y.cpy', lines: [19] },
   },
   /**
    * `CCDA-TITLE02` - the application line of the title band.
@@ -489,9 +489,9 @@ export const SCREEN_TITLES = {
    * is `*` or `/` before looking at its content, rather than filtering by content.
    */
   TITLE02: {
-    text: "              CardDemo                  ",
+    text: '              CardDemo                  ',
     declaredWidth: 40,
-    source: { file: "app/cpy/COTTL01Y.cpy", lines: [22] },
+    source: { file: 'app/cpy/COTTL01Y.cpy', lines: [22] },
   },
   /**
    * `CCDA-THANK-YOU` - the sign-off line, which names the application "CCDA".
@@ -506,9 +506,9 @@ export const SCREEN_TITLES = {
    * would not reconcile them either.
    */
   THANK_YOU: {
-    text: "Thank you for using CCDA application... ",
+    text: 'Thank you for using CCDA application... ',
     declaredWidth: 40,
-    source: { file: "app/cpy/COTTL01Y.cpy", lines: [24] },
+    source: { file: 'app/cpy/COTTL01Y.cpy', lines: [24] },
   },
 } as const satisfies Record<string, FixedWidthText>;
 
@@ -525,15 +525,15 @@ export const COMMON_MESSAGES = {
    * "CardDemo". Distinct from {@link SCREEN_TITLES.THANK_YOU}; see the note there.
    */
   THANK_YOU: {
-    text: "Thank you for using CardDemo application...      ",
+    text: 'Thank you for using CardDemo application...      ',
     declaredWidth: 50,
-    source: { file: "app/cpy/CSMSG01Y.cpy", lines: [19] },
+    source: { file: 'app/cpy/CSMSG01Y.cpy', lines: [19] },
   },
   /** `CCDA-MSG-INVALID-KEY` - shown when an unmapped attention key is pressed. */
   INVALID_KEY: {
-    text: "Invalid key pressed. Please see below...         ",
+    text: 'Invalid key pressed. Please see below...         ',
     declaredWidth: 50,
-    source: { file: "app/cpy/CSMSG01Y.cpy", lines: [21] },
+    source: { file: 'app/cpy/CSMSG01Y.cpy', lines: [21] },
   },
 } as const satisfies Record<string, FixedWidthText>;
 
@@ -554,24 +554,24 @@ export const COMMON_MESSAGES = {
  */
 export const ABEND_DATA_FIELDS = [
   {
-    field: "ABEND-CODE",
+    field: 'ABEND-CODE',
     declaredWidth: 4,
-    source: { file: "app/cpy/CSMSG02Y.cpy", lines: [22, 23] },
+    source: { file: 'app/cpy/CSMSG02Y.cpy', lines: [22, 23] },
   },
   {
-    field: "ABEND-CULPRIT",
+    field: 'ABEND-CULPRIT',
     declaredWidth: 8,
-    source: { file: "app/cpy/CSMSG02Y.cpy", lines: [24, 25] },
+    source: { file: 'app/cpy/CSMSG02Y.cpy', lines: [24, 25] },
   },
   {
-    field: "ABEND-REASON",
+    field: 'ABEND-REASON',
     declaredWidth: 50,
-    source: { file: "app/cpy/CSMSG02Y.cpy", lines: [26, 27] },
+    source: { file: 'app/cpy/CSMSG02Y.cpy', lines: [26, 27] },
   },
   {
-    field: "ABEND-MSG",
+    field: 'ABEND-MSG',
     declaredWidth: 72,
-    source: { file: "app/cpy/CSMSG02Y.cpy", lines: [28, 29] },
+    source: { file: 'app/cpy/CSMSG02Y.cpy', lines: [28, 29] },
   },
 ] as const satisfies readonly FixedWidthField[];
 
@@ -658,19 +658,19 @@ export const MESSAGE_BAND = {
    */
   compositionBufferWidthNarrow: 75,
   /** The COBOL figurative constant that means "no message is set". */
-  emptySentinel: "LOW-VALUES",
+  emptySentinel: 'LOW-VALUES',
   /** Where each stage of the contract is declared. */
   sources: {
     /** The shared work area and its off-condition. */
-    workArea: { file: "app/cpy/CVCRD01Y.cpy", lines: [28, 29, 30] },
+    workArea: { file: 'app/cpy/CVCRD01Y.cpy', lines: [28, 29, 30] },
     /** One representative 78-character display declaration, input and output. */
-    displayStandard: { file: "app/cpy-bms/COSGN00.CPY", lines: [84, 152] },
+    displayStandard: { file: 'app/cpy-bms/COSGN00.CPY', lines: [84, 152] },
     /** The 80-character display declarations, input and output. */
-    displayCardDetail: { file: "app/cpy-bms/COCRDSL.CPY", lines: [102, 194] },
+    displayCardDetail: { file: 'app/cpy-bms/COCRDSL.CPY', lines: [102, 194] },
     /** One representative 80-character composition buffer. */
-    compositionBufferWide: { file: "app/cbl/COSGN00C.cbl", lines: [38] },
+    compositionBufferWide: { file: 'app/cbl/COSGN00C.cbl', lines: [38] },
     /** One representative 75-character composition buffer. */
-    compositionBufferNarrow: { file: "app/cbl/COACTUPC.cbl", lines: [479] },
+    compositionBufferNarrow: { file: 'app/cbl/COACTUPC.cbl', lines: [479] },
   },
 } as const;
 
@@ -696,31 +696,28 @@ export const MESSAGE_BAND = {
  * is no pattern to derive, so the table is exhaustive rather than computed.
  */
 export const MESSAGE_BAND_BY_MAPSET = {
-  COACTUP: { map: "CACTUPA", displayWidth: 78 },
-  COACTVW: { map: "CACTVWA", displayWidth: 78 },
-  COADM01: { map: "COADM1A", displayWidth: 78 },
-  COBIL00: { map: "COBIL0A", displayWidth: 78 },
-  COCRDLI: { map: "CCRDLIA", displayWidth: 78 },
-  COCRDSL: { map: "CCRDSLA", displayWidth: 80 },
-  COCRDUP: { map: "CCRDUPA", displayWidth: 80 },
-  COMEN01: { map: "COMEN1A", displayWidth: 78 },
-  COPAU00: { map: "COPAU0A", displayWidth: 78 },
-  COPAU01: { map: "COPAU1A", displayWidth: 78 },
-  CORPT00: { map: "CORPT0A", displayWidth: 78 },
-  COSGN00: { map: "COSGN0A", displayWidth: 78 },
-  COTRN00: { map: "COTRN0A", displayWidth: 78 },
-  COTRN01: { map: "COTRN1A", displayWidth: 78 },
-  COTRN02: { map: "COTRN2A", displayWidth: 78 },
-  COTRTLI: { map: "CTRTLIA", displayWidth: 78 },
-  COTRTUP: { map: "CTRTUPA", displayWidth: 78 },
-  COUSR00: { map: "COUSR0A", displayWidth: 78 },
-  COUSR01: { map: "COUSR1A", displayWidth: 78 },
-  COUSR02: { map: "COUSR2A", displayWidth: 78 },
-  COUSR03: { map: "COUSR3A", displayWidth: 78 },
-} as const satisfies Record<
-  string,
-  { readonly map: string; readonly displayWidth: 78 | 80 }
->;
+  COACTUP: { map: 'CACTUPA', displayWidth: 78 },
+  COACTVW: { map: 'CACTVWA', displayWidth: 78 },
+  COADM01: { map: 'COADM1A', displayWidth: 78 },
+  COBIL00: { map: 'COBIL0A', displayWidth: 78 },
+  COCRDLI: { map: 'CCRDLIA', displayWidth: 78 },
+  COCRDSL: { map: 'CCRDSLA', displayWidth: 80 },
+  COCRDUP: { map: 'CCRDUPA', displayWidth: 80 },
+  COMEN01: { map: 'COMEN1A', displayWidth: 78 },
+  COPAU00: { map: 'COPAU0A', displayWidth: 78 },
+  COPAU01: { map: 'COPAU1A', displayWidth: 78 },
+  CORPT00: { map: 'CORPT0A', displayWidth: 78 },
+  COSGN00: { map: 'COSGN0A', displayWidth: 78 },
+  COTRN00: { map: 'COTRN0A', displayWidth: 78 },
+  COTRN01: { map: 'COTRN1A', displayWidth: 78 },
+  COTRN02: { map: 'COTRN2A', displayWidth: 78 },
+  COTRTLI: { map: 'CTRTLIA', displayWidth: 78 },
+  COTRTUP: { map: 'CTRTUPA', displayWidth: 78 },
+  COUSR00: { map: 'COUSR0A', displayWidth: 78 },
+  COUSR01: { map: 'COUSR1A', displayWidth: 78 },
+  COUSR02: { map: 'COUSR2A', displayWidth: 78 },
+  COUSR03: { map: 'COUSR3A', displayWidth: 78 },
+} as const satisfies Record<string, { readonly map: string; readonly displayWidth: 78 | 80 }>;
 
 /** Name of a mapset whose message-band width this module records. */
 export type MapsetName = keyof typeof MESSAGE_BAND_BY_MAPSET;
@@ -752,91 +749,91 @@ export const MAIN_MENU_OPTION_COUNT = 11 as const;
 export const MAIN_MENU_OPTIONS = [
   {
     optionNumber: 1,
-    name: "Account View                       ",
+    name: 'Account View                       ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COACTVWC",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [27] },
+    programName: 'COACTVWC',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [27] },
   },
   {
     optionNumber: 2,
-    name: "Account Update                     ",
+    name: 'Account Update                     ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COACTUPC",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [33] },
+    programName: 'COACTUPC',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [33] },
   },
   {
     optionNumber: 3,
-    name: "Credit Card List                   ",
+    name: 'Credit Card List                   ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COCRDLIC",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [39] },
+    programName: 'COCRDLIC',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [39] },
   },
   {
     optionNumber: 4,
-    name: "Credit Card View                   ",
+    name: 'Credit Card View                   ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COCRDSLC",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [45] },
+    programName: 'COCRDSLC',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [45] },
   },
   {
     optionNumber: 5,
-    name: "Credit Card Update                 ",
+    name: 'Credit Card Update                 ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COCRDUPC",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [51] },
+    programName: 'COCRDUPC',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [51] },
   },
   {
     optionNumber: 6,
-    name: "Transaction List                   ",
+    name: 'Transaction List                   ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COTRN00C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [57] },
+    programName: 'COTRN00C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [57] },
   },
   {
     optionNumber: 7,
-    name: "Transaction View                   ",
+    name: 'Transaction View                   ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COTRN01C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [63] },
+    programName: 'COTRN01C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [63] },
   },
   {
     optionNumber: 8,
-    name: "Transaction Add                    ",
+    name: 'Transaction Add                    ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COTRN02C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [70] },
+    programName: 'COTRN02C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [70] },
   },
   {
     optionNumber: 9,
-    name: "Transaction Reports                ",
+    name: 'Transaction Reports                ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "CORPT00C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [76] },
+    programName: 'CORPT00C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [76] },
   },
   {
     optionNumber: 10,
-    name: "Bill Payment                       ",
+    name: 'Bill Payment                       ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COBIL00C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [82] },
+    programName: 'COBIL00C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [82] },
   },
   {
     optionNumber: 11,
-    name: "Pending Authorization View         ",
+    name: 'Pending Authorization View         ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COPAUS0C",
-    userType: "U",
-    source: { file: "app/cpy/COMEN02Y.cpy", lines: [88] },
+    programName: 'COPAUS0C',
+    userType: 'U',
+    source: { file: 'app/cpy/COMEN02Y.cpy', lines: [88] },
   },
 ] as const satisfies readonly MainMenuOption[];
 
@@ -862,45 +859,45 @@ export const ADMIN_MENU_OPTION_COUNT = 6 as const;
 export const ADMIN_MENU_OPTIONS = [
   {
     optionNumber: 1,
-    name: "User List (Security)               ",
+    name: 'User List (Security)               ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COUSR00C",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [28] },
+    programName: 'COUSR00C',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [28] },
   },
   {
     optionNumber: 2,
-    name: "User Add (Security)                ",
+    name: 'User Add (Security)                ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COUSR01C",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [33] },
+    programName: 'COUSR01C',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [33] },
   },
   {
     optionNumber: 3,
-    name: "User Update (Security)             ",
+    name: 'User Update (Security)             ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COUSR02C",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [38] },
+    programName: 'COUSR02C',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [38] },
   },
   {
     optionNumber: 4,
-    name: "User Delete (Security)             ",
+    name: 'User Delete (Security)             ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COUSR03C",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [43] },
+    programName: 'COUSR03C',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [43] },
   },
   {
     optionNumber: 5,
-    name: "Transaction Type List/Update (Db2) ",
+    name: 'Transaction Type List/Update (Db2) ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COTRTLIC",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [48] },
+    programName: 'COTRTLIC',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [48] },
   },
   {
     optionNumber: 6,
-    name: "Transaction Type Maintenance (Db2) ",
+    name: 'Transaction Type Maintenance (Db2) ',
     nameDeclaredWidth: MENU_OPTION_DECLARED_WIDTH,
-    programName: "COTRTUPC",
-    source: { file: "app/cpy/COADM02Y.cpy", lines: [52] },
+    programName: 'COTRTUPC',
+    source: { file: 'app/cpy/COADM02Y.cpy', lines: [52] },
   },
 ] as const satisfies readonly AdminMenuOption[];
 
@@ -917,28 +914,28 @@ export const ADMIN_MENU_OPTIONS = [
  * them.
  */
 export const PROGRAM_SOURCE_FILES = {
-  COACTUPC: "app/cbl/COACTUPC.cbl",
-  COACTVWC: "app/cbl/COACTVWC.cbl",
-  COADM01C: "app/cbl/COADM01C.cbl",
-  COBIL00C: "app/cbl/COBIL00C.cbl",
-  COCRDLIC: "app/cbl/COCRDLIC.cbl",
-  COCRDSLC: "app/cbl/COCRDSLC.cbl",
-  COCRDUPC: "app/cbl/COCRDUPC.cbl",
-  COMEN01C: "app/cbl/COMEN01C.cbl",
-  COPAUS0C: "app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl",
-  COPAUS1C: "app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl",
-  COPAUS2C: "app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl",
-  CORPT00C: "app/cbl/CORPT00C.cbl",
-  COSGN00C: "app/cbl/COSGN00C.cbl",
-  COTRN00C: "app/cbl/COTRN00C.cbl",
-  COTRN01C: "app/cbl/COTRN01C.cbl",
-  COTRN02C: "app/cbl/COTRN02C.cbl",
-  COTRTLIC: "app/app-transaction-type-db2/cbl/COTRTLIC.cbl",
-  COTRTUPC: "app/app-transaction-type-db2/cbl/COTRTUPC.cbl",
-  COUSR00C: "app/cbl/COUSR00C.cbl",
-  COUSR01C: "app/cbl/COUSR01C.cbl",
-  COUSR02C: "app/cbl/COUSR02C.cbl",
-  COUSR03C: "app/cbl/COUSR03C.cbl",
+  COACTUPC: 'app/cbl/COACTUPC.cbl',
+  COACTVWC: 'app/cbl/COACTVWC.cbl',
+  COADM01C: 'app/cbl/COADM01C.cbl',
+  COBIL00C: 'app/cbl/COBIL00C.cbl',
+  COCRDLIC: 'app/cbl/COCRDLIC.cbl',
+  COCRDSLC: 'app/cbl/COCRDSLC.cbl',
+  COCRDUPC: 'app/cbl/COCRDUPC.cbl',
+  COMEN01C: 'app/cbl/COMEN01C.cbl',
+  COPAUS0C: 'app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl',
+  COPAUS1C: 'app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl',
+  COPAUS2C: 'app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl',
+  CORPT00C: 'app/cbl/CORPT00C.cbl',
+  COSGN00C: 'app/cbl/COSGN00C.cbl',
+  COTRN00C: 'app/cbl/COTRN00C.cbl',
+  COTRN01C: 'app/cbl/COTRN01C.cbl',
+  COTRN02C: 'app/cbl/COTRN02C.cbl',
+  COTRTLIC: 'app/app-transaction-type-db2/cbl/COTRTLIC.cbl',
+  COTRTUPC: 'app/app-transaction-type-db2/cbl/COTRTUPC.cbl',
+  COUSR00C: 'app/cbl/COUSR00C.cbl',
+  COUSR01C: 'app/cbl/COUSR01C.cbl',
+  COUSR02C: 'app/cbl/COUSR02C.cbl',
+  COUSR03C: 'app/cbl/COUSR03C.cbl',
 } as const;
 
 /** Name of an online program that contributes strings to this catalog. */
@@ -963,16 +960,15 @@ export type ProgramName = keyof typeof PROGRAM_SOURCE_FILES;
  */
 export const SHARED_MESSAGES = {
   ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER:
-    "ACCOUNT FILTER,IF SUPPLIED MUST BE A 11 DIGIT NUMBER",
-  ACCOUNT_ID_NOT_FOUND: "Account ID NOT found...",
+    'ACCOUNT FILTER,IF SUPPLIED MUST BE A 11 DIGIT NUMBER',
+  ACCOUNT_ID_NOT_FOUND: 'Account ID NOT found...',
   CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER:
-    "CARD ID FILTER,IF SUPPLIED MUST BE A 16 DIGIT NUMBER",
-  FIRST_NAME_CAN_NOT_BE_EMPTY: "First Name can NOT be empty...",
-  INVALID_SELECTION_VALID_VALUE_IS_S: "Invalid selection. Valid value is S",
-  INVALID_VALUE_VALID_VALUES_ARE_Y_N:
-    "Invalid value. Valid values are (Y/N)...",
-  LAST_NAME_CAN_NOT_BE_EMPTY: "Last Name can NOT be empty...",
-  PASSWORD_CAN_NOT_BE_EMPTY: "Password can NOT be empty...",
+    'CARD ID FILTER,IF SUPPLIED MUST BE A 16 DIGIT NUMBER',
+  FIRST_NAME_CAN_NOT_BE_EMPTY: 'First Name can NOT be empty...',
+  INVALID_SELECTION_VALID_VALUE_IS_S: 'Invalid selection. Valid value is S',
+  INVALID_VALUE_VALID_VALUES_ARE_Y_N: 'Invalid value. Valid values are (Y/N)...',
+  LAST_NAME_CAN_NOT_BE_EMPTY: 'Last Name can NOT be empty...',
+  PASSWORD_CAN_NOT_BE_EMPTY: 'Password can NOT be empty...',
   /**
    * WHY this sits in the shared group rather than under `COTRTLIC` (Refactoring
    * Rationale): it was filed as COTRTLIC-only, but the transaction-type maintenance
@@ -982,29 +978,24 @@ export const SHARED_MESSAGES = {
    * "keyed by origin" rule honest and lets both sites be cited; the key a consumer
    * uses is unchanged.
    */
-  PLEASE_DELETE_ASSOCIATED_CHILD_RECORDS_FIRST:
-    "Please delete associated child records first:",
-  PLEASE_ENTER_A_VALID_OPTION_NUMBER: "Please enter a valid option number...",
-  TRANSACTION_DESC: "Transaction Desc",
-  TRANSACTION_ID_NOT_FOUND: "Transaction ID NOT found...",
-  TRAN_ID_ALREADY_EXIST: "Tran ID already exist...",
-  UNABLE_TO_LOOKUP_TRANSACTION: "Unable to lookup Transaction...",
-  UNABLE_TO_LOOKUP_USER: "Unable to lookup User...",
-  UNABLE_TO_UPDATE_USER: "Unable to Update User...",
-  UNEXPECTED_ABEND_OCCURRED: "UNEXPECTED ABEND OCCURRED.",
-  UNEXPECTED_DATA_SCENARIO: "UNEXPECTED DATA SCENARIO",
-  USER_ID_CAN_NOT_BE_EMPTY: "User ID can NOT be empty...",
-  USER_ID_NOT_FOUND: "User ID NOT found...",
-  USER_TYPE_CAN_NOT_BE_EMPTY: "User Type can NOT be empty...",
-  YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE:
-    "You are already at the bottom of the page...",
-  YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE:
-    "You are already at the top of the page...",
-  YOU_ARE_AT_THE_TOP_OF_THE_PAGE: "You are at the top of the page...",
-  YOU_HAVE_REACHED_THE_BOTTOM_OF_THE_PAGE:
-    "You have reached the bottom of the page...",
-  YOU_HAVE_REACHED_THE_TOP_OF_THE_PAGE:
-    "You have reached the top of the page...",
+  PLEASE_DELETE_ASSOCIATED_CHILD_RECORDS_FIRST: 'Please delete associated child records first:',
+  PLEASE_ENTER_A_VALID_OPTION_NUMBER: 'Please enter a valid option number...',
+  TRANSACTION_DESC: 'Transaction Desc',
+  TRANSACTION_ID_NOT_FOUND: 'Transaction ID NOT found...',
+  TRAN_ID_ALREADY_EXIST: 'Tran ID already exist...',
+  UNABLE_TO_LOOKUP_TRANSACTION: 'Unable to lookup Transaction...',
+  UNABLE_TO_LOOKUP_USER: 'Unable to lookup User...',
+  UNABLE_TO_UPDATE_USER: 'Unable to Update User...',
+  UNEXPECTED_ABEND_OCCURRED: 'UNEXPECTED ABEND OCCURRED.',
+  UNEXPECTED_DATA_SCENARIO: 'UNEXPECTED DATA SCENARIO',
+  USER_ID_CAN_NOT_BE_EMPTY: 'User ID can NOT be empty...',
+  USER_ID_NOT_FOUND: 'User ID NOT found...',
+  USER_TYPE_CAN_NOT_BE_EMPTY: 'User Type can NOT be empty...',
+  YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE: 'You are already at the bottom of the page...',
+  YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE: 'You are already at the top of the page...',
+  YOU_ARE_AT_THE_TOP_OF_THE_PAGE: 'You are at the top of the page...',
+  YOU_HAVE_REACHED_THE_BOTTOM_OF_THE_PAGE: 'You have reached the bottom of the page...',
+  YOU_HAVE_REACHED_THE_TOP_OF_THE_PAGE: 'You have reached the top of the page...',
 } as const;
 
 /**
@@ -1173,38 +1164,38 @@ export const SHARED_MESSAGE_SOURCES = {
  * temporal-dead-zone error at module load, not a compile-time warning.
  */
 export const ACCOUNT_UPDATE_FIELD_LABELS = {
-  ACCOUNT_STATUS: "Account Status",
-  OPEN_DATE: "Open Date",
-  CREDIT_LIMIT: "Credit Limit",
-  EXPIRY_DATE: "Expiry Date",
-  CASH_CREDIT_LIMIT: "Cash Credit Limit",
-  REISSUE_DATE: "Reissue Date",
-  CURRENT_BALANCE: "Current Balance",
-  CURRENT_CYCLE_CREDIT_LIMIT: "Current Cycle Credit Limit",
-  CURRENT_CYCLE_DEBIT_LIMIT: "Current Cycle Debit Limit",
-  SSN: "SSN",
-  DATE_OF_BIRTH: "Date of Birth",
-  FICO_SCORE: "FICO Score",
-  FIRST_NAME: "First Name",
-  MIDDLE_NAME: "Middle Name",
-  LAST_NAME: "Last Name",
-  ADDRESS_LINE_1: "Address Line 1",
-  STATE: "State",
-  ZIP: "Zip",
-  CITY: "City",
-  COUNTRY: "Country",
-  PHONE_NUMBER_1: "Phone Number 1",
-  PHONE_NUMBER_2: "Phone Number 2",
-  EFT_ACCOUNT_ID: "EFT Account Id",
-  PRIMARY_CARD_HOLDER: "Primary Card Holder",
-  SSN_FIRST_3_CHARS: "SSN: First 3 chars",
+  ACCOUNT_STATUS: 'Account Status',
+  OPEN_DATE: 'Open Date',
+  CREDIT_LIMIT: 'Credit Limit',
+  EXPIRY_DATE: 'Expiry Date',
+  CASH_CREDIT_LIMIT: 'Cash Credit Limit',
+  REISSUE_DATE: 'Reissue Date',
+  CURRENT_BALANCE: 'Current Balance',
+  CURRENT_CYCLE_CREDIT_LIMIT: 'Current Cycle Credit Limit',
+  CURRENT_CYCLE_DEBIT_LIMIT: 'Current Cycle Debit Limit',
+  SSN: 'SSN',
+  DATE_OF_BIRTH: 'Date of Birth',
+  FICO_SCORE: 'FICO Score',
+  FIRST_NAME: 'First Name',
+  MIDDLE_NAME: 'Middle Name',
+  LAST_NAME: 'Last Name',
+  ADDRESS_LINE_1: 'Address Line 1',
+  STATE: 'State',
+  ZIP: 'Zip',
+  CITY: 'City',
+  COUNTRY: 'Country',
+  PHONE_NUMBER_1: 'Phone Number 1',
+  PHONE_NUMBER_2: 'Phone Number 2',
+  EFT_ACCOUNT_ID: 'EFT Account Id',
+  PRIMARY_CARD_HOLDER: 'Primary Card Holder',
+  SSN_FIRST_3_CHARS: 'SSN: First 3 chars',
   /**
    * WHY the ampersand is a bare character. Assumptions: the baseline holds a plain
    * `&`, not an HTML entity. React escapes text children when rendering, so this
    * must stay `&` here; writing `&amp;` would display the entity literally.
    */
-  SSN_4TH_AND_5TH_CHARS: "SSN 4th & 5th chars",
-  SSN_LAST_4_CHARS: "SSN Last 4 chars",
+  SSN_4TH_AND_5TH_CHARS: 'SSN 4th & 5th chars',
+  SSN_LAST_4_CHARS: 'SSN Last 4 chars',
 } as const;
 
 /** Baseline line of each {@link ACCOUNT_UPDATE_FIELD_LABELS} entry. */
@@ -1236,10 +1227,7 @@ export const ACCOUNT_UPDATE_FIELD_LABEL_SOURCES = {
   SSN_FIRST_3_CHARS: [2439],
   SSN_4TH_AND_5TH_CHARS: [2469],
   SSN_LAST_4_CHARS: [2481],
-} as const satisfies Record<
-  keyof typeof ACCOUNT_UPDATE_FIELD_LABELS,
-  readonly number[]
->;
+} as const satisfies Record<keyof typeof ACCOUNT_UPDATE_FIELD_LABELS, readonly number[]>;
 
 /**
  * Messages emitted by exactly one program, grouped under that program's name.
@@ -1270,20 +1258,20 @@ export const PROGRAM_MESSAGES = {
      * correct English.
      */
     ACCOUNT_FILTER_MUST_BE_A_NON_ZERO_11_DIGIT_NUMBER:
-      "Account Filter must  be a non-zero 11 digit number",
+      'Account Filter must  be a non-zero 11 digit number',
   },
   /** bill payment - `app/cbl/COBIL00C.cbl` (10 messages). */
   COBIL00C: {
-    ACCT_ID_CAN_NOT_BE_EMPTY: "Acct ID can NOT be empty...",
-    YOU_HAVE_NOTHING_TO_PAY: "You have nothing to pay...",
-    POS_TERM: "POS TERM",
-    BILL_PAYMENT_ONLINE: "BILL PAYMENT - ONLINE",
-    BILL_PAYMENT: "BILL PAYMENT",
-    CONFIRM_TO_MAKE_A_BILL_PAYMENT: "Confirm to make a bill payment...",
-    UNABLE_TO_LOOKUP_ACCOUNT: "Unable to lookup Account...",
-    UNABLE_TO_UPDATE_ACCOUNT: "Unable to Update Account...",
-    UNABLE_TO_LOOKUP_XREF_AIX_FILE: "Unable to lookup XREF AIX file...",
-    UNABLE_TO_ADD_BILL_PAY_TRANSACTION: "Unable to Add Bill pay Transaction...",
+    ACCT_ID_CAN_NOT_BE_EMPTY: 'Acct ID can NOT be empty...',
+    YOU_HAVE_NOTHING_TO_PAY: 'You have nothing to pay...',
+    POS_TERM: 'POS TERM',
+    BILL_PAYMENT_ONLINE: 'BILL PAYMENT - ONLINE',
+    BILL_PAYMENT: 'BILL PAYMENT',
+    CONFIRM_TO_MAKE_A_BILL_PAYMENT: 'Confirm to make a bill payment...',
+    UNABLE_TO_LOOKUP_ACCOUNT: 'Unable to lookup Account...',
+    UNABLE_TO_UPDATE_ACCOUNT: 'Unable to Update Account...',
+    UNABLE_TO_LOOKUP_XREF_AIX_FILE: 'Unable to lookup XREF AIX file...',
+    UNABLE_TO_ADD_BILL_PAY_TRANSACTION: 'Unable to Add Bill pay Transaction...',
   },
   /** credit-card list - `app/cbl/COCRDLIC.cbl` (3 messages). */
   COCRDLIC: {
@@ -1293,7 +1281,7 @@ export const PROGRAM_MESSAGES = {
      * case-insensitively would keep one and drop the other, changing what one of the two
      * screens renders.
      */
-    NO_PREVIOUS_PAGES_TO_DISPLAY: "NO PREVIOUS PAGES TO DISPLAY",
+    NO_PREVIOUS_PAGES_TO_DISPLAY: 'NO PREVIOUS PAGES TO DISPLAY',
     /**
      * WHY this is not merged with `COTRTLIC.NO_MORE_PAGES_TO_DISPLAY` (Alternatives
      * Considered): the two differ only in letter case, so a case-insensitive
@@ -1301,8 +1289,8 @@ export const PROGRAM_MESSAGES = {
      * form and the transaction-type screen shows a mixed-case form; collapsing them
      * would change what one of the two screens renders.
      */
-    NO_MORE_PAGES_TO_DISPLAY: "NO MORE PAGES TO DISPLAY",
-    NO_MORE_RECORDS_TO_SHOW: "NO MORE RECORDS TO SHOW",
+    NO_MORE_PAGES_TO_DISPLAY: 'NO MORE PAGES TO DISPLAY',
+    NO_MORE_RECORDS_TO_SHOW: 'NO MORE RECORDS TO SHOW',
   },
   /** main menu - `app/cbl/COMEN01C.cbl` (1 message). */
   COMEN01C: {
@@ -1314,111 +1302,104 @@ export const PROGRAM_MESSAGES = {
      * Alternatives Considered: trimming it reads as tidier and silently breaks that
      * comparison and the screen test that asserts the rendered text.
      */
-    NO_ACCESS_ADMIN_ONLY_OPTION: "No access - Admin Only option... ",
+    NO_ACCESS_ADMIN_ONLY_OPTION: 'No access - Admin Only option... ',
   },
   /** pending-authorization summary - `app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl` (2 messages). */
   COPAUS0C: {
-    PLEASE_ENTER_ACCT_ID: "Please enter Acct Id...",
-    ACCT_ID_MUST_BE_NUMERIC: "Acct Id must be Numeric ...",
+    PLEASE_ENTER_ACCT_ID: 'Please enter Acct Id...',
+    ACCT_ID_MUST_BE_NUMERIC: 'Acct Id must be Numeric ...',
   },
   /** pending-authorization detail - `app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl` (3 messages). */
   COPAUS1C: {
-    ALREADY_AT_THE_LAST_AUTHORIZATION: "Already at the last Authorization...",
-    AUTH_FRAUD_REMOVED: "AUTH FRAUD REMOVED...",
-    AUTH_MARKED_FRAUD: "AUTH MARKED FRAUD...",
+    ALREADY_AT_THE_LAST_AUTHORIZATION: 'Already at the last Authorization...',
+    AUTH_FRAUD_REMOVED: 'AUTH FRAUD REMOVED...',
+    AUTH_MARKED_FRAUD: 'AUTH MARKED FRAUD...',
   },
   /** authorization fraud marking - `app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl` (2 messages). */
   COPAUS2C: {
-    ADD_SUCCESS: "ADD SUCCESS",
-    UPDT_SUCCESS: "UPDT SUCCESS",
+    ADD_SUCCESS: 'ADD SUCCESS',
+    UPDT_SUCCESS: 'UPDT SUCCESS',
   },
   /** transaction reports - `app/cbl/CORPT00C.cbl` (19 messages). */
   CORPT00C: {
-    MONTHLY: "Monthly",
-    YEARLY: "Yearly",
-    START_DATE_MONTH_CAN_NOT_BE_EMPTY: "Start Date - Month can NOT be empty...",
-    START_DATE_DAY_CAN_NOT_BE_EMPTY: "Start Date - Day can NOT be empty...",
-    START_DATE_YEAR_CAN_NOT_BE_EMPTY: "Start Date - Year can NOT be empty...",
-    END_DATE_MONTH_CAN_NOT_BE_EMPTY: "End Date - Month can NOT be empty...",
-    END_DATE_DAY_CAN_NOT_BE_EMPTY: "End Date - Day can NOT be empty...",
-    END_DATE_YEAR_CAN_NOT_BE_EMPTY: "End Date - Year can NOT be empty...",
-    START_DATE_NOT_A_VALID_MONTH: "Start Date - Not a valid Month...",
-    START_DATE_NOT_A_VALID_DAY: "Start Date - Not a valid Day...",
-    START_DATE_NOT_A_VALID_YEAR: "Start Date - Not a valid Year...",
-    END_DATE_NOT_A_VALID_MONTH: "End Date - Not a valid Month...",
-    END_DATE_NOT_A_VALID_DAY: "End Date - Not a valid Day...",
-    END_DATE_NOT_A_VALID_YEAR: "End Date - Not a valid Year...",
-    START_DATE_NOT_A_VALID_DATE: "Start Date - Not a valid date...",
-    END_DATE_NOT_A_VALID_DATE: "End Date - Not a valid date...",
-    CUSTOM: "Custom",
-    SELECT_A_REPORT_TYPE_TO_PRINT_REPORT:
-      "Select a report type to print report...",
-    UNABLE_TO_WRITE_TDQ_JOBS: "Unable to Write TDQ (JOBS)...",
+    MONTHLY: 'Monthly',
+    YEARLY: 'Yearly',
+    START_DATE_MONTH_CAN_NOT_BE_EMPTY: 'Start Date - Month can NOT be empty...',
+    START_DATE_DAY_CAN_NOT_BE_EMPTY: 'Start Date - Day can NOT be empty...',
+    START_DATE_YEAR_CAN_NOT_BE_EMPTY: 'Start Date - Year can NOT be empty...',
+    END_DATE_MONTH_CAN_NOT_BE_EMPTY: 'End Date - Month can NOT be empty...',
+    END_DATE_DAY_CAN_NOT_BE_EMPTY: 'End Date - Day can NOT be empty...',
+    END_DATE_YEAR_CAN_NOT_BE_EMPTY: 'End Date - Year can NOT be empty...',
+    START_DATE_NOT_A_VALID_MONTH: 'Start Date - Not a valid Month...',
+    START_DATE_NOT_A_VALID_DAY: 'Start Date - Not a valid Day...',
+    START_DATE_NOT_A_VALID_YEAR: 'Start Date - Not a valid Year...',
+    END_DATE_NOT_A_VALID_MONTH: 'End Date - Not a valid Month...',
+    END_DATE_NOT_A_VALID_DAY: 'End Date - Not a valid Day...',
+    END_DATE_NOT_A_VALID_YEAR: 'End Date - Not a valid Year...',
+    START_DATE_NOT_A_VALID_DATE: 'Start Date - Not a valid date...',
+    END_DATE_NOT_A_VALID_DATE: 'End Date - Not a valid date...',
+    CUSTOM: 'Custom',
+    SELECT_A_REPORT_TYPE_TO_PRINT_REPORT: 'Select a report type to print report...',
+    UNABLE_TO_WRITE_TDQ_JOBS: 'Unable to Write TDQ (JOBS)...',
   },
   /** sign-on - `app/cbl/COSGN00C.cbl` (5 messages). */
   COSGN00C: {
-    PLEASE_ENTER_USER_ID: "Please enter User ID ...",
-    PLEASE_ENTER_PASSWORD: "Please enter Password ...",
-    WRONG_PASSWORD_TRY_AGAIN: "Wrong Password. Try again ...",
-    USER_NOT_FOUND_TRY_AGAIN: "User not found. Try again ...",
-    UNABLE_TO_VERIFY_THE_USER: "Unable to verify the User ...",
+    PLEASE_ENTER_USER_ID: 'Please enter User ID ...',
+    PLEASE_ENTER_PASSWORD: 'Please enter Password ...',
+    WRONG_PASSWORD_TRY_AGAIN: 'Wrong Password. Try again ...',
+    USER_NOT_FOUND_TRY_AGAIN: 'User not found. Try again ...',
+    UNABLE_TO_VERIFY_THE_USER: 'Unable to verify the User ...',
   },
   /** transaction list - `app/cbl/COTRN00C.cbl` (2 messages). */
   COTRN00C: {
-    TRAN_ID_MUST_BE_NUMERIC: "Tran ID must be Numeric ...",
+    TRAN_ID_MUST_BE_NUMERIC: 'Tran ID must be Numeric ...',
     /**
      * WHY the lower-case "transaction" is preserved -- Assumptions: the shared
      * `SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION` spells it with a capital T at
      * its three sites, while this program spells it lower-case at all three of its
      * own. Normalising either way alters text that a golden-master comparison reads.
      */
-    UNABLE_TO_LOOKUP_TRANSACTION: "Unable to lookup transaction...",
+    UNABLE_TO_LOOKUP_TRANSACTION: 'Unable to lookup transaction...',
   },
   /** transaction view - `app/cbl/COTRN01C.cbl` (1 message). */
   COTRN01C: {
-    TRAN_ID_CAN_NOT_BE_EMPTY: "Tran ID can NOT be empty...",
+    TRAN_ID_CAN_NOT_BE_EMPTY: 'Tran ID can NOT be empty...',
   },
   /** transaction add - `app/cbl/COTRN02C.cbl` (27 messages). */
   COTRN02C: {
-    CONFIRM_TO_ADD_THIS_TRANSACTION: "Confirm to add this transaction...",
-    ACCOUNT_ID_MUST_BE_NUMERIC: "Account ID must be Numeric...",
-    CARD_NUMBER_MUST_BE_NUMERIC: "Card Number must be Numeric...",
-    ACCOUNT_OR_CARD_NUMBER_MUST_BE_ENTERED:
-      "Account or Card Number must be entered...",
-    TYPE_CD_CAN_NOT_BE_EMPTY: "Type CD can NOT be empty...",
-    CATEGORY_CD_CAN_NOT_BE_EMPTY: "Category CD can NOT be empty...",
-    SOURCE_CAN_NOT_BE_EMPTY: "Source can NOT be empty...",
-    DESCRIPTION_CAN_NOT_BE_EMPTY: "Description can NOT be empty...",
-    AMOUNT_CAN_NOT_BE_EMPTY: "Amount can NOT be empty...",
-    ORIG_DATE_CAN_NOT_BE_EMPTY: "Orig Date can NOT be empty...",
-    PROC_DATE_CAN_NOT_BE_EMPTY: "Proc Date can NOT be empty...",
-    MERCHANT_ID_CAN_NOT_BE_EMPTY: "Merchant ID can NOT be empty...",
-    MERCHANT_NAME_CAN_NOT_BE_EMPTY: "Merchant Name can NOT be empty...",
-    MERCHANT_CITY_CAN_NOT_BE_EMPTY: "Merchant City can NOT be empty...",
-    MERCHANT_ZIP_CAN_NOT_BE_EMPTY: "Merchant Zip can NOT be empty...",
-    TYPE_CD_MUST_BE_NUMERIC: "Type CD must be Numeric...",
-    CATEGORY_CD_MUST_BE_NUMERIC: "Category CD must be Numeric...",
-    AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99:
-      "Amount should be in format -99999999.99",
-    ORIG_DATE_SHOULD_BE_IN_FORMAT_YYYY_MM_DD:
-      "Orig Date should be in format YYYY-MM-DD",
-    PROC_DATE_SHOULD_BE_IN_FORMAT_YYYY_MM_DD:
-      "Proc Date should be in format YYYY-MM-DD",
-    ORIG_DATE_NOT_A_VALID_DATE: "Orig Date - Not a valid date...",
-    PROC_DATE_NOT_A_VALID_DATE: "Proc Date - Not a valid date...",
-    MERCHANT_ID_MUST_BE_NUMERIC: "Merchant ID must be Numeric...",
-    UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE:
-      "Unable to lookup Acct in XREF AIX file...",
-    CARD_NUMBER_NOT_FOUND: "Card Number NOT found...",
+    CONFIRM_TO_ADD_THIS_TRANSACTION: 'Confirm to add this transaction...',
+    ACCOUNT_ID_MUST_BE_NUMERIC: 'Account ID must be Numeric...',
+    CARD_NUMBER_MUST_BE_NUMERIC: 'Card Number must be Numeric...',
+    ACCOUNT_OR_CARD_NUMBER_MUST_BE_ENTERED: 'Account or Card Number must be entered...',
+    TYPE_CD_CAN_NOT_BE_EMPTY: 'Type CD can NOT be empty...',
+    CATEGORY_CD_CAN_NOT_BE_EMPTY: 'Category CD can NOT be empty...',
+    SOURCE_CAN_NOT_BE_EMPTY: 'Source can NOT be empty...',
+    DESCRIPTION_CAN_NOT_BE_EMPTY: 'Description can NOT be empty...',
+    AMOUNT_CAN_NOT_BE_EMPTY: 'Amount can NOT be empty...',
+    ORIG_DATE_CAN_NOT_BE_EMPTY: 'Orig Date can NOT be empty...',
+    PROC_DATE_CAN_NOT_BE_EMPTY: 'Proc Date can NOT be empty...',
+    MERCHANT_ID_CAN_NOT_BE_EMPTY: 'Merchant ID can NOT be empty...',
+    MERCHANT_NAME_CAN_NOT_BE_EMPTY: 'Merchant Name can NOT be empty...',
+    MERCHANT_CITY_CAN_NOT_BE_EMPTY: 'Merchant City can NOT be empty...',
+    MERCHANT_ZIP_CAN_NOT_BE_EMPTY: 'Merchant Zip can NOT be empty...',
+    TYPE_CD_MUST_BE_NUMERIC: 'Type CD must be Numeric...',
+    CATEGORY_CD_MUST_BE_NUMERIC: 'Category CD must be Numeric...',
+    AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99: 'Amount should be in format -99999999.99',
+    ORIG_DATE_SHOULD_BE_IN_FORMAT_YYYY_MM_DD: 'Orig Date should be in format YYYY-MM-DD',
+    PROC_DATE_SHOULD_BE_IN_FORMAT_YYYY_MM_DD: 'Proc Date should be in format YYYY-MM-DD',
+    ORIG_DATE_NOT_A_VALID_DATE: 'Orig Date - Not a valid date...',
+    PROC_DATE_NOT_A_VALID_DATE: 'Proc Date - Not a valid date...',
+    MERCHANT_ID_MUST_BE_NUMERIC: 'Merchant ID must be Numeric...',
+    UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE: 'Unable to lookup Acct in XREF AIX file...',
+    CARD_NUMBER_NOT_FOUND: 'Card Number NOT found...',
     /**
      * WHY the hash is left as-is -- Assumptions: it is a literal character in the baseline
      * standing for the word "number", not a substitution marker. Treating it as a
      * placeholder and interpolating a card number into it would invent text the mainframe
      * never displays - and would leak a card number into an error message.
      */
-    UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE:
-      "Unable to lookup Card # in XREF file...",
-    UNABLE_TO_ADD_TRANSACTION: "Unable to Add Transaction...",
+    UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE: 'Unable to lookup Card # in XREF file...',
+    UNABLE_TO_ADD_TRANSACTION: 'Unable to Add Transaction...',
   },
   /**
    * transaction-type list and update -
@@ -1438,11 +1419,10 @@ export const PROGRAM_MESSAGES = {
    */
   COTRTLIC: {
     TYPE_CODE_FILTER_IF_SUPPLIED_MUST_BE_A_2_DIGIT_NUMBER:
-      "TYPE CODE FILTER,IF SUPPLIED MUST BE A 2 DIGIT NUMBER",
-    NO_RECORDS_FOUND_FOR_THESE_FILTER_CONDITIONS:
-      "No Records found for these filter conditions",
-    NO_PREVIOUS_PAGES_TO_DISPLAY: "No previous pages to display",
-    NO_MORE_PAGES_TO_DISPLAY: "No more pages to display",
+      'TYPE CODE FILTER,IF SUPPLIED MUST BE A 2 DIGIT NUMBER',
+    NO_RECORDS_FOUND_FOR_THESE_FILTER_CONDITIONS: 'No Records found for these filter conditions',
+    NO_PREVIOUS_PAGES_TO_DISPLAY: 'No previous pages to display',
+    NO_MORE_PAGES_TO_DISPLAY: 'No more pages to display',
     /**
      * WHY there is a space on both sides of the question mark. Assumptions: both are
      * in the baseline literal. The trailing one separated this text from the `SQLCODE`
@@ -1450,32 +1430,29 @@ export const PROGRAM_MESSAGES = {
      * transcribed because the invariant of this module is the source bytes, not the
      * bytes the target happens to need.
      */
-    RECORD_NOT_FOUND_DELETED_BY_OTHERS:
-      "Record not found. Deleted by others ? ",
+    RECORD_NOT_FOUND_DELETED_BY_OTHERS: 'Record not found. Deleted by others ? ',
   },
   /** transaction-type maintenance - `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` (1 message). */
   COTRTUPC: {
-    TRAN_TYPE_CODE: "Tran Type code",
+    TRAN_TYPE_CODE: 'Tran Type code',
   },
   /** user list - `app/cbl/COUSR00C.cbl` (1 message). */
   COUSR00C: {
-    INVALID_SELECTION_VALID_VALUES_ARE_U_AND_D:
-      "Invalid selection. Valid values are U and D",
+    INVALID_SELECTION_VALID_VALUES_ARE_U_AND_D: 'Invalid selection. Valid values are U and D',
   },
   /** user add - `app/cbl/COUSR01C.cbl` (2 messages). */
   COUSR01C: {
-    USER_ID_ALREADY_EXIST: "User ID already exist...",
-    UNABLE_TO_ADD_USER: "Unable to Add User...",
+    USER_ID_ALREADY_EXIST: 'User ID already exist...',
+    UNABLE_TO_ADD_USER: 'Unable to Add User...',
   },
   /** user update - `app/cbl/COUSR02C.cbl` (2 messages). */
   COUSR02C: {
-    PLEASE_MODIFY_TO_UPDATE: "Please modify to update ...",
-    PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES:
-      "Press PF5 key to save your updates ...",
+    PLEASE_MODIFY_TO_UPDATE: 'Please modify to update ...',
+    PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES: 'Press PF5 key to save your updates ...',
   },
   /** user delete - `app/cbl/COUSR03C.cbl` (1 message). */
   COUSR03C: {
-    PRESS_PF5_KEY_TO_DELETE_THIS_USER: "Press PF5 key to delete this user ...",
+    PRESS_PF5_KEY_TO_DELETE_THIS_USER: 'Press PF5 key to delete this user ...',
   },
 } as const;
 
@@ -1641,31 +1618,28 @@ export const PROGRAM_MESSAGE_SOURCES = {
  * defects in the upper-case filter messages.
  */
 export const FIELD_VALIDATION_SUFFIXES = {
-  MUST_BE_SUPPLIED: " must be supplied.",
-  MUST_BE_Y_OR_N: " must be Y or N.",
-  CAN_HAVE_ALPHABETS_ONLY: " can have alphabets only.",
-  CAN_HAVE_NUMBERS_OR_ALPHABETS_ONLY: " can have numbers or alphabets only.",
-  MUST_BE_ALL_NUMERIC: " must be all numeric.",
-  MUST_NOT_BE_ZERO: " must not be zero.",
-  IS_NOT_VALID: " is not valid",
-  AREA_CODE_MUST_BE_SUPPLIED: ": Area code must be supplied.",
-  AREA_CODE_MUST_BE_A_3_DIGIT_NUMBER: ": Area code must be A 3 digit number.",
-  AREA_CODE_CANNOT_BE_ZERO: ": Area code cannot be zero",
+  MUST_BE_SUPPLIED: ' must be supplied.',
+  MUST_BE_Y_OR_N: ' must be Y or N.',
+  CAN_HAVE_ALPHABETS_ONLY: ' can have alphabets only.',
+  CAN_HAVE_NUMBERS_OR_ALPHABETS_ONLY: ' can have numbers or alphabets only.',
+  MUST_BE_ALL_NUMERIC: ' must be all numeric.',
+  MUST_NOT_BE_ZERO: ' must not be zero.',
+  IS_NOT_VALID: ' is not valid',
+  AREA_CODE_MUST_BE_SUPPLIED: ': Area code must be supplied.',
+  AREA_CODE_MUST_BE_A_3_DIGIT_NUMBER: ': Area code must be A 3 digit number.',
+  AREA_CODE_CANNOT_BE_ZERO: ': Area code cannot be zero',
   NOT_VALID_NORTH_AMERICA_GENERAL_PURPOSE_AREA_CODE:
-    ": Not valid North America general purpose area code",
-  PREFIX_CODE_MUST_BE_SUPPLIED: ": Prefix code must be supplied.",
-  PREFIX_CODE_MUST_BE_A_3_DIGIT_NUMBER:
-    ": Prefix code must be A 3 digit number.",
-  PREFIX_CODE_CANNOT_BE_ZERO: ": Prefix code cannot be zero",
-  LINE_NUMBER_CODE_MUST_BE_SUPPLIED: ": Line number code must be supplied.",
-  LINE_NUMBER_CODE_MUST_BE_A_4_DIGIT_NUMBER:
-    ": Line number code must be A 4 digit number.",
-  LINE_NUMBER_CODE_CANNOT_BE_ZERO: ": Line number code cannot be zero",
-  SHOULD_NOT_BE_000_666_OR_BETWEEN_900_AND_999:
-    ": should not be 000, 666, or between 900 and 999",
-  IS_NOT_A_VALID_STATE_CODE: ": is not a valid state code",
-  SHOULD_BE_BETWEEN_300_AND_850: ": should be between 300 and 850",
-  MUST_BE_NUMERIC: " must be numeric.",
+    ': Not valid North America general purpose area code',
+  PREFIX_CODE_MUST_BE_SUPPLIED: ': Prefix code must be supplied.',
+  PREFIX_CODE_MUST_BE_A_3_DIGIT_NUMBER: ': Prefix code must be A 3 digit number.',
+  PREFIX_CODE_CANNOT_BE_ZERO: ': Prefix code cannot be zero',
+  LINE_NUMBER_CODE_MUST_BE_SUPPLIED: ': Line number code must be supplied.',
+  LINE_NUMBER_CODE_MUST_BE_A_4_DIGIT_NUMBER: ': Line number code must be A 4 digit number.',
+  LINE_NUMBER_CODE_CANNOT_BE_ZERO: ': Line number code cannot be zero',
+  SHOULD_NOT_BE_000_666_OR_BETWEEN_900_AND_999: ': should not be 000, 666, or between 900 and 999',
+  IS_NOT_A_VALID_STATE_CODE: ': is not a valid state code',
+  SHOULD_BE_BETWEEN_300_AND_850: ': should be between 300 and 850',
+  MUST_BE_NUMERIC: ' must be numeric.',
 } as const;
 
 /** Baseline sites of each {@link FIELD_VALIDATION_SUFFIXES} entry. */
@@ -1679,9 +1653,7 @@ export const FIELD_VALIDATION_SUFFIX_SOURCES = {
     { file: PROGRAM_SOURCE_FILES.COTRTUPC, lines: [866, 924] },
   ],
   MUST_BE_Y_OR_N: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [1886] }],
-  CAN_HAVE_ALPHABETS_ONLY: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [1941, 2047] },
-  ],
+  CAN_HAVE_ALPHABETS_ONLY: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [1941, 2047] }],
   CAN_HAVE_NUMBERS_OR_ALPHABETS_ONLY: [
     { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [1999, 2095] },
     { file: PROGRAM_SOURCE_FILES.COTRTLIC, lines: [1225] },
@@ -1693,50 +1665,27 @@ export const FIELD_VALIDATION_SUFFIX_SOURCES = {
     { file: PROGRAM_SOURCE_FILES.COTRTUPC, lines: [961] },
   ],
   IS_NOT_VALID: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2209] }],
-  AREA_CODE_MUST_BE_SUPPLIED: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2254] },
-  ],
-  AREA_CODE_MUST_BE_A_3_DIGIT_NUMBER: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2272] },
-  ],
-  AREA_CODE_CANNOT_BE_ZERO: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2286] },
-  ],
+  AREA_CODE_MUST_BE_SUPPLIED: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2254] }],
+  AREA_CODE_MUST_BE_A_3_DIGIT_NUMBER: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2272] }],
+  AREA_CODE_CANNOT_BE_ZERO: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2286] }],
   NOT_VALID_NORTH_AMERICA_GENERAL_PURPOSE_AREA_CODE: [
     { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2306] },
   ],
-  PREFIX_CODE_MUST_BE_SUPPLIED: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2325] },
-  ],
-  PREFIX_CODE_MUST_BE_A_3_DIGIT_NUMBER: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2343] },
-  ],
-  PREFIX_CODE_CANNOT_BE_ZERO: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2357] },
-  ],
-  LINE_NUMBER_CODE_MUST_BE_SUPPLIED: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2378] },
-  ],
+  PREFIX_CODE_MUST_BE_SUPPLIED: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2325] }],
+  PREFIX_CODE_MUST_BE_A_3_DIGIT_NUMBER: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2343] }],
+  PREFIX_CODE_CANNOT_BE_ZERO: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2357] }],
+  LINE_NUMBER_CODE_MUST_BE_SUPPLIED: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2378] }],
   LINE_NUMBER_CODE_MUST_BE_A_4_DIGIT_NUMBER: [
     { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2396] },
   ],
-  LINE_NUMBER_CODE_CANNOT_BE_ZERO: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2410] },
-  ],
+  LINE_NUMBER_CODE_CANNOT_BE_ZERO: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2410] }],
   SHOULD_NOT_BE_000_666_OR_BETWEEN_900_AND_999: [
     { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2457] },
   ],
-  IS_NOT_A_VALID_STATE_CODE: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2503] },
-  ],
-  SHOULD_BE_BETWEEN_300_AND_850: [
-    { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2523] },
-  ],
+  IS_NOT_A_VALID_STATE_CODE: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2503] }],
+  SHOULD_BE_BETWEEN_300_AND_850: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2523] }],
   MUST_BE_NUMERIC: [{ file: PROGRAM_SOURCE_FILES.COTRTUPC, lines: [943] }],
-} as const satisfies Record<
-  keyof typeof FIELD_VALIDATION_SUFFIXES,
-  readonly SourceRef[]
->;
+} as const satisfies Record<keyof typeof FIELD_VALIDATION_SUFFIXES, readonly SourceRef[]>;
 
 /**
  * Messages the baseline holds as `88`-level condition names on a message field,
@@ -1771,747 +1720,745 @@ export const FIELD_VALIDATION_SUFFIX_SOURCES = {
 export const STATUS_MESSAGES = {
   COACTUPC: {
     FOUND_ACCOUNT_DATA: {
-      text: "Details of selected account shown above",
-      field: "WS-INFO-MSG",
+      text: 'Details of selected account shown above',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 467,
     },
     PROMPT_FOR_SEARCH_KEYS: {
-      text: "Enter or update id of account to update",
-      field: "WS-INFO-MSG",
+      text: 'Enter or update id of account to update',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 469,
     },
     PROMPT_FOR_CHANGES: {
-      text: "Update account details presented above.",
-      field: "WS-INFO-MSG",
+      text: 'Update account details presented above.',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 471,
     },
     PROMPT_FOR_CONFIRMATION: {
-      text: "Changes validated.Press F5 to save",
-      field: "WS-INFO-MSG",
+      text: 'Changes validated.Press F5 to save',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 473,
     },
     CONFIRM_UPDATE_SUCCESS: {
-      text: "Changes committed to database",
-      field: "WS-INFO-MSG",
+      text: 'Changes committed to database',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 475,
     },
     INFORM_FAILURE: {
-      text: "Changes unsuccessful. Please try again",
-      field: "WS-INFO-MSG",
+      text: 'Changes unsuccessful. Please try again',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 477,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed.Exiting              ",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed.Exiting              ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 482,
     },
     WS_PROMPT_FOR_ACCT: {
-      text: "Account number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Account number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 484,
     },
     WS_PROMPT_FOR_LASTNAME: {
-      text: "Last name not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Last name not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 486,
     },
     WS_NAME_MUST_BE_ALPHA: {
-      text: "Name can only contain alphabets and spaces",
-      field: "WS-RETURN-MSG",
+      text: 'Name can only contain alphabets and spaces',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 488,
     },
     NO_SEARCH_CRITERIA_RECEIVED: {
-      text: "No input received",
-      field: "WS-RETURN-MSG",
+      text: 'No input received',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 490,
     },
     NO_CHANGES_DETECTED: {
-      text: "No change detected with respect to values fetched.",
-      field: "WS-RETURN-MSG",
+      text: 'No change detected with respect to values fetched.',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 492,
     },
     SEARCHED_ACCT_ZEROES: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 494,
     },
     SEARCHED_ACCT_NOT_NUMERIC: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 496,
     },
     DID_NOT_FIND_ACCT_IN_CARDXREF__L498: {
-      text: "Did not find this account in account card xref file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in account card xref file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 498,
     },
     DID_NOT_FIND_ACCT_IN_ACCTDAT: {
-      text: "Did not find this account in account master file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in account master file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 500,
     },
     DID_NOT_FIND_CUST_IN_CUSTDAT: {
-      text: "Did not find associated customer in master file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find associated customer in master file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 502,
     },
     ACCT_STATUS_MUST_BE_YES_NO: {
-      text: "Account Active Status must be Y or N",
-      field: "WS-RETURN-MSG",
+      text: 'Account Active Status must be Y or N',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 504,
     },
     CRED_LIMIT_IS_BLANK: {
-      text: "Credit Limit must be supplied",
-      field: "WS-RETURN-MSG",
+      text: 'Credit Limit must be supplied',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 506,
     },
     CRED_LIMIT_IS_NOT_VALID: {
-      text: "Credit Limit is not valid",
-      field: "WS-RETURN-MSG",
+      text: 'Credit Limit is not valid',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 508,
     },
     THIS_MONTH_NOT_VALID: {
-      text: "Card expiry month must be between 1 and 12",
-      field: "WS-RETURN-MSG",
+      text: 'Card expiry month must be between 1 and 12',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 510,
     },
     THIS_YEAR_NOT_VALID: {
-      text: "Invalid card expiry year",
-      field: "WS-RETURN-MSG",
+      text: 'Invalid card expiry year',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 512,
     },
     DID_NOT_FIND_ACCT_IN_CARDXREF__L514: {
-      text: "Did not find this account in cards database",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in cards database',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 514,
     },
     DID_NOT_FIND_ACCTCARD_COMBO: {
-      text: "Did not find cards for this search condition",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find cards for this search condition',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 516,
     },
     COULD_NOT_LOCK_ACCT_FOR_UPDATE: {
-      text: "Could not lock account record for update",
-      field: "WS-RETURN-MSG",
+      text: 'Could not lock account record for update',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 518,
     },
     COULD_NOT_LOCK_CUST_FOR_UPDATE: {
-      text: "Could not lock customer record for update",
-      field: "WS-RETURN-MSG",
+      text: 'Could not lock customer record for update',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 520,
     },
     DATA_WAS_CHANGED_BEFORE_UPDATE: {
-      text: "Record changed by some one else. Please review",
-      field: "WS-RETURN-MSG",
+      text: 'Record changed by some one else. Please review',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 522,
     },
     LOCKED_BUT_UPDATE_FAILED: {
-      text: "Update of record failed",
-      field: "WS-RETURN-MSG",
+      text: 'Update of record failed',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 524,
     },
     XREF_READ_ERROR: {
-      text: "Error reading Card Data File",
-      field: "WS-RETURN-MSG",
+      text: 'Error reading Card Data File',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 526,
     },
     CODING_TO_BE_DONE: {
-      text: "Looks Good.... so far",
-      field: "WS-RETURN-MSG",
+      text: 'Looks Good.... so far',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 528,
     },
   },
   COACTVWC: {
     WS_PROMPT_FOR_INPUT: {
-      text: "Enter or update id of account to display",
-      field: "WS-INFO-MSG",
+      text: 'Enter or update id of account to display',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 114,
     },
     WS_INFORM_OUTPUT: {
-      text: "Displaying details of given Account",
-      field: "WS-INFO-MSG",
+      text: 'Displaying details of given Account',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 116,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed.Exiting              ",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed.Exiting              ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 120,
     },
     WS_PROMPT_FOR_ACCT: {
-      text: "Account number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Account number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 122,
     },
     NO_SEARCH_CRITERIA_RECEIVED: {
-      text: "No input received",
-      field: "WS-RETURN-MSG",
+      text: 'No input received',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 124,
     },
     SEARCHED_ACCT_ZEROES: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 126,
     },
     SEARCHED_ACCT_NOT_NUMERIC: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 128,
     },
     DID_NOT_FIND_ACCT_IN_CARDXREF: {
-      text: "Did not find this account in account card xref file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in account card xref file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 130,
     },
     DID_NOT_FIND_ACCT_IN_ACCTDAT: {
-      text: "Did not find this account in account master file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in account master file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 132,
     },
     DID_NOT_FIND_CUST_IN_CUSTDAT: {
-      text: "Did not find associated customer in master file",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find associated customer in master file',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 134,
     },
     XREF_READ_ERROR: {
-      text: "Error reading account card xref File",
-      field: "WS-RETURN-MSG",
+      text: 'Error reading account card xref File',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 136,
     },
     CODING_TO_BE_DONE: {
-      text: "Looks Good.... so far",
-      field: "WS-RETURN-MSG",
+      text: 'Looks Good.... so far',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 138,
     },
   },
   COCRDLIC: {
     WS_INFORM_REC_ACTIONS: {
-      text: "TYPE S FOR DETAIL, U TO UPDATE ANY RECORD",
-      field: "WS-INFO-MSG",
+      text: 'TYPE S FOR DETAIL, U TO UPDATE ANY RECORD',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 116,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 PRESSED.EXITING",
-      field: "WS-ERROR-MSG",
+      text: 'PF03 PRESSED.EXITING',
+      field: 'WS-ERROR-MSG',
       declaredWidth: 75,
       line: 120,
     },
     WS_NO_RECORDS_FOUND: {
-      text: "NO RECORDS FOUND FOR THIS SEARCH CONDITION.",
-      field: "WS-ERROR-MSG",
+      text: 'NO RECORDS FOUND FOR THIS SEARCH CONDITION.',
+      field: 'WS-ERROR-MSG',
       declaredWidth: 75,
       line: 122,
     },
     WS_MORE_THAN_1_ACTION: {
-      text: "PLEASE SELECT ONLY ONE RECORD TO VIEW OR UPDATE",
-      field: "WS-ERROR-MSG",
+      text: 'PLEASE SELECT ONLY ONE RECORD TO VIEW OR UPDATE',
+      field: 'WS-ERROR-MSG',
       declaredWidth: 75,
       line: 124,
     },
     WS_INVALID_ACTION_CODE: {
-      text: "INVALID ACTION CODE",
-      field: "WS-ERROR-MSG",
+      text: 'INVALID ACTION CODE',
+      field: 'WS-ERROR-MSG',
       declaredWidth: 75,
       line: 126,
     },
   },
   COCRDSLC: {
     FOUND_CARDS_FOR_ACCOUNT: {
-      text: "   Displaying requested details",
-      field: "WS-INFO-MSG",
+      text: '   Displaying requested details',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 130,
     },
     WS_PROMPT_FOR_INPUT: {
-      text: "Please enter Account and Card Number",
-      field: "WS-INFO-MSG",
+      text: 'Please enter Account and Card Number',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 132,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed.Exiting              ",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed.Exiting              ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 137,
     },
     WS_PROMPT_FOR_ACCT: {
-      text: "Account number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Account number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 139,
     },
     WS_PROMPT_FOR_CARD: {
-      text: "Card number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Card number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 141,
     },
     NO_SEARCH_CRITERIA_RECEIVED: {
-      text: "No input received",
-      field: "WS-RETURN-MSG",
+      text: 'No input received',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 143,
     },
     SEARCHED_ACCT_ZEROES: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 145,
     },
     SEARCHED_ACCT_NOT_NUMERIC: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 147,
     },
     SEARCHED_CARD_NOT_NUMERIC: {
-      text: "Card number if supplied must be a 16 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Card number if supplied must be a 16 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 149,
     },
     DID_NOT_FIND_ACCT_IN_CARDXREF: {
-      text: "Did not find this account in cards database",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in cards database',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 152,
     },
     DID_NOT_FIND_ACCTCARD_COMBO: {
-      text: "Did not find cards for this search condition",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find cards for this search condition',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 154,
     },
     XREF_READ_ERROR: {
-      text: "Error reading Card Data File",
-      field: "WS-RETURN-MSG",
+      text: 'Error reading Card Data File',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 156,
     },
     CODING_TO_BE_DONE: {
-      text: "Looks Good.... so far",
-      field: "WS-RETURN-MSG",
+      text: 'Looks Good.... so far',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 158,
     },
   },
   COCRDUPC: {
     FOUND_CARDS_FOR_ACCOUNT: {
-      text: "Details of selected card shown above",
-      field: "WS-INFO-MSG",
+      text: 'Details of selected card shown above',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 161,
     },
     PROMPT_FOR_SEARCH_KEYS: {
-      text: "Please enter Account and Card Number",
-      field: "WS-INFO-MSG",
+      text: 'Please enter Account and Card Number',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 163,
     },
     PROMPT_FOR_CHANGES: {
-      text: "Update card details presented above.",
-      field: "WS-INFO-MSG",
+      text: 'Update card details presented above.',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 165,
     },
     PROMPT_FOR_CONFIRMATION: {
-      text: "Changes validated.Press F5 to save",
-      field: "WS-INFO-MSG",
+      text: 'Changes validated.Press F5 to save',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 167,
     },
     CONFIRM_UPDATE_SUCCESS: {
-      text: "Changes committed to database",
-      field: "WS-INFO-MSG",
+      text: 'Changes committed to database',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 169,
     },
     INFORM_FAILURE: {
-      text: "Changes unsuccessful. Please try again",
-      field: "WS-INFO-MSG",
+      text: 'Changes unsuccessful. Please try again',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 171,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed.Exiting              ",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed.Exiting              ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 176,
     },
     WS_PROMPT_FOR_ACCT: {
-      text: "Account number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Account number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 178,
     },
     WS_PROMPT_FOR_CARD: {
-      text: "Card number not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Card number not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 180,
     },
     WS_PROMPT_FOR_NAME: {
-      text: "Card name not provided",
-      field: "WS-RETURN-MSG",
+      text: 'Card name not provided',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 182,
     },
     WS_NAME_MUST_BE_ALPHA: {
-      text: "Card name can only contain alphabets and spaces",
-      field: "WS-RETURN-MSG",
+      text: 'Card name can only contain alphabets and spaces',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 184,
     },
     NO_SEARCH_CRITERIA_RECEIVED: {
-      text: "No input received",
-      field: "WS-RETURN-MSG",
+      text: 'No input received',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 186,
     },
     NO_CHANGES_DETECTED: {
-      text: "No change detected with respect to values fetched.",
-      field: "WS-RETURN-MSG",
+      text: 'No change detected with respect to values fetched.',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 188,
     },
     SEARCHED_ACCT_ZEROES: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 190,
     },
     SEARCHED_ACCT_NOT_NUMERIC: {
-      text: "Account number must be a non zero 11 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Account number must be a non zero 11 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 192,
     },
     SEARCHED_CARD_NOT_NUMERIC: {
-      text: "Card number if supplied must be a 16 digit number",
-      field: "WS-RETURN-MSG",
+      text: 'Card number if supplied must be a 16 digit number',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 194,
     },
     CARD_STATUS_MUST_BE_YES_NO: {
-      text: "Card Active Status must be Y or N",
-      field: "WS-RETURN-MSG",
+      text: 'Card Active Status must be Y or N',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 196,
     },
     CARD_EXPIRY_MONTH_NOT_VALID: {
-      text: "Card expiry month must be between 1 and 12",
-      field: "WS-RETURN-MSG",
+      text: 'Card expiry month must be between 1 and 12',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 198,
     },
     CARD_EXPIRY_YEAR_NOT_VALID: {
-      text: "Invalid card expiry year",
-      field: "WS-RETURN-MSG",
+      text: 'Invalid card expiry year',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 200,
     },
     DID_NOT_FIND_ACCT_IN_CARDXREF: {
-      text: "Did not find this account in cards database",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find this account in cards database',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 202,
     },
     DID_NOT_FIND_ACCTCARD_COMBO: {
-      text: "Did not find cards for this search condition",
-      field: "WS-RETURN-MSG",
+      text: 'Did not find cards for this search condition',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 204,
     },
     COULD_NOT_LOCK_FOR_UPDATE: {
-      text: "Could not lock record for update",
-      field: "WS-RETURN-MSG",
+      text: 'Could not lock record for update',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 206,
     },
     DATA_WAS_CHANGED_BEFORE_UPDATE: {
-      text: "Record changed by some one else. Please review",
-      field: "WS-RETURN-MSG",
+      text: 'Record changed by some one else. Please review',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 208,
     },
     LOCKED_BUT_UPDATE_FAILED: {
-      text: "Update of record failed",
-      field: "WS-RETURN-MSG",
+      text: 'Update of record failed',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 210,
     },
     XREF_READ_ERROR: {
-      text: "Error reading Card Data File",
-      field: "WS-RETURN-MSG",
+      text: 'Error reading Card Data File',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 212,
     },
     CODING_TO_BE_DONE: {
-      text: "Looks Good.... so far",
-      field: "WS-RETURN-MSG",
+      text: 'Looks Good.... so far',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 214,
     },
   },
   COTRTLIC: {
     WS_INFORM_REC_ACTIONS: {
-      text: "Type U to update, D to delete any record",
-      field: "WS-INFO-MSG",
+      text: 'Type U to update, D to delete any record',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 240,
     },
     WS_INFORM_DELETE: {
-      text: "Delete HIGHLIGHTED row ? Press F10 to confirm",
-      field: "WS-INFO-MSG",
+      text: 'Delete HIGHLIGHTED row ? Press F10 to confirm',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 242,
     },
     WS_INFORM_UPDATE: {
-      text: "Update HIGHLIGHTED row. Press F10 to save",
-      field: "WS-INFO-MSG",
+      text: 'Update HIGHLIGHTED row. Press F10 to save',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 244,
     },
     WS_INFORM_DELETE_SUCCESS: {
-      text: "HIGHLIGHTED row deleted.Hit Enter to continue",
-      field: "WS-INFO-MSG",
+      text: 'HIGHLIGHTED row deleted.Hit Enter to continue',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 246,
     },
     WS_INFORM_UPDATE_SUCCESS: {
-      text: "HIGHLIGHTED row was updated",
-      field: "WS-INFO-MSG",
+      text: 'HIGHLIGHTED row was updated',
+      field: 'WS-INFO-MSG',
       declaredWidth: 45,
       line: 248,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed. Exiting",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed. Exiting',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 252,
     },
     WS_MESG_NO_RECORDS_FOUND: {
-      text: "No records found for this search condition.",
-      field: "WS-RETURN-MSG",
+      text: 'No records found for this search condition.',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 254,
     },
     WS_MESG_NO_MORE_RECORDS: {
-      text: "No more pages for these search conditions",
-      field: "WS-RETURN-MSG",
+      text: 'No more pages for these search conditions',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 256,
     },
     WS_MESG_MORE_THAN_1_ACTION: {
-      text: "Please select only 1 action",
-      field: "WS-RETURN-MSG",
+      text: 'Please select only 1 action',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 258,
     },
     WS_MESG_INVALID_ACTION_CODE: {
-      text: "Action code selected is invalid",
-      field: "WS-RETURN-MSG",
+      text: 'Action code selected is invalid',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 260,
     },
     WS_MESG_NO_CHANGES_DETECTED: {
-      text: "No change detected with respect to database values.",
-      field: "WS-RETURN-MSG",
+      text: 'No change detected with respect to database values.',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 262,
     },
   },
   COTRTUPC: {
     FOUND_TRANTYPE_DATA: {
-      text: "Selected transaction type shown above",
-      field: "WS-INFO-MSG",
+      text: 'Selected transaction type shown above',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 146,
     },
     PROMPT_FOR_SEARCH_KEYS: {
-      text: "Enter transaction type to be maintained",
-      field: "WS-INFO-MSG",
+      text: 'Enter transaction type to be maintained',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 148,
     },
     PROMPT_CREATE_NEW_RECORD: {
-      text: "Press F05 to add. F12 to cancel",
-      field: "WS-INFO-MSG",
+      text: 'Press F05 to add. F12 to cancel',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 150,
     },
     PROMPT_DELETE_CONFIRM: {
-      text: "Delete this record ? Press F4 to confirm",
-      field: "WS-INFO-MSG",
+      text: 'Delete this record ? Press F4 to confirm',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 152,
     },
     CONFIRM_DELETE_SUCCESS: {
-      text: "Delete successful.",
-      field: "WS-INFO-MSG",
+      text: 'Delete successful.',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 154,
     },
     PROMPT_FOR_CHANGES: {
-      text: "Update transaction type details shown.",
-      field: "WS-INFO-MSG",
+      text: 'Update transaction type details shown.',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 156,
     },
     PROMPT_FOR_NEWDATA: {
-      text: "Enter new transaction type details.",
-      field: "WS-INFO-MSG",
+      text: 'Enter new transaction type details.',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 158,
     },
     PROMPT_FOR_CONFIRMATION: {
-      text: "Changes validated.Press F5 to save",
-      field: "WS-INFO-MSG",
+      text: 'Changes validated.Press F5 to save',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 161,
     },
     CONFIRM_UPDATE_SUCCESS: {
-      text: "Changes committed to database",
-      field: "WS-INFO-MSG",
+      text: 'Changes committed to database',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 163,
     },
     INFORM_FAILURE: {
-      text: "Changes unsuccessful",
-      field: "WS-INFO-MSG",
+      text: 'Changes unsuccessful',
+      field: 'WS-INFO-MSG',
       declaredWidth: 40,
       line: 165,
     },
     WS_EXIT_MESSAGE: {
-      text: "PF03 pressed.Exiting              ",
-      field: "WS-RETURN-MSG",
+      text: 'PF03 pressed.Exiting              ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 170,
     },
     WS_INVALID_KEY: {
-      text: "Invalid Key pressed. ",
-      field: "WS-RETURN-MSG",
+      text: 'Invalid Key pressed. ',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 172,
     },
     WS_NAME_MUST_BE_ALPHA: {
-      text: "Name can only contain alphabets and spaces",
-      field: "WS-RETURN-MSG",
+      text: 'Name can only contain alphabets and spaces',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 174,
     },
     WS_RECORD_NOT_FOUND: {
-      text: "No record found for this key in database",
-      field: "WS-RETURN-MSG",
+      text: 'No record found for this key in database',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 176,
     },
     NO_SEARCH_CRITERIA_RECEIVED: {
-      text: "No input received",
-      field: "WS-RETURN-MSG",
+      text: 'No input received',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 178,
     },
     NO_CHANGES_DETECTED: {
-      text: "No change detected with respect to values fetched.",
-      field: "WS-RETURN-MSG",
+      text: 'No change detected with respect to values fetched.',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 180,
     },
     COULD_NOT_LOCK_REC_FOR_UPDATE: {
-      text: "Could not lock record for update",
-      field: "WS-RETURN-MSG",
+      text: 'Could not lock record for update',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 182,
     },
     DATA_WAS_CHANGED_BEFORE_UPDATE: {
-      text: "Record changed by some one else. Please review",
-      field: "WS-RETURN-MSG",
+      text: 'Record changed by some one else. Please review',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 184,
     },
     WS_UPDATE_WAS_CANCELLED: {
-      text: "Update was cancelled",
-      field: "WS-RETURN-MSG",
+      text: 'Update was cancelled',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 186,
     },
     TABLE_UPDATE_FAILED: {
-      text: "Update of record failed",
-      field: "WS-RETURN-MSG",
+      text: 'Update of record failed',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 188,
     },
     RECORD_DELETE_FAILED: {
-      text: "Delete of record failed",
-      field: "WS-RETURN-MSG",
+      text: 'Delete of record failed',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 190,
     },
     WS_DELETE_WAS_CANCELLED: {
-      text: "Delete was cancelled",
-      field: "WS-RETURN-MSG",
+      text: 'Delete was cancelled',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 192,
     },
     WS_INVALID_KEY_PRESSED: {
-      text: "Invalid key pressed",
-      field: "WS-RETURN-MSG",
+      text: 'Invalid key pressed',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 194,
     },
     CODING_TO_BE_DONE: {
-      text: "Looks Good.... so far",
-      field: "WS-RETURN-MSG",
+      text: 'Looks Good.... so far',
+      field: 'WS-RETURN-MSG',
       declaredWidth: 75,
       line: 196,
     },
   },
-} as const satisfies Partial<
-  Record<ProgramName, Record<string, StatusMessage>>
->;
+} as const satisfies Partial<Record<ProgramName, Record<string, StatusMessage>>>;
 
 /**
  * Messages the baseline composes with a `STRING` statement, kept as ordered parts.
@@ -2544,14 +2491,14 @@ export const MESSAGE_TEMPLATES = {
    */
   ACCOUNT_NUMBER_MUST_BE_11_DIGIT_NON_ZERO: {
     parts: [
-      { literal: "Account Number if supplied must be a 11 digit" },
-      { literal: " Non-Zero Number" },
+      { literal: 'Account Number if supplied must be a 11 digit' },
+      { literal: ' Non-Zero Number' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [1807, 1808] },
   },
   /** `COACTUPC` state-and-ZIP cross-check rejection; one literal, no inserted value. */
   INVALID_ZIP_CODE_FOR_STATE: {
-    parts: [{ literal: "Invalid zip code for state" }],
+    parts: [{ literal: 'Invalid zip code for state' }],
     source: { file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2550] },
   },
   /**
@@ -2564,7 +2511,7 @@ export const MESSAGE_TEMPLATES = {
    * baseline behaviour, not an omission here.
    */
   ADMIN_OPTION_NOT_INSTALLED: {
-    parts: [{ literal: "This option " }, { literal: "is not installed ..." }],
+    parts: [{ literal: 'This option ' }, { literal: 'is not installed ...' }],
     source: {
       file: PROGRAM_SOURCE_FILES.COADM01C,
       lines: [152, 155, 273, 276],
@@ -2581,9 +2528,9 @@ export const MESSAGE_TEMPLATES = {
    */
   ADMIN_MENU_OPTION_LINE: {
     parts: [
-      { value: "CDEMO-ADMIN-OPT-NUM", delimitedBy: "SIZE" },
-      { literal: ". " },
-      { value: "CDEMO-ADMIN-OPT-NAME", delimitedBy: "SIZE" },
+      { value: 'CDEMO-ADMIN-OPT-NUM', delimitedBy: 'SIZE' },
+      { literal: '. ' },
+      { value: 'CDEMO-ADMIN-OPT-NAME', delimitedBy: 'SIZE' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COADM01C, lines: [236, 237, 238] },
   },
@@ -2598,9 +2545,9 @@ export const MESSAGE_TEMPLATES = {
    */
   MENU_OPTION_NOT_INSTALLED: {
     parts: [
-      { literal: "This option " },
-      { value: "CDEMO-MENU-OPT-NAME", delimitedBy: "  " },
-      { literal: " is not installed..." },
+      { literal: 'This option ' },
+      { value: 'CDEMO-MENU-OPT-NAME', delimitedBy: '  ' },
+      { literal: ' is not installed...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COMEN01C, lines: [163, 165, 166] },
   },
@@ -2618,9 +2565,9 @@ export const MESSAGE_TEMPLATES = {
    */
   MENU_OPTION_COMING_SOON: {
     parts: [
-      { literal: "This option " },
-      { value: "CDEMO-MENU-OPT-NAME", delimitedBy: "SPACE" },
-      { literal: "is coming soon ..." },
+      { literal: 'This option ' },
+      { value: 'CDEMO-MENU-OPT-NAME', delimitedBy: 'SPACE' },
+      { literal: 'is coming soon ...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COMEN01C, lines: [172, 174, 175] },
   },
@@ -2636,26 +2583,26 @@ export const MESSAGE_TEMPLATES = {
    */
   MENU_OPTION_LINE: {
     parts: [
-      { value: "CDEMO-MENU-OPT-NUM", delimitedBy: "SIZE" },
-      { literal: ". " },
-      { value: "CDEMO-MENU-OPT-NAME", delimitedBy: "SIZE" },
+      { value: 'CDEMO-MENU-OPT-NUM', delimitedBy: 'SIZE' },
+      { literal: '. ' },
+      { value: 'CDEMO-MENU-OPT-NAME', delimitedBy: 'SIZE' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COMEN01C, lines: [269, 270, 271] },
   },
   /** `CORPT00C` acknowledgement after the report job is submitted. */
   REPORT_SUBMITTED_FOR_PRINTING: {
     parts: [
-      { value: "WS-REPORT-NAME", delimitedBy: "SPACE" },
-      { literal: " report submitted for printing ..." },
+      { value: 'WS-REPORT-NAME', delimitedBy: 'SPACE' },
+      { literal: ' report submitted for printing ...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.CORPT00C, lines: [449, 450] },
   },
   /** `CORPT00C` confirmation prompt before the report job is submitted. */
   PLEASE_CONFIRM_TO_PRINT_REPORT: {
     parts: [
-      { literal: "Please confirm to print the " },
-      { value: "WS-REPORT-NAME", delimitedBy: "SPACE" },
-      { literal: " report..." },
+      { literal: 'Please confirm to print the ' },
+      { value: 'WS-REPORT-NAME', delimitedBy: 'SPACE' },
+      { literal: ' report...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.CORPT00C, lines: [466, 468, 469] },
   },
@@ -2668,7 +2615,7 @@ export const MESSAGE_TEMPLATES = {
   NOT_A_VALID_VALUE_TO_CONFIRM: {
     parts: [
       { literal: '"' },
-      { value: "CONFIRMI", delimitedBy: "SPACE" },
+      { value: 'CONFIRMI', delimitedBy: 'SPACE' },
       { literal: '" is not a valid value to confirm...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.CORPT00C, lines: [486, 487, 488] },
@@ -2683,10 +2630,10 @@ export const MESSAGE_TEMPLATES = {
    */
   PAYMENT_SUCCESSFUL: {
     parts: [
-      { literal: "Payment successful. " },
-      { literal: " Your Transaction ID is " },
-      { value: "TRAN-ID", delimitedBy: "SPACE" },
-      { literal: "." },
+      { literal: 'Payment successful. ' },
+      { literal: ' Your Transaction ID is ' },
+      { value: 'TRAN-ID', delimitedBy: 'SPACE' },
+      { literal: '.' },
     ],
     source: {
       file: PROGRAM_SOURCE_FILES.COBIL00C,
@@ -2702,10 +2649,10 @@ export const MESSAGE_TEMPLATES = {
    */
   TRANSACTION_ADDED_SUCCESSFULLY: {
     parts: [
-      { literal: "Transaction added successfully. " },
-      { literal: " Your Tran ID is " },
-      { value: "TRAN-ID", delimitedBy: "SPACE" },
-      { literal: "." },
+      { literal: 'Transaction added successfully. ' },
+      { literal: ' Your Tran ID is ' },
+      { value: 'TRAN-ID', delimitedBy: 'SPACE' },
+      { literal: '.' },
     ],
     source: {
       file: PROGRAM_SOURCE_FILES.COTRN02C,
@@ -2715,27 +2662,27 @@ export const MESSAGE_TEMPLATES = {
   /** `COUSR01C` user-added success message. */
   USER_HAS_BEEN_ADDED: {
     parts: [
-      { literal: "User " },
-      { value: "SEC-USR-ID", delimitedBy: "SPACE" },
-      { literal: " has been added ..." },
+      { literal: 'User ' },
+      { value: 'SEC-USR-ID', delimitedBy: 'SPACE' },
+      { literal: ' has been added ...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COUSR01C, lines: [255, 256, 257] },
   },
   /** `COUSR02C` user-updated success message. */
   USER_HAS_BEEN_UPDATED: {
     parts: [
-      { literal: "User " },
-      { value: "SEC-USR-ID", delimitedBy: "SPACE" },
-      { literal: " has been updated ..." },
+      { literal: 'User ' },
+      { value: 'SEC-USR-ID', delimitedBy: 'SPACE' },
+      { literal: ' has been updated ...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COUSR02C, lines: [372, 373, 374] },
   },
   /** `COUSR03C` user-deleted success message. */
   USER_HAS_BEEN_DELETED: {
     parts: [
-      { literal: "User " },
-      { value: "SEC-USR-ID", delimitedBy: "SPACE" },
-      { literal: " has been deleted ..." },
+      { literal: 'User ' },
+      { value: 'SEC-USR-ID', delimitedBy: 'SPACE' },
+      { literal: ' has been deleted ...' },
     ],
     source: { file: PROGRAM_SOURCE_FILES.COUSR03C, lines: [318, 319, 320] },
   },
@@ -2773,287 +2720,284 @@ export const MESSAGE_TEMPLATES = {
  */
 export const REDACTED_DIAGNOSTICS = [
   {
-    program: "COACTUPC",
+    program: 'COACTUPC',
     file: PROGRAM_SOURCE_FILES.COACTUPC,
     lines: [3674],
-    condition: "account not found in the card cross-reference file",
-    detail: "cics-response-and-reason",
-    replacement:
-      STATUS_MESSAGES.COACTUPC.DID_NOT_FIND_ACCT_IN_CARDXREF__L498.text,
+    condition: 'account not found in the card cross-reference file',
+    detail: 'cics-response-and-reason',
+    replacement: STATUS_MESSAGES.COACTUPC.DID_NOT_FIND_ACCT_IN_CARDXREF__L498.text,
   },
   {
-    program: "COACTUPC",
+    program: 'COACTUPC',
     file: PROGRAM_SOURCE_FILES.COACTUPC,
     lines: [3723],
-    condition: "account not found in the account master file",
-    detail: "cics-response-and-reason",
+    condition: 'account not found in the account master file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTUPC.DID_NOT_FIND_ACCT_IN_ACCTDAT.text,
   },
   {
-    program: "COACTUPC",
+    program: 'COACTUPC',
     file: PROGRAM_SOURCE_FILES.COACTUPC,
     lines: [3773],
-    condition: "customer not found in the customer master file",
-    detail: "cics-response-and-reason",
+    condition: 'customer not found in the customer master file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTUPC.DID_NOT_FIND_CUST_IN_CUSTDAT.text,
   },
   {
-    program: "COACTVWC",
+    program: 'COACTVWC',
     file: PROGRAM_SOURCE_FILES.COACTVWC,
     lines: [747],
-    condition: "account not found in the card cross-reference file",
-    detail: "cics-response-and-reason",
+    condition: 'account not found in the card cross-reference file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTVWC.DID_NOT_FIND_ACCT_IN_CARDXREF.text,
   },
   {
-    program: "COACTVWC",
+    program: 'COACTVWC',
     file: PROGRAM_SOURCE_FILES.COACTVWC,
     lines: [796],
-    condition: "account not found in the account master file",
-    detail: "cics-response-and-reason",
+    condition: 'account not found in the account master file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTVWC.DID_NOT_FIND_ACCT_IN_ACCTDAT.text,
   },
   {
-    program: "COACTVWC",
+    program: 'COACTVWC',
     file: PROGRAM_SOURCE_FILES.COACTVWC,
     lines: [846],
-    condition: "customer not found in the customer master file",
-    detail: "cics-response-and-reason",
+    condition: 'customer not found in the customer master file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTVWC.DID_NOT_FIND_CUST_IN_CUSTDAT.text,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [476],
-    condition: "reading an authorization detail segment failed",
-    detail: "ims-status-code",
+    condition: 'reading an authorization detail segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [509],
-    condition: "repositioning to an authorization detail segment failed",
-    detail: "ims-status-code",
+    condition: 'repositioning to an authorization detail segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [836],
-    condition: "account not found in the cross-reference file",
-    detail: "cics-response-and-reason",
+    condition: 'account not found in the cross-reference file',
+    detail: 'cics-response-and-reason',
     replacement: SHARED_MESSAGES.ACCOUNT_ID_NOT_FOUND,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [851],
-    condition: "reading the cross-reference file failed",
-    detail: "cics-response-and-reason",
+    condition: 'reading the cross-reference file failed',
+    detail: 'cics-response-and-reason',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [886],
-    condition: "account not found in the account master file",
-    detail: "cics-response-and-reason",
+    condition: 'account not found in the account master file',
+    detail: 'cics-response-and-reason',
     replacement: SHARED_MESSAGES.ACCOUNT_ID_NOT_FOUND,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [901],
-    condition: "reading the account master file failed",
-    detail: "cics-response-and-reason",
+    condition: 'reading the account master file failed',
+    detail: 'cics-response-and-reason',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [937],
-    condition: "customer not found in the customer master file",
-    detail: "cics-response-and-reason",
+    condition: 'customer not found in the customer master file',
+    detail: 'cics-response-and-reason',
     replacement: STATUS_MESSAGES.COACTVWC.DID_NOT_FIND_CUST_IN_CUSTDAT.text,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [952],
-    condition: "reading the customer master file failed",
-    detail: "cics-response-and-reason",
+    condition: 'reading the customer master file failed',
+    detail: 'cics-response-and-reason',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [988],
-    condition: "reading the authorization summary segment failed",
-    detail: "ims-status-code",
+    condition: 'reading the authorization summary segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS0C",
+    program: 'COPAUS0C',
     file: PROGRAM_SOURCE_FILES.COPAUS0C,
     lines: [1022],
-    condition: "scheduling the IMS program specification block failed",
-    detail: "ims-status-code",
+    condition: 'scheduling the IMS program specification block failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS1C",
+    program: 'COPAUS1C',
     file: PROGRAM_SOURCE_FILES.COPAUS1C,
     lines: [455],
-    condition: "reading the authorization summary segment failed",
-    detail: "ims-status-code",
+    condition: 'reading the authorization summary segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS1C",
+    program: 'COPAUS1C',
     file: PROGRAM_SOURCE_FILES.COPAUS1C,
     lines: [481],
-    condition: "reading an authorization detail segment failed",
-    detail: "ims-status-code",
+    condition: 'reading an authorization detail segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS1C",
+    program: 'COPAUS1C',
     file: PROGRAM_SOURCE_FILES.COPAUS1C,
     lines: [510],
-    condition: "reading the next authorization segment failed",
-    detail: "ims-status-code",
+    condition: 'reading the next authorization segment failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS1C",
+    program: 'COPAUS1C',
     file: PROGRAM_SOURCE_FILES.COPAUS1C,
     lines: [544],
-    condition: "marking an authorization as fraud failed and was rolled back",
-    detail: "ims-status-code",
+    condition: 'marking an authorization as fraud failed and was rolled back',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS1C",
+    program: 'COPAUS1C',
     file: PROGRAM_SOURCE_FILES.COPAUS1C,
     lines: [595],
-    condition: "scheduling the IMS program specification block failed",
-    detail: "ims-status-code",
+    condition: 'scheduling the IMS program specification block failed',
+    detail: 'ims-status-code',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS2C",
+    program: 'COPAUS2C',
     file: PROGRAM_SOURCE_FILES.COPAUS2C,
     lines: [211],
-    condition: "inserting the fraud row failed",
-    detail: "db2-sqlcode-and-sqlstate",
+    condition: 'inserting the fraud row failed',
+    detail: 'db2-sqlcode-and-sqlstate',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COPAUS2C",
+    program: 'COPAUS2C',
     file: PROGRAM_SOURCE_FILES.COPAUS2C,
     lines: [239],
-    condition: "updating the fraud row failed",
-    detail: "db2-sqlcode-and-sqlstate",
+    condition: 'updating the fraud row failed',
+    detail: 'db2-sqlcode-and-sqlstate',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTUPC",
+    program: 'COTRTUPC',
     file: PROGRAM_SOURCE_FILES.COTRTUPC,
     lines: [1499],
-    condition: "reading the transaction-type row failed",
-    detail: "db2-table-name",
+    condition: 'reading the transaction-type row failed',
+    detail: 'db2-table-name',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTUPC",
+    program: 'COTRTUPC',
     file: PROGRAM_SOURCE_FILES.COTRTUPC,
     lines: [1569],
-    condition: "updating the transaction-type row failed",
-    detail: "db2-table-name",
+    condition: 'updating the transaction-type row failed',
+    detail: 'db2-table-name',
     replacement: STATUS_MESSAGES.COTRTUPC.TABLE_UPDATE_FAILED.text,
   },
   {
-    program: "COTRTUPC",
+    program: 'COTRTUPC',
     file: PROGRAM_SOURCE_FILES.COTRTUPC,
     lines: [1609],
-    condition: "inserting a transaction-type row failed",
-    detail: "db2-table-name",
+    condition: 'inserting a transaction-type row failed',
+    detail: 'db2-table-name',
     replacement: STATUS_MESSAGES.COTRTUPC.INFORM_FAILURE.text,
   },
   {
-    program: "COTRTUPC",
+    program: 'COTRTUPC',
     file: PROGRAM_SOURCE_FILES.COTRTUPC,
     lines: [1641],
-    condition: "delete refused because child category rows reference the type",
-    detail: "db2-sqlcode-and-sqlerrm",
+    condition: 'delete refused because child category rows reference the type',
+    detail: 'db2-sqlcode-and-sqlerrm',
     replacement: SHARED_MESSAGES.PLEASE_DELETE_ASSOCIATED_CHILD_RECORDS_FIRST,
   },
   {
-    program: "COTRTUPC",
+    program: 'COTRTUPC',
     file: PROGRAM_SOURCE_FILES.COTRTUPC,
     lines: [1654],
-    condition: "deleting the transaction-type row failed",
-    detail: "db2-sqlcode-and-sqlerrm",
+    condition: 'deleting the transaction-type row failed',
+    detail: 'db2-sqlcode-and-sqlerrm',
     replacement: STATUS_MESSAGES.COTRTUPC.RECORD_DELETE_FAILED.text,
   },
   {
-    program: "COTRTLIC",
-    file: "app/app-transaction-type-db2/cpy/CSDB2RPY.cpy",
+    program: 'COTRTLIC',
+    file: 'app/app-transaction-type-db2/cpy/CSDB2RPY.cpy',
     lines: [40, 70, 74, 76, 78],
     condition:
-      "any Db2 failure on the transaction-type list screen; the included copybook joins the action label to the SQL code and to the formatted diagnostic text",
-    detail: "db2-sqlcode-and-diagnostic-text",
+      'any Db2 failure on the transaction-type list screen; the included copybook joins the action label to the SQL code and to the formatted diagnostic text',
+    detail: 'db2-sqlcode-and-diagnostic-text',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1686, 1712, 1958, 1986, 2013, 2042],
-    condition:
-      "opening, fetching from or closing either declared browse cursor failed",
-    detail: "db2-cursor-name",
+    condition: 'opening, fetching from or closing either declared browse cursor failed',
+    detail: 'db2-cursor-name',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1784],
-    condition: "fetching from the backward browse cursor failed",
-    detail: "db2-cursor-name",
+    condition: 'fetching from the backward browse cursor failed',
+    detail: 'db2-cursor-name',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1826],
-    condition: "reading the transaction-type table failed",
-    detail: "db2-table-name",
+    condition: 'reading the transaction-type table failed',
+    detail: 'db2-table-name',
     replacement: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1874],
-    condition:
-      "the update was refused because another unit of work held the row",
-    detail: "persistence-mechanism",
+    condition: 'the update was refused because another unit of work held the row',
+    detail: 'persistence-mechanism',
     replacement: STATUS_MESSAGES.COTRTUPC.DATA_WAS_CHANGED_BEFORE_UPDATE.text,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1883],
-    condition: "updating the transaction-type row failed",
-    detail: "db2-sqlcode",
+    condition: 'updating the transaction-type row failed',
+    detail: 'db2-sqlcode',
     replacement: STATUS_MESSAGES.COTRTUPC.TABLE_UPDATE_FAILED.text,
   },
   {
-    program: "COTRTLIC",
+    program: 'COTRTLIC',
     file: PROGRAM_SOURCE_FILES.COTRTLIC,
     lines: [1929],
-    condition: "deleting the transaction-type row failed",
-    detail: "db2-sqlcode",
+    condition: 'deleting the transaction-type row failed',
+    detail: 'db2-sqlcode',
     replacement: STATUS_MESSAGES.COTRTUPC.RECORD_DELETE_FAILED.text,
   },
 ] as const satisfies readonly RedactedDiagnostic[];
@@ -3217,7 +3161,7 @@ export function formatDb2Message(
   const text = action.trim();
   if (text.length === 0) {
     throw new RangeError(
-      "action must be a non-empty catalogued message; an empty action would render a message band containing only an error code.",
+      'action must be a non-empty catalogued message; an empty action would render a message band containing only an error code.',
     );
   }
   if (!PUBLIC_ERROR_CODE_PATTERN.test(diagnostic.code)) {
@@ -3259,10 +3203,7 @@ export function formatDb2Message(
  * @throws {RangeError} If `declaredWidth` is negative or not an integer, which
  *   would mean the caller passed something that is not a COBOL field width.
  */
-export function padToDeclaredWidth(
-  text: string,
-  declaredWidth: number,
-): string {
+export function padToDeclaredWidth(text: string, declaredWidth: number): string {
   if (!Number.isInteger(declaredWidth) || declaredWidth < 0) {
     throw new RangeError(
       `declaredWidth must be a non-negative integer, received ${String(declaredWidth)}`,
@@ -3274,7 +3215,7 @@ export function padToDeclaredWidth(
   // a runtime failure the mainframe never had.
   return text.length >= declaredWidth
     ? text.slice(0, declaredWidth)
-    : text + " ".repeat(declaredWidth - text.length);
+    : text + ' '.repeat(declaredWidth - text.length);
 }
 
 /**
@@ -3289,10 +3230,7 @@ export function padToDeclaredWidth(
  * @param {string} suffix - A value from {@link FIELD_VALIDATION_SUFFIXES}.
  * @returns {string} The composed message, trimmed label followed immediately by the suffix.
  */
-export function formatFieldValidationMessage(
-  label: string,
-  suffix: string,
-): string {
+export function formatFieldValidationMessage(label: string, suffix: string): string {
   // Assumptions: COBOL's FUNCTION TRIM removes leading and trailing spaces, which
   // String.prototype.trim also does, and the baseline field holds no other
   // whitespace, so the two agree byte for byte. A field carrying a tab or a
@@ -3344,16 +3282,14 @@ export function formatMessageTemplate(
        *   complete while missing an identifier the operator needs.
        */
       (part) => {
-        if ("literal" in part) {
+        if ('literal' in part) {
           return part.literal;
         }
         const supplied = values[part.value];
         if (supplied === undefined) {
-          throw new Error(
-            `formatMessageTemplate: no value supplied for ${part.value}`,
-          );
+          throw new Error(`formatMessageTemplate: no value supplied for ${part.value}`);
         }
-        if (part.delimitedBy === "SIZE") {
+        if (part.delimitedBy === 'SIZE') {
           return supplied;
         }
         // Alternatives Considered: a whitespace regular expression was rejected for
@@ -3362,12 +3298,12 @@ export function formatMessageTemplate(
         // text is the faithful operation; `\s` would additionally match a tab, which
         // the mainframe cannot produce and which would therefore truncate a value at
         // a character the reference program passes through.
-        const delimiter = part.delimitedBy === "SPACE" ? " " : part.delimitedBy;
+        const delimiter = part.delimitedBy === 'SPACE' ? ' ' : part.delimitedBy;
         const at = supplied.indexOf(delimiter);
         return at === -1 ? supplied : supplied.slice(0, at);
       },
     )
-    .join("");
+    .join('');
 }
 
 /**
@@ -3396,17 +3332,15 @@ export function messageBandWidthForMapset(mapset: MapsetName): 78 | 80 {
  *   stripped from both ends, which is the empty string when the field carried no
  *   message under either convention.
  */
-export function normaliseMessageBandValue(
-  value: string | null | undefined,
-): string {
+export function normaliseMessageBandValue(value: string | null | undefined): string {
   if (value === null || value === undefined) {
-    return "";
+    return '';
   }
   // Only U+0000 is removed, and only because it is the wire form of LOW-VALUES.
   // Stripping the wider C0 range was rejected: no baseline message field can hold
   // any other control character, so a broader filter would silently alter text it
   // was never meant to touch rather than fail loudly on it.
-  return value.replaceAll("\u0000", "").trim();
+  return value.replaceAll('\u0000', '').trim();
 }
 
 /**
@@ -3508,8 +3442,7 @@ export const INVALID_KEY_PRESSED = COMMON_MESSAGES.INVALID_KEY.text;
  * in the main-menu program. The trailing space is part of the value - see the note
  * on the underlying entry.
  */
-export const ACCESS_DENIED_ADMIN_ONLY =
-  PROGRAM_MESSAGES.COMEN01C.NO_ACCESS_ADMIN_ONLY_OPTION;
+export const ACCESS_DENIED_ADMIN_ONLY = PROGRAM_MESSAGES.COMEN01C.NO_ACCESS_ADMIN_ONLY_OPTION;
 
 /**
  * Headline for the abend surface, rendered by the application error boundary.
@@ -3517,9 +3450,7 @@ export const ACCESS_DENIED_ADMIN_ONLY =
  * Aliased because the error boundary is not associated with any one program even
  * though five programs emit this text.
  */
-export const UNEXPECTED_ABEND_OCCURRED =
-  SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED;
+export const UNEXPECTED_ABEND_OCCURRED = SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED;
 
 /** Headline for the unexpected-data surface, also rendered by the error boundary. */
-export const UNEXPECTED_DATA_SCENARIO =
-  SHARED_MESSAGES.UNEXPECTED_DATA_SCENARIO;
+export const UNEXPECTED_DATA_SCENARIO = SHARED_MESSAGES.UNEXPECTED_DATA_SCENARIO;

@@ -4,12 +4,12 @@
 -- WHAT: Supplies the contiguous ascending row volume that makes keyset
 --       pagination over the Flyway-created auth.users table observable at the
 --       baseline page size of ten.
---       Consumer, not authored yet -- the module's test tree holds
---       AuthApiContractTest and SecurityConfigTest only, and neither reads this
---       file: UserRepositoryIT will load it as a forward contract and drive the
+--       Consumer contract: this block is the single load for the repository
+--       integration test of auth.users keyset pagination. One load drives the
 --       forward query, the backward query, the size-plus-one probe, the exact
---       hasNext boundary, the short final page and both empty-cursor directions
---       from this one block by varying only the cursor.
+--       hasNext boundary, the short final page and both empty-cursor directions,
+--       with the cursor as the only thing that varies between cases -- which is
+--       why the row set is shaped once here rather than per case.
 --       Load result: twenty-one deterministic rows, KSET0001 through KSET0021,
 --       in strict ascending key order, spanning both the A and U user types.
 --       Failure modes: a repeated cognito_sub is rejected by UNIQUE, a user_type
@@ -75,8 +75,9 @@
 --       cognito_sub collision with this one. Twenty-one reaches every case from
 --       a single block.
 --       Trade-offs: one row past two whole pages looks arbitrary until the
---       arithmetic is written out, so it is written out here rather than left in
---       a test class that does not exist yet.
+--       arithmetic is written out, so it is written out here, beside the rows it
+--       describes, rather than in the test that consumes them -- a reader who
+--       changes a row can see the boundary it moves without opening a second file.
 --       Assumptions: at page size ten this block yields exactly these outcomes,
 --       and every keyset assertion in UserRepositoryIT depends on them holding.
 --       cursor            items returned             probe  flag

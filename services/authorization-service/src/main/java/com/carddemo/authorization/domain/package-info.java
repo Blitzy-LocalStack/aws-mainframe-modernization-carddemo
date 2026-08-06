@@ -109,13 +109,23 @@
  *       {@code com.carddemo.authorization} may name a type declared here, and nothing here may name
  *       a type declared in a sibling context's {@code domain} package.</li>
  *   <li>No IEEE-754 binary primitive type, and no boxed form of one, may appear anywhere in the
- *       money path.</li>
+ *       money path, which includes the members of this package.</li>
  * </ul>
  *
  * <p>All three belong to
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
  * which the {@code architecture-rules} Surefire execution in {@code services/pom.xml} selects by
  * that simple name and evaluates against each module's own compiled classes.
+ *
+ * <p>Assumptions: the third of the three reaches THIS package through rule A4 of that gate rather
+ * than through rule A3, and the distinction is worth stating because it decides whether the claim
+ * above is enforced here at all. A3 is scoped to {@code com.carddemo.common.money..} and examines
+ * every member there regardless of its name; it does not examine a single class in this package. A4
+ * examines every class under {@code com.carddemo} but only those members whose NAME denotes money,
+ * from a vocabulary drawn from the reference record layouts. The eight money items of the two
+ * reference segments carry names built on balance, limit, amount and cash, so each of the members
+ * mapping them is selected by A4 and a binary declaration on any of them fails the build in this
+ * module's own test run.
  *
  * <p>Alternatives Considered: expressing the same boundary as a Checkstyle {@code ImportControl}
  * module. {@code config/checkstyle/checkstyle.xml} omits that module deliberately and it must stay
@@ -199,9 +209,69 @@
  * because the fraud access path is keyed by that value and a masked key is not a key. Masking is
  * therefore applied on the way out, at the mapper. This is stated here so that nobody adds a
  * convenience serialiser to an entity: a member that serialises itself has escaped the one place
- * the masking rule is applied, and the escape is invisible at the call site. No credential,
- * endpoint, queue address, account identifier or connection string appears in this file or anywhere
- * in this package, and every such value is resolved at startup from configuration owned elsewhere.
+ * the masking rule is applied, and the escape is invisible at the call site.
+ *
+ * <h2>What this package actually holds, in three classes of sensitivity</h2>
+ *
+ * <p>Refactoring Rationale: an earlier revision of the paragraph above closed with a single sentence
+ * asserting that no credential, endpoint, queue address, account identifier or connection string
+ * appeared anywhere in this package, and that every such value was resolved at startup from
+ * configuration owned elsewhere. Two thirds of that sentence were false. This package persists a
+ * queue address and it persists account identifiers, and neither comes from configuration -- the
+ * queue address arrives on the request message and the account identifiers are the reference
+ * segments' own keys. A confidentiality charter that denies the presence of what it governs is worse
+ * than no charter, because a reader checking whether a masking rule applies to a member is told the
+ * member does not exist. The three classes below replace that sentence with what is actually here.
+ *
+ * <p><b>Secrets: none, and the absence is structural.</b> No password, no access key, no token, no
+ * signing material and no connection string is declared by any type in this package. Nothing here
+ * authenticates anything: the database connection is assembled by the module's data-source
+ * configuration from the secret store, and the queue client is built by its queue configuration, so
+ * neither credential has a reason to reach an entity. This part of the earlier sentence was true and
+ * is kept. It is worth stating positively because it is the one class of value for which the correct
+ * handling is not masking but total absence.
+ *
+ * <p><b>Identifiers: present, and unmasked on purpose.</b> {@code PendingAuthSummary} holds the
+ * eleven-digit account identifier as its root key and {@code PendingAuthDetailKey} holds it again as
+ * the first half of the child key, both decoded from the packed items at {@code cpy/CIPAUSMY.cpy}
+ * L19 and {@code cpy/CIPAUDTY.cpy} L20; {@code PendingAuthDetail} holds all sixteen characters of
+ * {@code PA-CARD-NUM} at {@code cpy/CIPAUDTY.cpy} L24; and {@code AuthReplyOutbox} holds the card
+ * number a third time as its ordering group and the acquirer's transaction identifier as its
+ * deduplication key. Every one of those is unmasked because every one is a KEY -- a masked key
+ * selects nothing, groups nothing and deduplicates nothing. The rule that follows is therefore about
+ * egress rather than storage: a CARD NUMBER leaves this package only through
+ * {@code com.carddemo.authorization.mapper}, which masks it to its last four digits on every path
+ * but the administrative card-detail endpoint, and no type holding one declares a serialiser or a
+ * rendering of its own that could bypass that mapper.
+ *
+ * <p>Assumptions: the ACCOUNT identifier is treated differently from the card number, and the
+ * difference is deliberate rather than an oversight. {@code PendingAuthDetailKey} declares a
+ * {@code toString} that renders it in full beside the two clock values of the key, which is the
+ * one rendering this package has; the migration's masking rule names the primary account number,
+ * the card verification value, the national identifier and the government-issued identifier, and
+ * an account identifier is none of those -- it selects a row in this deployment's own schema and
+ * discloses nothing outside it. Note that the batch context applies a STRICTER rule to its
+ * terminal error sink, refusing any digit run wide enough to be an account or customer identifier;
+ * that rule is a property of a long-lived, widely readable sink rather than a contradiction of
+ * this one, and the two are recorded together so a reader meeting both does not have to guess
+ * which governs where.
+ *
+ * <p><b>Routing values and free text: present, internal, and never rendered.</b>
+ * {@code AuthReplyOutbox} persists {@code replyQueueUrl}, which is a queue address taken from the
+ * request message exactly as the baseline took it from the message descriptor's reply-to field, so a
+ * reply stays deliverable across a restart and two acquirers with two reply queues can be served by
+ * one consumer. It is a destination and not a secret -- possessing it grants nothing, since sending
+ * to it is authorised by the task role -- but it is still operational detail, so it is not rendered
+ * into a log line or returned by any endpoint. The same row also carries the encoded reply
+ * {@code payload}, whose first field is the sixteen-character card number at
+ * {@code cpy/CCPAURLY.cpy} L19, and {@code lastError}, which is free text a publication failure
+ * supplied. Those two are the highest-risk members in this package precisely because neither has a
+ * shape a reader recognises, and the rule for both is that they are written, read by the publisher
+ * and never rendered: {@code AuthReplyOutbox} declares no {@code toString} and no other rendering,
+ * and no data-transfer object exposes it at all -- it is reached only by its repository, its
+ * listener and its publisher. Adding a rendering to it would put a card number into whatever store
+ * the rendering reaches, which is the same failure the batch context's terminal error sink closes
+ * by refusing free text outright.
  *
  * <p>Assumptions: the single authority for this schema's shape is the Flyway migration named
  * throughout this charter, and the schema, its owning role and its grants come from

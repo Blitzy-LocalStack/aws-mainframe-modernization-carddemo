@@ -188,7 +188,7 @@ import org.hibernate.annotations.Immutable;
  * performs no conversion at all -- which is stated here because a projection is exactly the place a
  * reader would expect one. The underlying rows are declared in
  * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}, and
- * {@code reporting.statement_transactions} in {@code data-migration/sql/V1__reporting_views.sql}
+ * {@code reporting.v_statement_transactions} in {@code data-migration/sql/V1__reporting_views.sql}
  * projects every one of them under its own name, width and type. The geometry list above therefore
  * names the base table's types, not converted ones.</p>
  *
@@ -326,7 +326,7 @@ public class StatementTransactionView {
     //       rather than a magnitude, though: no program performs arithmetic on it, and its leading
     //       zeros carry. Two independent sources settle it against the numeric reading. The
     //       physical column is CHAR(4) -- ledger.transactions declares category_cd that way in
-    //       transaction-service's V1__ledger.sql, and reporting.statement_transactions projects it
+    //       transaction-service's V1__ledger.sql, and reporting.v_statement_transactions projects it
     //       unchanged in data-migration/sql/V1__reporting_views.sql -- and the baseline's own
     //       relational expression of the same field declares
     //       TRC_TYPE_CATEGORY CHAR(4) NOT NULL at app/app-transaction-type-db2/ddl/TRNTYCAT.ddl L3.
@@ -408,14 +408,24 @@ public class StatementTransactionView {
     //       access to every primary account number in the ledger and reduce the masking from a boundary
     //       the database enforces to a convention the reporting code is trusted to follow -- which is
     //       exactly the arrangement data-migration/sql/V0__schemas_and_roles.sql withdrew.
-    // WHY : Assumptions: the value is a deterministic digest of the trimmed card number, computed by
-    //       reporting.statement_transactions in data-migration/sql/V1__reporting_views.sql. It is a
-    //       GROUPING KEY and nothing else: it is not a credential, no client ever receives it, and it
-    //       reveals no card number to a party that does not already hold one. It is deliberately not
-    //       part of {@link StatementTransactionKey}, because the transaction identifier already makes
-    //       that key unique and widening a key to carry a grouping column would change the identity of
-    //       every row for the sake of an ordering concern.
-    @Column(name = "card_fingerprint", length = 32)
+    // WHY : Assumptions: the value is a KEYED digest of the trimmed card number -- a SHA-256 over a
+    //       secret concatenated with the number, rendered as 64 hexadecimal characters -- computed by
+    //       reporting.v_statement_transactions in data-migration/sql/V1__reporting_views.sql and never
+    //       by this type. The secret lives in reporting.card_grouping_key, which the reporting login
+    //       role cannot select from; the view body reads it because a non-security_invoker view is
+    //       evaluated as its owner. It is a GROUPING KEY and nothing else: it is not a credential, no
+    //       client ever receives it, and it is deliberately not part of
+    //       {@link StatementTransactionKey}, because the transaction identifier already makes that key
+    //       unique and widening a key to carry a grouping column would change the identity of every row
+    //       for the sake of an ordering concern.
+    // WHY : Refactoring Rationale: the column is 64 characters because the digest is keyed and hex
+    //       SHA-256; an earlier revision mapped 32, matching an UNKEYED md5 of the card number. The
+    //       width changed because the mechanism had to: an unkeyed digest of a sixteen-digit decimal
+    //       string is invertible by exhaustive search, so the token stood beside a masked card_num
+    //       column and gave back what the mask withheld. Keying it removes the search, and the length
+    //       here has to track the view's expression exactly -- a shorter mapping would truncate the
+    //       token and silently merge cards whose digests share a prefix.
+    @Column(name = "card_fingerprint", length = 64)
     private String cardFingerprint;
 
     /**
@@ -576,15 +586,19 @@ public class StatementTransactionView {
      * <p>Assumptions: this is what a statement run breaks on, and not {@link #key()}'s card number.
      * That card number is masked to its last four digits, so breaking on it would merge two genuinely
      * different cards that share those four digits into a single statement; this token is a
-     * deterministic digest of the full card number, so it distinguishes them while revealing neither.
-     * The digest is computed by {@code reporting.statement_transactions} and never by this type.</p>
+     * deterministic KEYED digest of the full card number, so it distinguishes them while disclosing
+     * neither. The digest is computed by {@code reporting.v_statement_transactions} and never by this
+     * type, and it mixes in a secret the reporting role cannot read -- which is what makes it
+     * non-invertible, since an unkeyed digest of a sixteen-digit number is recoverable by exhaustive
+     * search.</p>
      *
      * <p>Trade-offs: the token has no meaning outside a grouping comparison. It is not an identifier
      * any client receives, it is not ordered in any way that corresponds to card ordering, and it must
      * not be rendered -- the card number a statement displays is the masked value on the key.</p>
      *
-     * @return the thirty-two-character digest held in column {@code card_fingerprint}, never
-     *     {@code null} for a row read from the view because the source card number is itself not-null
+     * @return the sixty-four-character hexadecimal digest held in column {@code card_fingerprint},
+     *     never {@code null} for a row read from the view because the source card number is itself
+     *     not-null
      */
     public String cardFingerprint() {
         return cardFingerprint;

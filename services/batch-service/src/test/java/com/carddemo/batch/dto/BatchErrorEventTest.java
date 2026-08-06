@@ -114,8 +114,60 @@ class BatchErrorEventTest {
      * record layouts is the nine-digit customer identifier; the account identifier is eleven digits
      * and a card number is sixteen characters. A threshold of nine therefore catches the narrowest of
      * them and everything wider.</p>
+     *
+     * <p>Refactoring Rationale: this field DELEGATES to the constant the type under test publishes
+     * rather than restating the number nine. An earlier revision spelled the literal here, which made
+     * the two independent: raising the production threshold to sixteen would have left this class
+     * asserting against nine and still passing, so the assertion would have gone on reporting a
+     * guarantee the production code had stopped giving. The width contract itself is asserted
+     * separately by {@link #theIdentifierThresholdStaysInsideTheWidthsTheReferenceDeclares()}.</p>
      */
-    private static final int SHORTEST_IDENTIFIER_DIGIT_RUN = 9;
+    private static final int SHORTEST_IDENTIFIER_DIGIT_RUN =
+            BatchErrorEvent.SHORTEST_IDENTIFIER_DIGIT_RUN;
+
+    /**
+     * Diagnostic texts a caller must not be able to publish, and that this class proves it cannot.
+     *
+     * <p>Assumptions: every value is synthetic -- a run of zeros with a recognisable four-digit tail,
+     * or a credential word with no credential beside it -- so this file carries nothing resembling a
+     * real card number, account or secret. Every identifier run ends in the same four digits, and
+     * they differ from the run itself, so the masking assertions can prove WHICH four digits
+     * survived rather than merely counting them. Every vector also fits inside the fifty-character
+     * reason width, so no vector is shortened before the guard measures it.</p>
+     *
+     * <p>Assumptions: the seven vectors cover the five shapes the finding named. An unseparated
+     * sixteen-digit card number; the same number written for a human in space-separated and
+     * hyphen-separated groups of four, which an unseparated scan would miss entirely; an
+     * eleven-digit account identifier and a nine-digit customer identifier, both narrower than a card
+     * number; a credential word, which has no shape to recognise; and a fixed-width record image of
+     * the kind the reference's reject stream writes, which is the widest of them all.</p>
+     */
+    private static final List<String> ADVERSARIAL_DIAGNOSTICS = List.of(
+            "insert failed for card 0000000000009010",
+            "insert failed for card 0000 0000 0000 9010",
+            "insert failed for card 0000-0000-0000-9010",
+            "account 00000009010 not found in the cross reference",
+            "customer 000009010 not found",
+            "connect refused: password rejected",
+            "0000000000000000000000000000000000009010POS TERMINAL 0001");
+
+    /**
+     * Diagnostic texts that are legitimate and must still construct, proving the guard is not blunt.
+     *
+     * <p>Assumptions: these are the shapes a guard measuring digit runs is most likely to refuse by
+     * mistake, and each is content an operator genuinely needs. A business date carries a four-digit
+     * year beside two-digit groups; a timestamp carries six more; a money amount carries a four-digit
+     * unit part and a two-digit fraction; a merchant reference carries six digits; and an abend code
+     * carries four. A guard that refused any of these would push callers towards publishing no
+     * diagnostics at all, which costs more than it saves.</p>
+     */
+    private static final List<String> BENIGN_DIAGNOSTICS = List.of(
+            "step ended abnormally",
+            "business date 2022-07-18 rejected",
+            "at 2022-07-18 12:34:56.789012 the step stopped",
+            "amount 1234.56 exceeded limit 5000.00",
+            "merchant 123456 unknown",
+            "sort returned 0016");
 
     /**
      * Values shaped like an identifier, used to prove the rendered form carries no such value.
@@ -502,6 +554,362 @@ class BatchErrorEventTest {
 
         assertThatThrownBy(() -> mapper.readValue(json, BatchErrorEvent.class))
                 .hasRootCauseInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Verifies that every adversarial diagnostic is refused when it is placed in the abend reason.
+     */
+    @Test
+    void everyAdversarialDiagnosticIsRefusedInTheAbendReason() {
+        // WHY : Refactoring Rationale: this class used to prove only that the record DECLARED no
+        //       sensitive component and that a digit-free fixture rendered digit-free. Neither
+        //       assertion could see the actual hazard, which was a caller passing record content
+        //       through the abend reason -- a fifty-character free-text component the type inspected
+        //       nowhere. The vectors below are the assertion the earlier ones could not make.
+        for (String vector : ADVERSARIAL_DIAGNOSTICS) {
+            assertThatThrownBy(() -> eventWithDiagnostics(detailWithReason(vector)))
+                    .as("the abend reason must refuse '%s'", vector)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("abendDetail.abendReason");
+        }
+    }
+
+    /**
+     * Verifies that every adversarial diagnostic is refused when it is placed in the abend message.
+     */
+    @Test
+    void everyAdversarialDiagnosticIsRefusedInTheAbendMessage() {
+        // WHY : Assumptions: the message is checked as well as the reason because it is the WIDER of
+        //       the two free-text components -- seventy-two characters against fifty -- so a guard
+        //       covering only the reason would leave the roomier component open. Testing both is what
+        //       makes the pair a contract rather than a spot check of whichever one was authored
+        //       first.
+        for (String vector : ADVERSARIAL_DIAGNOSTICS) {
+            assertThatThrownBy(() -> eventWithDiagnostics(detailWithMessage(vector)))
+                    .as("the abend message must refuse '%s'", vector)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("abendDetail.abendMsg");
+        }
+    }
+
+    /**
+     * Verifies that a credential word is refused in the abend culprit, the narrowest guarded
+     * component.
+     */
+    @Test
+    void aCredentialWordIsRefusedInTheAbendCulprit() {
+        // WHY : Assumptions: the culprit is eight characters, so it can hold a credential WORD but
+        //       not any of the reference's numeric identifiers -- the narrowest of those is nine
+        //       digits. The eight-character marker is therefore the only vector that can reach this
+        //       component, and the assertion proves the guard inspects all four components rather
+        //       than the two wide ones a reader would think of first.
+        assertThatThrownBy(() -> eventWithDiagnostics(detailWithCulprit("password")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("abendDetail.abendCulprit");
+    }
+
+    /**
+     * Verifies that every declared credential marker is refused, so the vocabulary is fully enforced.
+     */
+    @Test
+    void everyDeclaredCredentialMarkerIsRefused() {
+        // WHY : Alternatives Considered: asserting against a handful of markers chosen here. Rejected
+        //       because a marker added to the published vocabulary but never matched would then pass
+        //       unnoticed, and a vocabulary whose entries are not all enforced is a vocabulary a
+        //       reader cannot trust. Iterating the published set makes the two impossible to
+        //       disagree.
+        for (String marker : BatchErrorEvent.PROHIBITED_DIAGNOSTIC_MARKERS) {
+            String vector = "step failed while resolving " + marker + " for the run";
+            assertThatThrownBy(() -> eventWithDiagnostics(detailWithReason(vector)))
+                    .as("the marker '%s' must be refused", marker)
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    /**
+     * Verifies that the published credential vocabulary is populated and folded ready for matching.
+     */
+    @Test
+    void theCredentialVocabularyIsPopulatedAndAlreadyFolded() {
+        // WHY : Assumptions: matching folds the candidate text to lower case and then looks for each
+        //       entry as a substring, so an entry carrying an upper-case letter could never match
+        //       anything. That failure is silent -- the entry simply never fires -- so it is asserted
+        //       here rather than left to be noticed by an incident.
+        assertThat(BatchErrorEvent.PROHIBITED_DIAGNOSTIC_MARKERS).isNotEmpty();
+        for (String marker : BatchErrorEvent.PROHIBITED_DIAGNOSTIC_MARKERS) {
+            assertThat(marker)
+                    .as("every declared marker must be non-blank and already folded")
+                    .isNotBlank()
+                    .isEqualTo(marker.toLowerCase(Locale.ROOT));
+        }
+        assertThat(BatchErrorEvent.PROHIBITED_DIAGNOSTIC_MARKERS)
+                .contains("password", "secret", "token", "credential");
+    }
+
+    /**
+     * Verifies that legitimate diagnostics still construct, so the guard refuses shape and not
+     * digits.
+     */
+    @Test
+    void legitimateDiagnosticsStillConstruct() {
+        // WHY : Assumptions: this is the negative control, and without it the guard could be
+        //       tightened until it refused everything and every rejection assertion above would
+        //       still pass. The vectors are the near misses specifically: a date whose year is four
+        //       digits, a timestamp whose fractional part is six, and an amount whose unit part is
+        //       four.
+        for (String vector : BENIGN_DIAGNOSTICS) {
+            assertThatCode(() -> eventWithDiagnostics(detailWithReason(vector)))
+                    .as("the abend reason must accept '%s'", vector)
+                    .doesNotThrowAnyException();
+            assertThatCode(() -> eventWithDiagnostics(detailWithMessage(vector)))
+                    .as("the abend message must accept '%s'", vector)
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    /**
+     * Verifies that the published threshold stays inside the widths the reference record layouts
+     * declare.
+     */
+    @Test
+    void theIdentifierThresholdStaysInsideTheWidthsTheReferenceDeclares() {
+        // WHY : Assumptions: the threshold is bounded from BOTH sides, because either direction
+        //       breaks it silently. Above nine it stops catching the nine-digit customer identifier
+        //       the reference declares at app/cpy/CVCUS01Y.cpy; at four or below it starts refusing
+        //       the four-digit abend code and the four-digit year of a business date, and a caller
+        //       met with a rejection for writing a date publishes no diagnostics at all next time.
+        assertThat(BatchErrorEvent.SHORTEST_IDENTIFIER_DIGIT_RUN)
+                .as("the threshold must still catch the nine-digit customer identifier")
+                .isLessThanOrEqualTo(9)
+                .as("the threshold must not refuse a four-digit code or year")
+                .isGreaterThan(4);
+    }
+
+    /**
+     * Verifies that an over-width identifier is shortened by the shared type before the guard sees
+     * it.
+     */
+    @Test
+    void anOverWidthIdentifierIsShortenedBeforeTheGuardSeesIt() {
+        // WHY : Assumptions: this documents why the two narrow components are not a hole.
+        //       AbendDetail's own constructor conforms each component to the width the reference
+        //       declares BEFORE this record's guard runs, so a sixteen-digit run offered as the
+        //       eight-character culprit arrives as eight digits -- narrower than any identifier the
+        //       migration carries -- and is correctly accepted. The event that results carries no
+        //       identifier, which is the property that matters; it is asserted rather than reasoned
+        //       about because the ordering of the two constructors is what makes it true.
+        AbendDetail detail = new AbendDetail(
+                "0999", "0000000000009010", "step ended abnormally", "abending program");
+
+        assertThat(detail.abendCulprit()).hasSize(AbendDetail.ABEND_CULPRIT_LENGTH);
+        assertThatCode(() -> eventWithDiagnostics(detail)).doesNotThrowAnyException();
+        assertThat(longestDigitRun(detail.abendCulprit()))
+                .isLessThan(SHORTEST_IDENTIFIER_DIGIT_RUN);
+    }
+
+    /**
+     * Verifies that the rendered form omits both free-text components while keeping the closed ones.
+     */
+    @Test
+    void theRenderedFormOmitsBothFreeTextDiagnosticComponents() {
+        // WHY : Assumptions: this asserts the second half of the fix, and it has to be asserted
+        //       separately from the constructor guard because the two protect against different
+        //       things. The guard recognises identifier shape and credential words; it cannot
+        //       recognise a name or an electronic mail address. The rendering needs to recognise
+        //       nothing, because it does not read the free-text components at all -- and that is
+        //       only true while nobody restores the inherited rendering, which is what this test
+        //       refuses.
+        String rendered = fullyPopulatedEvent().toString();
+
+        assertThat(rendered)
+                .as("the closed components must still be rendered")
+                .contains(RUN_ID, STEP_NAME, CORRELATION_ID, "0999", "CBTRN02C");
+        assertThat(rendered)
+                .as("neither free-text component may be rendered")
+                .doesNotContain("step ended abnormally", "abending program");
+    }
+
+    /**
+     * Verifies that the published payload still carries the full diagnostics the rendering omits.
+     */
+    @Test
+    void theSerialisedFormStillCarriesTheFullDiagnostics() {
+        // WHY : Trade-offs: the rendering is narrowed and the PAYLOAD is not, and this test is where
+        //       that distinction is pinned down. The payload goes to one queue whose access is
+        //       controlled; the rendered line goes wherever log aggregation sends it. Narrowing both
+        //       would leave an operator with no way to read a reason at all, which is a cure worse
+        //       than the disease -- so the omission is scoped to the form that travels furthest.
+        JsonMapper mapper = JsonMapper.builder().build();
+        JsonNode tree = mapper.readTree(mapper.writeValueAsString(fullyPopulatedEvent()));
+        JsonNode detail = tree.get("abendDetail");
+
+        assertThat(detail.get("abendReason").stringValue()).isEqualTo("step ended abnormally");
+        assertThat(detail.get("abendMsg").stringValue()).isEqualTo("abending program");
+    }
+
+    /**
+     * Verifies that the redacting factory publishes every adversarial vector with nothing sensitive.
+     */
+    @Test
+    void theRedactingFactoryPublishesEveryAdversarialVectorCleanly() {
+        // WHY : Assumptions: three properties are asserted together because each alone would permit a
+        //       useless implementation. That the factory CONSTRUCTS rules out a redaction whose
+        //       output the guard still refuses, which would make the recovery path unusable. That
+        //       the result carries no identifier-wide digit run and no marker rules out a redaction
+        //       that merely relaxes the guard. That the four-digit tail SURVIVES rules out blanking
+        //       the component outright, which would satisfy the first two and leave the operator
+        //       nothing to read.
+        for (String vector : ADVERSARIAL_DIAGNOSTICS) {
+            BatchErrorEvent event = BatchErrorEvent.withRedactedDiagnostics(RUN_ID, STEP_NAME,
+                    BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, CORRELATION_ID,
+                    detailWithReason(vector));
+
+            String redacted = event.abendDetail().abendReason();
+            assertThat(longestDigitRun(redacted))
+                    .as("'%s' must be redacted below the identifier threshold", vector)
+                    .isLessThan(SHORTEST_IDENTIFIER_DIGIT_RUN);
+            assertThat(redacted.toLowerCase(Locale.ROOT))
+                    .as("'%s' must not survive redaction carrying a credential marker", vector)
+                    .doesNotContain(BatchErrorEvent.PROHIBITED_DIAGNOSTIC_MARKERS
+                            .toArray(String[]::new));
+            if (!redacted.equals(BatchErrorEvent.REDACTED_DIAGNOSTIC)) {
+                assertThat(redacted)
+                        .as("'%s' must keep its four-digit tail", vector)
+                        .contains("9010");
+            }
+        }
+    }
+
+    /**
+     * Verifies that the redacting factory replaces a credential-bearing component rather than
+     * masking it.
+     */
+    @Test
+    void theRedactingFactoryReplacesACredentialBearingComponentOutright() {
+        // WHY : Assumptions: a credential has no shape, so it has no safe remainder and masking a
+        //       digit run inside the sentence would leave the secret standing. Replacement is
+        //       therefore the only correct handling, and the replacement is one fixed literal
+        //       rather than a message naming what was found -- naming it would describe the content
+        //       where the content itself was refused.
+        BatchErrorEvent event = BatchErrorEvent.withRedactedDiagnostics(RUN_ID, STEP_NAME,
+                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, CORRELATION_ID,
+                detailWithReason("connect refused: password rejected"));
+
+        assertThat(event.abendDetail().abendReason())
+                .isEqualTo(BatchErrorEvent.REDACTED_DIAGNOSTIC);
+    }
+
+    /**
+     * Verifies that masking preserves each component's length, so no component is silently shortened.
+     */
+    @Test
+    void maskingPreservesEachComponentLength() {
+        // WHY : Assumptions: masking replaces digits one for one and inserts nothing, so a redacted
+        //       component still measures what it measured. That matters because AbendDetail truncates
+        //       an over-width component on the RIGHT without reporting it: a redaction that
+        //       lengthened a value sitting near its declared width would lose the far end of the
+        //       sentence, and the loss would be invisible.
+        String vector = "insert failed for card 0000 0000 0000 9010";
+        BatchErrorEvent event = BatchErrorEvent.withRedactedDiagnostics(RUN_ID, STEP_NAME,
+                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, CORRELATION_ID,
+                detailWithReason(vector));
+
+        assertThat(event.abendDetail().abendReason()).hasSameSizeAs(vector);
+    }
+
+    /**
+     * Verifies that the redacting factory leaves the run, step and correlation identifiers untouched.
+     */
+    @Test
+    void theRedactingFactoryLeavesTheJoinKeysUntouched() {
+        // WHY : Assumptions: the three character components are values this module generated, and
+        //       they are the event's only route back to the run's own record of itself. Redacting
+        //       them would make the payload unjoinable, so the factory redacts the diagnostics ONLY
+        //       -- which is asserted here because a redaction applied to the wrong components would
+        //       still pass every cleanliness assertion above.
+        BatchErrorEvent event = BatchErrorEvent.withRedactedDiagnostics(RUN_ID, STEP_NAME,
+                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, CORRELATION_ID,
+                ABEND_DETAIL);
+
+        assertThat(event.runId()).isEqualTo(RUN_ID);
+        assertThat(event.stepName()).isEqualTo(STEP_NAME);
+        assertThat(event.correlationId()).isEqualTo(CORRELATION_ID);
+        assertThat(event.abendDetail()).isEqualTo(ABEND_DETAIL);
+    }
+
+    /**
+     * Verifies that the redacting factory refuses an absent detail rather than substituting one.
+     */
+    @Test
+    void theRedactingFactoryRefusesAnAbsentDetail() {
+        // WHY : Assumptions: the factory refuses null rather than falling back to the blank form,
+        //       because the two mean different things -- one is a caller with no abend to report,
+        //       which withoutAbendDetail expresses, and the other is a caller that lost track of
+        //       its own argument. Substituting for the second would hide it.
+        assertThatThrownBy(() -> BatchErrorEvent.withRedactedDiagnostics(RUN_ID, STEP_NAME,
+                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, CORRELATION_ID, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ABSENT_ABEND_DETAIL");
+    }
+
+    /**
+     * Verifies that a rejection message quotes no part of the value it refused.
+     */
+    @Test
+    void aRejectionMessageQuotesNoPartOfTheRefusedValue() {
+        // WHY : Assumptions: an exception message is copied into logs and incident records by every
+        //       layer it passes through, so a guard that echoed the offending text would become the
+        //       disclosure path it exists to close. This is the one assertion that would catch that
+        //       regression, because the guard would otherwise still be refusing correctly.
+        String vector = "insert failed for card 0000000000009010";
+
+        assertThatThrownBy(() -> eventWithDiagnostics(detailWithReason(vector)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageNotContaining("0000000000009010")
+                .hasMessageNotContaining(vector);
+    }
+
+    /**
+     * Builds an event carrying the supplied diagnostics and the fixture values for every other part.
+     *
+     * @param abendDetail the diagnostics to carry, which may be {@code null} so that the absent
+     *     case is
+     *     reachable
+     * @return an event carrying those diagnostics; never {@code null}
+     */
+    private static BatchErrorEvent eventWithDiagnostics(AbendDetail abendDetail) {
+        return new BatchErrorEvent(RUN_ID, STEP_NAME, BatchJobName.POST_TRANSACTIONS,
+                BatchReturnCode.HARD_FAILURE, CORRELATION_ID, abendDetail);
+    }
+
+    /**
+     * Builds an abend detail carrying the supplied text as its reason and fixture values elsewhere.
+     *
+     * @param reason the reason text to carry; must be non-null
+     * @return an abend detail whose reason is that text; never {@code null}
+     */
+    private static AbendDetail detailWithReason(String reason) {
+        return new AbendDetail("0999", "CBTRN02C", reason, "abending program");
+    }
+
+    /**
+     * Builds an abend detail carrying the supplied text as its message and fixture values elsewhere.
+     *
+     * @param message the message text to carry; must be non-null
+     * @return an abend detail whose message is that text; never {@code null}
+     */
+    private static AbendDetail detailWithMessage(String message) {
+        return new AbendDetail("0999", "CBTRN02C", "step ended abnormally", message);
+    }
+
+    /**
+     * Builds an abend detail carrying the supplied text as its culprit and fixture values elsewhere.
+     *
+     * @param culprit the culprit text to carry; must be non-null
+     * @return an abend detail whose culprit is that text; never {@code null}
+     */
+    private static AbendDetail detailWithCulprit(String culprit) {
+        return new AbendDetail("0999", culprit, "step ended abnormally", "abending program");
     }
 
     /**

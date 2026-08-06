@@ -155,15 +155,35 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
-    # WHY : (1) Assumptions: the schema name is quoted here for the same reason it
-    #       is quoted on the init statement above.
-    #       (2) Assumptions: create-schemas is false and baseline-on-migrate is
+    # WHY : (1) Assumptions: the schema name is written BARE here, and this is the
+    #       one place in this file where the reserved word must NOT be quoted.
+    #       Refactoring Rationale: both keys previously read '"authorization"' --
+    #       fourteen characters including two literal double quotes -- on the stated
+    #       ground that "the schema name is quoted here for the same reason it is
+    #       quoted on the init statement above". That reason does not transfer, and
+    #       the value was measured to fail. Flyway treats these keys as NAMES, not as
+    #       SQL fragments: it takes the string as the identifier and applies the
+    #       database's own quoting when it emits DDL, so a value carrying quote
+    #       characters is emitted as """authorization""" and PostgreSQL
+    #       resolves a schema whose name literally contains two double quotes. Run
+    #       against a real PostgreSQL 17 instance holding this schema, the quoted form
+    #       fails migration with SQLSTATE 3F000, `schema ""authorization"" does not
+    #       exist`; the bare form resolves "authorization"."flyway_schema_history"
+    #       and validates. The init statement above is the opposite case and keeps
+    #       its quotes: that value is SQL text this application hands to the server
+    #       verbatim, where an unquoted reserved word IS a syntax error.
+    #       (2) Assumptions: `schemas` names every schema Flyway manages while
+    #       `default-schema` decides where its history table and unqualified objects
+    #       resolve, so both are set. Setting only one can place migration state in
+    #       `public` while tables land in the authorization schema, making a repeated
+    #       run report the wrong history.
+    #       (3) Assumptions: create-schemas is false and baseline-on-migrate is
     #       false because the schema and its role grants are created by
     #       data-migration/sql/V0__schemas_and_roles.sql, which runs first and is
     #       owned elsewhere. Letting Flyway create the schema would give it an
     #       owner and a grant set that V0 did not choose.
-    schemas: '"authorization"'
-    default-schema: '"authorization"'
+    schemas: authorization
+    default-schema: authorization
     baseline-on-migrate: false
     create-schemas: false
 
@@ -210,6 +230,30 @@ spring:
         #       long-lived key out of this file and out of the image.
         enabled: true
 
+  # WHY : Refactoring Rationale: this key was absent, and its absence made this
+  #       module's published contract unreachable. openapi/authorization-api.yaml is
+  #       packaged into the jar and is the interface ui/src/api/authorization.ts is
+  #       written against, but the framework serves static content only from the
+  #       locations named here and classpath:/openapi/ is not among its four
+  #       defaults -- so the contract answered 404 at every URL while being present
+  #       in the artifact. The reference and transaction contexts already carried
+  #       this list; this context was the outlier.
+  #       Assumptions: this key REPLACES the framework's default list rather than
+  #       adding to it, which is why all four defaults are restated below. Dropping
+  #       classpath:/META-INF/resources/ in particular would stop the Swagger UI
+  #       assets being served at all, because they ship inside a webjar under
+  #       exactly that path. classpath:/openapi/ is added rather than the class-path
+  #       root deliberately: the root would publish this configuration file itself,
+  #       placeholders and all, on an HTTP endpoint.
+  web:
+    resources:
+      static-locations:
+        - classpath:/META-INF/resources/
+        - classpath:/resources/
+        - classpath:/static/
+        - classpath:/public/
+        - classpath:/openapi/
+
 management:
   endpoints:
     web:
@@ -228,6 +272,73 @@ management:
       #       is deliberately unauthenticated so the load balancer can poll it, so
       #       details here would be an unauthenticated topology disclosure.
       show-details: never
+
+# WHY : Refactoring Rationale: this whole block was absent, so nothing in this
+#       context published the hand-authored contract and nothing pinned the
+#       document the browser view would show. The sibling POM carries
+#       springdoc-openapi-starter-webmvc-ui, so the view and the generated document
+#       were both being served on library defaults: the view offered the generated
+#       description of a context whose controllers are authored at a later index --
+#       an empty paths object today -- and presented it as authoritative, while
+#       openapi/authorization-api.yaml was reachable at no URL. Both halves are
+#       settled here.
+# WHY : Alternatives Considered: switching the generated endpoint off instead of
+#       pinning the view at the authored contract. Rejected because the generated
+#       document earns its keep as the thing to compare the implementation against
+#       when it and the contract are suspected of having diverged; removing it would
+#       remove the only mechanical check on that drift. Publishing it as the primary
+#       document is what is refused, not producing it.
+springdoc:
+
+  api-docs:
+    # WHY : Assumptions: stated explicitly because the library's two defaults for
+    #       this setting disagree. Its autoconfiguration is conditional on the
+    #       property with match-if-missing, so an absent property leaves the endpoint
+    #       served; but the backing properties object declares the field as a plain
+    #       boolean with no initialiser, so anything reading that object while the
+    #       property is absent is told the document is disabled. Setting it true
+    #       makes the two agree.
+    enabled: true
+
+    # WHY : Assumptions: the library's default path, pinned so the path a contract
+    #       comparison fetches cannot move under a library upgrade. A moved path does
+    #       not fail a build; it returns 404 to whatever was fetching the document.
+    path: /v3/api-docs
+
+    # WHY : Assumptions: pinned rather than inherited. This release already defaults
+    #       to the 3.1 form, so the line changes nothing today; it is here because
+    #       the contract of record declares openapi 3.1.0 and a future default
+    #       reverting to 3.0 would serve a document in a different specification
+    #       version than the file it is checked against, and the mismatch would be
+    #       reported as contract drift when it was really a library default moving
+    #       underneath.
+    version: openapi_3_1
+
+  swagger-ui:
+    # WHY : Assumptions: the library's default page path, pinned for the same reason
+    #       as the document path above. This page is a human entry point only, so it
+    #       is declared once here rather than varied per environment.
+    path: /swagger-ui.html
+
+    # WHY : Assumptions: this is the path spring.web.resources.static-locations
+    #       above resolves openapi/authorization-api.yaml to, so the two move
+    #       together: remove classpath:/openapi/ from that list and this URL 404s.
+    url: /authorization-api.yaml
+
+    # WHY : Assumptions: without this the view ALSO offers its own bundled sample
+    #       definition in the same selector as the contract above, so a reader can
+    #       silently end up reading a document that describes nothing in this
+    #       service. Disabling it leaves exactly one definition in the selector.
+    disable-swagger-default-url: true
+
+  # WHY : Trade-offs: sorting the generated document's keys costs a little
+  #       serialisation work on each request for it, and buys a document that is
+  #       diffable. Without it the key order follows reflection order, which can
+  #       change between builds for reasons that have nothing to do with the API, so
+  #       a diff against authorization-api.yaml would report noise and the drift
+  #       check that comparison exists to perform would stop being trusted.
+  writer-with-order-by-keys: true
+
 
 logging:
   level:

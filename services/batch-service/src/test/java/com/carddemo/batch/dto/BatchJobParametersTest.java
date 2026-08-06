@@ -9,9 +9,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 /**
- * Verifies that {@link BatchJobParameters} decodes the container command line the orchestration
- * state actually sends, refuses the combinations it documents as impossible, and stays permissive
- * about every argument it does not own.
+ * Verifies that {@link BatchJobParameters} refuses every argument combination it documents as
+ * impossible, and that {@link BatchApplication#parseArguments(String[])} -- the one parser this
+ * module ships -- decodes the container command line the orchestration state actually sends into
+ * that record while staying permissive about every argument it does not own.
+ *
+ * <p>Refactoring Rationale: the record CARRIES parameters and no longer decodes them, so the
+ * decoding cases below call the production entry point rather than a factory on the record. This
+ * class previously exercised a {@code fromArguments(String[])} factory that production never called,
+ * because the entry point had a parser of its own. The two had already diverged on a rule that
+ * matters -- the factory admitted six of the seven jobs with no business date while the entry point
+ * required one for every job -- so every case here could pass while the parsing that actually ran
+ * behaved differently. The factory is deleted and each of its former call sites now names the entry
+ * point, which is what makes a green run of this class evidence about the code the container
+ * executes. Reassembling the entry point's parsing steps inside this class was the alternative and is
+ * rejected on the same ground the factory was: it would be a second parser again, differing only in
+ * who wrote it.</p>
  *
  * <p>Every expectation below is pinned either to an immutable reference artifact or to the argument
  * contract published by {@link BatchApplication}, never to a value invented here. The two vectors
@@ -19,17 +32,20 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
  * {@code ["--job=calculate-interest", "--business-date=2022-07-18"]} that the state machine supplies,
  * and the compact {@code PARM='2022071800'} that {@code app/jcl/INTCALC.jcl:22} injects.</p>
  *
- * <p>Assumptions: the per-job requiredness rule is covered for ALL SEVEN jobs rather than for the
- * one job that requires a date. The rule lives in exactly two places -- the table in the type's
- * Javadoc and the conditional in its constructor -- and nothing but a test that walks the whole
- * enumeration stops those two drifting apart when a job is added or a ground is revised.</p>
+ * <p>Assumptions: the business-date requirement has two layers and both are covered, because a test
+ * of either layer alone would leave the other free to move. The entry point requires the option for
+ * ALL SEVEN jobs, on the job-instance identity ground its own documentation gives, and that layer is
+ * asserted by walking the whole enumeration through the parser. Underneath it the record's
+ * constructor requires a date for the accrual job specifically, on the two grounds its table records,
+ * and that layer is asserted by constructing the record directly -- otherwise the stricter parse
+ * above would shadow it, and the invariant would stop being checked while still being documented.</p>
  *
  * <p>Alternatives Considered: asserting the parser rejects arguments it does not recognise, which is
  * what a test of a strict command-line parser would do. Rejected because it would pin exactly the
- * defect this type is built to avoid: the argument vector is shared with the framework, so a strict
- * parser fails the container the first time anyone passes a profile selection or a property
- * override. The permissive behaviour is therefore asserted positively, by a test named so that its
- * purpose survives a future author's tidying.</p>
+ * defect the entry point's parser is built to avoid: the argument vector is shared with the
+ * framework, so a strict parser fails the container the first time anyone passes a profile selection
+ * or a property override. The permissive behaviour is therefore asserted positively, by a test named
+ * so that its purpose survives a future author's tidying.</p>
  */
 class BatchJobParametersTest {
 
@@ -55,7 +71,7 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("the Step Functions container override decodes to the interest job and the exact token")
     void stepFunctionsContainerOverrideDecodesToInterestJobAndExactToken() {
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(
+        BatchJobParameters parameters = BatchApplication.parseArguments(
                 new String[] {"--job=calculate-interest", "--business-date=2022-07-18"});
 
         assertThat(parameters.jobName()).isSameAs(BatchJobName.CALCULATE_INTEREST);
@@ -73,7 +89,7 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("the compact INTCALC parameter form decodes with nothing reformatted")
     void compactIntcalcParameterFormDecodesUnmodified() {
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(
+        BatchJobParameters parameters = BatchApplication.parseArguments(
                 new String[] {BatchJobParameters.JOB_OPTION + BatchJobName.CALCULATE_INTEREST.token(),
                     BatchJobParameters.BUSINESS_DATE_OPTION + COMPACT_TOKEN});
 
@@ -92,13 +108,15 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("unrecognised framework options are ignored rather than rejected")
     void unrecognisedFrameworkOptionsAreIgnoredRatherThanRejected() {
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(new String[] {
+        BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
             "--spring.profiles.active=prod",
             "--job=post-transactions",
+            "--business-date=" + SEPARATED_TOKEN,
             "--logging.level.root=INFO"});
 
         assertThat(parameters.jobName()).isSameAs(BatchJobName.POST_TRANSACTIONS);
-        assertThat(parameters.businessDate()).isEmpty();
+        assertThat(parameters.businessDate()).map(BusinessDate::token).contains(SEPARATED_TOKEN);
+        assertThat(parameters.targetGeneration()).isEmpty();
     }
 
     /**
@@ -111,9 +129,9 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("argument order does not affect the decoded result")
     void argumentOrderDoesNotAffectTheDecodedResult() {
-        BatchJobParameters jobFirst = BatchJobParameters.fromArguments(
+        BatchJobParameters jobFirst = BatchApplication.parseArguments(
                 new String[] {"--job=calculate-interest", "--business-date=2022-07-18"});
-        BatchJobParameters dateFirst = BatchJobParameters.fromArguments(
+        BatchJobParameters dateFirst = BatchApplication.parseArguments(
                 new String[] {"--business-date=2022-07-18", "--job=calculate-interest"});
 
         assertThat(dateFirst).isEqualTo(jobFirst);
@@ -130,7 +148,7 @@ class BatchJobParametersTest {
     @DisplayName("a vector carrying only a business date is rejected and names the job option")
     void dateOnlyVectorIsRejectedAndNamesTheJobOption() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(
+                .isThrownBy(() -> BatchApplication.parseArguments(
                         new String[] {"--business-date=2022-07-18"}))
                 .withMessageContaining(BatchJobParameters.JOB_OPTION)
                 .withMessageContaining("required");
@@ -147,11 +165,11 @@ class BatchJobParametersTest {
     @DisplayName("an empty vector and a null vector are both rejected as a missing job option")
     void emptyAndNullVectorsAreRejectedAsAMissingJobOption() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {}))
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {}))
                 .withMessageContaining(BatchJobParameters.JOB_OPTION);
 
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(null))
+                .isThrownBy(() -> BatchApplication.parseArguments(null))
                 .withMessageContaining(BatchJobParameters.JOB_OPTION);
     }
 
@@ -168,7 +186,7 @@ class BatchJobParametersTest {
         assertThat(BatchJobName.values()).hasSize(BatchApplication.JOB_NAMES.size());
 
         for (BatchJobName job : BatchJobName.values()) {
-            BatchJobParameters parameters = BatchJobParameters.fromArguments(new String[] {
+            BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
                 BatchJobParameters.JOB_OPTION + job.token(),
                 BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN});
 
@@ -188,36 +206,61 @@ class BatchJobParametersTest {
     @DisplayName("the interest job is rejected when no business date accompanies it")
     void interestJobIsRejectedWithoutABusinessDate() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(
+                .isThrownBy(() -> BatchApplication.parseArguments(
                         new String[] {BatchJobParameters.JOB_OPTION
                                 + BatchJobName.CALCULATE_INTEREST.token()}))
                 .withMessageContaining(BatchJobParameters.BUSINESS_DATE_OPTION);
     }
 
     /**
-     * Walks the whole enumeration to pin the requiredness table against the constructor, so that the
-     * documented rule and the enforced rule cannot diverge for any of the seven jobs.
+     * Walks the whole enumeration to pin BOTH requiredness rules, so neither the entry point's rule nor
+     * the record's own invariant can drift for any of the seven jobs.
+     *
+     * <p>Refactoring Rationale: an earlier revision of this case asserted that exactly ONE of the seven
+     * jobs required a business date and that the other six parsed without one. That was true of a second
+     * parser declared on the record and never reached by production, while the entry point had always
+     * required a date for every job -- so the suite certified a rule the running code did not apply.
+     * That parser is gone. The case now pins the two rules that genuinely exist and states how they
+     * relate: the entry point requires a date for EVERY job, which SUBSUMES the record's invariant that
+     * the accrual job in particular must carry one.
+     *
+     * <p>Assumptions: the record's invariant is still exercised directly, through the constructor, and
+     * not merely implied by the stricter parse. If the entry point were ever relaxed, that invariant is
+     * what would still refuse a dateless accrual run, so it has to be asserted on its own terms rather
+     * than shadowed by a rule that happens to be stricter today.
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
      */
     @Test
-    @DisplayName("exactly one of the seven jobs requires a business date, and it is the accrual job")
-    void exactlyOneJobRequiresABusinessDate() {
+    @DisplayName("every job requires a business date at the entry point, and the accrual job also by invariant")
+    void everyJobRequiresABusinessDateAndTheAccrualJobAlsoByInvariant() {
         for (BatchJobName job : BatchJobName.values()) {
             String[] withoutADate = {BatchJobParameters.JOB_OPTION + job.token()};
 
-            if (job == BatchJobName.CALCULATE_INTEREST) {
-                assertThatExceptionOfType(IllegalArgumentException.class)
-                        .isThrownBy(() -> BatchJobParameters.fromArguments(withoutADate));
-                continue;
-            }
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .as("%s must not parse without a business date", job.token())
+                    .isThrownBy(() -> BatchApplication.parseArguments(withoutADate))
+                    .withMessageContaining(BatchJobParameters.BUSINESS_DATE_OPTION);
 
-            BatchJobParameters parameters = BatchJobParameters.fromArguments(withoutADate);
+            BatchJobParameters parsed = BatchApplication.parseArguments(new String[] {
+                BatchJobParameters.JOB_OPTION + job.token(),
+                BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN});
 
-            assertThat(parameters.jobName()).isSameAs(job);
-            assertThat(parameters.businessDate()).isEmpty();
+            assertThat(parsed.jobName()).isSameAs(job);
+            assertThat(parsed.businessDate()).map(BusinessDate::token).contains(SEPARATED_TOKEN);
         }
+
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .as("the record's own invariant singles out the accrual job")
+                .isThrownBy(() -> new BatchJobParameters(
+                        BatchJobName.CALCULATE_INTEREST, Optional.empty(), Optional.empty()))
+                .withMessageContaining(BatchJobName.CALCULATE_INTEREST.token());
+
+        assertThat(new BatchJobParameters(
+                        BatchJobName.EXPORT, Optional.empty(), Optional.empty()).businessDate())
+                .as("the record permits a dateless set for a job other than the accrual job")
+                .isEmpty();
     }
 
     /**
@@ -232,13 +275,13 @@ class BatchJobParametersTest {
     @DisplayName("a repeated job option and a repeated business-date option are both rejected")
     void repeatedOptionsAreRejected() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
                     "--job=export", "--job=import"}))
                 .withMessageContaining(BatchJobParameters.JOB_OPTION)
                 .withMessageContaining("more than once");
 
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
                     "--job=export",
                     "--business-date=2022-07-18",
                     "--business-date=2022071800"}))
@@ -254,17 +297,23 @@ class BatchJobParametersTest {
      * errors.</p>
      */
     @Test
-    @DisplayName("a blank option value is treated as absent rather than as an empty token")
-    void blankOptionValueIsTreatedAsAbsent() {
+    @DisplayName("a blank option value is treated as absent and therefore refused")
+    void blankOptionValueIsTreatedAsAbsentAndRefused() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {"--job="}))
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {"--job="}))
                 .withMessageContaining(BatchJobParameters.JOB_OPTION)
                 .withMessageContaining("required");
 
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(new String[] {
-            "--job=export", "--business-date=   "});
-
-        assertThat(parameters.businessDate()).isEmpty();
+        // WHY : Refactoring Rationale: a blank date is ABSENT, and absent is refused here. An earlier
+        //       revision of this case asserted the parse SUCCEEDED with an empty date holder, because
+        //       it exercised a second parser on the record that admitted a dateless command. That
+        //       parser never ran in production and is gone; this entry point has always required a
+        //       date for every job, so the blank value is refused and the case now says so.
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
+                    "--job=export", "--business-date=   "}))
+                .withMessageContaining(BatchJobParameters.BUSINESS_DATE_OPTION)
+                .withMessageContaining("required");
     }
 
     /**
@@ -277,8 +326,8 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("a bare token carrying no option prefix is ignored")
     void bareTokenCarryingNoOptionPrefixIsIgnored() {
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(new String[] {
-            "export", "--job=export", null});
+        BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
+            "export", "--job=export", null, "--business-date=" + SEPARATED_TOKEN});
 
         assertThat(parameters.jobName()).isSameAs(BatchJobName.EXPORT);
     }
@@ -295,9 +344,9 @@ class BatchJobParametersTest {
     void decodingOneVectorTwiceYieldsEqualInstances() {
         String[] vector = {"--job=calculate-interest", "--business-date=2022-07-18"};
 
-        assertThat(BatchJobParameters.fromArguments(vector))
-                .isEqualTo(BatchJobParameters.fromArguments(vector))
-                .hasSameHashCodeAs(BatchJobParameters.fromArguments(vector));
+        assertThat(BatchApplication.parseArguments(vector))
+                .isEqualTo(BatchApplication.parseArguments(vector))
+                .hasSameHashCodeAs(BatchApplication.parseArguments(vector));
     }
 
     /**
@@ -310,7 +359,7 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("the rendered form carries the job name and date token and nothing surprising")
     void renderedFormCarriesTheJobNameAndDateTokenAndNothingSurprising() {
-        String rendered = BatchJobParameters.fromArguments(
+        String rendered = BatchApplication.parseArguments(
                 new String[] {"--job=calculate-interest", "--business-date=2022-07-18"}).toString();
 
         assertThat(rendered)
@@ -350,12 +399,12 @@ class BatchJobParametersTest {
     @DisplayName("a date token of the wrong width or character class is rejected")
     void malformedBusinessDateTokenIsRejected() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
                     "--job=export", "--business-date=2022-7-18"}))
                 .withMessageContaining(BatchJobParameters.BUSINESS_DATE_OPTION);
 
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(new String[] {
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
                     "--job=export", "--business-date=2022-07-1X"}))
                 .withMessageContaining(BatchJobParameters.BUSINESS_DATE_OPTION);
     }
@@ -371,11 +420,11 @@ class BatchJobParametersTest {
     @DisplayName("a job token outside the closed set of seven is rejected")
     void jobTokenOutsideTheClosedSetIsRejected() {
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(
+                .isThrownBy(() -> BatchApplication.parseArguments(
                         new String[] {"--job=POST-TRANSACTIONS"}));
 
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> BatchJobParameters.fromArguments(
+                .isThrownBy(() -> BatchApplication.parseArguments(
                         new String[] {"--job=post-transaction"}));
     }
 
@@ -443,8 +492,14 @@ class BatchJobParametersTest {
     @Test
     @DisplayName("insisting on an absent business date reports a state failure naming the job")
     void insistingOnAnAbsentBusinessDateReportsAStateFailure() {
-        BatchJobParameters parameters = BatchJobParameters.fromArguments(
-                new String[] {"--job=export"});
+        // WHY : Refactoring Rationale: the parameters are CONSTRUCTED rather than parsed, because a
+        //       dateless set can no longer be produced by parsing -- the entry point requires a date
+        //       for every job. The accessor's contract is still worth pinning: a caller holding a set
+        //       assembled in code, as a job that supplies its own generation coordinate does, can still
+        //       reach it with an empty holder. Constructing directly is what keeps this case about the
+        //       ACCESSOR rather than about the parser that can no longer reach that state.
+        BatchJobParameters parameters = new BatchJobParameters(
+                BatchJobName.EXPORT, Optional.empty(), Optional.empty());
 
         assertThatExceptionOfType(IllegalStateException.class)
                 .isThrownBy(parameters::requireBusinessDate)
@@ -463,7 +518,7 @@ class BatchJobParametersTest {
     @DisplayName("the factory never manufactures a generation coordinate")
     void factoryNeverManufacturesAGenerationCoordinate() {
         for (BatchJobName job : BatchJobName.values()) {
-            BatchJobParameters parameters = BatchJobParameters.fromArguments(new String[] {
+            BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
                 BatchJobParameters.JOB_OPTION + job.token(),
                 BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN,
                 "--generation=0001"});

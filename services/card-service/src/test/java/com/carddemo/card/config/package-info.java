@@ -17,12 +17,13 @@
  * surfaced first as a refused or over-permissive request in a deployed environment.</p>
  *
  * <p>Alternatives Considered: asserting the same rules by standing up an application context and
- * issuing a request per route, which is the stronger form and is what a negative authorization test
- * needs. Not available at the checkpoint that authored this package - this module has no application
- * class yet - and deferring the whole comparison until one exists would leave the rules unverified
- * during exactly the interval in which they were introduced. The runtime assertion is added when that
- * class lands; this package's assertions remain useful afterwards, because they check the PUBLISHED
- * contract, which a request-level test does not read.</p>
+ * issuing a request per route, which is the stronger form. Still not adopted, and the reason has
+ * changed since this package was authored, so the note is corrected rather than left standing:
+ * {@code CardApplication} now exists, but this module publishes no controller, so every request would
+ * answer 404 from the handler mapping and the assertion would rest on distinguishing 403 from 404 -- a
+ * signal that changes the moment the first controller lands. This package's assertions remain useful
+ * afterwards regardless, because they check the PUBLISHED contract, which a request-level test does not
+ * read.</p>
  *
  * <p>Trade-offs: the contract is parsed as untyped nested maps rather than through an OpenAPI object
  * model. A model would give typed access and would validate the document's structure on the way in;

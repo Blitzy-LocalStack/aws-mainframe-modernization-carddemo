@@ -22,42 +22,56 @@
  * interface in this directory would fail the charter-presence check if this
  * file were not part of the same package.
  *
- * <p>Exactly five {@code .java} files constitute this package, of which TWO are landed:
+ * <p>Exactly five {@code .java} files constitute this package, of which FOUR are landed:
  *
  * <ul>
  *   <li>{@code package-info.java}, this charter -- LANDED;</li>
  *   <li>{@code TransactionRepository}, the Spring Data JPA interface for
  *       {@code com.carddemo.transaction.domain.Transaction} -- LANDED;</li>
  *   <li>{@code DailyTransactionRepository}, the Spring Data JPA interface for
- *       {@code com.carddemo.transaction.domain.DailyTransaction} -- PLANNED, not yet
- *       authored;</li>
+ *       {@code com.carddemo.transaction.domain.DailyTransaction} -- LANDED. It serves the
+ *       posting job's sequential scan of the daily feed rather than a screen, which is what
+ *       distinguishes its member surface from the three keyed interfaces here. Its identity
+ *       type is {@code Long}, not {@code String}: the feed's own identifier is not unique,
+ *       so the entity is keyed on the generated ingestion sequence the owning migration
+ *       declares, and this interface's CURSOR is that same {@code ingest_seq} rather than the
+ *       staged transaction identifier;</li>
  *   <li>{@code TransactionCategoryBalanceRepository}, the Spring Data JPA
  *       interface for
  *       {@code com.carddemo.transaction.domain.TransactionCategoryBalance} --
- *       PLANNED, not yet authored; and</li>
+ *       LANDED. Its identifier is the declared three-part composite key, and it adds one
+ *       ordered read to the inherited keyed read; and</li>
  *   <li>{@code TransactionRejectRepository}, the Spring Data JPA interface for
  *       {@code com.carddemo.transaction.domain.TransactionReject} -- PLANNED, not yet
- *       authored, and its entity is not authored either, so this one is two files away
- *       rather than one.</li>
+ *       authored. Its ENTITY is landed and keyed on the reject-event sequence
+ *       {@code reject_seq}, so this one is a single file away rather than two.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: three of the five are marked PLANNED, and an earlier revision of
- * this charter stated all five as constituting the package. Two exist. The inventory is the
- * mechanism by which a reader finds the repository for an entity without opening five files, and
- * an entry that cannot be distinguished from a landed one defeats that at the first lookup --
- * particularly for {@code TransactionRejectRepository}, whose ENTITY is also unauthored, so a
- * reader following the charter would search for two files rather than one. The inventory stays
- * closed at five and now says which two are here.
+ * <p>Refactoring Rationale: the inventory is re-stated from the directory each time an interface
+ * lands, because an entry that cannot be distinguished from a landed one defeats the lookup it
+ * exists to serve. An earlier revision of this census said TWO of the five were landed and marked
+ * {@code DailyTransactionRepository} and {@code TransactionCategoryBalanceRepository} as not yet
+ * authored. Both are present, and each carries substantive query rulings -- the daily feed's scan
+ * contract and the composite-key ordered read -- so the census understated the package by two
+ * files and, worse, marked as absent the two interfaces whose rulings a reader most needs to
+ * find. The same revision said {@code TransactionRejectRepository} was "two files away" because
+ * its entity was also unauthored; {@code TransactionReject} is present in the sibling
+ * {@code domain} package, so that entry is one file away, not two. A census is consulted
+ * precisely to learn which contracts are settled, so under-reporting sends a reader to write an
+ * interface that already exists and over-states the work remaining on the one that does not. The
+ * inventory stays closed at five and now names the four that are here.
  *
- * <p>Assumptions: the three are not authored as empty interfaces to close the gap. A Spring Data
- * interface with no declared query and no caller contributes no behaviour and cannot be
- * exercised, so it would be a placeholder occupying the name of a reviewed contract; each
- * arrives with the job or service whose queries it declares.
+ * <p>Assumptions: the remaining interface is not authored as an empty one to close the gap. A
+ * Spring Data interface with no declared query and no caller contributes no behaviour and cannot
+ * be exercised, so it would be a placeholder occupying the name of a reviewed contract; it
+ * arrives with the job or service whose queries it declares. That is also why the three that are
+ * here were correct to author rather than premature: each declares queries a landed caller
+ * already issues.
  *
  * <p>Trade-offs: the inventory is closed rather than extensible. There is no
  * shared base repository, keyset base interface, custom fragment,
  * implementation fragment, Specification or Criteria helper, DTO, mapper or
- * service here. The cost is repetition across four small interfaces; what is
+ * service here. The cost is repetition across the small interfaces; what is
  * bought is one visible repository per physical record contract and no hidden
  * query surface behind a sixth type. This directory has no subdirectory.
  *

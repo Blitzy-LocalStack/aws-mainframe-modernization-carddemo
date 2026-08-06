@@ -27,12 +27,13 @@ import java.util.UUID;
  * observable differing between them, and a width changed in one of the three would then disagree
  * with the other two silently.
  *
- * <p>Assumptions: that argument does not extend to the two request records, and the contrast is
- * stated here so this paragraph is not read as licence to unify those as well. A request is
- * validated field by field, and the order its fields are declared in decides which one reports the
- * first error; the add screen and the update screen order their fields differently, so
- * {@code CreateUserRequest} and {@code UpdateUserRequest} stay separate types. A response reports no
- * first error, so it has no such order to preserve.
+ * <p>Assumptions: that argument does not extend to the request side, and the contrast is stated here
+ * so this paragraph is not read as licence to unify that as well. A request is validated field by
+ * field, and the order its fields are declared in decides which one reports the first error; the add
+ * screen and the update screen order their fields differently, which is why the published contract
+ * declares two distinct request schemas, {@code CreateUserRequest} at
+ * {@code src/main/resources/openapi/auth-api.yaml} L1946 and {@code UpdateUserRequest} at L2013,
+ * rather than one. A response reports no first error, so it has no such order to preserve.
  *
  * <h2>Where the five components come from</h2>
  *
@@ -200,12 +201,15 @@ import java.util.UUID;
  * the type domain as an enumeration, so a caller reads both without reading this file, and the test
  * channel evaluates the same annotations directly.
  *
- * <p>Assumptions: this record performs no padding removal. The identifier column is declared with a
- * character type of exactly 8 positions, so a value read from it arrives blank-padded, and that
- * padding is a storage representation concern which this context places in its
- * {@code com.carddemo.auth.mapper} package. A mapper stands between the stored row and this record,
- * so the values reaching these components have already had it removed; an inbound request has no
- * such intermediary, which is why the normalising treatment belongs on a request type and not here.
+ * <p>Assumptions: this record performs no padding removal, and the obligation is placed rather than
+ * dropped. The identifier column is declared with a character type of exactly 8 positions, so a value
+ * read from it arrives blank-padded, and stripping that padding is a storage-representation concern
+ * this context assigns to its mapping layer -- the {@code com.carddemo.auth.mapper} package the
+ * migration plan gives this module -- so a value reaching these components has already had it
+ * removed. An inbound request passes through no such layer, which is why the normalising treatment
+ * belongs on a request type and not here. A caller reading this record therefore never has to trim,
+ * and a mapper that forgot to trim would surface as a trailing-blank comparison failure in this
+ * module's own tests rather than as a silently padded response.
  *
  * <h2>What the test channel has to assert</h2>
  *
@@ -218,16 +222,19 @@ import java.util.UUID;
  * instead verifiable by reading the cited file at the cited line, which is why the citations are
  * exact.
  *
- * <p>Assumptions: five assertions are required of whatever tests this record. That it declares
+ * <p>Assumptions: six assertions are required of whatever tests this record. That it declares
  * exactly these five components in exactly this order, matching the five columns of
  * {@code auth.users} and the five properties of the published schema. That a 9-character identifier
  * is refused while an 8-character one is accepted, pinning the bound at the width
  * {@code app/cpy/CSUSR01Y.cpy} L18 declares rather than one position either side of it. That a
  * 21-character name is refused while a 20-character one is accepted. That {@code userType} admits
  * {@code 'A'} and {@code 'U'} and refuses everything else, which means a null, an empty string, a
- * blank, the lower-case forms of either letter, and the two letters together are each rejected. And
- * that the type exposes no accessor for a credential, which is the assertion that would fail first
- * if the omission documented above were ever undone.
+ * blank, the lower-case forms of either letter, and the two letters together are each rejected. That
+ * the type exposes no accessor for a credential, which is the assertion that would fail first if the
+ * omission documented above were ever undone. And that the string form renders neither name nor the
+ * Cognito subject, stated as an assertion about the rendered text rather than about the override's
+ * presence, because a rendering that named a component and then printed its value would satisfy the
+ * weaker check and still disclose exactly what the stronger one forbids.
  *
  * @param userId the row's identifier and primary key, of at most 8 characters, as
  *     {@code SEC-USR-ID PIC X(08)} declares at {@code app/cpy/CSUSR01Y.cpy} L18, byte position 0 of
@@ -330,4 +337,67 @@ public record UserResponse(
      * write what this contract had published as valid.
      */
     private static final String USER_TYPE_DOMAIN = "[AU]";
+
+    /**
+     * The placeholder that stands in for a component this record refuses to render.
+     *
+     * <p>Assumptions: the literal deliberately matches the one
+     * {@code com.carddemo.auth.dto.SignOnResponse} uses for its three token values, so a log store
+     * holding lines from both types shows one placeholder vocabulary rather than two. The constant is
+     * named for the class of data it hides rather than for the literal, because a reader of this file
+     * needs to know which components are withheld here and a reader of a log line needs only to know
+     * that something was.
+     *
+     * <p>Alternatives Considered: rendering a shortened form of each withheld value -- an initial, or
+     * the first several characters of the subject -- was evaluated and rejected on the ground the
+     * sibling record states for its tokens: a leading fragment is still material a reader can
+     * correlate across log lines, and correlating a person across lines is the exposure being closed.
+     * A family name is additionally the kind of value whose first characters identify it outright in a
+     * small population, so a prefix here would disclose more than a prefix of a token does.
+     */
+    private static final String REDACTED_PERSONAL = "REDACTED";
+
+    /**
+     * Renders this record for diagnostics with every personal component replaced by a placeholder.
+     *
+     * <p>Refactoring Rationale: the string form a record generates for itself lists every component
+     * beside its value, which on this record means a given name, a family name and the identity
+     * provider's subject for the person the row describes. Any log line, assertion message or
+     * exception detail that stringified an instance would publish those three into a log store, and a
+     * response type is stringified in exactly the places that happens by accident rather than by
+     * intent. This override keeps the generated form's shape and its component order and substitutes
+     * {@code REDACTED_PERSONAL} for the three.
+     *
+     * <p>Trade-offs: two components print in full and the choice of which is the whole substance of
+     * this method. {@code userId} prints because it is the row locator, an 8-character logon
+     * identifier assigned by the system rather than a fact about the person, and because a rendering
+     * that identified no row could not correlate anything and would defeat the purpose of having one;
+     * the sibling {@code SignOnResponse} prints the same component in full for the same reason.
+     * {@code userType} prints because it is a two-valued role classification carrying no personal
+     * content, and it is the single most useful value when a role-related fault is being traced. What
+     * is given up is the ability to tell two instances apart from their printed form alone whenever
+     * they describe the same row.
+     *
+     * <p>Assumptions: only the string form is narrowed. Component equality and hashing are untouched,
+     * and serialisation into a response body reads the component accessors rather than this method, so
+     * the published contract is unaffected and a caller still receives every value it promises. The
+     * distinction matters because the exposure being closed is incidental stringification, not the
+     * deliberate act of returning a record to the caller that asked for it.
+     *
+     * @return a single-line description of this record naming every component in contract order, in
+     *     which the given name, the family name and the Cognito subject are each represented by a
+     *     placeholder and never rendered
+     */
+    @Override
+    public String toString() {
+        // Assumptions: the generated form's shape is reproduced deliberately, component order
+        //   included, so that a reader who knows what a record prints is not led to think some other
+        //   type produced this line. Only the three personal values depart from it.
+        return "UserResponse[userId=" + userId
+                + ", firstName=" + REDACTED_PERSONAL
+                + ", lastName=" + REDACTED_PERSONAL
+                + ", userType=" + userType
+                + ", cognitoSub=" + REDACTED_PERSONAL
+                + "]";
+    }
 }

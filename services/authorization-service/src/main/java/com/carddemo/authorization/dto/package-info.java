@@ -16,10 +16,37 @@
  *
  * <p>Assumptions: every type name below describes this package's <b>target contract</b> as the
  * migration plan assigns it, not the set of files present beside this one. At the checkpoint that
- * authored this charter the directory holds this file alone, so each of the six types named below
- * is <b>planned</b> rather than missing. The counts attached to the COBOL sources are different in
- * kind: those are measurements taken from the reference tree, and each names the file and the line
- * range it was taken from so that any reader can re-take it.</p>
+ * authored this charter the directory held this file alone, so each type named below was
+ * <b>planned</b> rather than missing; all twelve have since landed. The counts attached to the COBOL
+ * sources are different in kind: those are measurements taken from the reference tree, and each names
+ * the file and the line range it was taken from so that any reader can re-take it.</p>
+ *
+ * <h2>Which type is authoritative for which edge</h2>
+ *
+ * <p>Refactoring Rationale: this section exists because the package holds two types for each of two
+ * payloads and an earlier state of it did not say which was which. The rule is one sentence:
+ * <b>{@code src/main/resources/openapi/authorization-api.yaml} is the contract of record for the HTTP
+ * edge, and the six {@code ...View} types plus {@code FraudMarkRequest} and {@code FraudMarkResponse}
+ * below are its Java realisation.</b> The two symbolic-map projections are the record of what the 3270
+ * terminal displayed and received -- the specification the browser screens implement and the module's
+ * own tests assert -- and they are not HTTP bodies. Assumptions: the two fraud-area records are the one
+ * place where both readings coincide, because the contract was aligned to them rather than a second pair
+ * declared beside them: one payload carries one name, so a client typed from the document and a handler
+ * compiled from the record cannot be describing different requests. Without that sentence a reader had two plausible
+ * candidates for one response and no way to choose, and no code path existed from either entity to the
+ * shapes the contract publishes.</p>
+ *
+ * <p>Assumptions: the split is forced by three properties of the map projections rather than chosen for
+ * neatness. They carry the screen's six header positions, which are chrome a browser client owns; they
+ * have no cursor or availability member, so they cannot express the keyset envelope this migration
+ * requires of every list; and the summary projection writes its page size of five into its own component
+ * names, so it cannot return four rows or six. Alternatives Considered: deleting them and keeping one
+ * type per payload. Rejected because they are the only record of three compositions the reference
+ * programs perform on the way to the screen -- the card expiry around a solidus, the response reason
+ * truncated to twenty characters around a separator, and the fraud mark around its report date -- one of
+ * which is a registered divergence, D-AUTH-REASON-WIDTH, whose verification lives in a test of one of
+ * them. Trade-offs: the package is larger than one type per payload would make it, and the compensation
+ * is that the boundary each type serves is now stated on the type itself as well as here.</p>
  *
  * <p><strong>Purpose.</strong> This package holds the types that cross this context's two external
  * edges, the synchronous HTTP edge and the asynchronous message-queue edge, and it holds nothing
@@ -28,7 +55,7 @@
  * layout in {@code app/app-authorization-ims-db2-mq}, which is reference material: it is read as
  * the specification and is never modified.
  *
- * <p><strong>The six types.</strong> Every one of them is a Java 21 {@code record}, and not one of
+ * <p><strong>The twelve types.</strong> Every one of them is a Java 21 {@code record}, and not one of
  * them carries a persistence annotation. The record form is what makes the components final and
  * the type a value, which is the whole of what a payload needs to be; the absence of persistence
  * annotations is the load-bearing half, because an annotated payload would be simultaneously a
@@ -45,13 +72,18 @@
  *       identifier code, response code, response reason and approved amount. The same field-order
  *       observation applies, and the six are the complete set rather than a selection from a
  *       larger record.</li>
- *   <li>{@code FraudMarkRequest} - the request half of the fraud-marking pair, from the
- *       {@code LINKAGE SECTION} of {@code cbl/COPAUS2C.cbl} L73 to L86. Its action component
- *       carries the two values that section admits, one to report a message fraudulent and one to
- *       remove that mark, so the component is a closed two-value domain and not free text.</li>
- *   <li>{@code FraudMarkResponse} - the reply half of the same pair, from the same L73 to L86
- *       block: an outcome component drawn from a closed two-value domain, and an action message
- *       whose declared width is 50 characters.</li>
+ *   <li>{@code FraudMarkRequest} - the request half of the fraud-marking pair, carrying the five
+ *       request-direction components of the {@code LINKAGE SECTION} of {@code cbl/COPAUS2C.cbl}
+ *       L73 to L86: the account identifier at L75 and the customer identifier at L76, the two
+ *       decoded key parts of the detail row the account identifier completes, and the action at
+ *       L80. The action component carries the two values that section admits, one to report an
+ *       authorization fraudulent and one to remove that mark, so the component is a closed
+ *       two-value domain and not free text.</li>
+ *   <li>{@code FraudMarkResponse} - the reply half of the same pair, carrying the two
+ *       response-direction components of the same L73 to L86 block: an outcome component drawn
+ *       from a closed two-value domain at L83, and an action message whose declared width is 50
+ *       characters at L86. The two halves together are the whole 272-byte area, which HTTP has no
+ *       single shape for.</li>
  *   <li>{@code PendingAuthDetailResponse} - a projection of the 27 components of the
  *       {@code COPAU1AI} structure in {@code cpy-bms/COPAU01.cpy}, the detail screen's symbolic
  *       map.</li>
@@ -59,6 +91,32 @@
  *       {@code COPAU0AI} structure in {@code cpy-bms/COPAU00.cpy}, the summary screen's symbolic
  *       map. Five of its component groups repeat, one per displayed row, which is the screen's
  *       page size expressed in the layout itself.</li>
+ *   <li>{@code PendingAuthSummaryView} - the account-level summary block of the list body, the Java
+ *       realisation of the contract's {@code PendingAuthSummary} schema and a component-for-component
+ *       projection of the 16 columns of {@code cpy/CIPAUSMY.cpy} L19 to L31.</li>
+ *   <li>{@code PendingAuthRowView} - one row of the list page, the realisation of the contract's
+ *       {@code PendingAuthListItem} schema. Three of its nine components are derived rather than
+ *       stored: the sealed selector, the approval character the reference program computes at
+ *       {@code cbl/COPAUS0C.cbl} L536 to L539, and the masked card number.</li>
+ *   <li>{@code PendingAuthListView} - the whole list body, the realisation of the contract's
+ *       {@code PendingAuthListResponse} schema: the summary block, a
+ *       {@code com.carddemo.common.web.PageResponse} of the row type, and the navigation-boundary
+ *       sentence when a paging move was already at a boundary.</li>
+ *   <li>{@code PendingAuthDetailView} - the read body, the realisation of the contract's
+ *       {@code PendingAuthDetail} schema. It publishes the STORED value of every column, the three
+ *       compositions the detail screen performs being the browser client's.</li>
+ *   <li>{@code FraudMarkRequest} - the HTTP request body of the fraud-state operation, naming the row
+ *       by the three decoded key columns, naming the customer the fraud row is filed against, and
+ *       carrying the state to END IN rather than an operation to perform, which is registered
+ *       divergence D-AUTH-FRAUD-TARGET-STATE. Assumptions: the row is named in the path AND in the
+ *       body, and the redundancy is a checked invariant -- a disagreement is refused with 400 and the
+ *       disagreeing members are named, so the service never chooses silently between the row the URL
+ *       named and the row the body named.</li>
+ *   <li>{@code FraudMarkResponse} - the body of a successful fraud-state write, carrying exactly the
+ *       two components the response direction of the reference area declares: the success flag and the
+ *       fifty-character sentence the fraud subprogram reported. Assumptions: which of the two write
+ *       paths ran is carried on the STATUS CODE -- 201 for the insert, 200 for the update -- rather
+ *       than as a third member, so a client never learns it by string-matching a sentence.</li>
  * </ul>
  *
  * <p>Assumptions: the last two are called projections rather than copies, and the word is chosen

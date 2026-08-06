@@ -6,7 +6,6 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.Objects;
 import org.hibernate.annotations.Immutable;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -131,8 +130,8 @@ import org.hibernate.type.SqlTypes;
  * strategy, because the table and its columns already exist by the time this type is loaded. They
  * are created by the owning service's migration,
  * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}, whose
- * {@code CREATE TABLE ledger.daily_transactions} declares all thirteen columns and no constraint
- * beyond their types. This module's persistence provider is never permitted to emit DDL: its schema
+ * {@code CREATE TABLE ledger.daily_transactions} declares all thirteen copybook columns plus the
+ * target-side ingestion sequence, and its only constraint is the primary key over that sequence. This module's persistence provider is never permitted to emit DDL: its schema
  * setting is {@code validate}, which asserts the mapping against the shape already present and emits
  * nothing, and the rationale carried beside that key in this module's {@code application.yml}
  * explains why this module in particular cannot use anything weaker -- seven of its eight mappings
@@ -143,14 +142,23 @@ import org.hibernate.type.SqlTypes;
  * objects, and it would surface as a validation failure or a permission error, neither of which
  * names the actual mistake.</p>
  *
- * <p>Assumptions: the physical table carries <b>no primary key and no index</b>, and that is the
- * baseline contract rather than an omission the mapping should make up for.
- * {@code app/cbl/CBTRN02C.cbl:29-31} selects the feed as {@code ORGANIZATION IS SEQUENTIAL} with
- * {@code ACCESS MODE IS SEQUENTIAL} and declares no record key at all, and
- * {@code app/jcl/POSTTRAN.jcl:30-31} supplies it as the physical sequential dataset
+ * <p>Assumptions: the SOURCE feed has <b>no record key</b>, and the physical table therefore asserts
+ * no uniqueness over any copybook column. {@code app/cbl/CBTRN02C.cbl:29-31} selects the feed as
+ * {@code ORGANIZATION IS SEQUENTIAL} with {@code ACCESS MODE IS SEQUENTIAL} and declares no record key
+ * at all, and {@code app/jcl/POSTTRAN.jcl:30-31} supplies it as the physical sequential dataset
  * {@code AWS.M2.CARDDEMO.DALYTRAN.PS}. The posting job reads it front to back and never keys into
- * it. The identifier declaration below explains how an entity identity is nevertheless established
- * without asserting a uniqueness the source does not guarantee.</p>
+ * it, so a feed repeating an identifier is a feed the baseline posts twice.</p>
+ *
+ * <p>Assumptions: the table nevertheless carries a primary key, {@code pk_daily_transactions} over the
+ * target-side column {@code ingest_seq}, and the distinction between that and a key over a copybook
+ * column is the whole point. A relational table is a heap with no inherent order, so a scan that
+ * resumes must order by something; the only copybook candidate is the transaction identifier, which
+ * this feed does not promise to be unique. The ingestion sequence supplies the one property the
+ * sequential file had and a heap does not -- a total order over physical arrival -- so every
+ * occurrence stays distinct and reachable, told apart by the provider and by any consumer paging
+ * the feed in a total order. This mapping does not create that column: the declaration is
+ * {@code V1__ledger.sql}'s, and the annotations below only describe it. The identifier declaration
+ * below explains what each column now denotes.</p>
  *
  * <h2>Why the mapping is local rather than borrowed</h2>
  *
@@ -271,24 +279,27 @@ public class DailyTransaction {
     //       share a cardinality -- two resolve a single row and the third may find none and then
     //       create one -- so a single association style could not have expressed all three anyway.
 
-    // WHAT: zero-based offset and width of every column below, as a lookup a maintainer editing one
-    //       declaration can read without leaving the field block. The class documentation above
-    //       carries the running-sum derivation and the argument for each type; this is only the
-    //       index. transaction_id 0:16 | type_cd 16:2 | category_cd 18:4 | source 22:10 |
+    // WHY : Assumptions: the offset index below is repeated here as a lookup a maintainer editing one
+    //       declaration can read without leaving the field block, even though the class
+    //       documentation above already carries the running-sum derivation and the argument for each
+    //       type. The duplication is deliberate: a maintainer changing one width has to reconcile
+    //       the whole table to 350, and sending them to the class Javadoc for the numbers is how a
+    //       width gets changed against a remembered layout instead of a read one.
+    //       transaction_id 0:16 | type_cd 16:2 | category_cd 18:4 | source 22:10 |
     //       description 32:100 | amount 132:11 | merchant_id 143:9 | merchant_name 152:50 |
     //       merchant_city 202:50 | merchant_zip 252:10 | card_num 262:16 | orig_ts 278:26 |
     //       proc_ts 304:26 | dropped FILLER 330:20. Last offset plus its width is 350, the declared
     //       record length, so a change that does not still reconcile to 350 is an error.
-    // WHAT: the three offsets a downstream artifact names directly are 262, 278 and 304, and each is
-    //       corroborated outside this file: app/jcl/TRANREPT.jcl:41-42 declares two of them to the
+    // WHY : Assumptions: the three offsets a downstream artifact names directly are 262, 278 and 304,
+    //       and each is corroborated outside this file rather than taken from the copybook alone: app/jcl/TRANREPT.jcl:41-42 declares two of them to the
     //       sort utility in one-based form, and app/jcl/TRANIDX.jcl:27 keys an alternate index at
     //       zero-based 304. Both artifacts name the POSTED record rather than this one, and they are
     //       admissible here only because the two copybook layouts are identical in the sense the
     //       class documentation establishes -- that inference is the whole basis of the citation, so
     //       it is stated rather than left implicit. Transaction records the same corroboration
     //       against the same sources and is cited rather than restated.
-    // WHAT: a fourth source agrees on the WHOLE table rather than on three offsets, and it was
-    //       derived independently of this file: the extract-and-load package declares this record as
+    // WHY : Assumptions: a fourth source agrees on the WHOLE table rather than on three offsets, and
+    //       it was derived independently of this file, which is what makes it corroboration: the extract-and-load package declares this record as
     //       DALYTRAN_LAYOUT at data-migration/src/carddemo_migration/copybook/layouts.py:2145-2163,
     //       giving the same thirteen offsets and widths in the same order. Two of its entries also
     //       confirm decisions taken below rather than merely the geometry: it types the amount as a
@@ -309,31 +320,62 @@ public class DailyTransaction {
     //       app/cbl/CBTRN02C.cbl:425, and the value the preflight names when it reports a record it
     //       could not resolve at app/cbl/CBTRN01C.cbl:181-183, so the two consumers that mention it
     //       both treat it as an opaque label.
-    // WHY : Assumptions: an identifier is declared because the persistence contract requires every
-    //       mapped type to have one, NOT because the physical table has a primary key -- it has
-    //       none, for the reasons the class documentation sets out. That is why nullability is left
-    //       unstated here while the sibling Transaction declares the same column NOT NULL: on the
-    //       posted master the column IS the primary key that V1__ledger.sql declares, whereas here
-    //       the owning migration deliberately declined to constrain it, and a DDL-passive mapping
-    //       must not assert a constraint the schema does not carry. The owning service's own mapping
-    //       of this same table reaches the identical conclusion and declares the column the same way.
-    // WHY : Trade-offs: identifying rows by this column accepts one consequence that has to be
-    //       stated, because the source does not guarantee uniqueness -- the sequential feed has no
-    //       record key at all, so a legitimate extract could repeat an identifier that the baseline
-    //       would process as two records. Under this mapping two such rows share an entity identity,
-    //       so a consumer must treat a scan of this feed as a stream and must not rely on entity
-    //       identity to tell two rows apart, nor deduplicate on it. That all 300 identifiers in the
-    //       current extract are distinct is a property of one extract and not a contract. The
-    //       alternative, a surrogate key, is rejected under Alternatives Considered below.
-    // WHY : Alternatives Considered: a generated surrogate key, which would give every row a
-    //       guaranteed-unique identity and remove the caveat above. Rejected on two grounds: the
-    //       column does not exist in the physical table, so a DDL-passive mapping could not populate
-    //       it without asking another service's schema to grow a column no copybook field
-    //       corresponds to; and a generated value would displace the identifier the feed actually
-    //       supplies, which is the value the committed parity expectations compare. No key
-    //       generation strategy is declared here for exactly that reason -- the identifier arrives
-    //       with the data.
+    /**
+     * The database-assigned ingestion sequence distinguishing one physical occurrence from another.
+     *
+     * <p>Assumptions: this is the mapped identity and it corresponds to
+     * {@code ledger.daily_transactions.ingest_seq}, which the owning migration declares as
+     * {@code pk_daily_transactions}. It reflects arrival order, so ordering by it reproduces the order
+     * the baseline's sequential read covers the dataset in. It is non-null on every row read back.</p>
+     *
+     * <p>Assumptions: this mapping does not create the column. The declaration is the owning
+     * migration's -- {@code ingest_seq BIGINT GENERATED BY DEFAULT AS IDENTITY} -- so this type
+     * describes a column that exists rather than asking another service's schema to grow one.</p>
+     *
+     * <p>Refactoring Rationale: an earlier revision mapped {@code transactionId} as the identity and
+     * recorded the consequence honestly -- that two rows repeating an identifier would share one entity
+     * identity, so a consumer "must treat a scan of this feed as a stream and must not rely on entity
+     * identity to tell two rows apart". The caveat was accurate but it was not sufficient, because the
+     * chunked reader that scans this feed did exactly what the caveat forbade: it ordered and resumed on
+     * that same non-unique column, so a duplicate identifier straddling a chunk boundary was skipped
+     * outright. A caveat cannot correct a cursor. The earlier note also rejected a surrogate on the
+     * ground that the column did not exist in the physical table; the owning migration now declares it,
+     * so that objection is spent.</p>
+     */
+    // WHY : Assumptions: the ordinal is the row's position in the source stream, so ordering by it
+    //       reproduces the order `READ ... NEXT RECORD` visited at app/cbl/CBTRN02C.cbl:202-219.
+    //       That is the order this module's own posting loop depends on, because the reject stream's
+    //       sequence is the feed's sequence restricted to the rejected records.
+    // WHY : Assumptions: no generation strategy is declared on this mapping even though the column is
+    //       an identity column, because this type is @Immutable and read-only here -- this module
+    //       scans the feed and never inserts into it. Declaring IDENTITY generation would describe a
+    //       write path that does not exist in this module. The owning service's mapping, which is the
+    //       one a loader uses, declares the strategy.
+    // WHY : Alternatives Considered: declaring @GeneratedValue(IDENTITY) here as well, on the ground
+    //       that it costs nothing on a read path and states where the value comes from. Rejected,
+    //       and the sibling test asserts the absence so the decision cannot be undone silently: an
+    //       annotation on this mapping would describe an insert this module cannot perform, and a
+    //       reader auditing which module writes the feed would find two mappings claiming the write
+    //       path and no way to tell which one has it. What the alternative was right about is
+    //       carried instead by the sentence above -- the value is database-assigned and never
+    //       application-supplied here -- which states the fact without asserting the capability.
+    // WHY : Assumptions: mapping the ordinal as the identity does NOT displace the identifier the
+    //       feed supplies. That value is still mapped, still compared by the committed parity
+    //       expectations, and still the value posting copies verbatim at app/cbl/CBTRN02C.cbl:425.
     @Id
+    @Column(name = "ingest_seq", updatable = false)
+    private Long ingestSeq;
+
+    // WHY : Assumptions: nullability is left unstated while the sibling Transaction declares the same
+    //       column NOT NULL, and the difference is real: on the posted master the column IS the
+    //       primary key, whereas here the owning migration deliberately declines to constrain it
+    //       because the sequential feed has no record key and a legitimate extract may repeat an
+    //       identifier. A DDL-passive mapping must not assert a constraint the schema does not carry.
+    // WHY : Assumptions: this column is NO LONGER the entity identity, which is what makes a repeated
+    //       identifier representable rather than merely documented. Two rows sharing this value are
+    //       two distinct entities, told apart by the ingestion sequence above, so a scan reaches both
+    //       -- and the identifier the feed supplies is still carried verbatim, which is what the
+    //       committed parity expectations compare.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "transaction_id", length = 16, updatable = false)
     private String transactionId;
@@ -701,6 +743,31 @@ public class DailyTransaction {
     }
 
     /**
+     * Returns this row's ingestion ordinal, which is this type's mapped identity and the value a
+     * chunked scan resumes from.
+     *
+     * <p>Assumptions: it is the only column on this feed that is both unique and monotonic in arrival
+     * order. A caller resuming a scan passes the ordinal of the last row it holds; a caller comparing
+     * rows for business content compares the transaction identifier instead, which the feed does not
+     * promise to be unique.</p>
+     *
+     * <p>Assumptions: the value is assigned by the database, and this mapping is {@code @Immutable}, so
+     * every instance this module publishes came from a query and carries a non-null ordinal. An instance
+     * built by the public constructor for a test carries none, which is the one case
+     * {@link #equals(Object)} answers by reference.</p>
+     *
+     * <p>Assumptions: the ordinal carries no business meaning and is not a transaction identifier, a run
+     * identifier or a reason code. Nothing this module writes to a queue, a log line or a report renders
+     * it.</p>
+     *
+     * @return the ingestion ordinal of the {@code ingest_seq} column, or {@code null} on an instance
+     *     that did not come from a query
+     */
+    public Long getIngestSeq() {
+        return this.ingestSeq;
+    }
+
+    /**
      * Returns the sixteen-character identifier the feed supplies for this unposted transaction.
      *
      * @return the String value of the {@code transaction_id} column, which posting copies verbatim
@@ -845,23 +912,33 @@ public class DailyTransaction {
     }
 
     /**
-     * Compares this feed record with another object for equality on the transaction identifier alone.
+     * Compares this feed record with another object for equality on the ingestion sequence alone,
+     * which is this type's mapped identity.
+     *
+     * <p>Refactoring Rationale: an earlier revision compared the transaction identifier, because that
+     * identifier was then mapped as the identity. That is why this method changed. The earlier version
+     * recorded the resulting hazard as a caveat -- that the table asserts no uniqueness over the
+     * identifier, so two rows of a feed that legitimately repeated one would compare equal -- and a
+     * caveat does not prevent the loss it describes. The sequence the owning migration now declares is
+     * unique per row, so the hazard is removed rather than documented.
      *
      * <p>Alternatives Considered: comparing every member instead. Rejected even though this type is
      * read-only and so cannot suffer the usual objection that a member may change after the instance
-     * has been placed in a hash-based collection. The identifier is what names the record in the
-     * source -- it is the value posting carries into the posted record's primary key at
-     * {@code app/cbl/CBTRN02C.cbl:425} -- so it alone settles which record is meant, and comparing
-     * thirteen members would report two representations of one record unequal whenever a projection
-     * had populated a subset of them. </p>
+     * has been placed in a hash-based collection, because comparing thirteen members would report two
+     * representations of one row unequal whenever a projection had populated a subset of them. </p>
      *
-     * <p>Assumptions: the identifier is a natural key arriving with the input data rather than a
-     * value the database generates, so it is populated from construction onward. This comparison
-     * therefore does not face the null-identity problem a generated key would present, where two
-     * not-yet-persisted instances share an absent key and so compare equal to each other. The one
-     * caveat is the one the identifier's own declaration records: the physical table asserts no
-     * uniqueness, so two rows of a feed that legitimately repeated an identifier would compare equal
-     * here, and a consumer must treat a scan as a stream rather than as a set for that reason. </p>
+     * <p>Refactoring Rationale: the comparison is on the INGESTION ORDINAL and not on the transaction
+     * identifier the feed supplies. The physical table asserts no uniqueness over that identifier, so
+     * comparing it reported two rows of a feed that legitimately repeated one as equal, and a consumer
+     * collecting a scan into a set silently kept one of them. The ordinal is unique by construction, so
+     * a scan can now be treated as a set as well as a stream. </p>
+     *
+     * <p>Assumptions: the ordinal is assigned by the database rather than by this module, which maps the
+     * column read-only and declares no generation strategy, so every instance the provider publishes
+     * arrives with it populated. The null branch below therefore covers only an instance built by the
+     * no-argument constructor, and two such instances are equal only when they are the same object --
+     * reporting them equal would let a hash-based collection discard one of two distinct arrivals, which
+     * is the loss this identity exists to prevent. </p>
      *
      * <p>Assumptions: the comparison is a pattern match rather than an exact-class test, for the
      * provider-subclass reason the sibling {@link Transaction} sets out for its own equality, which is
@@ -871,8 +948,8 @@ public class DailyTransaction {
      * denote one record, and an exact-class test would call them unequal. </p>
      *
      * @param other the Object to compare against, which may be of any type and may be null
-     * @return the boolean value true when the argument is a daily-transaction record carrying an
-     *     equal transaction identifier, and false otherwise
+     * @return the boolean value true when the argument is this same object, or is a daily-transaction
+     *     record carrying an equal, assigned ingestion ordinal, and false otherwise
      */
     @Override
     public boolean equals(Object other) {
@@ -882,31 +959,65 @@ public class DailyTransaction {
         if (!(other instanceof DailyTransaction that)) {
             return false;
         }
-        return Objects.equals(this.transactionId, that.transactionId);
+        // WHY : Assumptions: the identity is the ingestion sequence, so two rows repeating a
+        //       transaction identifier are UNEQUAL here -- which is the point. An unhydrated
+        //       instance carrying no sequence is equal only to itself, because treating two null
+        //       sequences as equal would let a hash-based collection discard one of two distinct
+        //       occurrences and reintroduce the loss this identity removes.
+        if (this.ingestSeq == null || that.ingestSeq == null) {
+            return this == other;
+        }
+        return this.ingestSeq.equals(that.ingestSeq);
     }
 
     /**
-     * Returns a hash drawn from the same transaction identifier the equality above compares.
+     * Returns a hash consistent with the identity-based equality above.
      *
-     * <p>Assumptions: the hash is drawn from exactly the member equality uses and from no other,
-     * which is the contract the two methods share rather than a preference; the sibling
-     * {@link Transaction} pairs its own two the same way for the same reason. What is worth adding for
-     * THIS type is why the pairing is unusually safe here: the identifier cannot change after
-     * construction, because the type exposes no mutator and the provider will not write to it, so the
-     * hash is stable for an instance's entire lifetime rather than only by the convention that
-     * nothing reassigns it. </p>
+     * <p>Assumptions: the hash is a CONSTANT rather than a function of the ingestion sequence. The pair
+     * must agree -- hashing a value the equality no longer consults would let two instances the
+     * equality calls equal land in different buckets, which breaks the collection contract outright --
+     * and a constant satisfies that agreement for every instance, including one built by the
+     * no-argument constructor whose sequence is still absent. </p>
      *
-     * @return the int hash of the transaction identifier, or zero when no identifier has been
-     *     populated yet
+     * <p>Refactoring Rationale: an earlier revision hashed the transaction identifier, to match an
+     * equality that then compared it, and argued the pairing was unusually safe here because this
+     * read-only type exposes no mutator for the identifier. That argument was sound about STABILITY and
+     * silent about UNIQUENESS, which is the property a hash key actually needs: two distinct arrivals
+     * sharing an identifier hashed alike and compared equal, so a set discarded one. Moving both halves
+     * onto the sequence fixes the pair rather than the symptom. A hash derived from the sequence would
+     * have carried the opposite hazard instead: an instance hashed before the database assigned its
+     * value would sit in a bucket keyed by the old hash and become unfindable in a collection that
+     * still held it. </p>
+     *
+     * <p>Trade-offs: every instance therefore lands in one bucket, so a large hash set of feed rows
+     * degrades to linear scanning within it. Accepted because a silently unfindable entity is a
+     * correctness fault where a slower lookup is only a performance one, and because this module reads
+     * the feed as an ordered chunked stream rather than assembling it into a set. </p>
+     *
+     * <p>Trade-offs: every instance therefore lands in one bucket, so a hash-based collection of these
+     * degrades to a linear scan. That is accepted because the feed is read in bounded chunks and is
+     * never accumulated into a large set. </p>
+     *
+     * @return a constant int hash, equal for every instance of this type
      */
     @Override
     public int hashCode() {
-        return Objects.hashCode(this.transactionId);
+        // WHY : Assumptions: a constant rather than a function of the sequence, so the value cannot
+        //       change if an instance is hashed before the provider hydrates it. Every instance
+        //       therefore shares one bucket, which is accepted because this feed is read in bounded
+        //       chunks and is never accumulated into a large hash-based collection.
+        return DailyTransaction.class.hashCode();
     }
 
     /**
-     * Returns a diagnostic rendering naming this feed record and the three members that characterise
-     * it.
+     * Returns a diagnostic rendering naming this feed record's identity and the three members that
+     * characterise it.
+     *
+     * <p>Refactoring Rationale: the ingestion sequence leads the rendering, and an earlier revision
+     * omitted it. The sequence is this type's mapped identity, so a log line without it names a
+     * transaction identifier that two physical rows can share -- which is precisely the ambiguity the
+     * identity was moved onto the sequence to remove. A diagnostic that cannot say WHICH occurrence it
+     * concerns is the one case where the reader most needs it to. </p>
      *
      * <p>Trade-offs: THE CARD NUMBER IS DELIBERATELY OMITTED, even though the accessor above returns
      * it in full and the column stores it unmasked. The two are not in tension: the column has to
@@ -926,8 +1037,8 @@ public class DailyTransaction {
      * {@link Transaction} reached for its own rendering and recorded there. It applies with more force
      * here rather than less, because the aggregate that argument describes -- a log holding every
      * amount in an entire daily feed -- is precisely what a scan of THIS type produces, this being
-     * the feed itself. The three members that remain are an identifier and two codes: none is
-     * monetary, none is personal, and together they say which record an entry concerns without
+     * the feed itself. The four members that remain are an ordinal, an identifier and two codes: none
+     * is monetary, none is personal, and together they say which record an entry concerns without
      * saying what it was worth. The accessor above returns the amount to a caller that needs it. </p>
      *
      * <p>Alternatives Considered: rendering the processing stamp, which is the stamp the sibling
@@ -947,13 +1058,14 @@ public class DailyTransaction {
      * payload would break parity silently -- the two agree on content and differ at every byte
      * position. </p>
      *
-     * @return a String containing a single-line rendering naming the type, the transaction
-     *     identifier, the type and category codes and the origination stamp, and carrying neither the
-     *     card number nor the amount
+     * @return a String containing a single-line rendering naming the type, the ingestion sequence,
+     *     the transaction identifier, the type and category codes and the origination stamp, and
+     *     carrying neither the card number nor the amount
      */
     @Override
     public String toString() {
-        return "DailyTransaction[transactionId=" + transactionId
+        return "DailyTransaction[ingestSeq=" + ingestSeq
+                + ", transactionId=" + transactionId
                 + ", typeCd=" + typeCd
                 + ", categoryCd=" + categoryCd
                 + ", origTs=" + origTs + "]";

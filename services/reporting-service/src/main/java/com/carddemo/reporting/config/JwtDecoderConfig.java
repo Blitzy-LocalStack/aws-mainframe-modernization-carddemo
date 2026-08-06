@@ -28,10 +28,26 @@ import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
  * added to {@code application.yml}.</p>
  *
  * <p>Assumptions: the framework's own validators are composed IN rather than replaced. The
- * issuer-and-time validator is obtained from the framework's own factory, and the audience validator is
- * the one the {@code audiences} property configures, so this class adds checks and removes none. Writing
- * the issuer or time checks by hand here would duplicate logic the framework maintains and would be the
- * kind of hand-rolled security code that goes stale silently.</p>
+ * issuer-and-time validator is obtained from the framework's own factory, so this class adds checks and
+ * removes none. Writing the issuer or time checks by hand here would duplicate logic the framework
+ * maintains and would be the kind of hand-rolled security code that goes stale silently.</p>
+ *
+ * <p>Refactoring Rationale: NO audience validator takes part, and this paragraph replaces one that said
+ * otherwise. Three places in this class previously described the chain as carrying "the audience
+ * validation the configured audiences imply" and declined to restate it "because two places asserting one
+ * audience is two places it can be narrowed unevenly". There is no first place: no {@code audiences} key
+ * exists in any profile of this module, and this module's {@code application.yml} says so in as many
+ * words, on the ground that an audience validator would reject every ACCESS token the sign-on flow
+ * issues -- a Cognito access token carries no audience claim at all -- while accepting exactly the
+ * identity tokens this class exists to refuse. The correction matters because the false version described
+ * a chain with four checks where three run, and the missing one was the check on WHICH client obtained
+ * the token; the {@code client_id} comparison inside the shared validator is what actually performs
+ * that, which is why a blank client id is refused in the constructor.</p>
+ *
+ * <p>Assumptions: the chain a token must pass is therefore exactly, and in this order: the framework's
+ * signature, issuer and time-window validation, then the shared validator's token-kind check, then its
+ * {@code client_id} check, then its scope check. Naming the whole list here is deliberate -- a reader
+ * auditing what this resource server accepts should not have to assemble it from two files.</p>
  *
  * <p>Alternatives Considered: putting these checks in a request filter or in a method-security
  * expression instead. Rejected because a filter runs after the token has already been accepted as valid,
@@ -116,8 +132,9 @@ public class JwtDecoderConfig {
      * explicitly below. Omitting it would silently drop the checks the auto-configured decoder
      * performed, which is the failure mode a hand-built decoder most often introduces.</p>
      *
-     * @return the decoder, carrying the framework's issuer and time validation, the audience validation
-     *     the configured audiences imply, and this module's token-kind, client and scope validation
+     * @return the decoder, carrying the framework's signature, issuer and time validation followed by
+     *     this module's token-kind, client-id and scope validation, and no audience validation at all,
+     *     for the reason recorded on this class; never {@code null}
      */
     @Bean
     public JwtDecoder jwtDecoder() {
@@ -125,10 +142,15 @@ public class JwtDecoderConfig {
 
         // WHY : Assumptions: the issuer-and-time validator comes from the framework's own factory
         //       rather than being assembled here, so a future release that adds a default check gains
-        //       it here too. The audience check is applied by the validator the `audiences` property
-        //       configures, which the framework composes into the same chain; this class deliberately
-        //       does not restate it, because two places asserting one audience is two places it can be
-        //       narrowed unevenly.
+        //       it here too.
+        // WHY : Assumptions: the composition below is the WHOLE chain. There is no audience validator
+        //       in it, and none is configured elsewhere -- no `audiences` key appears in any profile of
+        //       this module, which its own application.yml states explicitly. An earlier revision of
+        //       this comment claimed the framework composed one in from that property and that this
+        //       class declined to restate it; both halves were false, and the effect was to describe a
+        //       client check that nothing performed. The client check is the `client_id` comparison
+        //       inside the shared validator on the second line, which is why the constructor refuses a
+        //       blank client id rather than letting that comparison be skipped.
         OAuth2TokenValidator<Jwt> composed = new DelegatingOAuth2TokenValidator<>(
                 JwtValidators.createDefaultWithIssuer(issuerUri),
                 new CognitoAccessTokenValidator(appClientId, requiredScopes));

@@ -23,41 +23,55 @@
  * the four has a subject in this compilation unit; the paragraph above accounts
  * for the other three.
  *
- * <h2>The closed inventory: three files, of which ONE is landed</h2>
+ * <h2>The closed inventory: three files, ALL THREE landed</h2>
  *
  * <p>Three {@code .java} files constitute this package and no more:
  *
  * <ul>
- *   <li>{@code package-info.java} -- this charter. LANDED, and the only file in this
- *       directory at this checkpoint.</li>
- *   <li>{@code TransactionMapper} -- PLANNED, not yet authored. Conversions for the
- *       three transaction screens, serving {@code TransactionListItemResponse},
+ *   <li>{@code package-info.java} -- this charter. LANDED.</li>
+ *   <li>{@code TransactionMapper} -- LANDED. Conversions for the three transaction
+ *       screens, serving {@code TransactionListItemResponse},
  *       {@code TransactionDetailResponse}, {@code TransactionAddRequest} and
  *       {@code TransactionAddResponse}.</li>
- *   <li>{@code BillPaymentMapper} -- PLANNED, not yet authored. Conversions for bill
- *       payment, serving {@code BillPaymentRequest} and {@code BillPaymentResponse},
- *       the second of which is itself not yet authored.</li>
+ *   <li>{@code BillPaymentMapper} -- LANDED. Conversions for bill payment, serving
+ *       {@code BillPaymentRequest} and {@code BillPaymentResponse}, both of which are
+ *       themselves landed in the sibling {@code dto} package.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the two mappers are marked PLANNED, and an earlier revision of
- * this charter wrote all three in the present tense under the heading "three files". That
- * made a directory holding one file read as a directory holding three, and it did so in the
- * one place a reader consults to find out what converts what -- so the reader would look for
- * a mapper, fail to find it, and have no way to tell an unauthored contract from a missing
- * one. The inventory is still closed at three; it now distinguishes what exists.
+ * <p>Refactoring Rationale: this census previously read "three files, of which ONE is
+ * landed", marked both mappers PLANNED and described {@code BillPaymentResponse} as not yet
+ * authored. All four statements were untrue of the directory beside it:
+ * {@code TransactionMapper} was present, {@code BillPaymentResponse} was present, and
+ * {@code BillPaymentMapper} was the only genuine absence. A charter is the one place a reader
+ * consults to find out what converts what, so a census that under-reports is worse than none
+ * -- it makes a present class look missing and gives a reader no way to tell an unauthored
+ * contract from a mislaid one. The inventory is still closed at three; every entry is now
+ * marked against the file that is actually there, and {@code BillPaymentMapper} has been
+ * authored to close the one real gap.
  *
- * <p>Assumptions: neither mapper is authored here to make the roster true. A mapper with no
- * controller to call it and no service to feed it converts nothing that can be exercised, and
- * this package's whole purpose is to be the one place where copybook representation concerns
- * are justified at the point of decision -- masking, padding, narrowing, renaming. Those
- * decisions are written when the conversion they govern is written, not before.
+ * <p>Assumptions: each mapper was authored alongside the conversion it governs rather than ahead of
+ * it, which is why this roster moved rather than the plan. A mapper with no shape to convert into
+ * converts nothing that can be exercised, and this package's whole purpose is to be the one place
+ * where copybook representation concerns are justified at the point of decision -- masking, padding,
+ * narrowing, renaming. Those decisions are written when the conversion they govern is written, and
+ * {@code BillPaymentMapper} followed its response record for exactly that reason. The inventory is
+ * closed at three either way; what changed is that it is now checkable by listing the directory.
+ *
+ * <p>Assumptions: a landed mapper is exercisable without its controller. The two classes are
+ * pure conversion with no repository, no clock read and no framework dependency beyond the
+ * stereotype, so each method is directly callable from a unit test with fabricated arguments.
+ * That is what made authoring {@code BillPaymentMapper} correct rather than premature: the
+ * copybook representation decisions it records -- the eleven bill-payment literals, the single
+ * instant written to both timestamp fields, the pre-payment balance used as the amount -- are
+ * decisions of the conversion itself, and they are justified at the point of decision here
+ * rather than deferred to whichever service later calls it.
  *
  * <p>Alternatives Considered: the arrangement a reader is most likely to expect
  * is one mapper per persistence entity, which would make six files rather than
  * three, because {@code domain} holds four entities. It is not available, and
  * the reason is a fact about the sibling package rather than a preference here.
  * The {@code dto} package is a closed inventory of eight files, seven of them
- * records -- six of the seven authored at this checkpoint -- and those seven serve
+ * records -- all seven authored -- and those seven serve
  * the four migrated online screens only. No
  * transfer object exists for {@code DailyTransaction}, for
  * {@code TransactionCategoryBalance} or for {@code TransactionReject}, so a
@@ -83,6 +97,13 @@
  * which is a different quantity that happens to share a digit. This package
  * holds three files. None of the three figures is derivable from either of the
  * others, so each is stated where it is owned rather than restated here.
+ *
+ * <p>Refactoring Rationale: the {@code dto} figure above previously read "six of the seven
+ * authored at this checkpoint". All seven records are present, and the understatement mattered
+ * because the sentence's own argument is that a mapper cannot exist without a transfer object
+ * on the far side -- so an under-reported {@code dto} census reads as a reason a mapper is
+ * absent when no such reason exists. The count is verified against the directory rather than
+ * inherited from the previous revision.
  *
  * <h2>Why two mappers and not one</h2>
  *
@@ -312,7 +333,11 @@
  * seed data carries the consequence: 30 of the 300 records in
  * {@code app/data/ASCII/dailytran.txt} hold a card number beginning with a zero
  * at the sixteen bytes starting at zero-based offset 262, the second record's
- * {@code 0927987108636232} among them. A numeric column or a {@code Long}
+ * {@code 0***********6232} among them -- masked to its last four digits in the
+ * same twelve-asterisk form the response contract publishes, because the leading
+ * zero and the sixteen-position width are the whole of the evidence and the
+ * interior digits would make it a usable card number. A numeric column or a
+ * {@code Long}
  * component would discard that leading zero and turn a sixteen-character
  * identifier into a fifteen-digit number, which no longer matches the value
  * stored, printed or indexed.

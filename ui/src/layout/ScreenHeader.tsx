@@ -125,16 +125,13 @@
  * or ellipsise under the layout instead.
  */
 
-import { Col, Flex, Row, Typography, theme } from "antd";
-import dayjs from "dayjs";
-import { useId } from "react";
-import type { CSSProperties, ReactElement } from "react";
+import { Col, Flex, Row, Typography, theme } from 'antd';
+import dayjs from 'dayjs';
+import { useId } from 'react';
+import type { CSSProperties, ReactElement } from 'react';
 
-import {
-  APP_ORGANISATION_TITLE_DISPLAY,
-  APP_TITLE_DISPLAY,
-} from "../messages/messages";
-import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from "../theme/tokens";
+import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from '../messages/messages';
+import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 /**
  * The four status-line prompt words the band paints beside its value slots,
@@ -185,17 +182,14 @@ import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from "../theme/tokens";
  */
 export const HEADER_PROMPT_LABELS = {
   /** `Tran:` - `app/bms/COACTVW.bms` L33, beside the transaction slot. */
-  transaction: "Tran:",
+  transaction: 'Tran:',
   /** `Prog:` - `app/bms/COACTVW.bms` L56, beside the program slot. */
-  program: "Prog:",
+  program: 'Prog:',
   /** `Date:` - `app/bms/COACTVW.bms` L46, beside the paint-time date. */
-  date: "Date:",
+  date: 'Date:',
   /** `Time:` - `app/bms/COACTVW.bms` L69, beside the paint-time time. */
-  time: "Time:",
-} as const satisfies Record<
-  "transaction" | "program" | "date" | "time",
-  string
->;
+  time: 'Time:',
+} as const satisfies Record<'transaction' | 'program' | 'date' | 'time', string>;
 
 /**
  * `dayjs` format producing the baseline's 8-character `mm/dd/yy` date exactly.
@@ -216,7 +210,7 @@ export const HEADER_PROMPT_LABELS = {
  * registration; keeping `MM/DD/YY` needs none, so the ambiguity of a two-digit
  * year is accepted as the faithful reading.
  */
-export const HEADER_DATE_FORMAT = "MM/DD/YY" as const;
+export const HEADER_DATE_FORMAT = 'MM/DD/YY' as const;
 
 /**
  * `dayjs` format producing the baseline's 8-character 24-hour `hh:mm:ss` time.
@@ -237,7 +231,7 @@ export const HEADER_DATE_FORMAT = "MM/DD/YY" as const;
  * field at `LENGTH=8` with an `hh:mm:ss` initial value, which corroborates the
  * 8-character reading independently.
  */
-export const HEADER_TIME_FORMAT = "HH:mm:ss" as const;
+export const HEADER_TIME_FORMAT = 'HH:mm:ss' as const;
 
 /**
  * A baseline header slot that this component deliberately does not render.
@@ -285,24 +279,24 @@ export interface RetiredHeaderField {
  */
 export const RETIRED_HEADER_FIELDS = [
   {
-    field: "APPLID",
+    field: 'APPLID',
     declaredWidth: 8,
     source:
-      "app/bms/COSGN00.bms L80-L83 and app/cpy-bms/COSGN00.CPY L55-L60; 1 of 17 base mapsets.",
+      'app/bms/COSGN00.bms L80-L83 and app/cpy-bms/COSGN00.CPY L55-L60; 1 of 17 base mapsets.',
     baselineMeaning:
-      "CICS region application identifier, obtained by EXEC CICS ASSIGN APPLID at app/cbl/COSGN00C.cbl L198-L200.",
+      'CICS region application identifier, obtained by EXEC CICS ASSIGN APPLID at app/cbl/COSGN00C.cbl L198-L200.',
     disposition:
       "Dropped. The CICS region has no target analogue; AAP section 0.2.2 retires the region's own artifacts rather than porting them.",
   },
   {
-    field: "SYSID",
+    field: 'SYSID',
     declaredWidth: 8,
     source:
-      "app/bms/COSGN00.bms L89-L93 and app/cpy-bms/COSGN00.CPY L61-L66; 1 of 17 base mapsets.",
+      'app/bms/COSGN00.bms L89-L93 and app/cpy-bms/COSGN00.CPY L61-L66; 1 of 17 base mapsets.',
     baselineMeaning:
-      "CICS system identifier, obtained by EXEC CICS ASSIGN SYSID at app/cbl/COSGN00C.cbl L202-L204.",
+      'CICS system identifier, obtained by EXEC CICS ASSIGN SYSID at app/cbl/COSGN00C.cbl L202-L204.',
     disposition:
-      "Dropped for the same reason as APPLID. Its BMS initial value is already eight blanks, so the slot renders empty until CICS fills it.",
+      'Dropped for the same reason as APPLID. Its BMS initial value is already eight blanks, so the slot renders empty until CICS fills it.',
   },
 ] as const satisfies readonly RetiredHeaderField[];
 
@@ -500,9 +494,7 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
             <Typography.Text style={promptStyle}>
               {HEADER_PROMPT_LABELS.transaction}
             </Typography.Text>
-            <Typography.Text style={valueStyle}>
-              {transactionId}
-            </Typography.Text>
+            <Typography.Text style={valueStyle}>{transactionId}</Typography.Text>
           </Flex>
         </Col>
         <Col span={24} md={12}>
@@ -523,16 +515,12 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * proportional layout the Flex above does the centring and those
              * spaces would only offset it.
              */}
-            <Typography.Text type="warning">
-              {APP_ORGANISATION_TITLE_DISPLAY}
-            </Typography.Text>
+            <Typography.Text type="warning">{APP_ORGANISATION_TITLE_DISPLAY}</Typography.Text>
           </Flex>
         </Col>
         <Col span={24} md={6}>
           <Flex gap="small" align="baseline" justify="flex-end" wrap>
-            <Typography.Text style={promptStyle}>
-              {HEADER_PROMPT_LABELS.date}
-            </Typography.Text>
+            <Typography.Text style={promptStyle}>{HEADER_PROMPT_LABELS.date}</Typography.Text>
             <Typography.Text style={valueStyle}>
               {paintedAt.format(HEADER_DATE_FORMAT)}
             </Typography.Text>
@@ -542,9 +530,7 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
       <Row align="middle">
         <Col span={24} md={6}>
           <Flex gap="small" align="baseline" wrap>
-            <Typography.Text style={promptStyle}>
-              {HEADER_PROMPT_LABELS.program}
-            </Typography.Text>
+            <Typography.Text style={promptStyle}>{HEADER_PROMPT_LABELS.program}</Typography.Text>
             <Typography.Text style={valueStyle}>{programName}</Typography.Text>
           </Flex>
         </Col>
@@ -584,9 +570,7 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
         </Col>
         <Col span={24} md={6}>
           <Flex gap="small" align="baseline" justify="flex-end" wrap>
-            <Typography.Text style={promptStyle}>
-              {HEADER_PROMPT_LABELS.time}
-            </Typography.Text>
+            <Typography.Text style={promptStyle}>{HEADER_PROMPT_LABELS.time}</Typography.Text>
             <Typography.Text style={valueStyle}>
               {paintedAt.format(HEADER_TIME_FORMAT)}
             </Typography.Text>

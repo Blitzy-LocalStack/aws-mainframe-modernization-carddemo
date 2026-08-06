@@ -80,6 +80,31 @@
  * not duplicated here, and no import-control module is added to the ruleset, which omits one
  * deliberately so that the boundary keeps a single owner.
  *
+ * <p><strong>Target contract, and the tree state at the checkpoint that authored this
+ * section.</strong> Assumptions: every class name, package inventory and count in this
+ * charter states the module's <b>target contract</b> as the migration plan assigns it, not
+ * a measurement of the files present in this subtree. A type named here that has no file
+ * yet is <b>planned</b>, not missing, and is authored at a later index of the same plan.
+ * This is the single place a reader has to look to tell a target from a measurement.
+ *
+ * <p>Measured when this section was written, the subtree holds <b>21</b> production classes
+ * of a target <b>32</b>, and all <b>8</b> charter files. Landed is the data-and-format half:
+ * {@code ReportingApplication}; {@code SecurityConfig}, {@code DataSourceConfig} and
+ * {@code JwtDecoderConfig} in {@code .config}; four view projections in {@code .domain};
+ * seven records in {@code .dto}; and six classes in {@code .mapper}. Planned and not yet
+ * authored are the eleven behavioural types: both controllers in {@code .api}
+ * ({@code ReportController} and {@code StatementController}), all three services in
+ * {@code .service} ({@code TransactionReportService}, {@code StatementService} and
+ * {@code ReportExecutionService}), the four repository roles in {@code .repository},
+ * {@code StatementHtmlMapper} in {@code .mapper}, and {@code OpenApiConfig} and
+ * {@code StepFunctionsConfig} in {@code .config}.
+ *
+ * <p>Trade-offs: naming the split costs this charter its brevity and ties it to the moment
+ * it was measured. It is worth that because the package list below reads as an inventory,
+ * and an inventory a reader cannot verify is worse than no inventory: the first name that
+ * turns out to be absent makes every other name in the document a question. Stating which
+ * eleven are outstanding keeps the remaining twenty-one readable as facts.
+ *
  * <p><strong>Charter of the eight packages in this context.</strong>
  * <ul>
  *   <li>{@code com.carddemo.reporting} - this charter, the entry point, and the decisions

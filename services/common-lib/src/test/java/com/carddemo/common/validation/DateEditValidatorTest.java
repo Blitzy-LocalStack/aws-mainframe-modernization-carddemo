@@ -493,6 +493,57 @@ class DateEditValidatorTest {
         }
 
         /**
+         * Confirms an unrecognised mask is answered with the unusable-pattern verdict rather than an
+         * exception, for every unrecognised form a caller can now submit.
+         *
+         * <p>Assumptions: this verdict is REACHABLE and that is the point of the case. The reference
+         * date service treats an unusable picture string as a feedback code returned like any other
+         * result, so a mask this validator does not know is a normal answer and not an error. The
+         * published reference contract states exactly that behaviour for its mask query, and until
+         * recently it declared the mask a closed two-value enumeration -- which made the verdict
+         * impossible to observe through the published surface, because no client could construct a
+         * third value. The schema is now a bounded string, so this case pins the behaviour the schema
+         * was widened to expose.
+         *
+         * <p>Assumptions: the third value below is the one the reference contract publishes as its
+         * example of an unrecognised mask, so the example and the behaviour it illustrates are pinned
+         * by the same case. The others cover a near-miss on each recognised form -- differing case,
+         * and a plausible alternative separator -- because a lenient implementation that normalised
+         * either would silently accept a mask the reference program rejects.
+         *
+         * @param mask an unrecognised mask a caller may submit
+         */
+        @ParameterizedTest
+        @ValueSource(strings = {"DD/MM/YYYY", "yyyy-mm-dd", "YYYY/MM/DD", "MM-DD-YYYY", "X"})
+        @DisplayName("answers an unrecognised mask with the unusable-pattern verdict")
+        void answersAnUnrecognisedMaskWithTheUnusablePatternVerdict(String mask) {
+            LanguageEnvironmentResult result =
+                DateEditValidator.evaluateWithLanguageEnvironment("2022-07-18", mask);
+
+            assertThat(result.acceptable()).isFalse();
+            assertThat(result.feedbackCode()).isEqualTo(FeedbackCode.BAD_PIC_STRING);
+        }
+
+        /**
+         * Confirms every unrecognised mask this case submits is within the width the published contract
+         * bounds the mask to, so the case cannot pass by submitting a value no client could send.
+         *
+         * <p>Assumptions: the ceiling of ten is the reference program's own interface width --
+         * {@code LS-DATE-FORMAT PIC X(10)} at {@code app/cbl/CSUTLDTC.cbl} L85, the second parameter of
+         * its {@code PROCEDURE DIVISION USING} at L88 -- and the published schema bounds the mask to
+         * it. Asserting the fixtures respect that bound is what keeps the case above a test of the
+         * PUBLISHED surface rather than of an unreachable internal path.
+         *
+         * @param mask an unrecognised mask this class submits above
+         */
+        @ParameterizedTest
+        @ValueSource(strings = {"DD/MM/YYYY", "yyyy-mm-dd", "YYYY/MM/DD", "MM-DD-YYYY", "X"})
+        @DisplayName("every unrecognised mask exercised here is submittable under the published bound")
+        void unrecognisedMasksAreWithinThePublishedBound(String mask) {
+            assertThat(mask.length()).isBetween(1, 10);
+        }
+
+        /**
          * Confirms the compact baseline mask evaluates its own form.
          *
          * <p>Assumptions: two masks are published because the baseline uses both -- the hyphenated form

@@ -2,27 +2,20 @@
  * Shared kernel of the CardDemo mainframe migration: the single home for every
  * contract that more than one bounded context consumes.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Target contract, not a directory listing</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter
- * describes the package's <b>target contract</b> as the migration plan assigns it,
- * not the set of files present beside this one today. The migration lands its
- * artifacts in plan order and this charter is authored first, so at the checkpoint
- * that authored it this directory holds this charter and the eight subpackages
- * named below, and <b>all twenty-one production classes now exist</b> across them:
- * the module's production inventory is complete, so nothing named below is
- * outstanding. A <em>test</em> named below that has no file yet is therefore
- * <b>planned</b>, not missing, and a count below is a target total that the
- * production tree now meets exactly.</p>
+ * <p>Assumptions: every inventory, subpackage name and class name in this charter
+ * states the package's <b>target contract</b> as the migration plan assigns it. It
+ * is a specification of what this module owns and of what it may never hold, so it
+ * is read against the plan rather than against a listing of the directory beside
+ * it.</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <p>Alternatives Considered: deriving the inventory from the directory instead of
+ * from the plan. Rejected, because a charter that describes whatever happens to be
+ * present cannot say what may <em>not</em> be added, and that is the half of a
+ * package contract a reader cannot reconstruct from the files. Stating the closed
+ * set costs a charter that has to be revised when the contract itself changes, and
+ * buys a boundary a reviewer can enforce against a proposed addition.</p>
  *
  * <p><b>Purpose.</b> This package and its eight subpackages hold exactly the
  * types that all eight service modules need and that none of them owns: exact
@@ -106,53 +99,45 @@
  * know the concern first. The gain is that all eight subpackage names are
  * contracts rather than seven contracts and one bucket, so the question "which
  * subpackage does this belong in" keeps a definite answer as the tree grows.
- * The count canon immediately below enumerates those eight and nothing else,
+ * The closed inventory immediately below enumerates those eight and nothing else,
  * which is what makes the closed list checkable rather than merely intended.
  *
- * <h2>The count canon</h2>
+ * <h2>The closed inventory</h2>
  *
- * <p><b>The target totals and the measurement now agree.</b> The plan assigns
- * this module <b>21 production classes</b> and <b>9</b> package charter files, for
- * <b>30</b> compilation units when it is complete. The module now holds the 9 charters
- * and <b>all 21</b> of those production classes, for <b>30</b> compilation units, so the
- * module is closed at its target. The landed column is retained rather than deleted
- * because it is what lets a later reader tell a class that has not landed yet from a
- * class that was never planned, and it must be updated with the class that closes a
- * package -- the entry that closed {@code codec} was {@code FixedWidthCodec}:
+ * <p>The module's contract is <b>23 production classes</b> in a root and eight
+ * subpackages, each carrying one charter file, for <b>32</b> compilation units. The
+ * table is the closed set: a class belonging to this module belongs to exactly one
+ * of these nine rows, and a proposed addition that fits none of them does not belong
+ * in the shared kernel at all.
  *
  * <pre>
- * package             production classes   charter   compilation units   landed
- * common (this root)                   1         1                   2      2/2
- * common.money                         2         1                   3      3/3
- * common.codec                         5         1                   6      6/6
- * common.error                         3         1                   4      4/4
- * common.web                           3         1                   4      4/4
- * common.security                      3         1                   4      4/4
- * common.observability                 1         1                   2      2/2
- * common.time                          1         1                   2      2/2
- * common.validation                    2         1                   3      3/3
+ * package               production classes   charter   compilation units
+ * common (this root)                     1         1                   2
+ * common.money                           2         1                   3
+ * common.codec                           5         1                   6
+ * common.error                           3         1                   4
+ * common.web                             3         1                   4
+ * common.security                        4         1                   5
+ * common.observability                   2         1                   3
+ * common.time                            1         1                   2
+ * common.validation                      2         1                   3
  * </pre>
  *
- * <p>The first three numeric columns are the target. The fourth is what exists at
- * this checkpoint over that target, so a reader can see at a glance that <b>no</b>
- * package is short of its target. Its column total is 30 of 30.
- *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30. Both totals agree,
+ * 1 + 2 + 5 + 3 + 3 + 4 + 2 + 1 + 2 = 23, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 6 + 4 + 4 + 5 + 3 + 2 + 3 = 32. Both totals agree,
  * and this file is one of the nine charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>21 production classes
- * across 8 subpackages and the root, in 30 compilation units, of which 9 are charters</strong>
- * -- this file among them. They are counted subpackage by subpackage from the
- * enumerated target tree, and both cross-checks above re-derive them
- * independently, by class and by compilation unit. The total and the breakdown
- * are stated together for that reason: a bare total invites a reader to trust
- * it, whereas a breakdown lets a reader re-derive it and reject any figure that
- * does not add up. Any class count for this package other than 21 fails both
- * sums and is wrong.
+ * <p>Assumptions: the authoritative figures are <strong>23 production classes
+ * across 8 subpackages and the root, in 32 compilation units, of which 9 are charters</strong>
+ * -- this file among them. They are counted subpackage by subpackage, and both
+ * cross-checks above re-derive them independently, by class and by compilation
+ * unit. The total and the breakdown are stated together for that reason: a bare
+ * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
+ * it and reject any figure that does not add up. Any class count for this package
+ * other than 23 fails both sums and is wrong.
  *
  * <h2>The dependency arrow points inward only</h2>
  *
@@ -514,8 +499,8 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 21 target production classes. Neither substitutes for
- * the other, and work on one does not modify the other.
+ * the architecture rules for the 23 production classes this charter enumerates.
+ * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts
  * in this package consequently have no executable golden-master oracle at all

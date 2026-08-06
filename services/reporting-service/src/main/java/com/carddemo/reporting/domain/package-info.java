@@ -30,19 +30,31 @@
  * StatementTransactionView    reporting.v_statement_transactions    V1__reporting_views.sql
  * TransactionTypeView         reporting.v_transaction_types         V1__reporting_views.sql
  * TransactionCategoryView     reporting.v_transaction_categories    V1__reporting_views.sql
- * AccountView                 reporting.v_accounts                  planned, see below
- * CustomerView                reporting.v_customers                 planned, see below
- * CardXrefView                reporting.v_card_xref                 planned, see below
+ * AccountView                 reporting.v_accounts                  V1__reporting_views.sql
+ * CustomerView                reporting.v_customers                 V1__reporting_views.sql
+ * CardXrefView                reporting.v_card_xref                 V1__reporting_views.sql
  * </pre>
  *
- * <p>Assumptions: the last three rows are <b>planned</b> in the sense this charter's opening
- * paragraph defines, and the reason they are not yet declared is mechanical rather than a matter
- * of sequencing preference. {@code CREATE VIEW} resolves its base references when it runs, and
- * the three relations they read -- {@code account.accounts}, {@code account.customers} and
- * {@code account.card_xref} -- are created by an account-service migration that does not exist
- * yet, so a view over them cannot be created and would take the four that can down with it.
- * {@code data-migration/sql/V1__reporting_views.sql} records the same obligation from its own
- * side. Refactoring Rationale: {@code TransactionTypeView} previously mapped the base relation
+ * <p>Refactoring Rationale: the last three relations formerly read <b>planned</b> here, on the
+ * mechanical ground that {@code CREATE VIEW} resolves its base references when it runs and the
+ * three relations they read were created by an account-service migration that did not exist -- so
+ * a view over them could not be created and would have taken the four that could down with it.
+ * That ground is spent: {@code V1__account.sql} now creates all three base tables and
+ * {@code data-migration/sql/V1__reporting_views.sql} creates all three views, so the relation
+ * column above names the file that declares each of the seven rather than an intention.
+ *
+ * <p>Assumptions: the three projection TYPES named in those rows are nonetheless still to be
+ * authored, and the distinction between a missing relation and a missing projection is the point
+ * of this paragraph. The relations exist and are granted; what does not yet exist is the Java
+ * type that maps each one, because no repository or service in this module reads them yet -- the
+ * statement and report assemblies that will are themselves not yet authored. The closed set this
+ * charter opens with is therefore a set of SEVEN by declaration and FOUR by present count, and an
+ * eighth name is still a defect. Trade-offs: authoring the three types ahead of a reader would put
+ * three mappings into the module that nothing exercises, so a column name or a nullability wrong
+ * in one of them would be caught by no test until its first reader arrived; the mapping table
+ * above is what keeps the obligation visible in the meantime.
+ *
+ * <p>Refactoring Rationale: {@code TransactionTypeView} previously mapped the base relation
  * {@code reference.transaction_types} directly, which broke the invariant this paragraph opens
  * with; it now maps {@code reporting.v_transaction_types}, which also resolves the column name --
  * the base relation declares {@code description} and the view aliases it to {@code type_desc} so

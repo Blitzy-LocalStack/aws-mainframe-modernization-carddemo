@@ -45,8 +45,11 @@ The category-balance fork in
 | the update paragraph, not taken here | 526-528 | `2700-B-UPDATE-TCATBAL-REC.` adds the amount to the existing balance and rewrites |
 
 The key this record composes is account `00000000007` -- reached from the card
-number through row 7 of
-[`app/data/ASCII/cardxref.txt`](../../../../../../../app/data/ASCII/cardxref.txt)
+number `4859452612877065` through row **21** of
+[`app/data/ASCII/cardxref.txt`](../../../../../../../app/data/ASCII/cardxref.txt),
+whose 36 characters read `485945261287706500000000700000000007`. Assumptions: the
+cross-reference row number is not the account identifier; nothing orders that file
+by account, so the two figures coincide only by accident and here they do not
 -- with transaction type `01` at positions 17-18 and category `0001` at positions
 19-22 of the daily record. With no row on that key, the read takes `INVALID KEY`
 and the create arm runs.

@@ -1,7 +1,9 @@
 package com.carddemo.card.config;
 
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,6 +12,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.server.PathContainer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.authorization.AuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -17,6 +21,8 @@ import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.IpAddressAuthorizationManager;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 
@@ -115,12 +121,24 @@ import org.springframework.web.util.pattern.PathPatternParser;
  * {@code CardDemoCommonAutoConfiguration} contributes a registration bean for it over every request
  * path, and the framework additionally adapts ANY unwrapped filter bean it finds into a registration
  * of its own; the kernel's registration is guarded on the NAME of its own registration bean, which a
- * differently named bean here does not satisfy, so both survived. The filter does not extend the
- * run-once base class, so both ran: two identifiers were minted for one request, the response carried
- * the inner one while earlier pipeline stages had logged the outer one, and the inner filter's
- * mandatory context cleanup then stripped the identity from every line emitted while the outer one
- * unwound. Nothing failed and nothing was logged about it, which is precisely why the duplicate had to
- * be removed rather than tolerated.</p>
+ * differently named bean here does not satisfy, so both survived.</p>
+ *
+ * <p>Refactoring Rationale: what a second registration actually costs is stated here as measured
+ * rather than as guessed, because an earlier revision of this paragraph guessed and was wrong. It
+ * claimed that both passes ran, that two identifiers were minted for one request, and that the inner
+ * pass's cleanup stripped the identity from every line the outer pass then logged. None of that
+ * happens. {@code CorrelationIdFilter} carries its own once-per-request guard -- a request attribute
+ * keyed on the class name, set on entry and removed only by the pass that set it -- and its second
+ * pass therefore returns after delegating, without reading a header, minting an identity, touching the
+ * logging context or writing a response header. One identity is minted per request no matter how many
+ * times the filter is registered, which is precisely why the duplicate was invisible.</p>
+ *
+ * <p>Assumptions: the duplicate is nonetheless withdrawn, and the reasons are ownership and
+ * legibility rather than observable behaviour. Two beans describing one filter means a reader has to
+ * find both to learn whether and where the filter runs; the second registration carries its own
+ * ordering position, which is a cross-cutting decision this per-service file has no business making;
+ * and a redundant filter sits in the chain of every request for the life of the service, delegating.
+ * Withdrawing it leaves exactly one mechanism, one order and one file to read.</p>
  *
  * <p>Alternatives Considered: three ways to keep a registration in this class were weighed and all
  * three rejected. Declaring a registration bean here under the exact name the kernel's condition
@@ -178,6 +196,60 @@ public class SecurityConfig {
     public static final String HEALTH_PATH = "/actuator/health/**";
 
     /**
+     * The build-identity management path, reachable only from inside the task.
+     *
+     * <p>Assumptions: this path and the scrape path below are named EXPLICITLY rather than left to a
+     * catch-all, because they are the two management endpoints this module's exposure list admits
+     * beyond health -- {@code include: health,info,prometheus} in {@code application.yml} -- and each
+     * describes the service to whatever reaches the port. Naming them is what lets the chain state a
+     * rule for them instead of inheriting one.</p>
+     */
+    public static final String BUILD_IDENTITY_PATH = "/actuator/info";
+
+    /**
+     * The metric scrape path, reachable only from inside the task.
+     *
+     * <p>Assumptions: the only configured consumer is TASK-LOCAL. The collector sidecar scrapes
+     * {@code 127.0.0.1:<container-port>} at {@code metrics_path: /actuator/prometheus} --
+     * {@code infra/modules/ecs-service/main.tf} lines 154 to 172 -- and that scrape configuration
+     * carries no authorization header at all, so it can present no token. Any rule requiring a token
+     * would therefore break the scrape rather than secure it.</p>
+     */
+    public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
+
+    /**
+     * The loopback addresses the task-local collector can reach this service from.
+     *
+     * <p>Assumptions: both families are listed because the address the container resolves loopback to
+     * is a property of its network stack rather than of this configuration. Fargate tasks run with an
+     * IPv4 address under the {@code awsvpc} mode this module uses, so the IPv4 form is the one expected
+     * in practice; the IPv6 form is included so a stack that presents {@code ::1} does not silently
+     * lose its metrics.</p>
+     *
+     * <p>Trade-offs: a loopback range rather than an authority is what grants telemetry, and the cost
+     * is that a rule enforced by network position cannot be audited from the token. It is accepted
+     * because the alternative is worse in both directions: requiring a token breaks the only consumer
+     * that exists, and admitting any authenticated token -- which this chain previously did by falling
+     * through -- grants the two endpoints to every principal the identity provider will issue a token
+     * for, including one carrying no CardDemo group at all.</p>
+     */
+    private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
+
+    /*
+     * WHY : Alternatives Considered: one MANAGEMENT_PATH pattern of "/actuator/**" granted to
+     *       ADMIN_AUTHORITY, with the catch-all admitting either group. Authored and REJECTED on
+     *       the measured scrape configuration: infra/modules/ecs-service/main.tf configures the
+     *       task-local collector to scrape https://127.0.0.1:<container-port>/actuator/prometheus
+     *       every sixty seconds and sends NO authorization header of any kind, so an authority rule
+     *       over the whole namespace would not narrow who may read metrics -- it would stop the
+     *       only consumer that exists from reading them at all, and the loss would be silent
+     *       because a scrape failure is not a request failure anybody sees. Granting the two named
+     *       endpoints by network position keeps the scrape working while still refusing every
+     *       caller that arrives through the load balancer, and the catch-all is denyAll rather than
+     *       either-group so a route added without a rule fails closed instead of inheriting one.
+     */
+
+    /**
      * The one path that renders a primary account number in full.
      *
      * <p>Assumptions: the pattern carries the deployed {@code /api/v1} prefix because the service
@@ -192,13 +264,22 @@ public class SecurityConfig {
      * assumed: a unit test in this package reads the contract, matches every published path against
      * this pattern, and requires that this one matches and that no other does.</p>
      *
-     * <p>Assumptions: the segment matched by the single asterisk is the opaque card selector, never a
-     * card number. Nothing in this pattern depends on that, but a reader comparing it against the
-     * published contract should know that the value in that position is a twenty-two-character token
-     * and that a sixteen-digit account number is refused by the contract's own shape check before any
-     * rule here is consulted.</p>
+     * <p>Assumptions: the segment matched by the single asterisk is the sixteen-digit card number,
+     * which the published contract refuses at any other width or with any non-digit before a rule here
+     * is consulted. Nothing in this pattern depends on that width; it is recorded so a reader comparing
+     * the pattern against the contract knows what occupies that position.</p>
+     *
+     * <p>Refactoring Rationale: this pattern sits under its OWN {@code /api/v1/admin} prefix, and an
+     * intermediate revision spelled it as a {@code /unmasked} suffix inside the card subtree. Under
+     * that spelling the administrative path was also matched by {@link #CARD_SUBTREE_PATH_PATTERN},
+     * so the authority of the one operation that discloses a full account number depended on this
+     * table's ORDER: place the subtree rule first and an ordinary user reaches the administrative
+     * read, with both rules still individually valid and nothing failing loudly. A separate prefix
+     * removes that dependency outright, because no card-subtree pattern can match a path that does
+     * not begin with the card collection. The published contract carries the same prefix, and the
+     * routing at both infrastructure hops was extended to reach it.</p>
      */
-    public static final String ADMIN_CARD_PATH_PATTERN = "/api/v1/cards/*/unmasked";
+    public static final String ADMIN_CARD_PATH_PATTERN = "/api/v1/admin/cards/*";
 
     /**
      * The collection path of the card resource, matched exactly.
@@ -213,11 +294,12 @@ public class SecurityConfig {
     /**
      * Every path beneath the card collection.
      *
-     * <p>Assumptions: this is ordered AFTER the administrative pattern in the table below and the
-     * order is load-bearing. A subtree pattern also matches the administrative path, so placing it
-     * first would grant the ordinary-user authority to the one operation that discloses a full
-     * account number - the failure would be silent, because both patterns are valid and both rules
-     * authorise something.</p>
+     * <p>Assumptions: this pattern can no longer match the administrative path, because that path
+     * carries its own {@code /api/v1/admin} prefix rather than a suffix beneath this collection. The
+     * administrative rule is nonetheless still ordered FIRST in the table below, so that the table
+     * remains correct under the most-specific-first reading a reader applies to it and so that adding
+     * a future card-subtree operation cannot reintroduce the shadowing this ordering once guarded
+     * against.</p>
      */
     public static final String CARD_SUBTREE_PATH_PATTERN = "/api/v1/cards/**";
 
@@ -226,8 +308,9 @@ public class SecurityConfig {
      *
      * <p>Assumptions: the order of this list is the order the rules are evaluated in, matching how a
      * filter chain evaluates its matchers, so a reader may take the first match as the effective one.
-     * The administrative rule precedes the two general card rules for the reason recorded on
-     * {@link #CARD_SUBTREE_PATH_PATTERN}.</p>
+     * The administrative rule precedes the two general card rules, which is no longer load-bearing
+     * now that the administrative path sits under its own prefix; the reason it is kept is recorded
+     * on {@link #CARD_SUBTREE_PATH_PATTERN}.</p>
      */
     private static final List<AuthorityRule> AUTHORITY_RULES = List.of(
             new AuthorityRule(ADMIN_CARD_PATH_PATTERN, JwtRoleConverter.ADMIN_AUTHORITY),
@@ -357,6 +440,36 @@ public class SecurityConfig {
         }
         return new String[] {JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY};
     }
+    /**
+     * Builds the authorization manager that admits a request only from a loopback address.
+     *
+     * <p>Assumptions: the manager is composed from the framework's own address manager rather than
+     * written here, so the address-range parsing this rule depends on is the same implementation the
+     * framework tests, and this class contributes only the choice of ranges. Composing with
+     * {@code anyOf} makes the two families alternatives rather than requirements, which is what a
+     * single-stack container needs -- it presents one loopback family, not both.</p>
+     *
+     * <p>Alternatives Considered: a network-level control instead, either a security-group rule or
+     * binding the management endpoints to a second port not reachable from outside the task. The
+     * security group was rejected because it cannot express a rule about a task's own loopback
+     * interface -- traffic that never leaves the task is not subject to it -- and a separate
+     * management port was rejected as a larger change than the finding requires: it would alter the
+     * container contract, the scrape configuration and the task definition together, and it would
+     * still need this chain to state a rule for whichever port served the endpoints. This rule is
+     * additionally not the only control: the scrape target is loopback precisely so the endpoints are
+     * never published through a security-group rule either, so the two narrowings compound.</p>
+     *
+     * @return an authorization manager granting access from any configured loopback range, never
+     *     {@code null}
+     */
+    private static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
+        @SuppressWarnings("unchecked")
+        AuthorizationManager<RequestAuthorizationContext>[] byRange = LOOPBACK_RANGES.stream()
+                .map(IpAddressAuthorizationManager::hasIpAddress)
+                .toArray(AuthorizationManager[]::new);
+
+        return AuthorizationManagers.anyOf(byRange);
+    }
 
     /**
      * Builds the filter chain from the rule table.
@@ -373,9 +486,21 @@ public class SecurityConfig {
      * confused-deputy condition the protection defends against cannot arise. Leaving it enabled would
      * reject every non-browser client - including the load balancer - for no gain.</p>
      *
-     * <p>Assumptions: the catch-all requires authentication rather than denying outright. A path this
-     * service does not publish reaches no handler and answers 404, and answering 403 for it instead
-     * would tell an unauthenticated caller which paths exist.</p>
+     * <p>Refactoring Rationale: the catch-all DENIES rather than requiring authentication, and an
+     * earlier revision required authentication on the ground that answering 403 for an unpublished
+     * path "would tell an unauthenticated caller which paths exist". That reasoning does not hold, and
+     * it had a concrete cost. It does not hold because an unauthenticated caller is answered by the
+     * entry point either way and learns nothing from a deny; it is an AUTHENTICATED caller that could
+     * previously distinguish paths, receiving 404 for one this service does not publish and a real
+     * answer for one it does. A uniform deny discloses strictly less. The cost was that every path no
+     * rule above matched -- which for this module means the two management endpoints its exposure list
+     * admits -- was granted to any valid token, including one carrying no CardDemo group, because
+     * membership of neither group still satisfies {@code authenticated()}.</p>
+     *
+     * <p>Assumptions: with the catch-all denying, every reachable path must be granted by a rule
+     * ABOVE it, so the rule list is now the complete statement of what this service serves. That is
+     * the property being bought: a route added without a rule fails closed and is discovered
+     * immediately, rather than inheriting the widest grant in the chain.</p>
      *
      * <p>Assumptions: the administrative gate below is decided SERVER-SIDE from a claim the identity
      * provider signed, and there is no parameter anywhere in this chain through which a caller could
@@ -397,17 +522,27 @@ public class SecurityConfig {
      * @param http the chain builder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be
      *     {@code null}
+     * @param clock the clock the rendered refusal bodies read their failure instant from; must not be
+     *     {@code null}
      * @return the configured chain, never {@code null}
      * @throws Exception when the chain cannot be built, which the builder declares
      */
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
-            JwtAuthenticationConverter authenticationConverter) throws Exception {
+            JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
                     requests.requestMatchers(HEALTH_PATH).permitAll();
+                    // WHY : Assumptions: the two management endpoints are granted by NETWORK
+                    //       POSITION and not by authority, because their only configured consumer
+                    //       is the task-local collector sidecar, which presents no token. See the
+                    //       rationale on LOOPBACK_RANGES for why an authority rule would break the
+                    //       scrape and why falling through to authenticated() granted them far too
+                    //       widely.
+                    requests.requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
+                            .access(loopbackOnly());
                     // WHY : Assumptions: the rules are applied in list order, so the chain's
                     //       first-match evaluation and the order declared on AUTHORITY_RULES are
                     //       the same order. Iterating a map instead would make the effective
@@ -418,10 +553,29 @@ public class SecurityConfig {
                         requests.requestMatchers(rule.pathPattern())
                                 .hasAnyAuthority(acceptedAuthorities(rule.requiredAuthority()));
                     }
-                    requests.anyRequest().authenticated();
+                    // WHY : Assumptions: denyAll and NOT authenticated, so that a principal holding
+                    //       a valid token but neither CardDemo group reaches nothing at all. Every
+                    //       path this service serves is granted by a rule above.
+                    requests.anyRequest().denyAll();
                 })
                 .oauth2ResourceServer(server -> server
-                        .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)));
+                        // WHY : Assumptions: the bearer-token filter answers a request whose token was
+                        //       absent, expired or malformed BEFORE the exception stage below is reached,
+                        //       and it resolves neither handler from the application context, so both must
+                        //       be set here as well. Setting only the exception stage would leave the more
+                        //       common of the two refusals -- a missing token -- rendered as a bodyless
+                        //       status, which every published contract of this service contradicts.
+                        .authenticationEntryPoint(ApiErrorSecurityHandlers.entryPoint(clock))
+                        .accessDeniedHandler(ApiErrorSecurityHandlers.accessDeniedHandler(clock))
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)))
+                // WHY : Refactoring Rationale: the shared handlers render the ApiError body that this
+                //       service's OpenAPI document declares for 401 and 403. Without them the framework
+                //       default answers with a status and a WWW-Authenticate header and no body at all,
+                //       because a refusal decided by the filter chain never reaches a controller and so
+                //       never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
+                //       the framework's bearer-token entry point first, so the challenge header the OAuth
+                //       2.0 contract requires is composed exactly as before and only the body is added.
+                .exceptionHandling(ApiErrorSecurityHandlers.renderingRefusals(clock));
         return http.build();
     }
 
@@ -513,13 +667,16 @@ public class SecurityConfig {
      *     have used so that one value configures both key resolution and the issuer check
      * @param expectedTokenUse the token kind a presented token must declare; the configured value is
      *     {@code access}
-     * @param expectedClientId the app client identity a presented token must name
+     * @param expectedClientId the app client identity a presented token must name; must not be
+     *     {@code null} or blank, because the shared validator reads a blank value as an instruction to
+     *     skip the client check entirely
      * @param requiredScope the scope a presented token must carry
      * @return the decoder, carrying the framework's issuer and time validation plus this migration's
      *     token-kind, client and scope validation; never {@code null}
      * @throws IllegalStateException if the configured token kind is not the one the shared validator
      *     enforces, because a deployment that asked for a different kind would be silently given the
-     *     access-token check instead of the one it configured
+     *     access-token check instead of the one it configured, or if the configured client id is blank,
+     *     because the shared validator would then skip the client check with nothing saying so
      */
     @Bean
     public JwtDecoder jwtDecoder(
@@ -537,6 +694,20 @@ public class SecurityConfig {
                             + CognitoAccessTokenValidator.ACCESS_TOKEN_USE
                             + "\"; the shared token validator enforces that kind and no other,"
                             + " so a different value here would not be honoured");
+        }
+        // WHY : Assumptions: a blank or absent client id is REFUSED rather than tolerated. The shared
+        //       validator reads a blank value as "skip the client check", which is a correct contract
+        //       only for a caller that has decided some other validator pins the client instead. No
+        //       context in this repository has decided that -- the alternative would be the framework's
+        //       audiences property, which the paragraph above rules out for this provider -- so a blank
+        //       value here would drop the check silently, with the property still present in
+        //       configuration and appearing to be in force. On this context the dropped check is the
+        //       one standing between an identity token minted for ANOTHER app client of the same pool
+        //       and the operation that returns an unmasked primary account number, so failing at
+        //       context build is the only outcome an operator can be expected to notice.
+        if (expectedClientId == null || expectedClientId.isBlank()) {
+            throw new IllegalStateException(
+                    "carddemo.security.jwt.expected-client-id must name the app client");
         }
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withIssuerLocation(issuerUri).build();
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(

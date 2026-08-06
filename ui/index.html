@@ -19,18 +19,11 @@
     and the rest) are served this one document, and the router then decides what
     renders.
 
-      STATE AT THIS CHECKPOINT, stated once here rather than repeated at every
-      element that names one of them. Every counterparty this document depends on
-      now exists: ui/.env.example, ui/src/messages/messages.ts,
-      ui/public/favicon.svg, ui/vite.config.ts, ui/nginx.conf, the entry module
-      ui/src/main.tsx that the body references, and ui/src/theme/antdTheme.ts,
-      where styling belongs. All three cross file contracts described just below
-      can therefore be inspected against real files, and `npm run build` emits a
-      bundle this document loads. Refactoring Rationale: earlier revisions of this
-      block classified first the favicon, the Vite configuration and the nginx
-      configuration, and then the entry module and the theme bridge, as later
-      index artifacts after each had landed -- the shape of stale claim that
-      survives because nothing compiles a comment.
+      COUNTERPARTIES, named once here rather than repeated at every element that
+      depends on one. This document asserts contracts against ui/.env.example,
+      ui/src/messages/messages.ts, ui/public/favicon.svg, ui/vite.config.ts,
+      ui/nginx.conf, the entry module ui/src/main.tsx that the body references,
+      and ui/src/theme/antdTheme.ts, where styling belongs.
 
     WHY (non-obvious design decisions):
       - Assumptions: three cross file contracts are asserted by this document and
@@ -118,14 +111,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <!--
-      WHY the icon path names no directory; Assumptions: Vite copies the
-      contents of ui/public verbatim to the root of the build output, so a
-      favicon authored there is served as /favicon.svg and the directory it was
-      authored in forms no part of any served path. Naming that directory in the
-      path here is the single most common mistake with Vite's public directory,
-      and it resolves in no environment at all, because such a path does not
-        exist once the bundle is built. ui/public/favicon.svg now exists, so this
-        link resolves to the asset Vite copies to the build root.
+      Assumptions: the icon path names no directory. Vite copies the contents of
+      ui/public verbatim to the root of the build output, so a favicon authored
+      there is served as /favicon.svg and the directory it was authored in forms
+      no part of any served path. Naming that directory in the path here is the
+      single most common mistake with Vite's public directory, and it resolves in
+      no environment at all, because such a path does not exist once the bundle
+      is built.
         Assumptions: the icon is not content hashed, because Vite copies the public
         directory without rewriting names. Both delivery layers account for that by
         serving it with a short revalidated lifetime rather than the immutable year
@@ -186,8 +178,8 @@
 
   <body>
     <!--
-      WHY this id and no other. Assumptions: ui/src/main.tsx is to resolve its
-      mount point with document.getElementById('root') and pass the result to
+      Assumptions: this id and no other, because ui/src/main.tsx resolves its
+      mount point with document.getElementById('root') and passes the result to
       createRoot. Nothing verifies that the two spellings agree while the bundle
       is built, so a rename fails at run time instead: React finds no container,
       mounts nothing, and the page renders blank with only a console error to

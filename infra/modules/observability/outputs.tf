@@ -15,16 +15,24 @@
 #   `module.observability.notification_topic_arn`, and `alb` and `s3-datasets`
 #   never read the bucket name. The ENVIRONMENT ROOT does the wiring -- it
 #   reads an output here and passes the value into another module's input. The
-#   three names already consumed that way, at identical line numbers in
-#   infra/envs/dev/main.tf and infra/envs/prod/main.tf, are
-#   `managed_log_group_arns` (L538, inside the Lambda log-write policy),
-#   `access_log_bucket_name` (L795 into s3-datasets, L1290 into alb) and
-#   `notification_topic_arn` (L1346 into step-functions-batch). Renaming any of
+#   three names already consumed that way -- in both infra/envs/dev/main.tf and
+#   infra/envs/prod/main.tf, whose observability wiring is identical -- are
+#   `managed_log_group_arns`, read inside
+#   `data "aws_iam_policy_document" "lambda_logs"`; `access_log_bucket_name`,
+#   read twice, by `module "s3_datasets"` and by `module "alb"`; and
+#   `notification_topic_arn`, read by `module "step_functions"`. Renaming any of
 #   them therefore breaks BOTH environment roots and no sibling module, which
 #   is the reason a rename cannot be treated as a local edit.
 #
+#   WHY the consumers are named by enclosing BLOCK and not by line number: an
+#   earlier revision of this header cited four line numbers, and one of them had
+#   already drifted -- `notification_topic_arn` had moved nine lines down the
+#   root -- so the citation pointed a reader at unrelated configuration. A block
+#   label moves with the block it names and is greppable, which a line number is
+#   not.
+#
 # Parameters:
-#   None. An `output` block accepts no input. The module's twenty-eight inputs
+#   None. An `output` block accepts no input. The module's twenty-nine inputs
 #   are declared in variables.tf, which carries the type, the description and
 #   the domain validation of each; every value published below is read from a
 #   resource attribute in main.tf rather than from one of those inputs.
@@ -35,8 +43,8 @@
 #   managed log groups' names and ARNs keyed by the same producer key main.tf
 #   iterated, and one carries every alarm ARN keyed by alarm family and
 #   instance. Each `description` states which identifier form it is and what a
-#   caller does with it, because infra/.terraform-docs.yml sets
-#   `read-comments: false` (L498), so a `description` is the ONLY text that
+#   caller does with it, because infra/.terraform-docs.yml sets its
+#   `read-comments` key to false, so a `description` is the ONLY text that
 #   reaches the generated table in README.md -- a rationale written in a
 #   comment beside an output never appears there.
 #
@@ -57,7 +65,7 @@
 #     calling root's own plan does, and only for the keys that root indexes.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: the map keys published here are exactly the keys main.tf gave
+#   - Assumptions: the map keys published here are exactly the keys main.tf gave
 #     its `for_each` expressions, and those come from the caller. The log-group
 #     keys are the four the environment roots compose in
 #     `local.lambda_log_group_names` -- quiesce, resume, database_admin and
@@ -68,7 +76,7 @@
 #     caller wrote over one of these maps would rename its instances between
 #     dev and prod and destroy and recreate resources whose configuration had
 #     not changed.
-#   - Trade-off: a map rather than a list for every collection. A list is
+#   - Trade-offs: a map rather than a list for every collection. A list is
 #     shorter to read and it re-indexes: removing one service from
 #     var.service_target_group_arn_suffixes would shift every later element, so
 #     a caller holding index 2 would silently begin reading a different
@@ -93,7 +101,7 @@
 #     of the 38 job cards. Publishing a log-group ARN and a topic ARN as module
 #     outputs is what makes both addressable by configuration instead, which is
 #     why this file is the contract and not a convenience.
-#   - Assumption: five things are deliberately NOT published, and the section
+#   - Assumptions: five things are deliberately NOT published, and the section
 #     on deliberate absences names each one with its reason, because an absent
 #     output is as much a decision as a present one and nothing in the lint
 #     gate can report it.
@@ -113,10 +121,10 @@
 #       which is granted by the task and function role policies the calling
 #       root composes. Withholding the identifier protects nothing that the
 #       authorization boundary is not already protecting.
-# WHY : Trade-off: the marking would not merely be redundant, it would cost
+# WHY : Trade-offs: the marking would not merely be redundant, it would cost
 #       three things. Sensitivity PROPAGATES, so every expression a caller
-#       built from one of these values -- the Lambda log-write policy document
-#       at L538 of each environment root, for instance -- would become
+#       built from one of these values -- each root's
+#       `data "aws_iam_policy_document" "lambda_logs"`, for instance -- would become
 #       sensitive too and be redacted in its own right. It would blank these
 #       values in `terraform plan`, which is the artifact
 #       .github/workflows/infra-ci.yml produces for a human to read: a plan
@@ -125,7 +133,7 @@
 #       ARNs exist to make possible. And it would force every calling root to
 #       unwrap each value with `nonsensitive()` before use, which is a marking
 #       and an immediate un-marking that leaves only the noise behind.
-# WHY : Assumption: what is genuinely sensitive in this module arrives as an
+# WHY : Assumptions: what is genuinely sensitive in this module arrives as an
 #       INPUT and is not echoed back. var.kms_key_arn and
 #       var.alarm_email_endpoints are both listed under deliberate absences
 #       below for that reason.
@@ -135,12 +143,12 @@
 # A name AND an ARN are published for the topic, the bucket, the dashboard and
 # the log groups. Neither form substitutes for the other.
 #
-# WHY : Assumption: the two forms are not interchangeable at the point of use,
+# WHY : Assumptions: the two forms are not interchangeable at the point of use,
 #       and that is a property of the consuming APIs rather than a preference.
 #       An IAM policy `Resource` element accepts an ARN and rejects a bare
 #       name, which is the whole mechanism by which a task or function role is
 #       scoped to one log group instead of to every group in the account -- the
-#       least-privilege property the environment roots depend on at L538. A
+#       least-privilege property each root's `lambda_logs` policy depends on. A
 #       CloudWatch metric dimension, a container log-driver `awslogs-group`
 #       option and a Logs Insights `SOURCE` clause each accept the bare name
 #       and reject an ARN; main.tf's own flow-log widget demonstrates the last
@@ -148,14 +156,14 @@
 #       var.vpc_flow_log_group_name. An S3 destination argument -- `alb`'s
 #       access-log bucket and `s3-datasets`' audit destination, both wired from
 #       here -- takes the bucket name and not its ARN.
-# WHY : Trade-off: publishing both doubles the string count for those
+# WHY : Trade-offs: publishing both doubles the string count for those
 #       resources, and a caller that only ever configures a producer will use
 #       half of it. The accepted cost is measured against the alternative,
 #       which is not "one fewer output" but "a caller composing the other form
 #       itself": that reintroduces an account identifier and a region into the
 #       calling configuration, and produces a plausible-looking string that is
 #       wrong whenever a partition, a region or a name changes.
-# WHY : Assumption: every value is read from the resource attribute rather than
+# WHY : Assumptions: every value is read from the resource attribute rather than
 #       recomposed from the naming locals in main.tf, even where the name is
 #       composed there and could be reused directly. Reading the attribute
 #       means the published value is the one the service holds, so a name the
@@ -166,13 +174,13 @@
 # -----------------------------------------------------------------------------
 # What is deliberately NOT published, and why each absence is a decision.
 #
-# WHY : Assumption: var.kms_key_arn is an INPUT this module receives from the
+# WHY : Assumptions: var.kms_key_arn is an INPUT this module receives from the
 #       `kms` module through the calling root, which already holds it.
 #       Republishing it would present this module as the key's owner and invite
 #       a caller to source it from here rather than from the module that
 #       creates and rotates it, which is where a key policy change has to be
 #       reviewed.
-# WHY : Assumption: var.log_retention_days is likewise an input the root sets,
+# WHY : Assumptions: var.log_retention_days is likewise an input the root sets,
 #       and it is one of the few values dev and prod are meant to differ on.
 #       Echoing it back would make a root's own variable reachable by two
 #       paths, one of which looks authoritative and is not.
@@ -191,7 +199,7 @@
 #       ARN as readily as by name. A second identically-keyed map would double
 #       the surface and add a second place for an alarm family to be forgotten
 #       when one is added to main.tf.
-# WHY : Assumption: no output publishes an aggregate the caller cannot act on
+# WHY : Assumptions: no output publishes an aggregate the caller cannot act on
 #       -- there is no count, no list of alarm states and no "all resources"
 #       object. TFLint's unused-declaration rule covers variables and locals
 #       and does NOT report an unused output, so an output nobody consumes
@@ -225,7 +233,7 @@ output "notification_topic_name" {
 # -----------------------------------------------------------------------------
 # The shared terminal access-log destination.
 #
-# WHY : Assumption: one destination is shared by the load balancer and the
+# WHY : Assumptions: one destination is shared by the load balancer and the
 #       dataset bucket rather than one being created per producer, so the two
 #       bounded encryption and self-logging exceptions main.tf records on it
 #       are confined to a single reviewable place. Publishing both its name and
@@ -246,7 +254,7 @@ output "access_log_bucket_arn" {
 # -----------------------------------------------------------------------------
 # The log groups this module owns, in both forms, keyed by producer.
 #
-# WHY : Assumption: the keys are var.log_group_names' own keys, which both
+# WHY : Assumptions: the keys are var.log_group_names' own keys, which both
 #       environment roots compose in `local.lambda_log_group_names` as quiesce,
 #       resume, database_admin and dataset_retention. The first two are the
 #       direct successors of the baseline's operator-command steps: app/jcl/
@@ -257,9 +265,9 @@ output "access_log_bucket_arn" {
 #       therefore impossible to name in a policy. The key here is what makes
 #       the target destination nameable, so it is part of the contract rather
 #       than an internal label.
-# WHY : Trade-off: the ARN map is published with the all-streams `:*` suffix
+# WHY : Trade-offs: the ARN map is published with the all-streams `:*` suffix
 #       removed, so a caller appends it unconditionally -- which is exactly
-#       what both environment roots do at L538, where a
+#       what both environment roots do in their `lambda_logs` policy, where a
 #       logs:CreateLogStream/logs:PutLogEvents statement requires the suffixed
 #       form. The provider already trims that suffix from a log group's `arn`
 #       attribute, and `trimsuffix` is applied anyway so that the PUBLISHED
@@ -279,7 +287,7 @@ output "managed_log_group_names" {
 }
 
 output "managed_log_group_arns" {
-  description = "Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map at L538 to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed_log_group_names exactly, so the two maps are indexed with one key set."
+  description = "Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map inside their lambda_logs IAM policy document to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed_log_group_names exactly, so the two maps are indexed with one key set."
   value = {
     for key, group in aws_cloudwatch_log_group.managed : key => trimsuffix(group.arn, ":*")
   }
@@ -288,7 +296,7 @@ output "managed_log_group_arns" {
 # -----------------------------------------------------------------------------
 # The operations dashboard.
 #
-# WHY : Assumption: the dashboard is published by name because a name is what a
+# WHY : Assumptions: the dashboard is published by name because a name is what a
 #       procedure can carry. A console deep-link URL embeds an account
 #       identifier and a region, neither of which belongs in a committed
 #       document, so a runbook that has to send a reader to this board names it
@@ -308,7 +316,7 @@ output "dashboard_arn" {
 # -----------------------------------------------------------------------------
 # Every alarm ARN, in one map keyed by family and instance.
 #
-# WHY : Assumption: the key is `<family>/<instance>` for an iterated family and
+# WHY : Assumptions: the key is `<family>/<instance>` for an iterated family and
 #       the bare family name for a single-instance alarm, and the family prefix
 #       is load-bearing rather than decorative. service_unhealthy,
 #       service_no_healthy_targets and service_5xx all iterate the SAME input,
@@ -320,7 +328,7 @@ output "dashboard_arn" {
 #       name suffix from disjoint subsets of var.queue_names -- so one grammar
 #       is applied to all eight iterated families rather than only where a
 #       collision exists today.
-# WHY : Trade-off: one map over all eleven families rather than one output per
+# WHY : Trade-offs: one map over all eleven families rather than one output per
 #       family. Eleven outputs would let each carry its own description into
 #       the generated README, which is what the deliberate-absence section
 #       argues for elsewhere; it is declined here because eight of the eleven
@@ -328,7 +336,7 @@ output "dashboard_arn" {
 #       only a map can express them at all. The accepted cost is that the
 #       eleven families share one description, and the key grammar above is
 #       what keeps the map self-describing in its place.
-# WHY : Assumption: this map must list every alarm family main.tf declares. An
+# WHY : Assumptions: this map must list every alarm family main.tf declares. An
 #       alarm added there and omitted here is invisible to both gates --
 #       `terraform validate` passes because the map is still well-formed, and
 #       TFLint passes because the output still carries a description -- and it
@@ -378,4 +386,3 @@ output "alarm_arns" {
     },
   )
 }
-

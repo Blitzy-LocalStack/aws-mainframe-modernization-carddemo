@@ -42,30 +42,31 @@
 # =============================================================================
 
 terraform {
-  # WHY : Refactoring Rationale: this was `>= 1.15.0`, an open-ended floor, and
-  #       the openness was the defect. A bare floor admits every future release
-  #       of the 1.x line, so the CLI that produced the reviewed plan and the CLI
-  #       an operator runs six months later need not be the same MINOR at all --
-  #       and a Terraform minor release is exactly where language behaviour,
-  #       validation semantics and state-format handling change. The reviewed
-  #       artifact for this root is a plan produced on 1.15.8; admitting 1.16 or
-  #       1.20 would let that review be discharged by a toolchain nobody
-  #       validated against.
-  # WHY : Trade-offs: `~> 1.15.0` rather than an exact `= 1.15.8`. The pessimistic
-  #       operator on the patch component accepts 1.15.0 through 1.15.x and
-  #       refuses 1.16.0 and 2.x, which is the supported-major/minor policy this
-  #       package is reviewed under. An exact pin would have to be edited for
-  #       every patch release even though a patch release cannot change what this
-  #       file means, and it would break every runner the moment its toolchain
-  #       image moved forward within the series. Moving to a new MINOR is
-  #       deliberately a reviewed edit to this line, in the same commit as the
-  #       plan produced under it.
-  # WHY : Assumptions: this constraint is what makes the committed
-  #       .terraform.lock.hcl beside this file meaningful. The lock records the
-  #       provider versions and checksums selected under a given CLI; a CLI from
-  #       an unvalidated minor could legitimately re-resolve or re-format it, so
-  #       the two controls are one mechanism and neither is sufficient alone.
-  required_version = "~> 1.15.0"
+  # WHY : Refactoring Rationale: this line briefly carried `~> 1.15.0`, on the
+  #       reasoning that a Terraform MINOR release is where language behaviour and
+  #       state handling change, so a ceiling kept a reviewed plan from being
+  #       discharged by an unvalidated toolchain. It has been returned to the
+  #       assigned `>= 1.15.0`. The ceiling was the only place in the whole infra/
+  #       tree where a version constraint disagreed with its siblings: the
+  #       bootstrap root and all sixteen modules under infra/modules/ declare
+  #       `>= 1.15.0`, and a module cannot be initialised except through a root, so
+  #       a root that refused 1.16 while every module accepted it made the tree
+  #       self-inconsistent and made the two environment roots differ from each
+  #       other in the one file the package requires to be structurally identical.
+  # WHY : Trade-offs: a floor accepts a CLI newer than the 1.15.8 this package is
+  #       validated on. That is the accepted cost of a shared contract, and it is
+  #       the right side to err on here, because the CLI is supplied by the
+  #       operator or the CI runner rather than resolved from a registry -- a
+  #       ceiling rejects a runner whose toolchain image moved forward, which is a
+  #       failure the package cannot fix from inside itself. Provider selection is
+  #       constrained the opposite way, and that asymmetry is deliberate.
+  # WHY : Assumptions: the guard against an unvalidated toolchain is the committed
+  #       .terraform.lock.hcl beside this file, not the CLI constraint. The lock
+  #       records the exact provider versions and checksums a reviewed plan was
+  #       produced under, and CI runs with `-lockfile=readonly`, so a newer CLI
+  #       cannot silently re-resolve a provider -- it can only fail, visibly, on a
+  #       lock it is not allowed to rewrite.
+  required_version = ">= 1.15.0"
 
   required_providers {
     # WHY : Assumptions: `~> 6.56` means `>= 6.56.0, < 7.0.0`; it establishes a
@@ -127,14 +128,43 @@ terraform {
     #       deterministically from repository sources during plan. An external
     #       zip command would add an untracked build step whose bytes Terraform
     #       could not hash into each function's source_code_hash.
+    # WHY : Assumptions: this entry and the `tls` entry below take this root past
+    #       the two providers -- `hashicorp/aws` and `hashicorp/random` -- that the
+    #       package's dependency inventory names, and the divergence is recorded
+    #       here rather than removed. Both are CONSUMED by main.tf, so the
+    #       declarations are not orphans: `data "archive_file"` packages the four
+    #       Lambda functions the batch state machine's quiesce, analyze and resume
+    #       states invoke, and `aws_lambda_function` accepts only a `filename`, an
+    #       S3 object or a container image -- there is no inline source form. The
+    #       only ways to drop this provider would be to commit a binary zip, which
+    #       hides reviewed source behind an opaque artifact, or to delete the
+    #       functions, which would delete three of the eleven batch states.
+    #       Trade-offs: because the provider IS used here, deleting the declaration
+    #       while keeping the resources is not the smaller change it looks like --
+    #       tflint's `terraform_required_providers` rule requires a version
+    #       constraint for every provider a directory actually uses, so an
+    #       undeclared-but-used provider fails the gating lint run AND lets `init`
+    #       resolve an arbitrary major.
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.7"
     }
 
-    # WHY : Refactoring Rationale: the internal API→ALB→task TLS chain needs a
-    #       certificate and PEM producer with no committed private key. The TLS
-    #       provider generates both into encrypted state during apply.
+    # WHY : Refactoring Rationale: the internal API-to-ALB-to-task TLS chain needs
+    #       a certificate and a PEM producer with no committed private key. This
+    #       provider generates both during apply, which is what let two required
+    #       PEM input variables be removed from this root: material that is
+    #       generated has no variable to arrive through and therefore no tfvars
+    #       file to be committed in.
+    # WHY : Assumptions: like `archive` above, this entry exceeds the two providers
+    #       the package's dependency inventory names, and is kept for the same
+    #       reason -- it is consumed. `tls_private_key` and `tls_self_signed_cert`
+    #       in main.tf feed `aws_acm_certificate` for the internal HTTPS listener
+    #       and the two root-owned Secrets Manager entries the tasks read their
+    #       listener material from. Dropping the provider would mean requiring an
+    #       operator-supplied certificate ARN, which contradicts the acceptance
+    #       criterion that the stack deploy end to end from the provided IaC with
+    #       no manual dependency.
     tls = {
       source  = "hashicorp/tls"
       version = "~> 4.1"

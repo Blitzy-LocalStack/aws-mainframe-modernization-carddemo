@@ -57,18 +57,33 @@
  * the two can drift apart.</p>
  *
  * <p>This subtree carries one charter per package and no more: this one, and one in each of those
- * four subpackages, so five in all. This directory holds no shared base class, no helper, no
+ * five subpackages, so six in all. Three are present -- this one and the charters in
+ * {@code domain} and {@code dto} -- and the remaining three arrive with the packages they
+ * govern. This directory holds no shared base class, no helper, no
  * fixture and no resource -- every such thing lives one level down, in the subpackage whose
  * environment it needs. It holds exactly one test class,
  * {@code BatchApplicationTest}, and that single exception is stated here rather than left to be
  * inferred from a directory listing.</p>
+ *
+ * <p>Refactoring Rationale: the charter count in the paragraph above said "one in each of those four
+ * subpackages, so five in all", and four further sentences in this charter likewise reasoned over
+ * "the four subpackages". All five were correct before {@code domain} joined the roster and none was
+ * updated when it did, so this charter contradicted its own roster -- a list of five immediately
+ * above, arithmetic over four immediately below. That is the specific failure a closed roster is
+ * supposed to prevent, and it is worth recording rather than silently renumbering: the roster
+ * paragraph was amended when the package arrived, which is what the expansion record two paragraphs
+ * up documents, but the figures derived FROM the roster elsewhere in the file were not, so the
+ * discipline held at the point of the edit and lapsed everywhere the count was restated. The
+ * derived figures are now stated once against the roster, and the count of charters actually
+ * present is given alongside the target so a reader can tell a planned charter from a missing
+ * one.</p>
  *
  * <p>Refactoring Rationale: this paragraph previously read that the directory holds no test class at
  * all, which was true when it was written and stopped being true when the entry point acquired
  * assertions of its own. The exception is admitted rather than avoided because the alternative was
  * worse in a specific way: {@code BatchApplication} is a compilation unit of the production package
  * of this same name, so a test of its argument sanitisation, its exit-status mapping and its outcome
- * reporting has no home in any of the four subpackages above without being misfiled. Filing it under
+ * reporting has no home in any of the five subpackages above without being misfiled. Filing it under
  * {@code dto} was the closest candidate and is rejected -- that subpackage's charter scopes it to
  * comparisons between a production value and the independent declaration that supplies or consumes
  * it, and a test that captures log events and asserts a severity is not such a comparison. A test
@@ -78,15 +93,15 @@
  * <p>Assumptions: this exception does not weaken the environment-based division above, because the
  * class it admits needs no environment -- no container, no datasource and no migrated schema. Nor
  * does it reopen the question the shared-base-class paragraph below settles: a test class asserting
- * the entry point's own behaviour is not a helper the four subpackages share, so admitting it here
+ * the entry point's own behaviour is not a helper the five subpackages share, so admitting it here
  * gives nothing at this level for a later edit to weaken on their behalf.</p>
  *
  * <p>Alternatives Considered: a shared base class or assertion helper at this level, which is where
- * one would naturally go if all four subpackages came to need it. Rejected, because such a helper
- * sits at the one level none of the four owns, and an assertion moved into it can afterwards be
+ * one would naturally go if all five subpackages came to need it. Rejected, because such a helper
+ * sits at the one level none of the five owns, and an assertion moved into it can afterwards be
  * weakened by an edit to the helper that reads as ordinary maintenance rather than as the
  * relaxation of a parity assertion that it would in fact be. Duplicating a few lines of set-up
- * across four subpackages is the accepted cost of keeping each assertion visible in the file that
+ * across five subpackages is the accepted cost of keeping each assertion visible in the file that
  * depends on it. The one test class this directory does hold is not such a helper and is imported by
  * nothing: it covers the entry point that sits at this same level in the production tree, and the
  * paragraph above records why that is the only placement for it.</p>

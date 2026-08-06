@@ -1,6 +1,11 @@
 package com.carddemo.batch.dto;
 
 import com.carddemo.common.error.AbendDetail;
+import com.carddemo.common.security.CardNumberMasker;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * The one message this module publishes: a batch step's failure, addressed to the terminal sink.
@@ -94,16 +99,36 @@ import com.carddemo.common.error.AbendDetail;
  * {@link #stepName()} to the durable step ledger row and {@link #correlationId()} to the run's log
  * lines, and reads the input there, inside stores that do have the controls for it.</p>
  *
- * <p>Assumptions: the inherited {@code toString} is consequently safe to write into a log line, and
- * it is safe <b>because</b> the constraint above is enforced rather than incidentally. The inherited
- * form renders every component, so its safety is entirely a property of which components exist and
- * of what callers are permitted to put in them; it would leak the moment a seventh component did not
- * observe the paragraph above. Two further properties make it safe in practice as well as in
- * principle. Four of the six components are drawn from closed or key vocabularies -- two enumerated
- * types whose constants are declared in this package, and two ledger keys -- and every component of
- * the abend detail is stripped of control characters by {@code AbendDetail}'s own constructor before
- * it is ever held, so the free-text half of this payload cannot inject a line break into a log record
- * and forge a second line out of one.</p>
+ * <p>Refactoring Rationale: an earlier revision of this paragraph claimed the record's INHERITED
+ * {@code toString} was safe to write into a log line, on the ground that the constraint above was
+ * enforced. It was not enforced -- it was only asserted in this prose -- and the inherited rendering
+ * emits every component, including the two widest free-text components of the abend detail, whose
+ * content no part of this type inspected. A caller passing a database driver's message, an exception
+ * message or a rejected record image through the abend reason or the abend message therefore put that
+ * content onto a long-lived, widely readable sink, and the file said the opposite. Both halves of
+ * that gap are now closed by mechanism rather than by wording: the canonical constructor REFUSES an
+ * abend detail whose text carries an identifier-shaped digit run or one of
+ * {@link #PROHIBITED_DIAGNOSTIC_MARKERS}, and {@link #toString()} is overridden to a CLOSED rendering
+ * that omits the free-text components altogether.</p>
+ *
+ * <p>Trade-offs: the two mechanisms overlap deliberately, and the overlap is the point. The
+ * constructor check is a heuristic -- it recognises identifier SHAPE and a vocabulary of credential
+ * words, and it cannot recognise a name, an address or an electronic mail address -- so a rendering
+ * whose safety rested on it alone would be exactly as complete as the heuristic. The closed rendering
+ * needs no heuristic to be right about anything: it emits the run identifier, the step name, the two
+ * enumerated tokens, the correlation identifier and the abend code and culprit, and there is no input
+ * a caller can supply that makes it emit more. The cost is that an engineer who prints an event does
+ * not see the abend reason or message in that line and has to read {@link #abendDetail()} or the
+ * published payload for it; that cost is accepted because the printed line is the form that reaches
+ * aggregation stores, and it is the form whose contents are hardest to withdraw once written.</p>
+ *
+ * <p>Assumptions: two properties of the components themselves still hold and still carry weight. Four
+ * of the six are drawn from closed or key vocabularies -- two enumerated types whose constants are
+ * declared in this package, and two ledger keys -- and every component of the abend detail is
+ * stripped of control characters by {@code AbendDetail}'s own constructor before it is ever held,
+ * so no component of this payload can inject a line break into a log record and forge a second line
+ * out of one. What has changed is that neither property is now asked to carry the whole
+ * guarantee.</p>
  *
  * <h2>The only message payload in this package, and the only one there will be</h2>
  *
@@ -196,7 +221,11 @@ import com.carddemo.common.error.AbendDetail;
  *     message attributes; never {@code null} and never blank
  * @param abendDetail the structured abend detail, carrying the four components the reference declares
  *     as one group item at {@code app/cpy/CSMSG02Y.cpy:21-29}; never {@code null}, and
- *     {@link #ABSENT_ABEND_DETAIL} where the failure has no abend analogue
+ *     {@link #ABSENT_ABEND_DETAIL} where the failure has no abend analogue. None of its four
+ *     components may carry an identifier-shaped digit run of {@value #SHORTEST_IDENTIFIER_DIGIT_RUN}
+ *     digits or more, or any fragment in {@link #PROHIBITED_DIAGNOSTIC_MARKERS}; text of unknown
+ *     provenance is passed through {@link #withRedactedDiagnostics} rather than straight to the
+ *     constructor
  */
 public record BatchErrorEvent(
         String runId,
@@ -232,11 +261,81 @@ public record BatchErrorEvent(
     public static final AbendDetail ABSENT_ABEND_DETAIL = new AbendDetail("", "", "", "");
 
     /**
+     * The shortest run of digits that could be one of the reference's numeric identifiers.
+     *
+     * <p>Assumptions: the narrowest identifier the migration derives from the reference record
+     * layouts is the nine-digit customer identifier declared as {@code CUST-ID PIC 9(09)} at
+     * {@code app/cpy/CVCUS01Y.cpy}; the account identifier is eleven digits at
+     * {@code app/cpy/CVACT01Y.cpy} and a card number is sixteen at {@code app/cpy/CVACT02Y.cpy}. A
+     * threshold of nine therefore catches the narrowest of the three and everything wider, and
+     * nothing narrower than an identifier -- a four-digit abend code, a two-digit transaction type, a
+     * six-digit merchant reference -- trips it.</p>
+     *
+     * <p>Trade-offs: the threshold is PUBLISHED rather than kept private, and the cost is one more
+     * name on this type's surface. It is paid because the test that proves this guard works has to
+     * compare against the same number, and a test that spells the literal nine beside a production
+     * literal nine still passes after somebody changes one of them. Publishing it makes the two one
+     * value; the vocabulary in {@link #PROHIBITED_DIAGNOSTIC_MARKERS} is published for the same
+     * reason.</p>
+     */
+    public static final int SHORTEST_IDENTIFIER_DIGIT_RUN = 9;
+
+    /**
+     * Lower-case fragments whose presence in an abend component means the text is refused outright.
+     *
+     * <p>Assumptions: these are credential words, and a credential is refused rather than masked
+     * because there is nothing in it to keep. An identifier has a shape, so masking it leaves a
+     * reader the last four digits and a usable diagnostic; a secret has no shape and no safe
+     * remainder, so the only correct handling of a component that mentions one is to discard the
+     * component. The list is matched case-insensitively as a substring, so {@code Password},
+     * {@code PASSWD} and {@code x-api-key} are all caught.</p>
+     *
+     * <p>Trade-offs: substring matching over-refuses, and the over-refusal is accepted. A legitimate
+     * message such as {@code cursor token malformed} mentions {@code token} and is refused even
+     * though it carries no secret. The alternative -- matching whole words, or matching only an
+     * assignment shape such as {@code password=} -- under-refuses in exactly the case that matters,
+     * because the text most likely to carry a real secret is a driver or client message whose
+     * wording nobody here controls. A caller holding text of unknown provenance has
+     * {@link #withRedactedDiagnostics}, which replaces the offending component with
+     * {@link #REDACTED_DIAGNOSTIC} and still publishes the failure, so the cost of over-refusal is
+     * a lost sentence and never a lost failure report.</p>
+     */
+    public static final Set<String> PROHIBITED_DIAGNOSTIC_MARKERS = Set.of(
+            "password", "passwd", "secret", "token", "credential", "apikey", "api-key",
+            "api_key", "bearer", "privatekey", "private-key", "private_key");
+
+    /**
+     * The fixed text that replaces an abend component whose content had to be discarded.
+     *
+     * <p>Assumptions: one closed literal is used for every discarded component rather than a message
+     * naming what was found in it. Naming the reason -- that the text mentioned a credential word, or
+     * which word it was -- would put a description of the sensitive content where the content itself
+     * was refused, which is the same disclosure one indirection removed.</p>
+     */
+    public static final String REDACTED_DIAGNOSTIC = "[redacted]";
+
+    /**
+     * The fewest digits a group must carry before a separator may join it to the next group.
+     *
+     * <p>Assumptions: this is what stops a date or a timestamp being mistaken for an identifier. A
+     * primary account number is written in the wild as four groups of four -- {@code 4111 1111 1111
+     * 1111} -- so a guard that measured only unseparated runs would miss it entirely. A guard that
+     * joined ANY separated groups would instead reject {@code 2022-07-18 12:34:56}, whose groups are
+     * four then two then two, and a business date is legitimate and frequent diagnostic content.
+     * Requiring every joined group to carry at least four digits admits the grouped card number and
+     * excludes the date, because a date's month and day groups are two digits wide.</p>
+     */
+    private static final int GROUPED_DIGIT_MINIMUM = 4;
+
+    /**
      * Validates every component and stores each exactly as received.
      *
      * <p>Nothing is altered, normalised or substituted. The three character components are checked
      * for presence, the two enumerated components for presence, the completion tier additionally for
-     * membership of the failure tier, and the abend detail for presence.</p>
+     * membership of the failure tier, and the abend detail for presence and then for content: each of
+     * its four components is refused if it carries an identifier-shaped digit run or a fragment in
+     * {@link #PROHIBITED_DIAGNOSTIC_MARKERS}. A refusal is a rejection and never a silent repair,
+     * so a value that constructs is the value the caller supplied.</p>
      *
      * <p>Successful construction yields this record instance and no separate return value.</p>
      *
@@ -252,8 +351,9 @@ public record BatchErrorEvent(
      * @param abendDetail the structured abend detail, or {@link #ABSENT_ABEND_DETAIL} where the
      *     failure has no abend analogue; must be non-null
      * @throws IllegalArgumentException if any component is {@code null}, if {@code runId},
-     *     {@code stepName} or {@code correlationId} is blank, or if {@code returnCode} is a tier that
-     *     permits the following state to run
+     *     {@code stepName} or {@code correlationId} is blank, if {@code returnCode} is a tier that
+     *     permits the following state to run, or if any component of {@code abendDetail} carries an
+     *     identifier-shaped digit run or a fragment in {@link #PROHIBITED_DIAGNOSTIC_MARKERS}
      */
     public BatchErrorEvent {
         // WHY : Alternatives Considered: raising the platform's null-argument exception for an absent
@@ -319,21 +419,34 @@ public record BatchErrorEvent(
         //       consumer rather than on one: a nullable component makes the null check the
         //       consumer's obligation on a path that runs only when something has already failed,
         //       which is the path least likely to have been exercised.
-        // WHY : Assumptions: the reason and message components of the abend detail are free-form
-        //       text, and they are operator-facing diagnostics ONLY -- a caller must never populate
-        //       either with record content. The ground for that is the migration's own handling of
-        //       the same content elsewhere: a primary account number is reduced to its last four
-        //       digits on every path but one administrative detail endpoint, a card verification
-        //       value is returned nowhere at all, and a national or government-issued identifier is
-        //       stored encrypted and returned reduced. Free text is the one component of this
-        //       payload wide enough to defeat all of that by accident, and it is also the one this
-        //       constructor cannot police -- the shared type conforms the widths and strips control
-        //       characters but cannot know what a string means -- so the constraint is stated here,
-        //       at the point the value enters, rather than assumed.
         if (abendDetail == null) {
             throw new IllegalArgumentException("abendDetail is required on a batch error event; use "
                     + "ABSENT_ABEND_DETAIL where the failure has no abend analogue");
         }
+
+        // WHY : Refactoring Rationale: the reason and message components of the abend detail are
+        //       free-form text, and an earlier revision of this constructor only STATED that a caller
+        //       must never populate either with record content. Stating it was not enough: free text
+        //       is the one part of this payload wide enough to defeat the migration's masking rules
+        //       by accident -- a primary account number is reduced to its last four digits on every
+        //       path but one administrative detail endpoint, a card verification value is returned
+        //       nowhere at all, and a national or government-issued identifier is stored encrypted
+        //       and returned reduced -- and this sink is the worst place in the deployment for that,
+        //       because it is long-lived and its contents are copied into stores that inherit none of
+        //       its controls. The rule is therefore enforced here, at the one point every publication
+        //       path passes through, and the shared type is not asked to do it: AbendDetail conforms
+        //       the four widths and strips control characters for every consumer of an abend, and
+        //       widening it to refuse content would impose a batch sink's minimisation rule on the
+        //       synchronous error path, where the same text is short-lived and scoped to one
+        //       response.
+        // WHY : Alternatives Considered: masking the offending text in place here, so that
+        //       construction always succeeded. Rejected as the DEFAULT because it makes a caller's
+        //       mistake invisible -- the event publishes, the diagnostic arrives mangled, and nobody
+        //       learns that a producer is reading cardholder data into an error path. Masking is
+        //       offered instead as an explicit, named entry point, withRedactedDiagnostics, so that a
+        //       caller holding text of unknown provenance chooses it deliberately and a caller
+        //       composing its own text is told at once when it composed something it should not.
+        requireDiagnosticsCarryNothingSensitive(abendDetail);
     }
 
     /**
@@ -380,6 +493,269 @@ public record BatchErrorEvent(
             throw new IllegalArgumentException(componentName
                     + " is required on a batch error event and carried only whitespace");
         }
+    }
+
+    /**
+     * Refuses an abend detail whose text carries an identifier-shaped digit run or a credential word.
+     *
+     * <p>All four components are inspected, not only the two wide ones. The code and the culprit are
+     * narrow -- four and eight characters -- but neither is a closed vocabulary, so a caller can
+     * write whatever fits and eight characters is enough to hold a nine-digit identifier's first
+     * eight.</p>
+     *
+     * <p>This method returns nothing; it either accepts the value silently or raises.</p>
+     *
+     * @param abendDetail the candidate abend detail, already known to be non-null
+     * @throws IllegalArgumentException if any of the four components carries a run of
+     *     {@value #SHORTEST_IDENTIFIER_DIGIT_RUN} digits or more, counting a separator-joined group
+     *     sequence as one run, or contains any fragment in {@link #PROHIBITED_DIAGNOSTIC_MARKERS}
+     */
+    private static void requireDiagnosticsCarryNothingSensitive(AbendDetail abendDetail) {
+        // WHY : Assumptions: the component NAMES are spelled here rather than read reflectively so
+        //       that a rejection can say which of the four was at fault. A reflective loop would say
+        //       only that some component was, which leaves a caller re-reading its own four arguments
+        //       to work out which one it must fix -- on a path that runs when something has already
+        //       gone wrong and attention is elsewhere.
+        rejectSensitiveDiagnostic(abendDetail.abendCode(), "abendDetail.abendCode");
+        rejectSensitiveDiagnostic(abendDetail.abendCulprit(), "abendDetail.abendCulprit");
+        rejectSensitiveDiagnostic(abendDetail.abendReason(), "abendDetail.abendReason");
+        rejectSensitiveDiagnostic(abendDetail.abendMsg(), "abendDetail.abendMsg");
+    }
+
+    /**
+     * Refuses one abend component whose text is identifier-shaped or mentions a credential.
+     *
+     * <p>This method returns nothing; it either accepts the value silently or raises.</p>
+     *
+     * @param value the candidate component text, which {@code AbendDetail} guarantees is non-null
+     * @param componentName the component's own name, used to name the offending component in the
+     *     rejection message and never itself derived from the value
+     * @throws IllegalArgumentException if the value carries a run of
+     *     {@value #SHORTEST_IDENTIFIER_DIGIT_RUN} digits or more, or contains any fragment in
+     *     {@link #PROHIBITED_DIAGNOSTIC_MARKERS}
+     */
+    private static void rejectSensitiveDiagnostic(String value, String componentName) {
+        // WHY : Assumptions: neither rejection message quotes any part of the value, and that follows
+        //       the same minimisation rule requireNonBlank states above -- an exception message is
+        //       copied into logs and incident records by every layer it passes through, so echoing
+        //       the offending text would make the guard itself the disclosure path it exists to
+        //       close. What the message carries instead is enough for a caller to act: which
+        //       component, which rule, and the named entry point that publishes the failure anyway.
+        int digitRun = longestIdentifierShapedDigitRun(value);
+        if (digitRun >= SHORTEST_IDENTIFIER_DIGIT_RUN) {
+            throw new IllegalArgumentException(componentName + " carries a run of " + digitRun
+                    + " digits, which is wide enough to be a cardholder, account or customer "
+                    + "identifier; a batch error event carries no such value. Use "
+                    + "withRedactedDiagnostics for text of unknown provenance");
+        }
+
+        if (mentionsProhibitedMarker(value)) {
+            throw new IllegalArgumentException(componentName + " mentions a credential; a batch "
+                    + "error event carries no such value. Use withRedactedDiagnostics for text of "
+                    + "unknown provenance");
+        }
+    }
+
+    /**
+     * Reports whether text mentions one of the refused credential fragments.
+     *
+     * @param value the text to inspect; must be non-null
+     * @return {@code true} when the text contains any fragment in
+     *     {@link #PROHIBITED_DIAGNOSTIC_MARKERS}, compared case-insensitively; {@code false}
+     *     otherwise
+     */
+    private static boolean mentionsProhibitedMarker(String value) {
+        // WHY : Assumptions: this method is NOT named after what it looks for, and the name is a
+        //       constraint rather than a stylistic choice. BatchErrorEventTest asserts that no method
+        //       declared on this record carries any of the fragments it refuses in its own name --
+        //       "credential", "secret", "password" and the rest -- because a method so named is
+        //       evidence the type handles the value. Naming this guard for the words it hunts would
+        //       therefore fail that assertion, which is why it is named for its answer instead. A
+        //       future author renaming it descriptively will discover the same thing from a red
+        //       build.
+        // WHY : Assumptions: the fold uses the root locale explicitly. A default-locale fold under a
+        //       Turkish locale maps a capital I to a dotless small letter, so "APIKEY" would stop
+        //       matching "apikey" purely because of where the process happened to run.
+        String folded = value.toLowerCase(Locale.ROOT);
+        for (String marker : PROHIBITED_DIAGNOSTIC_MARKERS) {
+            if (folded.contains(marker)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Measures the widest identifier-shaped digit run in text, joining wide groups across separators.
+     *
+     * <p>A run is the total number of digits in a maximal sequence of digit groups joined by single
+     * space or hyphen separators in which every joined group carries at least
+     * {@value #GROUPED_DIGIT_MINIMUM} digits. An unseparated run is the degenerate case of one
+     * group.</p>
+     *
+     * @param value the text to measure; must be non-null
+     * @return the widest such run, or zero when the text carries no digit at all
+     */
+    private static int longestIdentifierShapedDigitRun(String value) {
+        // WHY : Alternatives Considered: a regular expression per identifier width. Rejected because
+        //       it answers only the question it was compiled with, whereas one measured width is
+        //       compared against a named threshold that a later reader can move without rewriting a
+        //       pattern -- and because the grouped form needs a rule about the groups themselves,
+        //       which a fixed pattern would have to encode once per group count.
+        int longest = 0;
+        int index = 0;
+        while (index < value.length()) {
+            if (!Character.isDigit(value.charAt(index))) {
+                index++;
+                continue;
+            }
+            List<Integer> positions = collectIdentifierShapedRun(value, index);
+            longest = Math.max(longest, positions.size());
+            // WHY : Assumptions: the scan resumes one character past the FIRST group rather than past
+            //       the whole sequence, and the redundancy is deliberate. Resuming past the sequence
+            //       would make a later group unreachable as a sequence start, so a text whose second
+            //       and third groups form a wider run than its first would be measured short. Only
+            //       maxima are accumulated, so re-measuring an overlapping sequence cannot inflate
+            //       the answer.
+            while (index < value.length() && Character.isDigit(value.charAt(index))) {
+                index++;
+            }
+        }
+        return longest;
+    }
+
+    /**
+     * Collects the positions of every digit in the identifier-shaped run beginning at an index.
+     *
+     * @param value the text being scanned; must be non-null
+     * @param start the index of the first digit of the run; must address a digit of {@code value}
+     * @return the indices of the digits in the run, in ascending order and never empty
+     */
+    private static List<Integer> collectIdentifierShapedRun(String value, int start) {
+        List<Integer> positions = new ArrayList<>();
+        int cursor = start;
+        while (cursor < value.length() && Character.isDigit(value.charAt(cursor))) {
+            positions.add(cursor);
+            cursor++;
+        }
+
+        int previousGroupLength = positions.size();
+        while (previousGroupLength >= GROUPED_DIGIT_MINIMUM
+                && cursor + 1 < value.length()
+                && isGroupSeparator(value.charAt(cursor))
+                && Character.isDigit(value.charAt(cursor + 1))) {
+            int nextStart = cursor + 1;
+            int nextEnd = nextStart;
+            while (nextEnd < value.length() && Character.isDigit(value.charAt(nextEnd))) {
+                nextEnd++;
+            }
+
+            // WHY : Assumptions: a narrow following group ENDS the sequence rather than being skipped
+            //       over. Skipping it would let two wide groups separated by a two-digit group join
+            //       across it, which is the shape of a date embedded between two amounts and not the
+            //       shape of a grouped identifier.
+            if (nextEnd - nextStart < GROUPED_DIGIT_MINIMUM) {
+                break;
+            }
+
+            for (int position = nextStart; position < nextEnd; position++) {
+                positions.add(position);
+            }
+            previousGroupLength = nextEnd - nextStart;
+            cursor = nextEnd;
+        }
+        return positions;
+    }
+
+    /**
+     * Reports whether a character is one of the separators that may join two wide digit groups.
+     *
+     * @param candidate the character to classify
+     * @return {@code true} for a space or a hyphen-minus; {@code false} for anything else
+     */
+    private static boolean isGroupSeparator(char candidate) {
+        // WHY : Assumptions: the set is exactly space and hyphen, and a full stop, comma, colon and
+        //       solidus are deliberately excluded. Those four are the separators of a decimal amount,
+        //       a thousands-grouped amount, a time and a date respectively, and treating any of them
+        //       as a joiner would make an amount or a timestamp measure as an identifier. Space and
+        //       hyphen are the two forms a card number is written in for a human to read.
+        return candidate == ' ' || candidate == '-';
+    }
+
+    /**
+     * Returns an abend detail with every identifier-shaped run masked and every refused component
+     * replaced.
+     *
+     * @param abendDetail the detail to redact; must be non-null
+     * @return a detail that the canonical constructor accepts, equal to the argument where the
+     *     argument already carried nothing sensitive; never {@code null}
+     */
+    private static AbendDetail redact(AbendDetail abendDetail) {
+        return new AbendDetail(
+                redactComponent(abendDetail.abendCode()),
+                redactComponent(abendDetail.abendCulprit()),
+                redactComponent(abendDetail.abendReason()),
+                redactComponent(abendDetail.abendMsg()));
+    }
+
+    /**
+     * Returns one abend component in a form the canonical constructor accepts.
+     *
+     * @param value the component text, which {@code AbendDetail} guarantees is non-null
+     * @return {@link #REDACTED_DIAGNOSTIC} when the text mentions a credential, otherwise the text
+     *     with every identifier-shaped digit run masked down to its last
+     *     {@code CardNumberMasker.VISIBLE_TAIL_LENGTH} digits; never {@code null}
+     */
+    private static String redactComponent(String value) {
+        // WHY : Assumptions: the credential test runs FIRST and replaces the whole component, because
+        //       masking a digit run inside a sentence that mentions a secret leaves the secret. The
+        //       two rules are therefore ordered rather than combined.
+        if (mentionsProhibitedMarker(value)) {
+            return REDACTED_DIAGNOSTIC;
+        }
+        return maskIdentifierShapedRuns(value);
+    }
+
+    /**
+     * Masks every identifier-shaped digit run in text, leaving each run's last four digits visible.
+     *
+     * <p>Only digit characters are replaced, so the result has exactly the length of the argument and
+     * passes through {@code AbendDetail}'s width conformance unchanged.</p>
+     *
+     * @param value the text to mask; must be non-null
+     * @return the text with every identifier-shaped run masked; never {@code null}
+     */
+    private static String maskIdentifierShapedRuns(String value) {
+        // WHY : Alternatives Considered: reusing com.carddemo.common.security.CardNumberMasker's own
+        //       maskEmbeddedCardNumbers for this. Rejected on two counts, both about its contract
+        //       rather than its quality: its threshold is the sixteen digits of a card number, so it
+        //       passes an eleven-digit account identifier and a nine-digit customer identifier
+        //       straight through, and it measures unseparated runs only, so it passes a card number
+        //       written as four groups of four. Widening that shared method to this sink's threshold
+        //       would change what every other consumer of it masks, which is a far larger change than
+        //       this finding needs. Its two published constants ARE reused, so the mask character and
+        //       the visible tail width stay one decision across the migration rather than two.
+        char[] characters = value.toCharArray();
+        int index = 0;
+        while (index < characters.length) {
+            if (!Character.isDigit(characters[index])) {
+                index++;
+                continue;
+            }
+            List<Integer> positions = collectIdentifierShapedRun(value, index);
+            if (positions.size() >= SHORTEST_IDENTIFIER_DIGIT_RUN) {
+                int maskUntil = positions.size() - CardNumberMasker.VISIBLE_TAIL_LENGTH;
+                for (int ordinal = 0; ordinal < maskUntil; ordinal++) {
+                    characters[positions.get(ordinal)] = CardNumberMasker.MASK_CHARACTER;
+                }
+                index = positions.get(positions.size() - 1) + 1;
+            } else {
+                while (index < characters.length && Character.isDigit(characters[index])) {
+                    index++;
+                }
+            }
+        }
+        return new String(characters);
     }
 
     /**
@@ -514,5 +890,109 @@ public record BatchErrorEvent(
         //       constructor.
         return new BatchErrorEvent(
                 runId, stepName, jobName, returnCode, correlationId, ABSENT_ABEND_DETAIL);
+    }
+
+    /**
+     * Builds an event from diagnostics of unknown provenance, redacting them first.
+     *
+     * <p>Every identifier-shaped digit run in the four abend components is masked down to its last
+     * four digits, and any component mentioning a credential is replaced wholesale by
+     * {@link #REDACTED_DIAGNOSTIC}. The redacted detail is then passed through the canonical
+     * constructor, which validates it exactly as it validates a detail supplied directly, so this
+     * factory relaxes no rule -- it satisfies the rule on the caller's behalf.</p>
+     *
+     * <p>Every other component is validated exactly as the constructor validates it and is NOT
+     * redacted: a run identifier, a step name and a correlation identifier are values this module
+     * generated, so masking them would break the joins they exist to support.</p>
+     *
+     * @param runId the identifier of the batch run the failed step belongs to; must be non-null and
+     *     must contain at least one non-whitespace character
+     * @param stepName the name of the step that failed; must be non-null and must contain at least
+     *     one non-whitespace character
+     * @param jobName the job the failed step belongs to; must be non-null
+     * @param returnCode the completion tier the step reported; must be non-null and must be a tier
+     *     that does not permit the following state to run
+     * @param correlationId the correlation identifier the run's log lines were written under; must be
+     *     non-null and must contain at least one non-whitespace character
+     * @param abendDetail the diagnostics to redact and carry; must be non-null, and may carry text of
+     *     any provenance
+     * @return an event describing the failure, carrying the redacted diagnostics; never {@code null}
+     * @throws IllegalArgumentException if any argument is {@code null}, if {@code runId},
+     *     {@code stepName} or {@code correlationId} is blank, or if {@code returnCode} is a tier that
+     *     permits the following state to run
+     */
+    public static BatchErrorEvent withRedactedDiagnostics(
+            String runId,
+            String stepName,
+            BatchJobName jobName,
+            BatchReturnCode returnCode,
+            String correlationId,
+            AbendDetail abendDetail) {
+        // WHY : Trade-offs: this factory exists so that the constructor can refuse rather than
+        //       repair, and the cost is one more entry point on a type whose surface is otherwise
+        //       minimal. It is paid because the alternative to a named recovery path is each
+        //       producer inventing one -- one catching the rejection and republishing without
+        //       diagnostics, another swallowing it and publishing nothing, a third masking to its
+        //       own threshold -- and the third of those is how a second, weaker masking rule enters
+        //       the codebase. Naming the decision once means a producer that cannot vouch for its
+        //       text has exactly one thing to do with it.
+        // WHY : Assumptions: this method does NOT catch the constructor's rejection and retry. The
+        //       redaction is written so that its output always satisfies the guard -- masking
+        //       leaves at most four consecutive digits per run, below the threshold, and a
+        //       credential-marked component is replaced entirely -- so a rejection reaching a
+        //       caller from here would mean the two are out of step, and it should surface rather
+        //       than be absorbed. The paired test asserts that property against adversarial input
+        //       rather than trusting this paragraph.
+        if (abendDetail == null) {
+            throw new IllegalArgumentException("abendDetail is required on a batch error event; use "
+                    + "ABSENT_ABEND_DETAIL where the failure has no abend analogue");
+        }
+        return new BatchErrorEvent(
+                runId, stepName, jobName, returnCode, correlationId, redact(abendDetail));
+    }
+
+    /**
+     * Renders this event for a log line, carrying a closed set of values and no free text.
+     *
+     * <p>The rendering carries the run identifier, the step name, the two enumerated tokens, the
+     * correlation identifier and the abend code and culprit. It deliberately omits the abend reason
+     * and message, which are the two free-text components; a reader needing them reads
+     * {@link #abendDetail()} or the published payload, both of which carry them in full.</p>
+     *
+     * <p>This method accepts no parameters.</p>
+     *
+     * @return a single-line rendering of this event carrying no free-text component; never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+        // WHY : Refactoring Rationale: the inherited record rendering emits EVERY component,
+        //       including the abend detail's two wide free-text components, and this type's own
+        //       documentation used to claim that was safe. The claim rested entirely on callers
+        //       observing a prose constraint. The constructor now enforces that constraint, but a
+        //       rendering whose safety depends on a heuristic is only as complete as the heuristic
+        //       -- identifier shape and a credential vocabulary are recognisable, a name or an
+        //       electronic mail address is not. This override needs no heuristic to be correct:
+        //       there is no input a caller can supply that makes it emit a free-text component,
+        //       because it does not read one.
+        // WHY : Alternatives Considered: rendering the reason and message through the same redaction
+        //       the factory applies, so the line stayed faithful while being safe. Rejected because
+        //       redaction is a heuristic too, so the resulting line would carry exactly the residual
+        //       risk this override exists to remove, in exchange for a convenience the accessor
+        //       already provides.
+        // WHY : Assumptions: overriding toString does not disturb value equality. The inherited
+        //       equals and hashCode are generated from the components and are untouched here, so
+        //       two events agreeing on all six components remain equal and remain interchangeable
+        //       -- which is what the type's equality paragraph promises. Only the rendering is
+        //       narrowed.
+        return "BatchErrorEvent[runId=" + runId
+                + ", stepName=" + stepName
+                + ", jobName=" + jobName
+                + ", returnCode=" + returnCode
+                + ", correlationId=" + correlationId
+                + ", abendDetail.abendCode=" + abendDetail.abendCode()
+                + ", abendDetail.abendCulprit=" + abendDetail.abendCulprit()
+                + ", abendDetail.abendReason=<omitted>"
+                + ", abendDetail.abendMsg=<omitted>]";
     }
 }

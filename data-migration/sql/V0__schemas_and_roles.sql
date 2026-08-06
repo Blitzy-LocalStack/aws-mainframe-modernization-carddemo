@@ -965,6 +965,60 @@ ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reporting_owner IN SCHEMA reporting
 
 GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO carddemo_reporting;
 
+-- WHY : Assumptions: the two statements above convey SELECT on every relation in
+-- the reporting schema, and in PostgreSQL "ON TABLES" covers TABLES AND VIEWS
+-- alike. That is exactly what makes the masking views readable without naming
+-- each one -- and it is also why the ONE relation in that schema which must NOT
+-- be readable by the service role has to be excluded right here, immediately
+-- after the grant that would otherwise convey it.
+--
+-- reporting.card_grouping_key holds the secret the statement projection mixes
+-- into its per-card grouping token. That token exists so a statement can be
+-- grouped by card while the card number itself stays masked, and it is only
+-- non-invertible for as long as the secret is unavailable to whoever holds the
+-- token: the card-number space is small enough that an UNKEYED digest of a
+-- sixteen-digit number is recovered by exhaustive search, which is precisely the
+-- weakness this key removes. A view body evaluated as its owner can read the key;
+-- the reporting login must not.
+--
+-- WHY : Trade-offs: this REVOKE belongs in this file rather than only beside the
+-- table it protects, and the placement is the whole point. The documented
+-- bootstrap sequence RE-RUNS this script after the per-service migrations have
+-- created their objects, so a revoke issued only in
+-- data-migration/sql/V1__reporting_views.sql would be silently undone by the very
+-- re-run the sequence prescribes -- the blanket grant above would hand the key
+-- back, and nothing would report it. That file revokes at creation time as well,
+-- and the two are not redundant: it closes the window opened by the default
+-- privilege above, and this one closes the window opened by the blanket grant.
+-- The guard is the to_regclass test, for the same reason it guards the account
+-- grant earlier in this file: on a first bootstrap the table does not exist yet.
+--
+-- Alternatives Considered: withdrawing the default privilege for TABLES and
+-- re-granting it for views only, so that no key table could ever be granted
+-- automatically. Rejected because PostgreSQL default privileges cannot
+-- distinguish a view from a table -- both are "TABLES" -- so the withdraw and the
+-- re-grant cancel out exactly and leave the privilege they started from, while
+-- reading as though they had achieved something. Revoking the one named relation
+-- is the statement that does the work.
+DO $$
+BEGIN
+    IF to_regclass('reporting.card_grouping_key') IS NOT NULL THEN
+        REVOKE ALL ON reporting.card_grouping_key FROM carddemo_reporting;
+    ELSE
+        -- WHY : Trade-offs: a NOTICE rather than an EXCEPTION, matching the
+        -- account grant above. On a first bootstrap the reporting views have not
+        -- been created yet, so the key table is legitimately absent and raising
+        -- here would make the documented sequence fail. The notice is silent once
+        -- the table exists, so a clean re-run confirms the key is private.
+        RAISE NOTICE
+            'reporting.card_grouping_key does not exist yet, so no revoke was '
+            'needed. It is created by data-migration/sql/V1__reporting_views.sql; '
+            're-run this script afterwards so the grouping key is withheld from '
+            'carddemo_reporting.';
+    END IF;
+END
+$$;
+
 
 -- =============================================================================
 -- 6. Credential application, and the two assertions that must precede it

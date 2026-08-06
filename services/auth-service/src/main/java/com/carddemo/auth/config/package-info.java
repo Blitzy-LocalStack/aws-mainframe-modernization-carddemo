@@ -59,11 +59,19 @@
  * {@code com.carddemo.auth}, while every shared kernel type lives under {@code com.carddemo.common},
  * outside that root. Shared components are therefore never discovered automatically; each is
  * registered deliberately. {@code SecurityConfig} registers
- * {@code com.carddemo.common.web.CorrelationIdFilter} and
- * {@code com.carddemo.common.security.JwtRoleConverter}, because both take effect as part of the
- * request pipeline it defines. The remainder of the shared kernel - the error shapes, the page
- * envelope, the timestamp formatter, the validation and codec helpers - needs no registration and is
- * used as plain imports.</p>
+ * {@code com.carddemo.common.security.JwtRoleConverter} and
+ * {@code com.carddemo.common.security.CognitoAccessTokenValidator}, because both take effect as part
+ * of the request pipeline it defines and the second cannot be contributed from outside the decoder it
+ * is installed into. The remainder of the shared kernel - the error shapes, the page envelope, the
+ * timestamp formatter, the validation and codec helpers - needs no registration and is used as plain
+ * imports.</p>
+ *
+ * <p>Refactoring Rationale: this charter previously listed
+ * {@code com.carddemo.common.web.CorrelationIdFilter} among the components {@code SecurityConfig}
+ * registers. It no longer does, and the reason is recorded on that class: the shared kernel's own
+ * auto-configuration already registers the filter over every request path, so a bean here produced a
+ * second registration of one filter. The filter's own once-per-request guard made the duplicate
+ * invisible rather than harmful, which is exactly why it needed removing deliberately.</p>
  *
  * <h2>Labelling of the rationale above</h2>
  *

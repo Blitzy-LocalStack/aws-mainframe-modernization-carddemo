@@ -14,10 +14,33 @@
 > disagree about behaviour, the baseline is right and this record is wrong.
 
 - **Status:** Accepted
-- **Decision:** Run the eight service deployables as **ECS Fargate** services,
-  run every batch step as a **Step-Functions-invoked Fargate task**, and reserve
-  **Lambda for glue only** — three of the eleven states in the nightly chain,
-  and nothing else.
+- **Decision:** Run the **seven online deployables** as **ECS Fargate services**,
+  run every batch step as a **Step-Functions-invoked Fargate task** from a task
+  definition that has **no long-running service** behind it, and reserve **Lambda
+  for glue only**. Three of the eleven states in the nightly chain are Lambda
+  invocations; a small number of operational functions outside the chain are too,
+  and all of them are enumerated in
+  [The glue tier is bounded by role, not by count](#the-glue-tier-is-bounded-by-role-not-by-count)
+  so that "glue only" stays a checkable claim. One platform, three provisioning
+  shapes.
+- **Refactoring Rationale.** An earlier revision of this record said "the eight
+  service deployables" and reasoned about eight always-on tiers throughout. That
+  did not match what the environment roots compose, and the mismatch inflated
+  every count and every cost figure that followed from it. What the roots
+  actually build is set out in [Decision](#decision) below and read from
+  `local.online_services` and `local.workloads` in
+  [`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf): **nine** workloads
+  receive a task definition, **seven** of them receive a service, a target group
+  and autoscaling, and **two** — batch-service and the data-migration ETL — receive
+  a task definition and nothing else, because nothing about them runs between
+  invocations.
+- **Refactoring Rationale.** The same bullet also used to bound the glue tier at
+  "three of the eleven states, and nothing else". The inventory further down
+  contradicts it: two of the five functions are invoked from outside the chain
+  altogether and two of the in-chain functions carry a second duty, so a count of
+  chain states is not a count of functions. The bound is therefore stated by ROLE
+  and evidenced by that inventory, which is a claim a reader can check, rather
+  than by a number that the record itself refutes.
 - **Scope of this record.** The compute substrate, and nothing else. The
   language and runtime belong to [ADR-001](ADR-001-language-and-runtime.md), the
   datastore to [ADR-003](ADR-003-datastore-targets.md), the queues to
@@ -45,16 +68,28 @@ transactions run inside a single CICS region: one address space, and therefore
 one unit of deployment, one unit of failure and one unit of capacity for all of
 them at once.
 
-The migration decomposes that into eight independently deployable services, and
-which transaction lands in which service is
-[ADR-007](ADR-007-service-boundaries.md)'s decision rather than this one. What
-matters here is the consequence for compute: the target needs a substrate on
-which **eight** deployables can be sized, scaled, deployed and failed
-independently, where the baseline needed a substrate for one.
+The migration decomposes that into eight bounded contexts, and which transaction
+lands in which context is [ADR-007](ADR-007-service-boundaries.md)'s decision
+rather than this one. What matters here is the consequence for compute, and it is
+not simply "eight of something": **seven** of those contexts answer HTTP requests
+and therefore need a substrate on which a long-lived process can be sized,
+scaled, deployed and failed independently. The eighth, the batch context, answers
+no request at all — it runs when the nightly chain invokes it and does not exist
+between invocations — so it needs the same substrate in a different shape, which
+is exactly the distinction Shape 2 draws.
+
+Assumptions: the seven are auth, account, card, transaction, reference,
+authorization and reporting, which is `local.online_services` in
+[`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf) verbatim, and each is
+reached through an ALB path pattern that root declares beside it. Reporting is
+one of the seven and not a batch tier: it publishes report and statement
+endpoints, and it *also* supplies the image two states of the nightly chain run
+as a task — one image, two provisioning shapes, which is why the count of
+services and the count of images are different numbers.
 
 The programs themselves are long-lived processes serving short interactions.
-That is the property the compute model has to accommodate, and it is the
-property the [Rationale](#rationale) turns on.
+That is the property the compute model has to accommodate for those seven, and it
+is the property the [Rationale](#rationale) turns on.
 
 ### Shape 2 — a batch step is a process that runs to completion and reports a code
 
@@ -79,7 +114,14 @@ Two of the baseline's operational jobs bracket the batch window rather than
 doing any of its work — quiescing online writes before it and resuming them
 after — and a third rebuilds an index. In the target these become three states
 that set a flag, run a maintenance statement, and clear a flag. They hold no
-connection pool, process no records, and finish in moments.
+connection pool and process no records: two of them write a single parameter and
+the third issues a single statement, so their work does not scale with the record
+volume the chain is moving. No duration is claimed for them here — see
+[Accepted limitation](#accepted-limitation--this-record-chooses-a-platform-not-a-running-system)
+— and one of them genuinely is not instantaneous in principle: `ANALYZE` takes as
+long as the database takes, which is why that function carries a 300-second
+timeout rather than a token one. What matters for the shape is that the work is a
+single call and not a volume of records.
 
 Recognising this third shape as distinct is what keeps the decision from
 collapsing into a single answer applied uniformly.
@@ -116,7 +158,9 @@ idempotence belongs to [ADR-009](ADR-009-iac-tool.md) and is not restated here.
 
 ### The question this record answers
 
-Given three workload shapes and eight deployables where there was one region:
+Given three workload shapes and nine container workloads where there was one
+region — seven of them answering requests continuously and two of them existing
+only while a batch step runs:
 **on what substrate does each shape execute, and what is each charged on?**
 
 ```mermaid
@@ -128,16 +172,19 @@ graph LR
     end
 
     subgraph TGT["Linux and AWS compute — authored beside it"]
-        S["8 service deployables<br/>long-lived JVM, warm pool"] --> F["ECS Fargate service<br/>rolling deployment"]
-        B["Batch steps<br/>run to completion, exit code"] --> FT["Fargate task<br/>ecs:runTask.sync"]
+        S["7 online deployables<br/>long-lived JVM, warm pool"] --> F["ECS Fargate SERVICE<br/>target group, autoscaling,<br/>rolling deployment"]
+        B["Batch + ETL images<br/>run to completion, exit code"] --> FT["Fargate TASK, no service<br/>ecs:runTask.sync"]
         G["3 glue states<br/>flag set, analyze, flag clear"] --> L["Lambda"]
         F --> IMG[("Container images<br/>private registry")]
         FT --> IMG
     end
 
     REF -.->|"workload shapes carried across;<br/>baseline keeps running unchanged"| TGT
-%% Three shapes, three models. The one-way arrow is deliberate: nothing in the
-%% target writes back into the left-hand side, and the left-hand side keeps running.
+%% Three shapes, three models. The eight deployables split 7/1 across the first
+%% two rows -- the batch context has a task definition and no long-running
+%% service -- so the deployable count and the service count are different counts.
+%% The one-way arrow is deliberate: nothing in the target writes back into the
+%% left-hand side, and the left-hand side keeps running.
 ```
 
 ## Decision
@@ -148,12 +195,26 @@ two directions.
 
 | Tier | Workload shape | Compute model | Charged on |
 |---|---|---|---|
-| The eight service deployables | Long-lived process, short request/response interactions, holds a connection pool | **ECS Fargate service**, rolling deployment, autoscaled between a floor and a bounded ceiling | vCPU-seconds and GiB-seconds **for as long as a task runs** |
-| Every batch step | Runs to completion, is handed arguments, reports an exit status | **Fargate task** invoked by the state machine through the synchronous run-task integration | The same dimensions, **only for the step's own duration** |
-| Three glue states of eleven | Short, stateless, no pool, no records | **Lambda** | Per request and per GB-second of execution |
+| The seven online deployables — auth, account, card, transaction, reference, authorization, reporting | Long-lived process, short request/response interactions, holds a connection pool | **ECS Fargate service** with a target group and autoscaling, rolling deployment, autoscaled between a floor and a bounded ceiling | vCPU-seconds and GiB-seconds **for as long as a task runs** |
+| Every batch step — the batch-service image, the data-migration ETL image, and the reporting image in its task shape | Runs to completion, is handed arguments, reports an exit status | **Fargate task definition with no service behind it**, invoked by the state machine through the synchronous run-task integration | The same dimensions, **only for the step's own duration** |
+| Glue and operational tasks — three of the eleven chain states, and the out-of-chain functions the inventory below names | Short, stateless, no pool, no records | **Lambda** | Per request and per GB-second of execution |
 
-The three glue states are named rather than described, so that "glue only" is a
-bounded claim and not a loophole:
+Assumptions: the second row is a *provisioning* distinction and not a different
+platform. One reusable module builds every workload, and two of its inputs decide
+the shape: `create_service` and `attach_load_balancer` are both set from
+`each.value.online` in [`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf)
+and identically in [`infra/envs/prod/main.tf`](../../infra/envs/prod/main.tf), and
+in [`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf)
+that one flag gates the `aws_ecs_service`, its load-balancer target group and its
+autoscaling target and policy together. So the two offline workloads get a task
+definition, a task role, a log group and an image, and get no service, no target
+group and no autoscaling. This is why the tier boundary is legible in a plan
+rather than only in prose: the resources themselves are absent.
+
+### The glue tier is bounded by role, not by count
+
+Every Lambda workload is named, so that "glue only" is a bounded claim and not a
+loophole. Inside the nightly chain,
 [`infra/modules/step-functions-batch/main.tf`](../../infra/modules/step-functions-batch/main.tf)
 declares state **1 `QuiesceOnlineWrites`**, state **10 `AnalyzeTables`** and
 state **11 `ResumeOnlineWrites`** as Lambda invocations, and the module's
@@ -161,6 +222,38 @@ state **11 `ResumeOnlineWrites`** as Lambda invocations, and the module's
 three against the baseline jobs whose behaviour they carry. Every other state in
 the chain — the ones that stage datasets, post transactions, accrue interest,
 back up, combine, generate statements and generate reports — is a Fargate task.
+
+The complete inventory is five functions carrying six duties. Two of the five are
+invoked from outside the chain entirely, and two of the in-chain functions carry a
+second duty, so a count of chain states is not a count of functions:
+
+| Function | Declared in | Duty |
+|---|---|---|
+| `quiesce` | each environment root | Chain state 1 — sets the read-only flag |
+| `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 11 |
+| `database_admin` | each environment root | Chain state 10 — runs `ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
+| `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
+| `rotation` | [`infra/modules/secrets`](../../infra/modules/secrets) | Not a chain state — Secrets Manager credential rotation |
+
+Two clarifications the inventory earns. The maintenance statement is plain
+`ANALYZE`, not `VACUUM ANALYZE`: the Data API wraps a statement in a transaction
+context and PostgreSQL refuses `VACUUM` there, so the handler runs `ANALYZE`
+alone and records why at its point of use. And `seed_user_bootstrap.py` under the
+Cognito module is **not** a Lambda despite the shape of its name — it runs as a
+local provisioner at apply time — so it is absent from the table on purpose.
+
+What makes the claim hold is the role boundary, not the number: not one of these
+five holds a connection pool for request serving, and not one of them carries a
+batch step's work. That is the whole content of "glue only".
+
+Refactoring Rationale: an earlier revision of this record said "three of the
+eleven states in the nightly chain, and nothing else". The clause was false in two
+independent ways — two functions run outside the chain, and two in-chain
+functions have a second duty — so a reader auditing the decision against the
+Terraform would have found five functions where the record promised three and
+been right to call it a loophole. The count is replaced by an enumeration because
+a count goes stale the moment an operational function is added, whereas the role
+boundary does not.
 The chain's shape, its condition-code handling and its restart behaviour are
 [ADR-005](ADR-005-batch-orchestration.md)'s to record.
 
@@ -240,8 +333,8 @@ for the services and Jobs for the batch steps — under one API.
 
 Trade-offs: this is an operational-burden judgement scaled to the component
 count, and it is not a criticism of Kubernetes, whose capabilities exceed what
-this system needs rather than fall short of it. The system is eight service
-deployables and one nightly chain. Adopting Kubernetes would add a control plane
+this system needs rather than fall short of it. The system is seven online
+services, two invoke-only images and one nightly chain. Adopting Kubernetes would add a control plane
 to run, a cluster version and add-on lifecycle to track, and a manifest and
 scheduling discipline for engineers to hold, in exchange for capabilities —
 custom scheduling, service meshes, operators, portable workload definitions —
@@ -266,7 +359,7 @@ stated platform limit; none of them is a preference.
 
 ### 1. The workload holds a connection pool, and a task process can hold one
 
-Every one of the eight services reads and writes a relational database on
+Every one of the seven online services reads and writes a relational database on
 essentially every request. Establishing a database connection is expensive
 relative to the work a single request does, which is why the services pool
 connections: the pool is built once when the task starts and reused across every
@@ -278,8 +371,9 @@ open for the life of the region, so no transaction pays a per-interaction cost
 to reach its data. A Fargate task holds its JDBC pool open for the life of the
 task and reproduces that property. The pools are sized explicitly rather than
 left at a default, per service and per environment: the base configuration sets
-`maximum-pool-size: 10`, the development profile lowers it, and the production
-profile raises it — for example
+`maximum-pool-size: 10` for the six request-path services (4 for reporting and
+for batch, whose work is job-shaped), the development profile lowers it, and the
+production profile raises it — for example
 [`services/account-service/src/main/resources/application.yml`](../../services/account-service/src/main/resources/application.yml)
 against its `application-dev.yml` and `application-prod.yml` siblings.
 
@@ -354,21 +448,43 @@ the state's own result. That integration is declared in
 and its per-state retry, catch and timeout behaviour is
 [ADR-005](ADR-005-batch-orchestration.md)'s to record.
 
-### 4. Health is a checkable endpoint, so an unhealthy task is replaced without an operator
+### 4. Health is a checkable endpoint, and for the online tier that endpoint drives replacement
 
-Each service exposes an actuator health endpoint, and that one endpoint is
-consumed twice: by the load balancer's target group, which stops routing to a
-task that fails it, and by the image's own `HEALTHCHECK`, which lets the
-container runtime report the task unhealthy so the service replaces it. The
-authored images do exactly that — for example
-[`services/batch-service/Dockerfile`](../../services/batch-service/Dockerfile)
-carries `HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3`
-against `http://127.0.0.1:8080/actuator/health`, and runs as a non-root user.
+Each service exposes an actuator health endpoint. For the **seven online
+services** it is the **load balancer's target group** that consumes it: a task
+failing the configured threshold is taken out of rotation and, because the target
+group's health is the service's health, replaced. That health block is declared in
+[`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf)
+and is created only when a load balancer is attached, which is the same condition
+that creates the service at all.
 
-Assumptions: the probe is only as useful as its reach. A liveness-only response
-would report a task healthy while its database connectivity was gone, so the
-probe is datasource-aware — which is what lets a hung dependency surface as an
-unhealthy task rather than as a task that accepts requests it cannot serve.
+Refactoring Rationale: an earlier revision of this fact said the image's own
+`HEALTHCHECK` was a **second ECS health signal** that caused the service to
+replace a task. That was wrong on the mechanism. ECS acts on a **task-definition**
+`healthCheck`, and this module deliberately declares none — the rationale is
+recorded at the container definition itself: the command a container health check
+runs must exist inside the image, only each Dockerfile knows what its pinned base
+image ships, and a headless Corretto runtime carries no `curl`. So the authored
+`HEALTHCHECK` instructions — for example
+[`services/batch-service/Dockerfile`](../../services/batch-service/Dockerfile),
+`HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3` against
+`http://127.0.0.1:8080/actuator/health` — are **image metadata**. They are honoured
+by a container runtime that reads them, which is what makes them useful for a local
+`docker run` and for any registry or scanner that reports image health, and they are
+**not** part of ECS's replacement decision.
+
+Assumptions: the two offline workloads therefore have no health-driven replacement
+at all, and need none. They are not load-balanced, so there is no target group to
+report to, and they are not services, so there is nothing to replace: a batch task
+that hangs is bounded by its state's own `TimeoutSeconds` in the state machine,
+whose catch handler notifies and fails the chain. Health for that tier is the
+step's outcome, not a probe.
+
+Assumptions: for the online tier the probe is only as useful as its reach. A
+liveness-only response would report a task healthy while its database connectivity
+was gone, so the probe is datasource-aware — which is what lets a hung dependency
+surface as an unhealthy target rather than as a task that accepts requests it
+cannot serve.
 
 ### 5. Deployment is rolling replacement, and that is the whole of it
 
@@ -410,11 +526,18 @@ on one platform, which is the point of this section.
 
 ### The always-on tier: task count times task size times hours running
 
-For the eight services the third driver is pinned — they run continuously — so
-cost reduces to `task count × task size × hours running`. Those are therefore
-exactly the levers that separate the environments, and per AAP §0.4.1.6 the two
-environment roots differ **only** in sizing and retention, never in topology: an
-operator reading either root sees the same resources.
+For the **seven online services** the third driver is pinned — they run
+continuously — so cost reduces to `task count × task size × hours running`. Those
+are therefore exactly the levers that separate the environments, and per AAP
+§0.4.1.6 the two environment roots differ **only** in sizing and retention, never
+in topology: an operator reading either root sees the same resources.
+
+Assumptions: seven is the number this arithmetic is multiplied by, and the two
+offline workloads are excluded from it because nothing of theirs runs between
+invocations — a task definition is a description, and a description is not
+charged. Including them would overstate the always-on bill by two ninths, and it
+would misplace their cost as well as its size: batch and ETL compute belongs to
+the batch tier below, where it is charged by the step.
 
 The committed values make the lever concrete:
 
@@ -442,16 +565,40 @@ dimensions — but only for its own duration. A nightly chain's compute cost is
 bounded by the chain's own runtime, and between chains it is nil. This is the
 single largest cost difference between the accepted option and Option 3: a fleet
 provisioned to be large enough for the nightly peak is paid for during the
-twenty-odd hours it is not being used.
+hours it is not being used, whereas a per-step task is charged only while its own
+step runs. How large that gap is depends on the chain's runtime, which this record
+does not measure and therefore does not quantify; the direction of the difference
+follows from the charge shape alone, which is all the comparison needs.
 
-### The glue tier: per request, and negligible at three states
+### The glue tier: per request, on a cadence measured in invocations per day
 
-Functions are charged per request and per GB-second of execution. For three
-states that set a flag, run one maintenance statement and clear a flag, the
-per-request term rounds to nothing on a nightly cadence. It is worth naming only
-because the arithmetic is what makes "glue" the honest description: were those
-states doing real work, the per-invocation dimension would stop being the
-cheapest way to buy them.
+Functions are charged per request and per GB-second of execution. Of those two
+terms only the first can be stated here without a measurement, and it can be
+stated exactly, because an invocation count is a property of the design rather
+than of observed load: the three chain states run once per nightly execution, the
+watchdog fires only when an execution ends abnormally, credential rotation runs on
+its configured schedule, and dataset retention runs once per object created. That
+is single-digit invocations per day in normal operation, so the per-request term is
+negligible by arithmetic on the count and not by assumption.
+
+The GB-second term is the product of memory and duration, and **duration is not
+measured anywhere in this record** — see
+[Accepted limitation](#accepted-limitation--this-record-chooses-a-platform-not-a-running-system).
+No figure is offered for it. Naming the split is the point: what makes "glue" the
+honest description is that these workloads are bought per invocation on a
+low-frequency cadence, and were they doing real work the per-invocation dimension
+would stop being the cheapest way to buy them.
+
+Refactoring Rationale: the three sentences corrected in this section and the two
+above it previously asserted that the glue states "finish in moments", that a
+provisioned fleet idles for "twenty-odd hours", and that the per-request term
+"rounds to nothing" — while this same record states that no benchmark or load
+test has been performed and that it makes no latency or throughput claim. Those
+are duration claims, so the record contradicted its own caveat. Each is now either
+grounded in something knowable without measurement — a billing dimension, an
+invocation count, the number of calls a handler makes — or explicitly declined.
+The claims were not merely deleted, because the cost reasoning they supported is
+required of this record and remains sound on the mechanical grounds now given.
 
 ### What the rejected options would have cost instead
 
@@ -469,8 +616,9 @@ cheapest way to buy them.
   hours that the accepted option does not spend.
 - **Option 4.** A managed control plane is charged continuously per cluster,
   independent of the workload on it, and the cluster and add-on lifecycle is
-  again engineering hours. For eight services and one nightly chain both terms
-  buy capability the workload has no requirement for.
+  again engineering hours. For seven online services, two invoke-only images and
+  one nightly chain both terms buy capability the workload has no requirement
+  for.
 
 ### The guiding principle, and the one place it applied here
 
@@ -538,12 +686,69 @@ turn a partial problem into a total one.
 
 Mitigation is on both terms, and both are committed rather than intended. The
 pool size is set explicitly per service and per profile rather than left at a
-framework default — `maximum-pool-size: 10` in the base configuration, lower in
-`dev`, higher in `prod`. And the task count has a ceiling:
-[`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf)
-defines `min_capacity` at 2 and `max_capacity` at 6, the latter documented in the
-module as bounding the blast radius of a scale-out driven by a fault rather than
-by demand.
+framework default — `maximum-pool-size: 10` in the base configuration for the six
+request-path services and 4 for reporting and for batch, lowered again in `dev`
+(2 to 5 across the services) and raised in `prod` (8 to 20). And the task count
+has a ceiling.
+
+The ceiling that actually applies is set in the environment roots, **not** by the
+module default, and the difference matters enough to state both:
+
+| Autoscaling bound | Module *default* | `dev` (effective) | `prod` (effective) |
+|---|---|---|---|
+| `min_capacity` | 2 | **1** | **2** |
+| `max_capacity` | 6 | **2** | **4** |
+
+The module's own numbers live in
+[`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf),
+which documents `max_capacity` as bounding the blast radius of a scale-out driven
+by a fault rather than by demand. They are **defaults only**, and no environment
+uses them: both roots pass the bounds explicitly, deriving them from the single
+lever that already separates the environments —
+`min_capacity = var.ecs_desired_count` and
+`max_capacity = max(var.ecs_desired_count, var.ecs_desired_count * 2)` in
+[`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf) and
+[`infra/envs/prod/main.tf`](../../infra/envs/prod/main.tf), over the
+`ecs_desired_count` of 1 in `dev` and 2 in `prod` recorded in
+[Cost Implications](#the-always-on-tier-task-count-times-task-size-times-hours-running).
+The defaults are retained in the table rather than dropped, because a root that
+omitted the override would get them, so they remain the fallback a reader needs
+to know.
+
+Autoscaling is additionally enabled only for the online services; the batch and
+data-migration workloads are pinned at a single task with autoscaling off, so the
+ceiling above bounds the request-serving tier and nothing else.
+
+The products the database has to accept therefore are the following, taking each
+service's `prod` pool against the effective `prod` ceiling of 4 tasks and each
+`dev` pool against the effective `dev` ceiling of 2:
+
+| Service | `dev` pool × 2 | `prod` pool × 4 |
+|---|---|---|
+| auth | 5 × 2 = **10** | 20 × 4 = **80** |
+| account | 4 × 2 = 8 | 20 × 4 = **80** |
+| card | 3 × 2 = 6 | 20 × 4 = **80** |
+| reference | 4 × 2 = 8 | 20 × 4 = **80** |
+| authorization | 4 × 2 = 8 | 20 × 4 = **80** |
+| transaction | 4 × 2 = 8 | 16 × 4 = 64 |
+| reporting | 2 × 2 = 4 | 8 × 4 = 32 |
+| batch (1 task, no autoscaling) | 4 × 1 = 4 | 4 × 1 = 4 |
+| **Tier total** | **56** | **500** |
+
+Refactoring Rationale: an earlier revision quoted the module defaults as though
+they were the deployed bounds. That is an error that stays invisible until it
+matters — it overstates `dev`'s floor and both ceilings, so a reader sizing the
+database against this record, or carrying a figure into an
+[ADR-003](ADR-003-datastore-targets.md) capacity conversation, would have
+provisioned for a scale-out that cannot happen while still not knowing what the
+real one is. A later revision corrected the bounds but quoted only the single
+largest product — 10 in `dev` and 80 in `prod` — and the per-service products,
+which are the numbers that actually have to fit together, were absent altogether.
+Trade-offs: naming the module value and both effective values in one table, and
+then every service's product in a second, is more numbers than a bound and a
+maximum would be. That is the cost of keeping the module's own contract visible
+without letting it stand in for the deployment, and of making the tier total
+addable rather than asserted.
 
 Assumptions: the product of those two terms has to fit what the database will
 accept, and the database's capacity is [ADR-003](ADR-003-datastore-targets.md)'s
@@ -602,20 +807,24 @@ that looks reasonable until the fact against it is known.
 
 ### 1. Container base image pin
 
-Every deployable is pinned to an exact base image tag rather than a floating one,
-and the authored Dockerfiles additionally pin the immutable content digest
-alongside the tag, so a rebuild resolves the same bytes even if a tag is
-republished.
+Every base image named below is pinned to an exact tag rather than a floating
+one, and each of the **nine Dockerfiles that exist today** additionally pins the
+immutable content digest alongside its tag, so a rebuild resolves the same bytes
+even if a tag is republished. The **tenth** image — the browser SPA — has no
+Dockerfile authored yet, so for that one the two rows below record the tags the
+image will be built from rather than a pin any file enforces; the paragraph after
+the table states exactly where that stands and why it is not counted.
 
 | Stage | Image | Used by |
 |---|---|---|
 | Java runtime | `public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless` | The eight service images |
 | Java build | `maven:3.9.16-amazoncorretto-21-al2023` | The build stage of the same eight |
-| SPA build | `node:22.23.1-alpine` | The user-interface image |
-| SPA runtime | `nginx:1.30.4-alpine` | The user-interface image |
+| SPA build | `node:22.23.1-alpine` | The user-interface image — **Dockerfile not yet authored**, see below |
+| SPA runtime | `nginx:1.30.4-alpine` | The user-interface image — **Dockerfile not yet authored**, see below |
 | ETL | `python:3.13.14-slim-trixie` | The data-migration image |
 
-Four properties of that table are decisions rather than defaults.
+Four properties of that table are decisions rather than defaults, and one row
+of it is a forward reference rather than an enforced pin.
 
 **There is no Alpine variant of the Corretto image, and assuming one costs a
 build.** Alternatives Considered: `21-alpine` is the tag a reader would reach for
@@ -652,10 +861,40 @@ not raise an error — it produces a plausible number that is wrong. The
 per-field decoding rule this depends on belongs to
 [`data-migration/README.md`](../../data-migration/README.md).
 
-The user-interface Dockerfile is referenced above by the tags its configuration
-already names — `ui/nginx.conf` records the nginx tag and `ui/tsconfig.json`
-records the Node tag — and `ui/Dockerfile` is written here as a plain path rather
-than a link because that file does not exist yet.
+**The tenth Dockerfile does not exist yet, and this record scopes its claim to
+the nine that do rather than counting it.** All nine are authored and every one
+carries a digest beside its tag: the eight service images —
+[`services/auth-service/Dockerfile`](../../services/auth-service/Dockerfile) and
+its seven siblings, each pinning both the Maven build tag and the Corretto
+runtime tag — and the ETL image
+([`data-migration/Dockerfile`](../../data-migration/Dockerfile)), which pins its
+one tag in both stages. `ui/Dockerfile` is written here as a plain path rather
+than a link because there is no file to link to. Its two tags are nevertheless
+already committed elsewhere, which is why the table can name them: `ui/nginx.conf`
+records `nginx:1.30.4-alpine` and `ui/tsconfig.json` records
+`node:22.23.1-alpine`, and
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) already
+lists `ui/Dockerfile` in the build table it iterates — so the path used here is
+the path that file will occupy, not a guess at one.
+
+Refactoring Rationale: the claim opening this section used to be universal —
+every deployable pinned, the Dockerfiles pinning the digest — while this
+paragraph simultaneously admitted one of the ten was absent. A record cannot
+assert a property of ten artifacts and then except one of them four paragraphs
+later: a reader auditing digest pinning takes the count on trust, finds the gap
+independently, and then has to re-verify everything else the section says.
+Scoping the claim to nine and naming the tenth explicitly makes the audit finish
+where it starts.
+
+Trade-offs: the alternative was to author `ui/Dockerfile` here so that the
+universal claim became true. It was declined because the user-interface source
+tree is still partial — `ui/src` holds the application shell, the routing and the
+three card screens, and `npm run build` does not yet succeed across it — so the
+file would be an image definition whose build cannot be exercised, and an
+unbuildable artifact committed to the repository is a worse defect than an
+accurately-scoped claim. Authoring it belongs with the remainder of the UI tree,
+where the build can be run; when it lands, the count in this section moves from
+nine to ten and the two rows above lose their qualifier.
 
 **Private registry references are placeholders, and that is deliberate.** The
 public base images above are named verbatim because they are public registry
@@ -679,8 +918,8 @@ echo "<aws-account-id>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>"
 
 ### 2. No external resilience library
 
-**Decision: no external resilience library is added to this build at all** —
-neither `resilience4j` nor the superseded `spring-retry`.
+**Decision: this build declares no external resilience library and no CardDemo
+class uses one** — neither `resilience4j` nor the superseded `spring-retry`.
 
 The capability that would have justified one is already on the classpath. Spring
 Framework 7, which arrives inside the Spring Boot parent chosen in
@@ -690,6 +929,46 @@ framework core: `@Retryable`, `@ConcurrencyLimit` and a programmatic
 `excludes`, `maxRetries`, `delay`, `jitter`, `multiplier` and `maxDelay`. Adding
 a library would duplicate a capability already present and would have to be
 re-evaluated at every framework upgrade.
+
+**The decision is about declaration and use, not about the classpath, and the
+distinction is recorded because an earlier revision of this record stated the
+stronger claim that "no external resilience library is added to this build at
+all".** That reading is measurably false. The resolution path is
+`io.awspring.cloud:spring-cloud-aws-starter-sqs:4.1.0` →
+`io.awspring.cloud:spring-cloud-aws-sqs:4.1.0` →
+`org.springframework.retry:spring-retry:2.0.13`, at **compile** scope, in **four
+of the nine modules** — account, reference, batch and authorization services,
+being the four that consume the SQS starter. That artifact references
+`org/springframework/retry` from six of its own classes, among them
+`AbstractPollingMessageSource`, `ContainerOptions`, `ContainerOptionsBuilder` and
+`AbstractPollingMessageSource$NoOpsBackOffContext`. The command that shows it is:
+
+```bash
+# WHAT: list every path by which Spring Retry reaches this reactor.
+# WHY : the claim in this record is a claim about the dependency graph, so it is
+#       stated with the command that checks it rather than left to be trusted.
+mvn -f services/pom.xml dependency:tree \
+    -Dincludes=org.springframework.retry:spring-retry
+```
+
+Alternatives Considered: **excluding `spring-retry` from the SQS starter**, so
+that the stronger claim would become true as written. Rejected on that same
+measurement: those six classes implement the listener container's own polling
+back-off, so the exclusion would delete a type the integration loads at run time
+and convert a documentation defect into a `NoClassDefFoundError` that appears
+only once a queue is being polled. The wording was corrected instead of the
+dependency graph, because the dependency is correct and the sentence was not.
+
+**What replaces the overstated claim is a narrower one that is enforced rather
+than asserted.** Rule **A5** of the ArchUnit gate in the shared kernel
+(`services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java`)
+fails the build if any class under `com.carddemo` depends on
+`org.springframework.retry..` or `io.github.resilience4j..`, and that gate runs
+in every module of the reactor rather than only in the module declaring it.
+Trade-offs: the guarantee is weaker than absence — a transitive copy remains on
+the classpath and an operator reading a dependency report will find it — and
+stronger than a document, because the day a service reaches for either library
+the build stops instead of a reviewer having to notice.
 
 Alternatives Considered: both candidates were named and rejected on checkable
 grounds, and the rejection is recorded at the point of use as well as here — in
@@ -718,7 +997,7 @@ against the previous framework generation.
 
 **In-process retry is the thin top layer, not the whole story.** The durable
 retry tiers are supplied by the infrastructure rather than by the application,
-which is the second and independent reason no library is needed:
+which is the second and independent reason no library is declared:
 
 - Queue redelivery, with a dead-letter queue at **`maxReceiveCount` 5** —
   [ADR-004](ADR-004-messaging.md).
@@ -757,9 +1036,16 @@ rejection is recorded at its point of use in
 
 Ten container images replace the load library as the unit of deployment: the
 eight services, the user interface and the data-migration ETL. Each has its own
-repository, each is built by the pipeline and pushed under a short-lived
-federated role rather than a stored credential, and each is deployed by
-replacing tasks rather than by rewriting a shared location.
+repository, and each is built by the pipeline and pushed under a short-lived
+federated role rather than a stored credential. **Nine** of the ten are then
+deployed by replacing tasks rather than by rewriting a shared location; the
+user-interface image is the exception, because the SPA reaches a browser as
+static objects synced to the CloudFront-fronted bucket — which is why
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) omits it
+from the image-digest map it hands to Terraform, and why the delivery mechanism
+itself is [ADR-006](ADR-006-api-and-ui.md)'s to record rather than this one's.
+Assumptions: the image is still built and pushed so that every artifact in the
+inventory has the same provenance trail, not because a task runs from it.
 
 Refactoring Rationale: the property gained is that the artifact is immutable and
 content-identified, so what was tested is provably what runs. The baseline's unit
@@ -840,15 +1126,15 @@ platform authored beside the baseline is the kind of contribution that text asks
 for, and the comparisons drawn in this record exist to make the two models
 legible side by side rather than to rank them.
 
-### Three documented baseline limitations are not fixed in COBOL
+### Three documented baseline limitations, and where each divergence is recorded
 
-Named here only to forestall a misreading of the comparisons above: the migration
-implements correct behaviour in three places where the baseline has a documented
-limitation, and **no COBOL is edited for any of them**. Each is registered as a
-divergence in
+Named here only to forestall a misreading of the comparisons above. In three places
+the baseline has a documented limitation and the target implements different
+behaviour: **the baseline keeps the behaviour it has, `app/**` is untouched, and the
+target's behaviour is the divergence.** Each of the three is registered in
 [`docs/architecture/cobol-to-service-traceability.md`](../architecture/cobol-to-service-traceability.md),
-which is the authoritative register. Nothing in this record should be read as a
-claim that any of them has been corrected in the baseline.
+which is the authoritative register. Nothing in this record should be read as a claim
+that anything in the baseline was altered.
 
 ## References
 

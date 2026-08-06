@@ -1,4 +1,4 @@
-import type { NavigateFunction, To } from "react-router";
+import type { NavigateFunction, To } from 'react-router';
 
 /**
  * Performs a router transition and falls back to a full navigation if a data
@@ -6,10 +6,7 @@ import type { NavigateFunction, To } from "react-router";
  * @param {NavigateFunction} navigate - Router navigation function.
  * @param {To} destination - Safe application destination.
  */
-export function navigateSafely(
-  navigate: NavigateFunction,
-  destination: To,
-): void {
+export function navigateSafely(navigate: NavigateFunction, destination: To): void {
   const transition = navigate(destination);
   if (transition instanceof Promise) {
     transition.catch(
@@ -18,10 +15,10 @@ export function navigateSafely(
        * router rejects it, so the operator still reaches the destination.
        */
       () => {
-        if (typeof destination === "string") {
+        if (typeof destination === 'string') {
           window.location.assign(destination);
         } else {
-          window.location.assign(destination.pathname ?? "/");
+          window.location.assign(destination.pathname ?? '/');
         }
       },
     );
@@ -40,10 +37,7 @@ export function navigateSafely(
  * @param {To} destination - Safe application destination.
  * @returns {() => void} A handler suitable for an Ant Design control's `onClick`.
  */
-export function navigationHandler(
-  navigate: NavigateFunction,
-  destination: To,
-): () => void {
+export function navigationHandler(navigate: NavigateFunction, destination: To): () => void {
   return (
     /** Performs the transition, falling back to a full navigation if it is rejected. */
     () => {

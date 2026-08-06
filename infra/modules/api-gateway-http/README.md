@@ -394,25 +394,32 @@ module stays usable against a pre-existing user pool or load balancer.
 
 ## 7. What it publishes
 
-Nine outputs, each described in [`outputs.tf`](outputs.tf) and tabulated below
+Five outputs, each described in [`outputs.tf`](outputs.tf) and tabulated below
 the marker. They fall into three groups:
 
 - **The address.** `api_endpoint_url` is the base HTTPS URL, read from the
   stage's `invoke_url` so it already carries any stage path segment. It is the
   only address the browser SPA is configured with.
 - **Identifiers for work done elsewhere.** `api_id`, `stage_name`,
-  `authorizer_id`, `vpc_link_id` and `vpc_link_security_group_id` name this
-  module's resources so dashboards, alarms, metric dimensions and any
-  additional rule can reference them without rediscovering them.
+  `authorizer_id` and `vpc_link_id` name this module's resources so dashboards,
+  alarms, metric dimensions and any additional rule can reference them without
+  rediscovering them.
   Assumptions: `stage_name` is read back from the created stage rather than
   echoed from the input that asked for it, so the published value is the value
   that exists.
-- **Observability and audit handles.** `access_log_group_name` and
-  `access_log_group_arn` let the observability inventory and the key policy
-  name the log group precisely. `public_route_keys` publishes the
-  unauthenticated surface as a list, read back from the routes actually
-  created, so that exposure is auditable from the outputs rather than only by
-  reading the HCL.
+- **Nothing else.** Refactoring Rationale: four further outputs stood here and
+  were withdrawn — `vpc_link_security_group_id`, `access_log_group_name`,
+  `access_log_group_arn` and `public_route_keys` — returning this module to the
+  five its contract admits. A repository-wide search confirmed that neither
+  environment root and no sibling module referenced any of them, which is the only
+  condition under which removing from a one-way contract is safe. Trade-offs: the
+  withdrawn `public_route_keys` reported the unauthenticated surface as a list read
+  back from the routes actually created, which an input validation cannot match for
+  auditability. The exposure is nonetheless bounded at its source instead:
+  `var.public_route_keys` admits the three exact pre-token `/api/v1/auth`
+  method-and-path keys and nothing else, so no plan can widen it. The VPC Link
+  security group's single egress rule and the access-log group's retention and
+  encryption are both declared in `main.tf`, where they can be read directly.
 
 Module outputs are the only source of runtime endpoints and identifiers in this
 migration: **no service hard-codes an endpoint.** The environment root writes
@@ -420,7 +427,7 @@ this endpoint to Parameter Store, and the SPA reads it through its documented
 environment variables — which is what allows `ui/.env.example` to list a
 variable name with no value beside it.
 
-Assumptions: none of the nine is marked `sensitive`, and that is deliberate
+Assumptions: none of the five is marked `sensitive`, and that is deliberate
 rather than overlooked. None is a credential; the endpoint is public by
 construction, since being callable from a browser is its entire purpose; and an
 operator has to be able to read these with `terraform output` to configure a
@@ -603,7 +610,7 @@ cites the baseline by path and line and changes nothing in it.
 | <a name="input_public_route_throttling_burst_limit"></a> [public\_route\_throttling\_burst\_limit](#input\_public\_route\_throttling\_burst\_limit) | Token-bucket depth for the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_burst\_limit because an anonymous route is reachable without any credential. | `number` | `20` | no |
 | <a name="input_public_route_throttling_rate_limit"></a> [public\_route\_throttling\_rate\_limit](#input\_public\_route\_throttling\_rate\_limit) | Steady-state requests per second sustained on the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_rate\_limit for the same reason as its burst counterpart. | `number` | `10` | no |
 | <a name="input_route_authorization_scopes"></a> [route\_authorization\_scopes](#input\_route\_authorization\_scopes) | Scopes every route requires in the token's scope claim, applied by main.tf to each route's authorization\_scopes. Defaults to the Cognito user pool's built-in aws.cognito.signin.user.admin scope, which is the scope an interactively signed-in access token carries and which an identity token carries not at all, so the requirement rejects the wrong token kind at the edge. | `list(string)` | <pre>[<br/>  "aws.cognito.signin.user.admin"<br/>]</pre> | no |
-| <a name="input_route_keys"></a> [route\_keys](#input\_route\_keys) | HTTP API route keys to create, each attached to the JWT authorizer AND given var.route\_authorization\_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module. | `list(string)` | <pre>[<br/>  "ANY /api/v1/auth",<br/>  "ANY /api/v1/auth/{proxy+}",<br/>  "ANY /api/v1/accounts",<br/>  "ANY /api/v1/accounts/{proxy+}",<br/>  "ANY /api/v1/cards",<br/>  "ANY /api/v1/cards/{opaqueCardId}",<br/>  "ANY /api/v1/cards/{opaqueCardId}/{proxy+}",<br/>  "ANY /api/v1/transactions",<br/>  "ANY /api/v1/transactions/{proxy+}",<br/>  "ANY /api/v1/billpay",<br/>  "ANY /api/v1/reference",<br/>  "ANY /api/v1/reference/{proxy+}",<br/>  "ANY /api/v1/authorizations",<br/>  "ANY /api/v1/authorizations/{proxy+}",<br/>  "ANY /api/v1/reports",<br/>  "ANY /api/v1/reports/{proxy+}"<br/>]</pre> | no |
+| <a name="input_route_keys"></a> [route\_keys](#input\_route\_keys) | HTTP API route keys to create, each attached to the JWT authorizer AND given var.route\_authorization\_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module. | `list(string)` | <pre>[<br/>  "ANY /api/v1/auth",<br/>  "ANY /api/v1/auth/{proxy+}",<br/>  "ANY /api/v1/accounts",<br/>  "ANY /api/v1/accounts/{proxy+}",<br/>  "ANY /api/v1/cards",<br/>  "ANY /api/v1/cards/{cardNumber}",<br/>  "ANY /api/v1/admin/cards",<br/>  "ANY /api/v1/admin/cards/{cardNumber}",<br/>  "ANY /api/v1/transactions",<br/>  "ANY /api/v1/transactions/{proxy+}",<br/>  "ANY /api/v1/billpay",<br/>  "ANY /api/v1/reference",<br/>  "ANY /api/v1/reference/{proxy+}",<br/>  "ANY /api/v1/authorizations",<br/>  "ANY /api/v1/authorizations/{proxy+}",<br/>  "ANY /api/v1/reports",<br/>  "ANY /api/v1/reports/{proxy+}"<br/>]</pre> | no |
 | <a name="input_stage_name"></a> [stage\_name](#input\_stage\_name) | Name of the single stage this module creates. `$default` is the reserved name for a stage that serves requests with no stage segment in the path. | `string` | `"$default"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto every taggable resource this module creates -- the HTTP API, the stage, the VPC Link and the access-log group. Supplied by the environment root, which owns the tagging scheme. | `map(string)` | `{}` | no |
 | <a name="input_throttling_burst_limit"></a> [throttling\_burst\_limit](#input\_throttling\_burst\_limit) | Token-bucket depth applied by default to every route on the stage: how many requests above the steady rate the edge absorbs before it starts rejecting. Shields the seven online services behind it from one client's spike. | `number` | `200` | no |
@@ -613,15 +620,11 @@ cites the baseline by path and line and changes nothing in it.
 
 | Name | Description |
 |------|-------------|
-| <a name="output_access_log_group_arn"></a> [access\_log\_group\_arn](#output\_access\_log\_group\_arn) | ARN of the HTTP API access-log group, consumed by the exact encryption-context KMS policy assembled by the environment root. |
-| <a name="output_access_log_group_name"></a> [access\_log\_group\_name](#output\_access\_log\_group\_name) | Name of the HTTP API access-log group, consumed by operator diagnostics and centralized observability inventory. |
 | <a name="output_api_endpoint_url"></a> [api\_endpoint\_url](#output\_api\_endpoint\_url) | Base HTTPS URL of this API, read from the stage's `invoke_url` so it already carries any stage path segment. The front door for every published CardDemo service and the only address the browser SPA is given: the environment root writes it to Parameter Store, and the SPA reads it from there as `VITE_API_BASE_URL`. Shaped `<api-id>.execute-api.<region>.amazonaws.com` for the reserved `$default` stage, where both bracketed parts are placeholders. |
 | <a name="output_api_id"></a> [api\_id](#output\_api\_id) | Provider-assigned identifier of the HTTP API, from `aws_apigatewayv2_api.this.id`. An opaque short string and not an address -- `api_endpoint_url` above is what a client calls. Consumed wherever the API must be NAMED rather than reached: associating a resource this module does not create, scoping an IAM condition to this one API, or locating it in the console. |
 | <a name="output_authorizer_id"></a> [authorizer\_id](#output\_authorizer\_id) | Identifier of the Cognito JWT authorizer, from `aws_apigatewayv2_authorizer.jwt.id`. Names the check that validates a caller's bearer token against the pool issuer and the accepted audience at the edge, before a request reaches any integration. Consumed by a caller attaching this same authorizer to a route created outside this module, so that route is validated identically. |
-| <a name="output_public_route_keys"></a> [public\_route\_keys](#output\_public\_route\_keys) | List of the route keys this API publishes with NO authorizer, each read back from the `route_key` of a created `aws_apigatewayv2_route.public` instance rather than echoed from the input that asked for it. Every OTHER route on this API requires a valid Cognito access token carrying the required scope, so this list is the complete set of paths reachable by an unauthenticated caller. Consumed by an operator or a review that needs the edge's unauthenticated exposure as a fact from the plan, not as a claim from a comment; empty when the caller published none. |
 | <a name="output_stage_name"></a> [stage\_name](#output\_stage\_name) | Name of the stage that was created, read back from `aws_apigatewayv2_stage.this.name` rather than echoed from the input that asked for it. Consumed to address the stage in a CloudWatch metric dimension or a stage-scoped API call; when it is the reserved `$default` it contributes no path segment, which is why the endpoint above needs no rewriting. |
 | <a name="output_vpc_link_id"></a> [vpc\_link\_id](#output\_vpc\_link\_id) | Identifier of the VPC Link, from `aws_apigatewayv2_vpc_link.this.id`. Names the private path this API takes into the application subnets to reach the internal load balancer, which is what keeps every service off the public internet. Consumed by a caller adding a further private integration that should reuse this link rather than provision a second one. |
-| <a name="output_vpc_link_security_group_id"></a> [vpc\_link\_security\_group\_id](#output\_vpc\_link\_security\_group\_id) | Identifier of the dedicated security group this module creates for the VPC Link. Its only egress is TCP 443 to the internal ALB security group, whose matching ingress rule this module also owns. |
 <!-- END_TF_DOCS -->
 
 ---

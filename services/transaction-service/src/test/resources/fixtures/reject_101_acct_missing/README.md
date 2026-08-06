@@ -154,11 +154,15 @@ this folder's shape, and an empty table makes "unchanged" vacuous -- a query ret
 nothing proves nothing about whether a write was suppressed, because it returns nothing
 either way.
 
-Trade-offs: this is the one `transact.txt` in the folder that is not byte-identical to
-`happy_path`'s, so an author comparing the ten with `cmp` meets a difference here and
-nowhere else. The cost is accepted because the alternative is a fixture whose bytes
-contradict the outcome its own section 3 states, and this section is where the
-difference is accounted for.
+Trade-offs: this `transact.txt` is not byte-identical to `happy_path`'s, and it is not
+the only one. Measured, three of the ten scenarios ship a divergent `transact.txt`:
+`boundary_expiry_equal`, which moves the two timestamp fields; this folder, which
+withholds the account being posted to; and `reject_109_rewrite_invalid_key`, which
+carries the identity bytes of seed line 114. An author comparing the ten with `cmp`
+therefore meets a difference in three places rather than one, and each is accounted for
+in that scenario's own section rather than here. The cost is accepted because the
+alternative is a fixture whose bytes contradict the outcome its own section 3 states,
+and this section is where this folder's difference is accounted for.
 
 Assumptions: the card at positions 263-278 is `0927987108636232` because it arrives
 with seed record 2, not because it was selected, and it is **not** a reintroduction of

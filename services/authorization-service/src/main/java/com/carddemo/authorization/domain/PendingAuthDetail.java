@@ -379,6 +379,156 @@ public class PendingAuthDetail {
     }
 
     /**
+     * Returns the originating date the acquirer supplied.
+     *
+     * <p>Assumptions: the six characters are returned exactly as stored, in year, month, day order,
+     * and are not recomposed here. The reference program displays them month first with hyphens --
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} splits the field at L530 to L532 and
+     * reassembles it at L533 -- and that recomposition is a rendering the client performs, so
+     * performing it here would put a presentation concern inside the persistence layer.</p>
+     *
+     * @return the six stored characters, or {@code null} when the request carried none
+     */
+    public String getAuthOrigDate() {
+        return this.authOrigDate;
+    }
+
+    /**
+     * Returns the originating time the acquirer supplied.
+     *
+     * @return the six stored characters, or {@code null} when the request carried none
+     */
+    public String getAuthOrigTime() {
+        return this.authOrigTime;
+    }
+
+    /**
+     * Returns the authorization type the acquirer supplied.
+     *
+     * @return the four-character type, or {@code null} when the request carried none
+     */
+    public String getAuthType() {
+        return this.authType;
+    }
+
+    /**
+     * Returns the card expiry date as the four characters stored against this authorization.
+     *
+     * <p>Assumptions: the solidus the detail screen shows at position three is inserted by the
+     * reference program on the way to the screen -- {@code cbl/COPAUS1C.cbl} moves the first two
+     * characters at L336, overlays the separator at L337 and moves the remaining two at L338 -- so it
+     * is a rendering and not part of the stored value. This accessor returns the stored four.</p>
+     *
+     * @return the four stored characters, or {@code null} when the request carried none
+     */
+    public String getCardExpiryDate() {
+        return this.cardExpiryDate;
+    }
+
+    /**
+     * Returns the message type the acquirer supplied.
+     *
+     * @return the message type, or {@code null} when the request carried none
+     */
+    public String getMessageType() {
+        return this.messageType;
+    }
+
+    /**
+     * Returns the message source the acquirer supplied.
+     *
+     * @return the message source, or {@code null} when the request carried none
+     */
+    public String getMessageSource() {
+        return this.messageSource;
+    }
+
+    /**
+     * Returns the processing code the acquirer supplied.
+     *
+     * @return the processing code, or {@code null} when the request carried none
+     */
+    public String getProcessingCode() {
+        return this.processingCode;
+    }
+
+    /**
+     * Returns the merchant category code the acquirer supplied.
+     *
+     * <p>Assumptions: the accessor is spelled correctly while the baseline field it carries is not.
+     * {@code PA-MERCHANT-CATAGORY-CODE} is the declared name, and correcting the spelling at the
+     * target boundary is the documented convention for this migration's three known misspellings.</p>
+     *
+     * @return the four-character category code, or {@code null} when the request carried none
+     */
+    public String getMerchantCategoryCode() {
+        return this.merchantCategoryCode;
+    }
+
+    /**
+     * Returns the acquirer country code.
+     *
+     * @return the three-character country code, or {@code null} when the request carried none
+     */
+    public String getAcqrCountryCode() {
+        return this.acqrCountryCode;
+    }
+
+    /**
+     * Returns the point-of-sale entry mode the acquirer supplied.
+     *
+     * @return the entry mode as a small integer, or {@code null} when the request carried none
+     */
+    public Short getPosEntryMode() {
+        return this.posEntryMode;
+    }
+
+    /**
+     * Returns the merchant identifier the acquirer supplied.
+     *
+     * @return the merchant identifier, or {@code null} when the request carried none
+     */
+    public String getMerchantId() {
+        return this.merchantId;
+    }
+
+    /**
+     * Returns the merchant name the acquirer supplied.
+     *
+     * @return the merchant name, or {@code null} when the request carried none
+     */
+    public String getMerchantName() {
+        return this.merchantName;
+    }
+
+    /**
+     * Returns the merchant city the acquirer supplied.
+     *
+     * @return the merchant city, or {@code null} when the request carried none
+     */
+    public String getMerchantCity() {
+        return this.merchantCity;
+    }
+
+    /**
+     * Returns the merchant state the acquirer supplied.
+     *
+     * @return the two-character state, or {@code null} when the request carried none
+     */
+    public String getMerchantState() {
+        return this.merchantState;
+    }
+
+    /**
+     * Returns the merchant postal code the acquirer supplied.
+     *
+     * @return the merchant postal code, or {@code null} when the request carried none
+     */
+    public String getMerchantZip() {
+        return this.merchantZip;
+    }
+
+    /**
      * Returns the authorization identification code that was returned to the acquirer.
      *
      * @return the identification code, or {@code null} when none was assigned

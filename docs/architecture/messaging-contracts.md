@@ -355,7 +355,7 @@ characters, but the consuming program receives only thirteen.
 | 7 | `PA-RQ-MESSAGE-SOURCE` | `X(06)` | 6 | |
 | 8 | `PA-RQ-PROCESSING-CODE` | `9(06)` | 6 | Unsigned numeric display |
 | 9 | `PA-RQ-TRANSACTION-AMT` | `+9(10).99` | 14 declared / **13 received** | Target emission follows `WS-TRANSACTION-AMT-AN PIC X(13)`, not the wider declaration; see [Money on the wire](#money-on-the-wire-is-edited-display-text-not-packed) |
-| 10 | `PA-RQ-MERCHANT-CATAGORY-CODE` | `X(04)` | 4 | Misspelled in the baseline; corrected only in the persisted column, per `data-model-and-schema-mapping.md` |
+| 10 | `PA-RQ-MERCHANT-CATAGORY-CODE` | `X(04)` | 4 | Misspelled in the baseline; corrected on every target-side surface — the persisted column, the Java component and the additive JSON envelope schema — per `data-model-and-schema-mapping.md`. The correction changes no byte of this wire, which carries no field name at all: what this row fixes is ordinal 10 |
 | 11 | `PA-RQ-ACQR-COUNTRY-CODE` | `X(03)` | 3 | |
 | 12 | `PA-RQ-POS-ENTRY-MODE` | `9(02)` | 2 | Unsigned numeric display |
 | 13 | `PA-RQ-MERCHANT-ID` | `X(15)` | 15 | |
@@ -432,6 +432,30 @@ levels are given separately and each is labelled.
 > `-999999999.99 … -0.01`, because a negative value spends one of the thirteen
 > positions on its sign, and a more negative value is **refused by name** rather
 > than truncated. Every positive amount `0.00 … 9999999999.99` round-trips exactly.
+
+> **Tolerant on input, strict on output — and the two committed fixtures say so.**
+> The paragraph above settles the **emitted** length; it does not make a
+> 14-character inbound token unacceptable, and the distinction is worth stating
+> because a reader can otherwise take "170 is the figure to reject" as a rule about
+> what may arrive. `CsvAuthCodec.parseMoney` accepts the wider grammar and parses
+> **every** character of it, so a producer built from
+> [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) L27
+> alone is understood rather than misread; the codec never *emits* fourteen, so the
+> reference receiver is never handed a token it would truncate; and a token that has
+> already been truncated to thirteen characters is **refused by name**, because the
+> parser requires exactly two fraction digits where `FUNCTION NUMVAL` would have
+> accepted one. That asymmetry is registered as **D-AUTH-AMOUNT-TOLERANT-READ** in
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) §7.4.
+>
+> Two fixtures under
+> `services/authorization-service/src/test/resources/fixtures/` make each half
+> executable, and neither is named as canonical:
+> `auth-request-amount-variants.csv` holds three **169**-byte payloads spanning the
+> negative, maximum and zero amount boundaries, and
+> `auth-request-declared-width-amount.csv` holds one **170**-byte payload whose
+> amount is at the copybook's declared width. `AuthRequestWireFixtureTest` asserts
+> the lengths, the decoded values, the refusal of the truncated form, and that
+> re-emitting the wider payload produces the canonical 169.
 
 > **Measured — the emitted reply is longer than the interior-delimiter arithmetic
 > predicts, because the `STRING` appends a comma after the last field too.** The
@@ -627,9 +651,18 @@ separately in the following section.
 | message type, set to reply | inferred from the queue the message is on | `COPAUA0C.cbl` L744 |
 
 The `contentType` of `text/csv` is doing real work rather than decorating the
-message: it is the discriminator that lets a consumer distinguish a positional
+message: it is the discriminator a consumer would use to distinguish a positional
 payload from the additive JSON envelope described above, which is why the format
 declaration at L397 and L751 is mapped rather than dropped as transport trivia.
+
+- Refactoring Rationale: "would use" rather than "does use". `AuthReplyOutbox`
+  declares exactly one content type — `CONTENT_TYPE_CSV` — and `OutboxPublisher`
+  stamps that one value on every reply, while `AuthorizationRequestListener`
+  decodes every inbound payload with `CsvAuthCodec.decodeRequest` and branches on
+  no content type at all. Stamping the attribute now is what makes the envelope
+  addable later without a breaking change, because an existing consumer already
+  receives the discriminator it will need; claiming the dispatch exists would send
+  a reader looking for a branch that is not there.
 
 ---
 
@@ -949,8 +982,14 @@ transaction**. There will then be one resource manager and one commit: a
 transaction manager coordinating two participants will have nothing left to
 coordinate. This is a designed simplification rather than an approximation — a
 single PostgreSQL transaction preserves the baseline's atomicity without a
-heuristically-resolved mixed outcome. The schema migration and service transaction
-boundary are not authored at this checkpoint.
+heuristically-resolved mixed outcome. The schema migration
+(`db/migration/V1__authorization.sql`) and the per-message transaction boundary
+(`AuthorizationRequestListener.onRequest`, annotated `REQUIRES_NEW`) are both authored;
+the fraud write's own boundary is not, its controller not yet existing.
+
+- Refactoring Rationale: an earlier revision said neither was authored, which has
+  ceased to be true. Naming which of the two boundaries is landed and which is not is
+  what keeps this paragraph checkable, since a reader can open both files and see.
 
 **Exposing distributed transactions is explicitly out of scope**, and the target
 contract does not reintroduce a two-phase protocol. The one place a second
@@ -974,8 +1013,8 @@ flag. The declaration and the observed behaviour must not be conflated.
 
 | Baseline bound | Location | Target equivalent |
 |---|---|---|
-| **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | Enforce **exactly 500** handled requests per invocation by checking the bound before the next receive |
-| A five-second get-with-wait | `MOVE 5000 TO WS-WAIT-INTERVAL` at L242, applied to the get at L393 | A five-second receive wait |
+| **500 declared; 501 observed** — `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500.` | declaration at L40; increment at L332; `> WS-REQSTS-PROCESS-LIMIT` test at L339; loop-end flag at L340 | **Enforced — exactly 500** handled requests per processing window, the bound being checked before the next receive. `AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT`, overridable by `carddemo.messaging.request-process-limit` |
+| A five-second get-with-wait | `MOVE 5000 TO WS-WAIT-INTERVAL` at L242, applied to the get at L393 | A five-second receive wait — `carddemo.messaging.poll-timeout-seconds`, default 5 |
 
 - Refactoring Rationale: **the target preserves the declared business limit, not
   the baseline's off-by-one implementation.** Enforcing exactly 500 is an
@@ -983,8 +1022,36 @@ flag. The declaration and the observed behaviour must not be conflated.
   501st message follows only from the order of increment and comparison. Preserving
   501 would turn an implementation defect into a new contract. The five-second wait
   remains unchanged to isolate that correction from transport tuning. Both values
-  are to be configurable so later performance work can change them with measured
+  are configurable so later performance work can change them with measured
   evidence rather than by editing code.
+
+- Refactoring Rationale: this row now describes code rather than an intention. An
+  earlier revision of this section stated the enforcement in the future tense while
+  no bounded run existed anywhere, so the document committed to a correction the
+  service did not make — the consumer counted nothing and handled an unbounded number
+  of requests. `AuthorizationRequestListener` now counts every request it takes off
+  the queue and closes its window on exactly the configured quota.
+
+- Assumptions: **closing the window means closing intake, not refusing a message.**
+  The bound is enforced by `ContainerCyclingWindowBoundary`, which stops the listener
+  container and starts it again, so the request that would have been the 501st of the
+  window is never received and remains on the queue until the next window opens.
+  Refusing it inside the handler was rejected: throwing would send a legitimate
+  request toward the dead-letter queue over a bound that has nothing to do with the
+  request, and returning without handling would delete a request nobody answered.
+
+- Trade-offs: the counter is **per task**, so the platform-wide figure is the quota
+  times the running task count. That matches the reference system, where the limit
+  bounded one running program and the queue could trigger more than one. A shared
+  counter would need a coordination round trip on the hot path of every
+  authorization to achieve nothing the bound is for.
+
+- Trade-offs: every failure path in the boundary leaves intake **open**. A window
+  that failed to reopen would halt every authorization in the system, which is
+  strictly worse than a window that ran long, so the stop and the start are guarded
+  separately and the start is unconditional. The divergence is registered as
+  **D-AUTH-REQUEST-WINDOW** in
+  [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
 
 **No throughput, latency or ordering figure in this section is a measurement.**
 The declaration, increment, comparison and wait above are quoted from the cited
@@ -1043,11 +1110,19 @@ sentence above can be read as a claim to the contrary:
 **Boundaries, stated honestly.**
 
 * The twelve SQS resources are authored as infrastructure-as-code and the module has
-  been statically validated; the authorization/account/reference consumers are not
-  authored. **No application message has been sent through these queues.** Every
-  figure in this document is either quoted from a cited baseline line or arithmetic
-  over declared widths; none is an observation of a running messaging flow, and no
-  throughput, latency or ordering behaviour has been measured.
+  been statically validated. The **authorization** consumer is authored —
+  `AuthorizationRequestListener` with its bounded processing window, `AuthReplyOutbox`
+  and `OutboxPublisher` — while the **account** and **reference** inquiry consumers are
+  not. **No application message has been sent through these queues.** Every figure in
+  this document is either quoted from a cited baseline line or arithmetic over declared
+  widths; none is an observation of a running messaging flow, and no throughput, latency
+  or ordering behaviour has been measured.
+
+  - Refactoring Rationale: an earlier revision of this bullet said all three consumers
+    were unauthored, which was true when it was written and is no longer. A boundaries
+    section that overstates what is missing is as misleading as one that understates it:
+    a reader would conclude the outbox and the request window described above were
+    aspirational, and would not look for the code that implements them.
 * The **external point-of-sale authorizer that produces authorization requests is
   not supplied by the baseline.** Only a test stub exists, and building a real
   producer is not in scope. The practical consequence is asymmetric confidence: the

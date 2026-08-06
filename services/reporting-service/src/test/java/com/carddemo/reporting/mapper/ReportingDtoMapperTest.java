@@ -104,18 +104,28 @@ import tools.jackson.databind.json.JsonMapper;
  * approximation anywhere on the money path is owned, as an executable rule, by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java};
  * that class is not relocated, its rules are not duplicated here, and no local rule engine is
- * declared. What the ownership does and does not amount to at this checkpoint is stated exactly,
- * because the money path is the migration's highest-risk requirement and a reader must not take a
- * stronger guarantee from this file than the build actually provides. {@code services/pom.xml}
- * declares an {@code architecture-rules} runner execution that selects rules by that reserved class
- * name, and each service declares the shared kernel's test artifact so the class would be collected
- * onto this module's own test classpath; the class itself is authored at a later index of the same
- * plan, and its package charter records that until it lands no engine enforces layering anywhere in
- * the reactor. The accurate statement is therefore that the prohibition has one owner and a prepared
- * gate, not that a gate already rejects a violation on every build. What the sweeps here add is
- * different in kind, and it is what this file does enforce today: they close the set of component
- * types this module's records may declare at all, which catches an exact-decimal component that no
- * money-path rule forbids and that nonetheless emits a bare JSON number.
+ * declared. What the ownership amounts to is stated exactly, because the money path is the migration's
+ * highest-risk requirement and a reader must not take either a stronger or a weaker guarantee from this
+ * file than the build actually provides. {@code services/pom.xml} declares an
+ * {@code architecture-rules} runner execution that selects rules by that reserved class name, this
+ * module declares the shared kernel's test artifact so the class is collected onto its own test
+ * classpath, and the rule class EXISTS: a build of this module reports it running five tests -- two
+ * guards plus the three architectural assertions, of which the third is the money-path prohibition
+ * itself. The accurate statement is therefore that a gate already rejects a violation on every build,
+ * and that the gate lives in one place rather than here.
+ *
+ * <p>Refactoring Rationale: this paragraph previously said the rule class was "authored at a later
+ * index of the same plan" and that "until it lands no engine enforces layering anywhere in the
+ * reactor", and concluded that the prohibition had only "a prepared gate". All three statements became
+ * false when the class landed, and an understatement is as misleading as an overstatement: a reader who
+ * believes the money-path rule is unenforced either duplicates it locally, which is the second engine
+ * this file exists to argue against, or treats a violation as review-only. The current wording states
+ * what a build reports and can be checked by running one.
+ *
+ * <p>What the sweeps here add is different in kind from that rule, and it is what this file uniquely
+ * enforces: they close the set of component types this module's records may declare at all, which
+ * catches an exact-decimal component that no money-path rule forbids and that nonetheless emits a bare
+ * JSON number.
  *
  * <p>Assumptions: a rationale in this file names the field, what is withheld from it, and what a
  * reader of the published form could otherwise recover. A rationale that appealed to safety in the
@@ -149,23 +159,34 @@ final class ReportingDtoMapperTest {
      * The ten fixed-width records this context reads, named by the convention the baseline uses.
      *
      * <p>Assumptions: each name is a baseline data-definition or seed-dataset name, lowercased with a
-     * {@code .txt} suffix, which is the convention the reference corpus follows. That is stated
-     * precisely because <b>this module has no test resource directory and authors none of these
-     * files</b>: nine of the ten appear as files in the immutable trees -- {@code trantype.txt} and
-     * {@code trancatg.txt} under {@code app/data/ASCII/}, the remaining seven under
-     * {@code tests/fixtures/} -- and {@code tranfile.txt} appears nowhere in the repository, because
-     * the posted-transaction master its data definition names is batch OUTPUT rather than a seeded
-     * input. {@code CBTRN02C} declares it at line 34 as {@code SELECT TRANSACT-FILE ASSIGN TO
-     * TRANFILE}, {@code app/jcl/POSTTRAN.jcl} supplies it at line 28, and
-     * {@code scripts/test_env.sh} binds it at line 253. So the list names records rather than
-     * locations, and the guards in this class are consequently expressed over values declared in
+     * {@code .txt} suffix, which is the convention the reference corpus follows. Where those names
+     * resolve is worth stating precisely, because the ten do not all resolve to the same place. Nine
+     * appear as files in the immutable trees -- {@code trantype.txt} and {@code trancatg.txt} under
+     * {@code app/data/ASCII/}, the remaining seven under {@code tests/fixtures/} -- and
+     * {@code tranfile.txt} appears nowhere in the repository, because the posted-transaction master its
+     * data definition names is batch OUTPUT rather than a seeded input. {@code CBTRN02C} declares it at
+     * line 34 as {@code SELECT TRANSACT-FILE ASSIGN TO TRANFILE}, {@code app/jcl/POSTTRAN.jcl} supplies
+     * it at line 28, and {@code scripts/test_env.sh} binds it at line 253. So this list names RECORDS
+     * rather than locations, and the guards below are consequently expressed over values declared in
      * source rather than over bytes read from a path.
      *
+     * <p>Refactoring Rationale: this paragraph previously asserted that "this module has no test
+     * resource directory and authors none of these files". The first half is now false --
+     * {@code src/test/resources/fixtures/} holds four authored records, {@code acctfile.txt},
+     * {@code custfile.txt}, {@code trantype.txt} and {@code trancatg.txt}, whose bytes and provenance are
+     * documented and asserted by {@code ReportingFixtureRecordTest} in this same package -- and the
+     * second half was never the point being made. The claim has been narrowed to the one that is true and
+     * that the surrounding guards actually rest on: this list is a list of record names, so nothing here
+     * loads a file. A blanket denial that any test resource exists would send a reader looking for
+     * fixtures to the wrong module.
+     *
      * <p>Alternatives Considered: writing a resource path here so the names would read as loadable.
-     * Rejected because it would be false for this module, and a citation a reader cannot follow costs
-     * more than no citation at all. The layouts these names carry are pinned instead against the
-     * shared kernel's record registry by {@link #theTenFixtureRecordNamesAreBoundExactly()}, which is
-     * a production symbol this module really does depend on.
+     * Rejected because seven of the ten resolve only under the reference-only {@code tests/fixtures/}
+     * tree and one resolves nowhere at all, so a path column would be wrong for eight of ten rows, and a
+     * citation a reader cannot follow costs more than no citation at all. The layouts these names carry
+     * are pinned instead against the shared kernel's record registry by
+     * {@link #theTenFixtureRecordNamesAreBoundExactly()}, which is a production symbol this module really
+     * does depend on.
      *
      * <p>The layouts behind them are {@code app/cpy/CVACT01Y.cpy}, {@code app/cpy/CVACT02Y.cpy},
      * {@code app/cpy/CVCUS01Y.cpy}, {@code app/cpy/CVACT03Y.cpy}, {@code app/cpy/CVTRA05Y.cpy},

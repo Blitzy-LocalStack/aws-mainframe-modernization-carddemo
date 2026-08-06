@@ -30,16 +30,12 @@
 #   capability, and each carries a cost that is recorded adjacent to it rather
 #   than summarised away here.
 #
-#   State of the artifacts this file's reasoning refers to, re-derivable with
-#   `ls services/card-service services/card-service/src/main/resources` rather
-#   than frozen here -- the previous version of this paragraph listed the
-#   production overlay as absent after it had landed. application-prod.yml, the
-#   counterpart overlay that narrows what this one widens, EXISTS.
-#   services/card-service/Dockerfile, whose HEALTHCHECK is to be one of the two
-#   consumers of the health endpoint named below, is NOT YET AUTHORED, so every
-#   statement about that consumer is a target contract. Nothing below is to be
-#   read as a claim that any value here has been deployed, benchmarked or
-#   measured against a running cluster.
+#   Counterparties. application-prod.yml is the counterpart overlay that narrows
+#   what this one widens, and services/card-service/Dockerfile is the second
+#   consumer of the health endpoint named below, alongside the load-balancer target
+#   group. Statements about either are target contracts for this module, and
+#   nothing below is to be read as a claim that any value here has been deployed,
+#   benchmarked or measured against a running cluster.
 #
 # Parameters:
 #   Environment variables. They are named and never valued: no value for any of

@@ -42,11 +42,21 @@
 -- =============================================================================
 
 \echo '== check 1: each view exists, is owned by the barrier owner, and is a barrier'
+-- WHY : Refactoring Rationale: three of these names formerly appeared here WITHOUT
+--       the v_ prefix the views actually carry, and the set was four names long
+--       rather than seven. A name that matches nothing makes this check report the
+--       view as missing, so the error announced itself -- but it also meant the
+--       three account-backed views, which did not exist when this file was
+--       written, had no check at all, and checks 2 and 4 failed outright on the
+--       unqualified names. All seven are listed now.
 WITH expected(view_name) AS (
     VALUES ('v_report_transactions'),
-           ('statement_transactions'),
-           ('transaction_types'),
-           ('transaction_categories')
+           ('v_statement_transactions'),
+           ('v_transaction_types'),
+           ('v_transaction_categories'),
+           ('v_accounts'),
+           ('v_customers'),
+           ('v_card_xref')
 )
 SELECT e.view_name,
        c.oid IS NULL                                             AS missing,
@@ -67,9 +77,12 @@ WHERE c.oid IS NULL
 \echo '== check 2: the service role can read every view'
 WITH expected(view_name) AS (
     VALUES ('reporting.v_report_transactions'),
-           ('reporting.statement_transactions'),
-           ('reporting.transaction_types'),
-           ('reporting.transaction_categories')
+           ('reporting.v_statement_transactions'),
+           ('reporting.v_transaction_types'),
+           ('reporting.v_transaction_categories'),
+           ('reporting.v_accounts'),
+           ('reporting.v_customers'),
+           ('reporting.v_card_xref')
 )
 SELECT view_name
 FROM expected
@@ -82,7 +95,23 @@ WITH forbidden(relation_name) AS (
            ('ledger.transaction_category_balances'),
            ('reference.transaction_types'),
            ('reference.transaction_categories'),
-           ('reference.disclosure_groups')
+           ('reference.disclosure_groups'),
+           -- WHY : Assumptions: the three account tables joined this list when the
+           --       views over them were created. The role reads the masked
+           --       projections and must not reach the base tables, where
+           --       account.card_xref holds unmasked card numbers and
+           --       account.customers holds the two encrypted national identifiers
+           --       no projection exposes at all.
+           ('account.accounts'),
+           ('account.customers'),
+           ('account.card_xref'),
+           -- WHY : Assumptions: the grouping key is checked HERE, among the
+           --       relations the role must not read, because that is what it is.
+           --       If this row ever reports, the per-card token in
+           --       v_statement_transactions is invertible by the role holding it
+           --       and the mask on card_num is defeated -- so the assertion
+           --       belongs with the privilege checks rather than in prose.
+           ('reporting.card_grouping_key')
 )
 SELECT relation_name
 FROM forbidden
@@ -96,9 +125,12 @@ WHERE to_regclass(relation_name) IS NOT NULL
 \echo '== check 4: the service role holds no write privilege on any view'
 WITH expected(view_name) AS (
     VALUES ('reporting.v_report_transactions'),
-           ('reporting.statement_transactions'),
-           ('reporting.transaction_types'),
-           ('reporting.transaction_categories')
+           ('reporting.v_statement_transactions'),
+           ('reporting.v_transaction_types'),
+           ('reporting.v_transaction_categories'),
+           ('reporting.v_accounts'),
+           ('reporting.v_customers'),
+           ('reporting.v_card_xref')
 ), writes(privilege) AS (
     VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')
 )

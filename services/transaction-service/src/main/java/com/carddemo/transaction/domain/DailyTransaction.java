@@ -3,11 +3,12 @@ package com.carddemo.transaction.domain;
 import com.carddemo.common.money.Money;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -91,37 +92,53 @@ import org.hibernate.type.SqlTypes;
  *
  * <h2>Two mappings differ from the posted master's, and both differences are the migration's</h2>
  *
- * <p>Assumptions: this table and {@code ledger.transactions} carry the same thirteen columns from
- * the same thirteen pictures, and the migration nonetheless constrains two of them differently
- * here. The processing timestamp is nullable where the master's is not null, and the transaction
+ * <p>Assumptions: this table and {@code ledger.transactions} carry the same thirteen COPYBOOK columns
+ * from the same thirteen pictures -- this table additionally carrying the target-side ingestion
+ * sequence argued under the next heading -- and the migration nonetheless constrains two of the
+ * shared thirteen differently here. The processing timestamp is nullable where the master's is not null, and the transaction
  * identifier carries neither a not-null constraint nor a primary key where the master's carries
  * both. Neither difference comes from the copybooks, which declare the two records identically;
  * both come from what the reference programs do with the two files, and each is argued on the
  * member that maps it. A reader who expects the two types to differ in exactly one place will find
  * two, and the second is the reason this heading is plural.
  *
- * <h2>This table has no key, and the identifier is still the mapped identity</h2>
+ * <h2>The source has no key, so the identity is an ingestion sequence</h2>
  *
- * <p>Assumptions: the migration declares no primary key, no unique constraint and no not-null
- * column over this table, and its lines 400 to 413 record that as the baseline contract rather than
- * as an omission. The evidence is the feed's own organisation: {@code app/cbl/CBTRN02C.cbl} line 29
- * selects it as {@code ORGANIZATION IS SEQUENTIAL} with {@code ACCESS MODE IS SEQUENTIAL} at line
- * 31 and declares no record key at all, and {@code app/jcl/POSTTRAN.jcl} lines 30 and 31 supply it
- * as a physical sequential dataset. The posting job reads it front to back and never keys into it.
+ * <p>Assumptions: the migration declares no unique constraint over any copybook column of this table,
+ * because the feed's own organisation asserts none: {@code app/cbl/CBTRN02C.cbl} line 29 selects it as
+ * {@code ORGANIZATION IS SEQUENTIAL} with {@code ACCESS MODE IS SEQUENTIAL} at line 31 and declares no
+ * record key at all, and {@code app/jcl/POSTTRAN.jcl} lines 30 and 31 supply it as a physical
+ * sequential dataset. The posting job reads it front to back and never keys into it, so a feed
+ * carrying the same identifier twice is a feed the baseline posts twice.
  *
- * <p>Trade-offs: the identifier is nevertheless mapped as this type's identity, because the
- * persistence provider requires an identity for every entity and has no other way to tell one row
- * of a result from another, to decide whether an instance is new, or to build the predicate of an
- * update. What is bought is that the feed is reachable through the same repository abstraction as
- * every other record in this package. What is given up is that the identity is an assertion of this
- * mapping rather than of the schema: the column carries no unique constraint, so a feed with a
- * repeated identifier -- which the sequential baseline would process without complaint -- loads
- * without error and produces two rows that this type cannot tell apart. Declaring the constraint
- * instead was the alternative and is rejected because it would reject at load time a feed the
- * baseline accepts, which is a behavioural change in the loader rather than a safeguard. The
- * identity is workable on the extract that exists: the 300 records of
- * {@code app/data/ASCII/dailytran.txt} carry 300 distinct identifiers and are already in ascending
- * order of them, though that is a property of one extract and not a contract.
+ * <p>Assumptions: the migration does declare a primary key, {@code pk_daily_transactions}, over the
+ * target-side column {@code ingest_seq}. That is not a uniqueness claim about the feed -- it is the
+ * order the feed had as a file and lost as a heap. A resumable scan must order by a unique column or
+ * it drops rows at its boundaries, and the transaction identifier is not one.
+ *
+ * <p>Refactoring Rationale: an earlier revision mapped the transaction IDENTIFIER as this type's
+ * identity and recorded the consequence as a trade-off -- that the column carries no unique
+ * constraint, so a feed with a repeated identifier loads without error and yields two rows the type
+ * cannot tell apart. That is why this mapping changed. The consequence is not one a caller can absorb:
+ * the provider uses the identity to tell one row of a result from another and to decide whether an
+ * instance is new, so two indistinguishable rows collapse inside one persistence context and an
+ * occurrence the feed is defined to carry is lost. Declaring a unique constraint over the identifier
+ * was the other way to make the identity honest, and it stays rejected -- it would refuse at load time
+ * a feed the sequential baseline accepts, which changes the loader's behaviour rather than safeguard
+ * it. The generated sequence satisfies both requirements at once: unique per row as the provider
+ * needs, and asserting nothing whatever about the identifier.
+ *
+ * <p>Trade-offs: the identity is therefore a column no copybook field corresponds to, so this type
+ * declares fourteen members where the record contract declares thirteen fields and a reader comparing
+ * it against {@code app/cpy/CVTRA06Y.cpy} finds one member with no counterpart there. That is accepted
+ * because the alternative is not "no surrogate" but "no identity", and because the ordinal is confined
+ * to exactly the places an identity is needed: it carries no business meaning, no transfer object in
+ * this service exposes it, and no golden-master comparison sees it, so the 350-byte record this table
+ * holds is unaffected by its presence. The member is documented at its declaration as target-side for
+ * exactly that reason. Uniqueness of the
+ * identifier remains a property of the extract rather than a contract -- the 300 records of
+ * {@code app/data/ASCII/dailytran.txt} carry 300 distinct identifiers in ascending order -- and
+ * nothing in this type now depends on it.
  *
  * <h2>No index is declared here</h2>
  *
@@ -259,20 +276,58 @@ import org.hibernate.type.SqlTypes;
 public class DailyTransaction {
 
     /**
-     * The transaction identifier, which is this type's mapped identity.
+     * The row's ingestion ordinal, assigned by the database on insert, and this type's mapped
+     * identity.
+     *
+     * <p>Refactoring Rationale: this member corresponds to no field of the record contract and is
+     * the one addition this type makes to the thirteen the layout declares. It exists because the
+     * feed is a sequential stream in which every business value may legitimately repeat, so nothing
+     * the record carries can denote a row -- and two consumers need exactly that. A persistence
+     * provider needs an identifier to distinguish two loaded rows rather than conflate them, and
+     * keyset paging needs a TOTAL order, because a cursor over a non-unique column either skips the
+     * remainder of a tied group when it pages strictly past the boundary value or returns that group
+     * again when it pages inclusively. Both failures are silent and both lose or duplicate a
+     * financial record. {@code app/cbl/CBTRN02C.cbl} needs neither, because it reads the file front
+     * to back in one pass and never holds two records at once.</p>
+     *
+     * <p>Assumptions: the value is the row's position in the source stream, so ordering by it
+     * reproduces the order {@code READ ... NEXT RECORD} visited. That order is observable in the
+     * baseline: lines 202 to 219 loop the feed and the reject stream's sequence is the feed's
+     * sequence restricted to the rejected records.</p>
+     *
+     * <p>Assumptions: {@code ingest_seq BIGINT GENERATED BY DEFAULT AS IDENTITY} is the schema's own
+     * declaration and this member does not create it. The identity strategy below states how the
+     * value arrives -- the provider omits the column from the insert and reads the assigned value
+     * back -- which is the only strategy compatible with a database-side identity column under
+     * {@code ddl-auto: none}.</p>
+     */
+    // WHY : Alternatives Considered: keying on the transaction identifier, which is what this type
+    //       previously mapped. Rejected because the feed asserts uniqueness over nothing -- the
+    //       reference selects it as ORGANIZATION IS SEQUENTIAL with no RECORD KEY -- so a feed
+    //       carrying a repeated identifier is a feed the baseline posts twice, and an
+    //       identifier-keyed identity turns the second occurrence into a row the provider cannot
+    //       distinguish from the first. That all 300 identifiers in the current extract happen to be
+    //       distinct is a property of one extract and not a contract.
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "ingest_seq", updatable = false)
+    private Long ingestSeq;
+
+    /**
+     * The transaction identifier the feed supplies, which is business data and NOT this type's
+     * identity.
      *
      * <p>Assumptions: {@code DALYTRAN-ID PIC X(16)} at line 5 of the record contract, bytes 1 to
      * 16, mapped to {@code transaction_id CHAR(16)}. The migration declares that column without a
-     * not-null constraint and declares no key over the table, so no {@code nullable} attribute is
+     * not-null constraint and declares no uniqueness over it, so no {@code nullable} attribute is
      * written here: the mapping states what the migration states and nothing more. The same value
      * becomes the posted row's primary key once {@code app/cbl/CBTRN02C.cbl} line 425 moves it
      * across, which is where the constraint the feed lacks is asserted.
      */
-    // WHY : Trade-offs: the identity is mapped although the schema constrains nothing, and the
-    //       compromise that buys is argued in this type's class documentation rather than twice.
-    //       What belongs on the member is the consequence: two rows sharing this value are
-    //       indistinguishable to this type, and it is the loader's business to notice a feed that
-    //       carries such a pair rather than this type's to refuse it.
+    // WHY : Assumptions: two rows sharing this value are legitimate and are now DISTINGUISHABLE,
+    //       because the identity is the ordinal above rather than this value. A loader therefore no
+    //       longer has to notice a repeated identifier in order to avoid losing a row; it may notice
+    //       one in order to report it, which is a different obligation.
     // WHY : Alternatives Considered: an integer column and a Long member, which is the obvious
     //       reading because sixteen decimal digits fit a signed sixty-four-bit integer. Rejected
     //       because line 5 of the record contract declares an alphanumeric picture and the copybook
@@ -282,11 +337,21 @@ public class DailyTransaction {
     //       fixes. The value is therefore treated as an opaque sixteen-character token. The sibling
     //       records the further evidence that two incompatible generation schemes share the posted
     //       column.
-    // WHY : Assumptions: the column is mapped non-updatable because an identity is populated once
-    //       by whatever loads the row and is never reassigned afterwards. Allowing an update would
-    //       let a persisted instance be re-keyed, which would silently invalidate any hash-based
-    //       collection already holding it.
-    @Id
+    // WHY : Assumptions: the column is mapped non-updatable because the identifier arrives with the
+    //       row and is never reassigned afterwards, and it is NO LONGER the entity identity, so a
+    //       repeated identifier is now two distinct entities rather than one -- which is what lets a
+    //       scan reach both occurrences -- while the value the feed supplied is still carried
+    //       verbatim for the parity comparison.
+    // WHY : Assumptions: the column stays non-updatable even though it is no longer the identity,
+    //       and the reason changed with the key rather than disappearing with it. A staged feed row
+    //       is written once by whatever loads it and is read from then on -- line 254 of
+    //       app/cbl/CBTRN01C.cbl opens the feed INPUT and line 203 only reads it -- so an update to
+    //       this value would rewrite history the posting run has already read.
+    // WHY : Refactoring Rationale: this member carries no @Id annotation, and its absence is the
+    //       whole point of the ordinal above. Leaving the annotation in place alongside the
+    //       ordinal's would declare a COMPOSITE key of two members, which the provider then rejects
+    //       for having no identifier class -- a failure that surfaces only when a repository for
+    //       this type is created, not at compile time.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "transaction_id", length = 16, updatable = false)
     private String tranId;
@@ -592,8 +657,10 @@ public class DailyTransaction {
      * the copybook's own order, lines 5 to 17, so the signature reads against the contract
      * directly.
      *
-     * @param tranId the sixteen-character transaction identifier, an opaque fixed-width token that
-     *     becomes this instance's mapped identity
+     * @param tranId the sixteen-character transaction identifier the feed supplies, an opaque
+     *     fixed-width token which is business data and NOT this instance's identity; the ingestion
+     *     ordinal that is the identity is assigned by the database and is deliberately not a
+     *     parameter here
      * @param tranTypeCd the two-character transaction type code, not yet validated against the
      *     reference data
      * @param tranCatCd the four-character transaction category code, zero-filled to its width
@@ -631,7 +698,31 @@ public class DailyTransaction {
     }
 
     /**
-     * Returns the sixteen-character transaction identifier that is this type's mapped identity.
+     * Returns this row's ingestion ordinal, which is this type's mapped identity and the value a
+     * chunked scan resumes from.
+     *
+     * <p>Assumptions: it is the only column on this feed that is both unique and monotonic in arrival
+     * order, which is what makes it usable as a resume position. The value is assigned by the database
+     * on insert, so it is {@code null} on an instance built but not yet persisted and non-null on every
+     * instance a query returned. That asymmetry is the ordinary contract of a generated identifier and
+     * is what {@link #equals(Object)} is written around.</p>
+     *
+     * <p>Assumptions: the ordinal is a position within the source stream and carries no business
+     * meaning. It is not the transaction identifier, and no transfer object in this service exposes
+     * it, so it must never be rendered to a caller as though it were one.</p>
+     *
+     * @return the ingestion ordinal, or {@code null} on an instance that has not been persisted
+     */
+    public Long getIngestSeq() {
+        return this.ingestSeq;
+    }
+
+    /**
+     * Returns the sixteen-character transaction identifier the feed supplied.
+     *
+     * <p>Assumptions: this is a business value and not this type's identity, so two distinct rows
+     * may return equal values here. A caller that needs to tell such rows apart uses
+     * {@link #getIngestSeq()}.
      *
      * @return the transaction identifier as stored, blank-padded to sixteen characters by the fixed
      *     width column, or {@code null} on an instance the provider has not hydrated
@@ -643,10 +734,10 @@ public class DailyTransaction {
     /**
      * Assigns the transaction identifier.
      *
-     * <p>Assumptions: this is the mapped identity and the column is mapped
-     * {@code updatable = false}, so assigning it after the row is persisted changes the member
-     * without changing the row. The accessor exists for the loader to populate a new instance, not
-     * to re-key an existing one.
+     * <p>Assumptions: the column is mapped {@code updatable = false}, so assigning it after the row
+     * is persisted changes the member without changing the row. The accessor exists for the loader to
+     * populate a new instance. It is not a re-keying operation, because this value is not the
+     * identity -- the ingestion ordinal is, and it has no setter at all.
      *
      * @param tranId the sixteen-character transaction identifier to assign, an opaque fixed-width
      *     token supplied by the feed rather than generated by this type
@@ -909,35 +1000,42 @@ public class DailyTransaction {
     }
 
     /**
-     * Compares this record with another on the transaction identifier alone. Two instances carrying
-     * the same identifier denote the same feed record.
+     * Compares this record with another on the ingestion sequence alone, which is this type's mapped
+     * identity. Two instances carrying the same sequence denote the same stored feed row.
      *
-     * <p>Alternatives Considered: comparing all thirteen members. Rejected because the identifier
-     * is the value the record contract leads with at line 5 and the value this type maps as its
-     * identity, so it already denotes the record. Comparing every member as well would make two
-     * reads of one row unequal the moment a query populated a different subset of columns, and
-     * would additionally break identity across a persistence flush, when the provider writes values
-     * into an instance that a collection is already holding.
+     * <p>Refactoring Rationale: an earlier revision compared the transaction identifier, because that
+     * identifier was then mapped as the identity. That is why this method changed. The feed is a
+     * sequential dataset whose identifier the source asserts no uniqueness over, so identifier
+     * equality reported two genuinely distinct arrivals as one row: the persistence context could
+     * collapse them, and a caller collecting a page of feed rows into a set would silently keep only
+     * one of the two. The sequence assigned as the row arrives is unique per occurrence, so comparing
+     * it distinguishes arrivals the identifier cannot.
      *
-     * <p>Trade-offs: because the migration puts no unique constraint on this column,
-     * identifier-only equality is an assertion this type makes rather than one the schema
-     * guarantees. A feed that carried a repeated identifier would therefore yield two rows this
-     * method reports as equal. That is accepted as the honest consequence of mapping a keyless
-     * sequential feed: the alternative, all-member comparison, would report those two rows as
-     * distinct while still leaving the provider unable to tell them apart, so it would move the
-     * ambiguity rather than remove it.
+     * <p>Alternatives Considered: comparing all fourteen members. Rejected because all-member
+     * equality would make two reads of one row unequal the moment a query populated a different
+     * subset of columns, and would break identity across a persistence flush, when the provider
+     * writes values into an instance that a collection is already holding.
      *
-     * <p>Assumptions: an instance built by the no-argument constructor and not yet hydrated carries
-     * no identifier, so two such instances compare equal because the identifier is the only value
-     * compared and there is nothing else to tell them apart. The provider never publishes an
-     * instance in that state, so the case is recorded rather than guarded against.
+     * <p>Assumptions: two instances that both carry an unassigned sequence are equal only when they
+     * are the same object. This is the deliberate opposite of the superseded behaviour: two records a
+     * reader has built but not yet persisted both carry a null sequence, and reporting them equal
+     * would let a hash-based collection discard one of two distinct arrivals, which is the loss this
+     * identity exists to prevent.
+     *
+     * <p>Trade-offs: equality is therefore unavailable as a way to ask whether two instances carry the
+     * same transaction identifier, and a caller that wants that question answered compares
+     * {@link #getTranId()} directly. That is accepted because the identifier names a business record
+     * while the sequence names a row, and only the latter is what a persistence provider may key on.
      *
      * @param other the object to compare with, which may be {@code null} or of any type
-     * @return {@code true} when {@code other} is a daily transaction of this type carrying an equal
-     *     transaction identifier, {@code false} otherwise
+     * @return {@code true} when {@code other} is a daily transaction of this type carrying an equal,
+     *     assigned ingestion sequence, or is this same object; {@code false} otherwise
      */
     @Override
     public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
         // WHY : Assumptions: a pattern match rather than a class comparison, because the provider
         //       may hand back an instrumented subclass for a lazy proxy and a strict class
         //       comparison would then report a row as unequal to itself. No subclass of this type
@@ -945,30 +1043,52 @@ public class DailyTransaction {
         if (!(other instanceof DailyTransaction that)) {
             return false;
         }
-        return Objects.equals(this.tranId, that.tranId);
+        // WHY : Assumptions: the identity is the ingestion sequence, so two rows repeating a
+        //       transaction identifier are UNEQUAL here, which is what keeps both occurrences
+        //       reachable. An instance with no sequence assigned is equal only to itself: treating
+        //       two nulls as equal would let a hash-based collection discard one of two distinct
+        //       occurrences before either was persisted.
+        if (this.ingestSeq == null || that.ingestSeq == null) {
+            return this == other;
+        }
+        return this.ingestSeq.equals(that.ingestSeq);
     }
 
     /**
-     * Returns a hash consistent with the identifier-only equality above. It is derived from the
-     * transaction identifier and from nothing else.
+     * Returns a hash consistent with the identity-based equality above.
      *
-     * <p>Assumptions: the identifier arrives with the record and this table is written only by the
-     * load that populates it, so the value stays stable for the life of an instance in practice
-     * even though a setter exists for the loader to populate a new one. That stability is what
-     * makes the type safe to place in a hash-based collection; re-keying a persisted instance would
-     * break it, which is why the identifier column is mapped {@code updatable = false}.
+     * <p>Assumptions: the hash is a CONSTANT rather than a function of the ingestion sequence, and the
+     * reason is the one case a database-assigned identity always creates. An instance is placed in a
+     * hash-based collection before it is inserted, when its sequence is null, and the database assigns
+     * the sequence afterwards -- so a hash derived from the sequence would change while the instance
+     * sat in a bucket chosen from the old value, and the collection could no longer find it. A
+     * constant hash is stable across that transition by construction.
      *
-     * @return the hash of the transaction identifier, or the hash of an absent value on an instance
-     *     the provider has not yet hydrated
+     * <p>Refactoring Rationale: an earlier revision hashed the transaction identifier, to match an
+     * equality that then compared it. Both halves moved together because the pair must agree: hashing
+     * a value the equality no longer consults would let two instances the equality calls equal land in
+     * different buckets, which breaks the collection contract outright.
+     *
+     * <p>Trade-offs: every instance therefore lands in one bucket, so a hash-based collection of these
+     * degrades to a linear scan. That is accepted because a silently unfindable entity is a correctness
+     * fault where a slower lookup is only a performance one, and because the feed is read in bounded,
+     * ordered chunks and is never accumulated into a large set.
+     *
+     * @return a constant hash, equal for every instance of this type and therefore consistent with
+     *     ordinal equality across the transition from unpersisted to persisted
      */
     @Override
     public int hashCode() {
-        return Objects.hashCode(this.tranId);
+        // WHY : Assumptions: a constant rather than a function of the sequence, because the sequence
+        //       is null until the database assigns it and a hash that changed on insert would leave
+        //       an already-hashed instance unreachable in its bucket. The cost is that every
+        //       instance shares one bucket, accepted because this feed is read in bounded chunks.
+        return DailyTransaction.class.hashCode();
     }
 
     /**
-     * Returns a diagnostic rendering of this record that deliberately names only three of its
-     * thirteen members. It is intended for a log line or an assertion message.
+     * Returns a diagnostic rendering of this record that deliberately names only four of its
+     * fourteen members. It is intended for a log line or an assertion message.
      *
      * <p>Trade-offs: the card number declared at line 15 of the record contract and the amount
      * declared at line 10 are omitted outright rather than abbreviated, so this rendering is not
@@ -980,18 +1100,20 @@ public class DailyTransaction {
      * second, slightly different masking rule here would give one value two renderings and make
      * neither authoritative.
      *
-     * <p>Assumptions: the three members retained are chosen for what they let a reader do with a
-     * line from the posting run. The identifier from line 5 locates the record, the type code from
+     * <p>Assumptions: the four members retained are chosen for what they let a reader do with a
+     * line from the posting run. The ordinal locates the row unambiguously even where the identifier
+     * repeats, the identifier from line 5 names the record the feed supplied, the type code from
      * line 6 places it, and the processing timestamp from line 17 says whether it has been posted
      * at all -- which on this table is the one piece of state that changes, and which renders as an
      * absent value for every record the feed supplies.
      *
-     * @return a short single-line rendering naming the type, the transaction identifier, the
-     *     transaction type code and the processing timestamp, and no other member
+     * @return a short single-line rendering naming the type, the ingestion ordinal, the transaction
+     *     identifier, the transaction type code and the processing timestamp, and no other member
      */
     @Override
     public String toString() {
-        return "DailyTransaction[tranId=" + this.tranId
+        return "DailyTransaction[ingestSeq=" + this.ingestSeq
+                + ", tranId=" + this.tranId
                 + ", tranTypeCd=" + this.tranTypeCd
                 + ", procTs=" + this.procTs + ']';
     }

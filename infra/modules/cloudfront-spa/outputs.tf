@@ -192,10 +192,20 @@ output "distribution_domain_name" {
   value = aws_cloudfront_distribution.spa.domain_name
 }
 
-output "distribution_hosted_zone_id" {
-  description = "Route 53 hosted-zone id of the CloudFront distribution, consumed by environment roots when they create the custom SPA alias without hard-coding CloudFront's global zone id."
-  value       = aws_cloudfront_distribution.spa.hosted_zone_id
-}
+# WHY : Refactoring Rationale: a `distribution_hosted_zone_id` output stood here,
+#       republishing `aws_cloudfront_distribution.spa.hosted_zone_id` so a caller
+#       could build a Route 53 alias record without hard-coding CloudFront's
+#       global zone constant. It was withdrawn. No caller in this package reads
+#       it: `grep -rn 'module.cloudfront_spa.distribution_hosted_zone_id' infra/`
+#       matches nothing in either environment root, and neither root creates a
+#       Route 53 zone or record at all, because DNS delegation for the alias
+#       names in `var.aliases` is an operator concern outside this package. An
+#       output nothing reads is interface surface with no consumer contract to
+#       keep, and `distribution_domain_name` immediately above already gives a
+#       DNS consumer the target it needs. Alternatives Considered: retaining it
+#       speculatively against a future Route 53 module, rejected because the
+#       sixteen-module catalog contains no such module and the attribute is one
+#       expression away for any root that later needs it.
 
 
 # -----------------------------------------------------------------------------

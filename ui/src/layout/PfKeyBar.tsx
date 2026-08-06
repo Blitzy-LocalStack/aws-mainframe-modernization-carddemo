@@ -51,12 +51,12 @@
  * literal colour, spacing or radius, and no resolved one either.
  */
 
-import { Button, Flex, theme } from "antd";
-import type { ReactElement } from "react";
+import { Button, Flex, theme } from 'antd';
+import type { ReactElement } from 'react';
 
-import { BMS_COLOR_TOKENS, SPACING_TOKENS } from "../theme/tokens";
-import { KEYBOARD_KEY_TO_AID, PF_KEY_ALIASES } from "./usePfKeys";
-import type { CicsAid, PfKeyBinding } from "./usePfKeys";
+import { BMS_COLOR_TOKENS, SPACING_TOKENS } from '../theme/tokens';
+import { KEYBOARD_KEY_TO_AID, PF_KEY_ALIASES } from './usePfKeys';
+import type { CicsAid, PfKeyBinding } from './usePfKeys';
 
 /**
  * Semantic colour role measured on a mapset's row-24 legend field.
@@ -72,10 +72,7 @@ import type { CicsAid, PfKeyBinding } from "./usePfKeys";
  * compilation instead of leaving a prop whose value no longer resolves to a
  * token. This mirrors the defensive typing the bridge applies to itself.
  */
-export type PfKeyLegendColor = Extract<
-  keyof typeof BMS_COLOR_TOKENS,
-  "YELLOW" | "TURQUOISE"
->;
+export type PfKeyLegendColor = Extract<keyof typeof BMS_COLOR_TOKENS, 'YELLOW' | 'TURQUOISE'>;
 
 /**
  * Legend labels for the three keys whose wording is uniform across every mapset
@@ -98,9 +95,9 @@ export type PfKeyLegendColor = Extract<
  * deliberate and is recorded here rather than left as an apparent gap.
  */
 export const UNIFORM_PF_KEY_LABELS = Object.freeze({
-  PFK04: "F4=Clear",
-  PFK07: "F7=Backward",
-  PFK08: "F8=Forward",
+  PFK04: 'F4=Clear',
+  PFK07: 'F7=Backward',
+  PFK08: 'F8=Forward',
 }) satisfies Readonly<Partial<Record<CicsAid, string>>>;
 
 /**
@@ -115,10 +112,7 @@ export const UNIFORM_PF_KEY_LABELS = Object.freeze({
  * here. PF7 and PF8 are absent because the plan maps page navigation separately
  * and specifies no emphasis for it, which leaves them on the default.
  */
-export const PRIMARY_ACTION_AIDS: readonly CicsAid[] = Object.freeze([
-  "ENTER",
-  "PFK05",
-]);
+export const PRIMARY_ACTION_AIDS: readonly CicsAid[] = Object.freeze(['ENTER', 'PFK05']);
 
 /**
  * Accessible name for the legend's navigation landmark.
@@ -130,7 +124,7 @@ export const PRIMARY_ACTION_AIDS: readonly CicsAid[] = Object.freeze([
  * carried across - it is new, and the catalog excludes strings that no COBOL
  * source holds.
  */
-export const PF_KEY_BAR_REGION_LABEL = "Function keys";
+export const PF_KEY_BAR_REGION_LABEL = 'Function keys';
 
 /**
  * Props accepted by {@link PfKeyBar}.
@@ -212,9 +206,7 @@ export interface PfKeyBarProps {
  * @returns {Readonly<Partial<Record<CicsAid, string>>>} Canonical browser key per
  * AID, omitting the AIDs that have no web key at all.
  */
-function buildAidToCanonicalBrowserKey(): Readonly<
-  Partial<Record<CicsAid, string>>
-> {
+function buildAidToCanonicalBrowserKey(): Readonly<Partial<Record<CicsAid, string>>> {
   const inverse: Partial<Record<CicsAid, string>> = {};
 
   for (const [browserKey, aid] of Object.entries(KEYBOARD_KEY_TO_AID)) {
@@ -259,7 +251,7 @@ const AID_TO_CANONICAL_BROWSER_KEY = buildAidToCanonicalBrowserKey();
  * ampersand pair reduced to one ampersand.
  */
 export function decodeBmsLegendText(mapsetInitial: string): string {
-  return mapsetInitial.replace(/&&/g, "&");
+  return mapsetInitial.replace(/&&/g, '&');
 }
 
 /**
@@ -297,9 +289,7 @@ function isPrimaryActionAid(aid: CicsAid): boolean {
  * @returns {readonly PfKeyBinding[]} Labelled, AID-unique descriptors in the
  * order supplied.
  */
-function selectRenderableKeys(
-  keys: readonly PfKeyBinding[],
-): readonly PfKeyBinding[] {
+function selectRenderableKeys(keys: readonly PfKeyBinding[]): readonly PfKeyBinding[] {
   const seen = new Set<CicsAid>();
 
   return keys.filter(
@@ -309,7 +299,7 @@ function selectRenderableKeys(
      * @returns {boolean} `true` when the descriptor should be rendered.
      */
     (binding: PfKeyBinding): boolean => {
-      if (binding.label.trim() === "" || seen.has(binding.aid)) {
+      if (binding.label.trim() === '' || seen.has(binding.aid)) {
         return false;
       }
 
@@ -367,7 +357,7 @@ function selectRenderableKeys(
 export function PfKeyBar({
   keys,
   onInvoke,
-  legendColor = "YELLOW",
+  legendColor = 'YELLOW',
   regionLabel = PF_KEY_BAR_REGION_LABEL,
 }: PfKeyBarProps): ReactElement | null {
   // Assumptions: the token modules export token NAMES, not values, so a name has
@@ -515,7 +505,7 @@ export function PfKeyBar({
             // Assumptions: the design-system mapping fixes primary emphasis to
             // ENTER and PF5 and the default to the rest; see
             // PRIMARY_ACTION_AIDS.
-            type={isPrimaryActionAid(binding.aid) ? "primary" : "default"}
+            type={isPrimaryActionAid(binding.aid) ? 'primary' : 'default'}
             // Trade-offs: the two activation paths are NOT equivalent for a
             // disabled binding, and the difference is intended rather than
             // incidental. A disabled control cannot fire its click handler, so a

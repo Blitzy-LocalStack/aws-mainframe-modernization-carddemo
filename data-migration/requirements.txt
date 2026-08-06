@@ -207,11 +207,22 @@ botocore==1.43.50 \
 # the euro-updated cp1141 through cp1149 -- which CPython does not ship. Note what
 # this pin is therefore NOT: cp037 itself IS a standard-library codec, so this is
 # not what makes today thirteen EBCDIC datasets under app/data/EBCDIC decode. It
-# is what lets a dataset in a sibling code page decode through the identical
-# per-field path by configuration alone, with no edit to
-# copybook/ebcdic_codec.py. Dropping it breaks nothing visible until the first
-# non-cp037 dataset appears, which is exactly why the reason it exists is recorded
-# here at the pin instead of being left to inference.
+# is what lets a dataset in a VETTED sibling code page decode through the
+# identical per-field path by configuration alone, with no edit to
+# copybook/ebcdic_codec.py.
+# Assumptions: registering a page and being allowed to decode through it are two
+# different things, and the distinction is worth stating at the pin because this
+# file is where the family arrives. copybook/ebcdic_codec.py admits only the pages
+# it has vetted -- cp037, cp1140, cp500 and cp1047 -- and proves each one before
+# use: 256 byte values in, one distinct character per byte out, an exact re-encode
+# back, and the EBCDIC digit, sign-overpunch, letter, blank and low-value positions
+# carrying the characters the numeric codecs read. Of the pages this pin adds,
+# cp1047 is the one that passes; the euro-updated cp1141 through cp1149 map BOTH
+# 0x15 and 0x25 to one character, so 256 byte values decode to 255 distinct ones
+# and no exact byte-for-byte round trip exists for them at all. Dropping this pin
+# therefore breaks nothing visible until the first cp1047 dataset appears, which is
+# exactly why the reason it exists is recorded here at the pin instead of being
+# left to inference.
 ebcdic==2.0.1 \
     --hash=sha256:645034983a6f4837f0e46e4bfe59d67de0b19e7c4294d33beebe74565cdefae6 \
     --hash=sha256:3a1bedfbeee76cab2d7e4de62409ac015cd7afb25d590fe1546105c32a065cf1

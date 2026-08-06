@@ -194,31 +194,27 @@ import org.hibernate.annotations.JdbcTypeCode;
 //       asking a module holding a scoped write grant to create or alter another service's
 //       schema, which it has no right to do and which surfaces as a permission error naming
 //       nothing about the actual mistake.
-// WHY : Assumptions: this mapping carries a SEQUENCING DEPENDENCY that is not yet satisfied, and
-//       it is recorded here rather than left to be discovered at run time. The migration that
-//       creates {@code account.accounts} is
-//       services/account-service/src/main/resources/db/migration/V1__account.sql, which the
-//       migration plan schedules as an account-service deliverable and which is not yet authored
-//       -- that module currently holds no db/migration directory at all. Three consequences
-//       follow and all three are transient: with DDL generation off, every column mapping on this
-//       type is DESCRIBED but not yet verifiable against a created table, including the BIGINT
-//       NOT NULL claim on the version column below; the conditional grant in
-//       data-migration/sql/V0__schemas_and_roles.sql at lines 778 to 791 takes its ELSE branch
-//       and raises a notice instead of granting UPDATE; and a job reading or rewriting an account
-//       master against a database migrated with V0 alone fails with
-//       {@code relation "account.accounts" does not exist}.
-// WHY : Alternatives Considered: authoring that migration from this module, so the table exists
-//       and every mapping here becomes verifiable at once. Rejected on ownership rather than on
-//       effort. The schema belongs to account-service, whose own entities are the authority for
-//       every column name, type and constraint in it, and those entities are not yet authored
-//       either -- so a migration written here would fix the columns by inference from a
-//       consuming module's read of them, and the owning module would then have to be written to
-//       match a file it did not author. That is the inverted direction of authority this
-//       document set is careful to avoid, and it would leave two files claiming to define one
-//       table. The dependency is therefore TRACKED rather than pre-empted: when V1__account.sql
-//       lands, re-verify every column mapping on this type against it and re-run
-//       V0__schemas_and_roles.sql so the conditional grant takes its IF branch. The same
-//       dependency is recorded once more, from the schema's own side, in
+// WHY : Assumptions: the table this type maps is created by
+//       services/account-service/src/main/resources/db/migration/V1__account.sql, which is the
+//       authoritative column list for the account schema and which this mapping mirrors rather
+//       than defines. Every column name, type and nullability asserted below was verified
+//       against that migration applied to a live database, including the BIGINT NOT NULL claim
+//       on the version column: the migration declares version BIGINT NOT NULL DEFAULT 0, and the
+//       DEFAULT is what lets the bulk load insert a seed row that carries no version field.
+// WHY : Refactoring Rationale: this block formerly recorded an UNSATISFIED sequencing dependency
+//       -- that V1__account.sql was not yet authored, that account-service held no db/migration
+//       directory, that every mapping here was therefore described but unverifiable, and that
+//       the conditional grant in data-migration/sql/V0__schemas_and_roles.sql took its ELSE
+//       branch and only raised a notice. All four statements were true when written and none is
+//       true now. The migration was authored in the OWNING module, which is the direction of
+//       authority the note insisted on: it was explicit that writing the migration from THIS
+//       module would fix the columns by inference from a consumer's read of them, and that
+//       objection is why the file lives under account-service rather than here. The grant is
+//       applied: re-running the bootstrap after the migration takes the IF branch, and
+//       carddemo_batch now holds SELECT and UPDATE on account.accounts and SELECT alone on
+//       account.customers -- the narrowly scoped privilege the posting and interest jobs need to
+//       rewrite an account master. The same dependency, and its resolution, is recorded once
+//       more from the schema's own side in
 //       docs/architecture/data-model-and-schema-mapping.md.
 @Table(name = "accounts", schema = "account")
 public class Account {

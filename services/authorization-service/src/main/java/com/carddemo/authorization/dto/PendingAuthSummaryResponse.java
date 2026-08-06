@@ -8,6 +8,18 @@ import com.carddemo.common.web.CursorToken;
  * for the data fields that screen's symbolic map declares, and five opaque row selectors the screen does
  * not declare because the baseline holds them in the communication area instead.
  *
+ * <h2>Which edge this record serves</h2>
+ *
+ * <p>Refactoring Rationale: this record is the record of what the 3270 summary screen displayed, and it
+ * is <b>not</b> an HTTP body. {@code src/main/resources/openapi/authorization-api.yaml} is the contract of
+ * record for this context's HTTP edge, and {@code PendingAuthListView} is its Java realisation for this payload; the
+ * package charter in {@code package-info.java} states the split once for all twelve types here. An earlier
+ * state of this package left the question open, so a reader had two plausible candidates for one payload
+ * and no way to choose. Assumptions: this record is retained rather than deleted because it is the only
+ * place three reference compositions and this screen's own field widths are recorded, and it is what the
+ * browser screen implements. Trade-offs: two types describe one screen, and the compensation is that each
+ * now names its edge on itself.</p>
+ *
  * <p><strong>Purpose.</strong> This record is the outbound half of the pending-authorization summary
  * endpoint. It carries what one screenful of that screen carries and nothing besides: six header positions,
  * fifteen account-and-customer context positions, five rows of eight positions each, and one message line.

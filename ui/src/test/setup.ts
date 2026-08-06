@@ -37,9 +37,9 @@
  * setting exists to withhold from production sources.
  */
 
-import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
 
 // Assumptions: Testing Library renders into document.body, so cleaning after
 // every test prevents a previous route or alert from satisfying the next
@@ -68,9 +68,7 @@ function evaluateWidthQuery(query: string): boolean {
     return false;
   }
   const threshold = Number(match[2]);
-  return match[1] === "min"
-    ? window.innerWidth >= threshold
-    : window.innerWidth <= threshold;
+  return match[1] === 'min' ? window.innerWidth >= threshold : window.innerWidth <= threshold;
 }
 
 /**
@@ -103,7 +101,7 @@ function evaluateWidthQuery(query: string): boolean {
  * @returns {void} Nothing; `window.matchMedia` is defined as a side effect.
  */
 function installMatchMedia(): void {
-  Object.defineProperty(window, "matchMedia", {
+  Object.defineProperty(window, 'matchMedia', {
     writable: true,
     configurable: true,
     /**
@@ -231,7 +229,7 @@ function installResizeObserver(): void {
     }
   }
 
-  Object.defineProperty(globalThis, "ResizeObserver", {
+  Object.defineProperty(globalThis, 'ResizeObserver', {
     writable: true,
     configurable: true,
     value: NoopResizeObserver,

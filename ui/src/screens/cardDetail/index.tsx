@@ -1,31 +1,32 @@
-import { Button, Descriptions, Flex, Result, Spin, Typography } from "antd";
-import { useEffect, useState } from "react";
-import type { ReactElement } from "react";
-import { useNavigate, useParams } from "react-router";
+import { Button, Descriptions, Flex, Result, Spin, Typography } from 'antd';
+import { useEffect, useState } from 'react';
+import type { ReactElement } from 'react';
+import { useNavigate, useParams } from 'react-router';
 
-import { getCard } from "../../api/cards";
-import type { CardDetail } from "../../api/cards";
-import { MessageBand } from "../../layout/MessageBand";
-import { cardEditPath, isOpaqueCardId } from "../../routes/cards";
-import { navigationHandler } from "../../routes/navigation";
+import { getCard } from '../../api/cards';
+import type { CardDetail } from '../../api/cards';
+import { MessageBand } from '../../layout/MessageBand';
+import { cardEditPath, isCardNumber } from '../../routes/cards';
+import { navigationHandler } from '../../routes/navigation';
 
 /**
- * Renders one card selected exclusively by a server-issued opaque identifier.
+ * Renders one card addressed by the sixteen-digit card number in its route.
+ *
+ * Assumptions: the route parameter is validated before any request is issued, so a masked rendering
+ * pasted into the address bar produces this screen's own not-found state rather than an HTTP 400.
  * @returns {ReactElement} The card detail screen or a bounded invalid-link result.
  */
 export function CardDetailScreen(): ReactElement {
   const navigate = useNavigate();
-  const { opaqueCardId: routeIdentifier } = useParams<{
-    opaqueCardId: string;
+  const { cardNumber: routeIdentifier } = useParams<{
+    cardNumber: string;
   }>();
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const opaqueCardId =
-    routeIdentifier !== undefined && isOpaqueCardId(routeIdentifier)
-      ? routeIdentifier
-      : null;
+  const cardNumber =
+    routeIdentifier !== undefined && isCardNumber(routeIdentifier) ? routeIdentifier : null;
 
   useEffect(
     /**
@@ -33,13 +34,13 @@ export function CardDetailScreen(): ReactElement {
      * settles the loading state without a request when the selector is rejected.
      */
     () => {
-      if (opaqueCardId === null) {
+      if (cardNumber === null) {
         setLoading(false);
         return;
       }
       setLoading(true);
       setError(null);
-      getCard(opaqueCardId).then(
+      getCard(cardNumber).then(
         /**
          * Publishes the retrieved record to the screen.
          * @param {CardDetail} selectedCard - The record the service returned.
@@ -54,26 +55,22 @@ export function CardDetailScreen(): ReactElement {
          */
         () => {
           setError(
-            "Card detail is temporarily unavailable. No card identifier was included in this diagnostic.",
+            'Card detail is temporarily unavailable. No card identifier was included in this diagnostic.',
           );
           setLoading(false);
         },
       );
     },
-    [opaqueCardId],
+    [cardNumber],
   );
 
-  if (opaqueCardId === null) {
+  if (cardNumber === null) {
     return (
       <Result
         status="error"
         title="Invalid card link"
         subTitle="The card selector is missing or malformed. Return to the card list and select the record again."
-        extra={
-          <Button onClick={navigationHandler(navigate, "/cards")}>
-            Back to cards
-          </Button>
-        }
+        extra={<Button onClick={navigationHandler(navigate, '/cards')}>Back to cards</Button>}
       />
     );
   }
@@ -102,29 +99,21 @@ export function CardDetailScreen(): ReactElement {
       <MessageBand message={error} />
       {card === null ? null : (
         <Descriptions bordered column={2}>
-          <Descriptions.Item label="Card">
-            {card.displayCardNumber}
-          </Descriptions.Item>
-          <Descriptions.Item label="Account">
-            {card.accountId}
-          </Descriptions.Item>
-          <Descriptions.Item label="Embossed name">
-            {card.embossedName}
-          </Descriptions.Item>
-          <Descriptions.Item label="Expiration">
-            {card.expirationDate}
-          </Descriptions.Item>
+          <Descriptions.Item label="Card">{card.displayCardNumber}</Descriptions.Item>
+          <Descriptions.Item label="Account">{card.accountId}</Descriptions.Item>
+          <Descriptions.Item label="Embossed name">{card.embossedName}</Descriptions.Item>
+          <Descriptions.Item label="Expiration">{card.expirationDate}</Descriptions.Item>
           <Descriptions.Item label="Status">
-            {card.activeStatus === "Y" ? "Active" : "Inactive"}
+            {card.activeStatus === 'Y' ? 'Active' : 'Inactive'}
           </Descriptions.Item>
         </Descriptions>
       )}
       <Flex gap="small">
-        <Button onClick={navigationHandler(navigate, "/cards")}>Back</Button>
+        <Button onClick={navigationHandler(navigate, '/cards')}>Back</Button>
         <Button
           type="primary"
           disabled={card === null}
-          onClick={navigationHandler(navigate, cardEditPath(opaqueCardId))}
+          onClick={navigationHandler(navigate, cardEditPath(cardNumber))}
         >
           Edit
         </Button>

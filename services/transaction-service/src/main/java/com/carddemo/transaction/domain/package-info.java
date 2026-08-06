@@ -5,12 +5,16 @@
  * <h2>Target contract, and the tree state that authored it</h2>
  *
  * <p>Assumptions: every type name, byte width and figure below states this
- * package's target contract as the migration plan assigns it, not the set of
- * files sitting beside this one at the checkpoint that authored it. At that
- * checkpoint this directory holds this charter and nothing else. An entity
- * named below that has no file yet is therefore planned rather than missing,
- * and a figure below is a target total rather than a measurement of the
- * directory.
+ * package's target contract as the migration plan assigns it. The directory
+ * beside this file now matches that contract -- all five files the inventory
+ * names are present -- but it did not when this charter was authored, and the
+ * distinction is recorded rather than quietly dropped. This paragraph was
+ * written when the directory held this charter alone, so that a name below with
+ * no file could be read as planned rather than missing; it is kept because the
+ * same reading is needed again the next time this charter leads its files, and
+ * because a charter that switched from stating a target to measuring a
+ * directory without saying so leaves a reader unable to tell which one is in
+ * front of them.
  *
  * <p>Alternatives Considered: withholding this charter until the four entities
  * it governs exist. Rejected on two independent grounds, either of which
@@ -22,8 +26,8 @@
  * charter-presence check is a file-set check over directories: a directory
  * holding an audited compilation unit and no charter fails the build outright,
  * so the first entity authored here could not have compiled unless this file
- * already existed. The cost accepted is that the inventory reads as present
- * tense unless the distinction is declared, which is what the paragraph above
+ * already existed. The cost accepted was that the inventory read as present
+ * tense before every file it names existed, which is what the paragraph above
  * is for.
  *
  * <p><b>Purpose.</b> This package holds the persistence model of the ledger
@@ -61,13 +65,19 @@
  *   <li>{@code package-info.java} -- this charter.</li>
  *   <li>{@code Transaction} -- from {@code app/cpy/CVTRA05Y.cpy} lines 4 to 18,
  *       {@code TRAN-RECORD}, a 350-byte record, mapping
- *       {@code ledger.transactions}. That table carries the only single-column
- *       primary key in the schema, on the transaction identifier, and it is the
- *       key the list screen pages on.</li>
+ *       {@code ledger.transactions}. Its primary key is the only one in the
+ *       schema that a record contract supplies -- the transaction identifier,
+ *       declared unique by the reference file definition -- and it is the key
+ *       the list screen pages on.</li>
  *   <li>{@code DailyTransaction} -- from {@code app/cpy/CVTRA06Y.cpy} lines 4
  *       to 18, {@code DALYTRAN-RECORD}, a 350-byte record, mapping
  *       {@code ledger.daily_transactions}. The layout is field for field the
- *       one above with only the name prefix differing.</li>
+ *       one above with only the name prefix differing, and the difference that
+ *       matters is the key: the staged feed is sequential and asserts no
+ *       uniqueness, so the table adds a generated ingestion ordinal,
+ *       {@code ingest_seq}, and this entity is keyed on that rather than on the
+ *       staged transaction identifier, which is business data here and not
+ *       unique.</li>
  *   <li>{@code TransactionCategoryBalance} -- from {@code app/cpy/CVTRA01Y.cpy}
  *       lines 4 to 10, {@code TRAN-CAT-BAL-RECORD}, a 50-byte record, mapping
  *       {@code ledger.transaction_category_balances}. Line 5 of that copybook
@@ -80,16 +90,21 @@
  *       176: a 350-byte record image at line 177 followed by an 80-byte trailer
  *       at line 178, which lines 181 and 182 resolve into a four-digit reason
  *       code and a 76-character description, for 430 bytes in total. It maps
- *       {@code ledger.transaction_rejects}.</li>
+ *       {@code ledger.transaction_rejects}, and it is keyed on a generated
+ *       reject-event ordinal, {@code reject_seq}, because the same record image
+ *       rejected on two runs is two legitimate rows and the image itself
+ *       therefore identifies nothing.</li>
  * </ul>
  *
  * <p>Assumptions: three separate counts meet in this module and none of them is
  * the others. This package holds five files. The module holds eight Java
  * packages in its main source tree and therefore eight package charters, which
  * the module's root charter records and this one does not restate differently.
- * And {@code ledger.transactions} and {@code ledger.daily_transactions} each
- * carry thirteen columns. A reader reconciling any one of the three against
- * another would conclude that files or columns are missing.
+ * And {@code ledger.transactions} carries thirteen columns, one per named copybook
+ * field, while {@code ledger.daily_transactions} carries those same thirteen plus a
+ * target-side ingestion sequence that no copybook field supplies, so fourteen. A
+ * reader reconciling any one of these figures against another would conclude that
+ * files or columns are missing.
  *
  * <p>Trade-offs: the inventory is closed rather than open-ended, so a type that
  * would be convenient here does not belong here. What is bought is that the
@@ -154,8 +169,12 @@
  * character column chosen over a varying one so that a rejected record image
  * keeps its padding at 350 bytes however short the write was; an index declared
  * without uniqueness because the baseline definition it carries forward is
- * explicitly a non-unique key; and a table left with no primary key at all
- * because the sequential feed it mirrors asserts no uniqueness. A generated
+ * explicitly a non-unique key; and a generated ordinal declared as the key of both
+ * the staged feed and the reject stream rather than any of their copybook columns,
+ * because neither asserts uniqueness over the record's own fields while a mapped row
+ * still needs an identity that is unique, because a duplicate image is a legitimate
+ * row in either rather than an error to collapse, and because a resumable scan
+ * ordered by a non-unique column loses rows at its chunk boundaries. A generated
  * schema would silently replace all three.
  *
  * <p>Assumptions: the schema and the login that owns it are established before

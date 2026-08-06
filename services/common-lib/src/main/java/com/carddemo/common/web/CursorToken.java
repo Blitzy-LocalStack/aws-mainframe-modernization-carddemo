@@ -1,5 +1,6 @@
 package com.carddemo.common.web;
 
+import com.carddemo.common.error.ClientInputException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -426,6 +427,22 @@ public final class CursorToken {
     }
 
     /**
+     * The stable token an alert rule or a log query matches a cursor refusal on.
+     *
+     * <p>Assumptions: one code for all three refusal reasons, matching the single exception type below,
+     * because the three are deliberately indistinguishable to a caller.</p>
+     */
+    private static final String REFUSAL_CODE = "CURSOR_REFUSED";
+
+    /**
+     * The request parameter a cursor refusal is attributed to.
+     *
+     * <p>Assumptions: the name is the query parameter the published contracts declare the cursor under,
+     * so a form or a client keys the refusal by the same name it sent.</p>
+     */
+    private static final String CURSOR_FIELD = "cursor";
+
+    /**
      * Reports that a presented cursor token cannot be accepted.
      *
      * <p>Assumptions: one exception type covers every refusal -- malformed, unauthenticated, expired --
@@ -433,8 +450,17 @@ public final class CursorToken {
      * the request and start the browse again from its opening page. Distinguishing them in the type
      * would also let a handler report which of them occurred, and telling a client whether its token
      * was expired or merely unauthentic is information it can use to probe.</p>
+     *
+     * <p>Refactoring Rationale: the supertype is {@link ClientInputException} rather than
+     * {@link IllegalArgumentException}. A cursor arrives from a caller as a query parameter, so a
+     * refusal is the caller's to fix and belongs in the 400 shape -- but the shared advice no longer
+     * claims the whole {@code IllegalArgumentException} family, precisely because that family also
+     * carries every internal invariant in the migration. Naming the narrower supertype is what keeps
+     * this refusal a 400 while a genuine invariant failure remains a 500. The message contract is
+     * unchanged and is what satisfies the supertype's redaction obligation: it names the shape, the
+     * length or the age of the token and never the characters it carried.</p>
      */
-    public static final class InvalidCursorException extends IllegalArgumentException {
+    public static final class InvalidCursorException extends ClientInputException {
 
         /** The serialisation version, fixed because this type's shape is its inherited message alone. */
         private static final long serialVersionUID = 1L;
@@ -446,7 +472,12 @@ public final class CursorToken {
          *     its age, and never in terms of the characters it carried
          */
         InvalidCursorException(String message) {
-            super(message);
+            // WHY : Assumptions: the stable code and the field key are fixed rather than taken from the
+            //       caller, because every refusal of this type concerns the same one parameter and a
+            //       caller's response to all of them is identical -- start the browse again from its
+            //       opening page. Accepting them per raise site would let one refusal be keyed
+            //       differently from another for one parameter.
+            super(REFUSAL_CODE, CURSOR_FIELD, message);
         }
     }
 }

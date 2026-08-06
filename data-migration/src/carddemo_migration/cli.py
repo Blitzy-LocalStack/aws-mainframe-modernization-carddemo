@@ -62,6 +62,14 @@ from carddemo_migration.config import (
     resolve_dataset_staging_settings,
 )
 from carddemo_migration.copybook import layouts
+from carddemo_migration.copybook.ebcdic_codec import (
+    EBCDIC_CODE_PAGE,
+    EbcdicFieldDecodeError,
+    EbcdicRecordLengthError,
+    decode_record,
+    iter_ebcdic_records,
+)
+from carddemo_migration.copybook.layouts import RecordSpec
 from carddemo_migration.credentials import (
     EXIT_FAILED,
     EXIT_FATAL,
@@ -108,6 +116,12 @@ _TABLE_COLUMNS: Final[tuple[str, ...]] = (
     "keylen",
     "provenance",
 )
+
+# Assumptions: the placeholder is a blank, so a sensitive field whose rendering is not the
+#   declared width is masked from a chunk that carries none of the value at all. It exists
+#   only to satisfy mask_field's width contract on that path; the redaction it produces is a
+#   keyed tag, so nothing about the real value reaches the output through it.
+_REDACTION_PLACEHOLDER: Final[str] = " "
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -223,6 +237,149 @@ def _list_datasets(arguments: argparse.Namespace) -> int:
     else:
         print(_render_table(rows))
     return EXIT_OK
+
+
+def _decode_record(arguments: argparse.Namespace) -> int:
+    """Decode one record of a fixed-length extract and print its fields.
+
+    Purpose
+    -------
+    Give an operator the one verification step that has to happen BEFORE a load rather
+    than after it: prove that a delivered extract decodes at the declared geometry. It
+    reads the record at the requested ordinal, decodes it field by field through
+    :func:`carddemo_migration.copybook.ebcdic_codec.decode_record`, and prints the field
+    map. Nothing is written, no database is opened and no credential is read.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``dataset`` (a registered layout name), ``source`` (the extract path),
+        ``record`` (a one-based ordinal) and ``code_page``.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the record decodes, :data:`EXIT_USAGE` when the layout name
+        or the ordinal is not acceptable, and :data:`EXIT_FAILED` when the extract does
+        not decode at the declared geometry.
+
+    Raises
+    ------
+    None
+        Every failure this command can reach is reported as an exit status, because it
+        runs as a container command whose caller reads a code and not a traceback.
+    """
+    # Assumptions: the layout name is validated against the registry before the file is
+    #   opened, so an unknown dataset costs no I/O and reports the closed set of names it
+    #   could have been. The registry refuses an unknown name with LayoutError -- a
+    #   ValueError subclass, NOT a KeyError -- and that exact type is caught rather than
+    #   propagated for the reason the Raises section gives.
+    try:
+        layout = layouts.layout(arguments.dataset)
+    except layouts.LayoutError:
+        print(
+            f"unknown dataset {arguments.dataset!r}; expected one of {', '.join(layouts.names())}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    if arguments.record < 1:
+        print("--record is a one-based ordinal, so it must be 1 or greater", file=sys.stderr)
+        return EXIT_USAGE
+
+    # Assumptions: the record is reached by ITERATING the dataset rather than by seeking to
+    #   ordinal times record length. The two agree on a well-formed extract, and they
+    #   disagree exactly where it matters: an extract whose length is not a whole multiple
+    #   of the record length is a truncated or misdeclared delivery, and the iterator says
+    #   so, where a seek would return a short final span and decode it as though it were
+    #   whole.
+    try:
+        image = None
+        for ordinal, candidate in enumerate(
+            iter_ebcdic_records(Path(arguments.source), layout), start=1
+        ):
+            if ordinal == arguments.record:
+                image = candidate
+                break
+        if image is None:
+            print(
+                f"{arguments.source} holds fewer than {arguments.record} records of "
+                f"{layout.reclen} bytes",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        fields = decode_record(image, layout, code_page=arguments.code_page)
+    except EbcdicRecordLengthError as failure:
+        print(str(failure), file=sys.stderr)
+        return EXIT_FAILED
+    except EbcdicFieldDecodeError as failure:
+        print(str(failure), file=sys.stderr)
+        return EXIT_FAILED
+    except OSError as failure:
+        print(f"cannot read {arguments.source}: {failure}", file=sys.stderr)
+        return EXIT_FAILED
+
+    # Assumptions: every value is rendered with str() rather than serialised by type,
+    #   because a decimal serialised as a JSON number would be re-read by most consumers
+    #   as an IEEE-754 double -- which is the one thing the whole codec stack exists to
+    #   avoid. A string keeps the exact digits the picture clause declares.
+    rendered = {name: str(value) for name, value in fields.items()}
+    print(json.dumps(_redacted(rendered, layout), indent=2))
+    return EXIT_OK
+
+
+def _redacted(rendered: dict[str, str], layout: RecordSpec) -> dict[str, str]:
+    """Redact every sensitive field of an already-rendered record.
+
+    Purpose
+    -------
+    Keep a diagnostic command from printing a cardholder name, a card number, a card
+    verification value, a national identifier or a stored password, while still proving
+    that each of those fields decoded at its declared width.
+
+    Parameters
+    ----------
+    rendered : dict of str to str
+        Field name to rendered value, as produced from a decoded record.
+    layout : RecordSpec
+        The layout the record was decoded against, carrying each field's sensitivity.
+
+    Returns
+    -------
+    dict of str to str
+        The same mapping with each sensitive field replaced by
+        :func:`carddemo_migration.copybook.layouts.mask_field`'s redaction.
+
+    Raises
+    ------
+    None
+    """
+    # Alternatives Considered: offering a --reveal flag that prints the cleartext was
+    #   considered and rejected. The command exists to prove a delivery decodes at the
+    #   declared geometry, and the redactions prove exactly that -- a last-four reveal shows
+    #   the card number's own trailing digits, and a keyed tag is stable for one value, so a
+    #   maintainer can still tell two records apart field by field. A reveal flag would put
+    #   a cardholder's name and a stored password into a container log for a check that never
+    #   needed them, and a flag defaulting to safe is still a flag an operator can pass.
+    safe: dict[str, str] = {}
+    for field in layout.fields:
+        value = rendered.get(field.name)
+        if value is None:
+            continue
+        if not field.sensitive:
+            safe[field.name] = value
+            continue
+        # Assumptions: every sensitive field in the registry decodes to characters at its
+        #   declared width, so mask_field applies directly -- verified across CARD and
+        #   CUSTOMER, the only two layouts carrying sensitive fields. The width branch below
+        #   is unreachable for that registry and is still written, because mask_field refuses
+        #   a mis-width chunk by raising, and a redaction that raised instead of redacting
+        #   would abort the command with the value still in the exception's own frame.
+        if len(value) == field.length:
+            safe[field.name] = layouts.mask_field(field, value)
+        else:
+            safe[field.name] = layouts.mask_field(field, _REDACTION_PLACEHOLDER * field.length)
+    return safe
 
 
 def _resolved_object_name(source: Path, requested: str | None) -> str:
@@ -484,8 +641,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROGRAM_NAME,
         description=(
             "Stage CardDemo extracts into the versioned dataset bucket, apply the "
-            "database credentials the service roles authenticate with, and report the "
-            "record-layout contract the extracts are decoded against."
+            "database credentials the service roles authenticate with, report the "
+            "record-layout contract the extracts are decoded against, and decode one "
+            "record of an extract through that contract to prove it before a load."
         ),
         epilog=(
             "Exit codes follow tests/README.md section 8: 0 success, 2 usage, 8 the "
@@ -520,6 +678,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format; 'table' for reading, 'json' for a consumer (default: table)",
     )
     list_datasets.set_defaults(handler=_list_datasets)
+
+    decode_record_command = subcommands.add_parser(
+        "decode-record",
+        help="decode one record of a fixed-length extract and print its fields",
+        description=(
+            "Decode the record at the given one-based ordinal through the per-field "
+            "codec stack and print the field map as JSON, with every value rendered as "
+            "a string so no consumer re-reads a monetary amount as a floating-point "
+            "number. Reads one local file; touches no database, object store or "
+            "credential."
+        ),
+    )
+    decode_record_command.add_argument(
+        "--dataset",
+        required=True,
+        help="registered layout name, as printed by list-datasets",
+    )
+    decode_record_command.add_argument(
+        "--source",
+        required=True,
+        type=Path,
+        help="path to the fixed-length extract to read",
+    )
+    # Assumptions: the ordinal is one-based and defaults to the first record, because an
+    #   operator verifying a delivery reads record 1 and because a zero-based default
+    #   would make the first invocation of this command disagree with every record count
+    #   the runbooks quote.
+    decode_record_command.add_argument(
+        "--record",
+        type=int,
+        default=1,
+        help="one-based ordinal of the record to decode (default: 1)",
+    )
+    # Assumptions: the code page defaults to the mainframe-character-set page the seed
+    #   extracts are delivered in, and is an argument rather than a constant only because
+    #   the same layouts also describe the ASCII copies of the same datasets.
+    decode_record_command.add_argument(
+        "--code-page",
+        default=EBCDIC_CODE_PAGE,
+        help=(f"character set of the extract's display fields (default: {EBCDIC_CODE_PAGE})"),
+    )
+    decode_record_command.set_defaults(handler=_decode_record)
 
     stage_dataset = subcommands.add_parser(
         "stage-dataset",

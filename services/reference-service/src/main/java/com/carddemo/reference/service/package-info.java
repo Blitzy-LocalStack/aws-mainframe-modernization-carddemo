@@ -4,23 +4,18 @@
  * data business rule in the module, and it is the only layer in the module
  * that holds one.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Target contract, not a directory listing</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: every inventory, file name, class name and count in this charter states the
+ * package's <b>target contract</b> as the migration plan assigns it. It is a specification of what
+ * this package owns and of what it may never hold, so it is read against the plan rather than against
+ * a listing of the directory beside it.</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <p>Alternatives Considered: deriving the inventory from the directory instead of from the plan.
+ * Rejected, because a charter that describes whatever happens to be present cannot say what may
+ * <em>not</em> be added, and that is the half of a package contract a reader cannot reconstruct from
+ * the files. Stating the closed set costs a charter that has to be revised when the contract itself
+ * changes, and buys a boundary a reviewer can enforce against a proposed addition.</p>
  *
  * <p>Purpose. Each significant paragraph of the baseline COBOL programs
  * named below becomes one named method here, so that the register at
@@ -246,14 +241,26 @@
  *       flag, no page size, no page number and no total count. Mappers
  *       supply item types only, so assembling the envelope is this layer's
  *       job.</li>
- *   <li>Concurrency. No entity in this module's domain carries a version
- *       column, so the before-image comparison the baseline performs at
- *       {@code COTRTUPC.cbl} L1585 is implemented in this layer rather
- *       than by the persistence provider. Assumptions: the exception it
- *       throws is discriminated by its fully qualified class name, because
- *       {@code common-lib} has no JPA dependency and so cannot name
- *       {@code jakarta.persistence.OptimisticLockException} by type; the
- *       shared handler walks the cause chain by name instead.</li>
+ *   <li>Concurrency. The two tables this context maintains --
+ *       {@code reference.transaction_types} and
+ *       {@code reference.transaction_categories} -- each carry a
+ *       {@code version BIGINT NOT NULL DEFAULT 0} column, so the
+ *       before-image comparison the baseline decides at
+ *       {@code COTRTUPC.cbl} L1585 is delegated to the persistence
+ *       provider through a {@code @Version} attribute rather than
+ *       hand-rolled in this layer. Refactoring Rationale: a
+ *       provider-managed version compares one column under the row lock
+ *       the UPDATE already takes, whereas a hand-rolled comparison would
+ *       have to re-read every field and could still lose a write
+ *       interleaved between that re-read and the UPDATE. The four seeded
+ *       lookup tables carry no such column because no operation updates
+ *       them. What remains this layer's job is translating the provider's
+ *       failure into the 409 the contract publishes. Assumptions: the
+ *       exception it throws is discriminated by its fully qualified class
+ *       name, because {@code common-lib} has no JPA dependency and so
+ *       cannot name {@code jakarta.persistence.OptimisticLockException}
+ *       by type; the shared handler walks the cause chain by name
+ *       instead.</li>
  * </ul>
  *
  * <p>Divergence register. Where the target's behaviour departs from the

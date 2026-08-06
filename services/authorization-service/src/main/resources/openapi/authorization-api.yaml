@@ -10,18 +10,29 @@
 #   context is written against this document rather than against a fresh
 #   reading of the reference COBOL.
 #
-#   This document LEADS and the Java follows. At the checkpoint that authored
-#   it the module holds its entities, its six data-transfer records, its
-#   mapper, its repositories, its services and its configuration, and it holds
-#   no controller at all: no type in it carries a request-mapping annotation,
-#   so nothing in it publishes an HTTP body yet. The two controllers that will,
-#   PendingAuthController and FraudController, are named as planned by the
-#   charter at src/main/java/com/carddemo/authorization/api/package-info.java,
-#   and they are written to the shapes below. Where a shape below differs from
-#   one of the six existing records, the difference is named at the point it
-#   occurs and resolved in this document, because two descriptions of one wire
-#   contract inside one module cannot both be right and nothing in either build
-#   compares them.
+#   This document LEADS and the Java follows. The module holds its entities, its
+#   ten data-transfer records, its mapper, its repositories, its services and
+#   its configuration, and it holds no controller at all: the api package holds
+#   its charter and nothing else, so no type in this module carries a
+#   request-mapping annotation and nothing in it publishes an HTTP body yet. The
+#   two controllers that will, PendingAuthController and FraudController, are
+#   named as planned by the charter at
+#   src/main/java/com/carddemo/authorization/api/package-info.java, and they are
+#   written to the shapes below. Where a shape below differs from one of the ten
+#   existing records, the difference is named at the point it occurs and
+#   resolved in this document, because two descriptions of one wire contract
+#   inside one module cannot both be right and nothing in either build compares
+#   them.
+#
+#   Refactoring Rationale: the record count above is re-measured from the dto
+#   directory rather than carried forward. It read six while ten were present --
+#   the four view records the mapper projects through are records of that
+#   package too, and the two queue payload records are as well -- and a figure
+#   that under-counts invites a reader to conclude a record they can see is
+#   undocumented. The ten are AuthorizationRequestPayload,
+#   AuthorizationReplyPayload, FraudMarkRequest, FraudMarkResponse,
+#   PendingAuthDetailResponse, PendingAuthDetailView, PendingAuthListView,
+#   PendingAuthRowView, PendingAuthSummaryResponse and PendingAuthSummaryView.
 #
 #   Field names, widths, value domains, nullability and monetary precision are
 #   not derived here. The persistent shape is settled by
@@ -48,7 +59,11 @@
 #     it.
 #   - A request header: X-Correlation-Id, optional on every operation, declared
 #     once at components/parameters/CorrelationIdHeader.
-#   - One request body: FraudTagRequest, carried by the fraud operation alone.
+#   - One request body: FraudMarkRequest, carried by the fraud operation alone.
+#     It names the row by its three decoded primary-key columns as well as by
+#     the path selector above, names the customer the fraud row is filed
+#     against, and names the state to reach. The two namings of the row must
+#     agree and a disagreement is refused; the rationale sits on the schema.
 #     The two list and read operations carry no body.
 #
 # Return values:
@@ -58,11 +73,27 @@
 #   - PendingAuthDetail, from the read operation: the full state of one pending
 #     authorization, with the primary account number rendered to its last four
 #     digits and with no member able to carry it unmasked.
-#   - FraudTagResponse, from a successful fraud write: the outcome flag, the
-#     insert-versus-update distinction, the verbatim outcome sentence and the
-#     identity of the fraud row that was written.
-#   - ApiError, from every failure, referenced from the shared kernel rather
-#     than redeclared here.
+#   - FraudMarkResponse, from a successful fraud write: the outcome flag and
+#     the verbatim outcome sentence, which are the two response-direction
+#     fields of the baseline communication area. The insert-versus-update
+#     distinction is carried by the status code rather than by a member, and
+#     the rationale sits on the schema.
+#   - ApiError, from every failure. It is DECLARED IN THIS DOCUMENT, at
+#     components/schemas/ApiError, and it mirrors the shared kernel type
+#     services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java
+#     that the shared advice actually assembles. The kernel owns the shape and
+#     the failure identifiers; this document owns a schema that describes them.
+#     Refactoring Rationale: an earlier revision said the schema was "referenced
+#     from the shared kernel rather than redeclared here", which is not what this
+#     file does and is not what any service contract does -- all five publish
+#     their own components/schemas/ApiError. The wording mattered because it
+#     pointed a maintainer at a reference that does not exist: someone tightening
+#     a member would have gone looking for a shared document to edit, found none,
+#     and had no reason to believe this one was authoritative. What keeps the five
+#     copies honest is the Java type every service serialises through, not a
+#     shared YAML file none of them reads -- nothing in this build resolves a
+#     reference across files, so a shared fragment would be a reference only some
+#     tools could follow.
 #
 #   Two further schemas are published that no HTTP operation returns:
 #   AuthorizationRequestMessage and AuthorizationReplyMessage document the
@@ -99,36 +130,39 @@
 #   them would misreport both.
 #
 # WHY (non-obvious design decisions):
-#   - Assumption: paths are absolute from the server root and carry an explicit
+#   - Assumptions: paths are absolute from the server root and carry an explicit
 #     /api/v1 prefix. No servlet context path exists to prepend, and
 #     config/SecurityConfig.java fixes FRAUD_PATH_PATTERN as
 #     /api/v1/authorizations/*/fraud with the reasoning for the prefix written
 #     beside it, so a relative assumption here would describe a route the
 #     service never receives while the authority gate matched the one it does.
-#   - Trade-off: exactly one server entry is declared and it is a relative URL.
+#   - Trade-offs: exactly one server entry is declared and it is a relative URL.
 #     Naming a resolvable host would put a deployment endpoint into version
 #     control, which this migration forbids; the cost is that a reader cannot
 #     learn an environment's address from this document, which is the intended
 #     outcome.
-#   - Alternative considered: declaring the actuator health endpoint. Rejected
+#   - Alternatives Considered: declaring the actuator health endpoint. Rejected
 #     because it is contributed by the framework, configured in
 #     application.yml and consumed by the load-balancer target group and the
 #     container health check. Publishing it here would create a second,
 #     hand-maintained description of an endpoint this file does not own, and
 #     the two would drift with no build step to notice.
-#   - Assumption: the four rationale labels used throughout this file are
-#     Assumption, Trade-off, Alternative considered and Refactoring rationale,
-#     written singular. They map one to one onto the four justification
-#     categories user-specified Rule 1 (Explainability) enumerates at its lines
-#     31 to 34, and the singular spelling is the one the repository's only
-#     pre-existing YAML artifact uses, at .github/workflows/tests.yml lines 19,
-#     23, 28, 39 and 41, which is also where this header's geometry is measured
-#     from. The plural spelling that docs/CODE_DOCUMENTATION_STANDARD.md sets
-#     as its permitted form is named here rather than left unsaid, so that a
-#     reviewer auditing this tree by literal string search for either spelling
-#     reaches this bullet and can then read the whole file with one token. The
-#     two forms are never mixed inside this file.
-#   - Trade-off: no mechanical gate inspects the comments in this file, and
+#   - Assumptions: the four rationale labels used throughout this file are
+#     Assumptions, Trade-offs, Alternatives Considered and Refactoring
+#     Rationale, written in the plural form that
+#     docs/CODE_DOCUMENTATION_STANDARD.md sets as the one permitted spelling.
+#     They map one to one onto the four justification categories user-specified
+#     Rule 1 (Explainability) enumerates at its lines 31 to 34.
+#     Refactoring Rationale: an earlier revision of this file used the singular
+#     spelling throughout and argued for it from the repository's only
+#     pre-existing YAML artifact, .github/workflows/tests.yml, which is also
+#     where this header's geometry is measured from. Geometry and label spelling
+#     are separate questions, and only one of them has a written convention: the
+#     standard names ONE permitted form, so a second form here would make a
+#     search for a category name miss this file and would leave the tree with two
+#     spellings of one label set. The geometry citation still stands; the spelling
+#     now follows the standard. The two forms are never mixed inside this file.
+#   - Trade-offs: no mechanical gate inspects the comments in this file, and
 #     that is stated rather than assumed. config/checkstyle/checkstyle.xml sets
 #     fileExtensions to java on its Checker at its line 185, so the
 #     documentation gate reaches this module's Java sources and not this one,
@@ -137,7 +171,7 @@
 #     less, precisely because nothing in the build will fail if it lapses:
 #     Rule 1's validation gate at its line 43 is unconditional and does not
 #     depend on a linter existing to notice.
-#   - Trade-off: parity for this context rests on the record layouts and the
+#   - Trade-offs: parity for this context rests on the record layouts and the
 #     transcribed logic and not on a byte comparison, and claiming otherwise
 #     would overstate it. All four online programs of this context are CICS
 #     programs, and tests/README.md records at its lines 83 to 85 that such
@@ -145,7 +179,7 @@
 #     does not have; the external authorization producer is not shipped either.
 #     The copybook and DDL contracts cited throughout are consequently the
 #     strongest available oracle for every width, key and domain below.
-#   - Refactoring rationale: user-visible message text is reproduced character
+#   - Refactoring Rationale: user-visible message text is reproduced character
 #     for character, including punctuation that is inconsistent between
 #     neighbouring literals in the same program -- cbl/COPAUS0C.cbl L269 has no
 #     space before its ellipsis and L278 has one. Normalising it would change
@@ -209,14 +243,24 @@ info:
     Money in this context is transported as a JSON string at two distinct
     precisions, never as a JSON number, for the reasons recorded on the
     SummaryAmount and DetailAmount schemas. No card verification value appears
-    anywhere in this document, in any schema, example or description, and every
-    primary account number is rendered to its last four digits.
+    anywhere in this document, in any schema, example or description.
+    Primary account numbers are masked to their last four digits in every HTTP
+    RESPONSE, and no response member is able to carry one whole. That guarantee
+    stops at the HTTP boundary and deliberately does not extend to the two queue
+    payload schemas: AuthorizationRequestMessage.cardNum carries the number whole
+    because the acquirer sends it whole and this context cannot mask what it has
+    not yet received, and AuthorizationReplyMessage.cardNum echoes the request
+    field so the acquirer can correlate the reply. Both are internal wire
+    contracts on encrypted queues that no client of this API reads, and each says
+    so on its own member. This distinction is stated here rather than left to
+    those two members because a blanket masking claim at the top of a contract is
+    exactly what a reviewer assessing data exposure reads and stops at, and an
+    unqualified one would be false.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
 
-# WHAT: the single origin every path below is appended to.
-# WHY : Trade-off: a relative entry rather than a templated host or a
+# WHY : Trade-offs: a relative entry rather than a templated host or a
 #       per-environment list. A relative URL resolves against whatever origin
 #       served the document, so one file is correct behind the gateway, behind
 #       the internal load balancer and in a local run, and it cannot carry a
@@ -230,9 +274,7 @@ servers:
       The origin that served this document. Every path below is appended to it
       unchanged, so no host, port, region or environment name is recorded here.
 
-# WHAT: the authorization requirement every operation in this document
-#       inherits.
-# WHY : Assumption: the requirement is asserted at the document level rather
+# WHY : Assumptions: the requirement is asserted at the document level rather
 #       than repeated per operation. There is no unauthenticated operation in
 #       this context and none may be added; a bearer requirement omitted from a
 #       single operation is invisible in review, whereas a document-level
@@ -240,14 +282,12 @@ servers:
 security:
   - bearerAuth: []
 
-# WHAT: the machine-readable declaration of which group claim each operation
-#       requires, and where that requirement is enforced.
-# WHY : Refactoring rationale: the authority is declared as a field on the
+# WHY : Refactoring Rationale: the authority is declared as a field on the
 #       operation rather than in prose or in a tag name. Prose and tag
 #       membership are not checkable: a reviewer could read that fraud tagging
 #       is restricted and a generator or gateway could not, so the restriction
 #       would be indistinguishable from any other authenticated route.
-# WHY : Alternative considered: expressing the authority as a security-scheme
+# WHY : Alternatives Considered: expressing the authority as a security-scheme
 #       scope, by writing a populated scope list on the fraud operation.
 #       Rejected because the specification requires that list to be EMPTY for a
 #       scheme that is neither oauth2 nor openIdConnect, and this scheme is of
@@ -257,15 +297,25 @@ security:
 #       are group names carried in a cognito:groups claim rather than OAuth
 #       scopes, and publishing them as scopes would state something untrue
 #       about how the token is issued.
-# WHY : Assumption: the two admitted values are exactly the two the shared
+# WHY : Assumptions: the two admitted values are exactly the two the shared
 #       token converter recognises, ADMIN_AUTHORITY and USER_AUTHORITY in
 #       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
 #       which are the migrated form of the two user types the baseline sign-on
-#       record carries. carddemo-user on an operation means any authenticated
-#       caller may reach it, because every user of this system holds one of the
-#       two groups and an administrator is not denied a cardholder operation;
-#       carddemo-admin means the administrative group is required and a token
-#       carrying only carddemo-user receives 403.
+#       record carries. carddemo-user on an operation means a caller holding
+#       EITHER group may reach it -- an administrator is not denied a cardholder
+#       operation -- and carddemo-admin means the administrative group is
+#       required, so a token carrying only carddemo-user receives 403.
+# WHY : Refactoring rationale: this field previously read carddemo-user as
+#       meaning "any authenticated caller may reach it, because every user of
+#       this system holds one of the two groups". The premise is false and the
+#       enforcement built on it was a defect. The shared token converter grants
+#       an EMPTY authority set for a token whose cognito:groups claim is absent,
+#       is encoded as neither a string nor an array, holds a non-textual entry,
+#       or names only groups this application does not recognise -- and each of
+#       those tokens is validly signed, in date, and therefore fully
+#       authenticated while holding neither group. The chain named below now
+#       requires one of the two authorities explicitly on every route rather
+#       than requiring authentication, so this field means what it says.
 x-authority-model:
   field: x-required-authority
   values:
@@ -427,7 +477,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/AuthorizationKeyPath'
 
-    # WHY : Alternative considered: POST, which is the shape a one-way "mark as
+    # WHY : Alternatives Considered: POST, which is the shape a one-way "mark as
     #       fraud" action would take. Rejected on two counts. The reference
     #       action is not one-way: WS-FRD-ACTION PIC X(01) at cbl/COPAUS2C.cbl
     #       L80 admits 'F' to report fraud at L81 and 'R' to remove it at L82,
@@ -437,12 +487,12 @@ paths:
     #       know whether it had applied the change twice; PUT carries the TARGET
     #       state, so a retry that arrives after the first attempt succeeded
     #       leaves the same state behind.
-    # WHY : Alternative considered: two paths, one to set and one to clear.
+    # WHY : Alternatives Considered: two paths, one to set and one to clear.
     #       Rejected because the two are one reference action distinguished only
     #       by the character it carries, so splitting them would double the
     #       authority surface config/SecurityConfig.java has to gate while
     #       describing one write as two.
-    # WHY : Refactoring rationale: this operation is ONE transaction where the
+    # WHY : Refactoring Rationale: this operation is ONE transaction where the
     #       reference system needed two resource managers joined by a genuine
     #       two-phase commit, and the second manager is named here rather than
     #       left to be inferred from its absence. The reference binding is
@@ -457,7 +507,7 @@ paths:
     #       detail row it marks commit together locally and there is no second
     #       manager left to coordinate. This is documented divergence D-6 in
     #       docs/architecture/cobol-to-service-traceability.md.
-    # WHY : Alternative considered: reproducing the two-manager shape as a saga,
+    # WHY : Alternatives Considered: reproducing the two-manager shape as a saga,
     #       with a compensating reversal if the second write failed. Rejected
     #       because a saga commits its steps separately, which would make a
     #       detail row marked fraudulent with no fraud row beside it an
@@ -465,6 +515,29 @@ paths:
     #       produce, because its rollback at L565-L568 backs out both writes
     #       together. A caller could then read a half-applied tag through this
     #       document's own read operation.
+    # WHY : Refactoring Rationale: the insert-versus-update outcome is reported on
+    #       the STATUS CODE, 201 for the insert and 200 for the update, rather than
+    #       as a member of the response body. It has to be reported somehow: the
+    #       reference program words the two successes differently, 'ADD SUCCESS' at
+    #       cbl/COPAUS2C.cbl L201 against 'UPDT SUCCESS' at L232, so a terminal user
+    #       could tell them apart and a caller of this operation must be able to as
+    #       well. An enumerated member was rejected on the response schema below,
+    #       because the body carries exactly the two fields the response direction of
+    #       the baseline communication area declares and a third member would put the
+    #       document and the returned record out of agreement.
+    # WHY : Assumptions: the fraud row is keyed on the card number and a COMPOSED
+    #       timestamp, per ddl/AUTHFRDS.ddl L28, and that timestamp is derived by
+    #       this write rather than supplied to it or returned from it. cbl/COPAUS2C.cbl
+    #       L38-L51 assembles twenty-three characters from a two-digit year, month and
+    #       day taken from the acquirer-supplied original date at L103-L105, then an
+    #       hour, minute, second and millisecond taken from the DECODED nines
+    #       complement at L107-L111, then a literal '000' constant at L51 -- and the
+    #       conversion mask at L227-L228 reads the last six digits as microseconds. Its
+    #       lowest three fractional digits therefore carry no information at all, which
+    #       is a property of the composition and not of the clock; nobody computing a
+    #       duration from two such values should read precision into them. It is
+    #       recorded here, beside the write that composes it, because no operation in
+    #       this document addresses a row by the fraud table's key.
     put:
       operationId: setAuthorizationFraudState
       tags:
@@ -472,7 +545,13 @@ paths:
       summary: Set the fraud state of one pending authorization
       description: >-
         Sets the fraud state of one pending authorization to the state the body
-        names, and reports what the write did. This carries across
+        names, and reports what the write did. The reference program instead
+        TOGGLES: cbl/COPAUS1C.cbl L230-L243 takes no action argument, re-reads the
+        segment at L234 and inverts what it found at L236-L241, so pressing its
+        one key twice returns the row to where it began. This operation is
+        idempotent instead, which is documented divergence
+        D-AUTH-FRAUD-TARGET-STATE in
+        docs/architecture/cobol-to-service-traceability.md. This carries across
         cbl/COPAUS2C.cbl, which assembles the fraud row's columns at L113-L139
         and then either inserts it, reporting 'ADD SUCCESS' at L201, or -- on
         the duplicate-key condition it tests at L203 -- updates it, reporting
@@ -495,25 +574,50 @@ paths:
       requestBody:
         required: true
         description: >-
-          The fraud state to set. It names the state to end in rather than an
-          operation to perform, which is what makes a retry a no-op.
+          The row to mark, the customer the fraud row is filed against, and the
+          fraud state to set. It names the state to end in rather than an
+          operation to perform, which is what makes a retry a no-op. Its three
+          key members must name the same row as the path selector; a request in
+          which they disagree is refused with 400 and the disagreeing members are
+          named, rather than one of the two namings being preferred silently.
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/FraudTagRequest'
+              $ref: '#/components/schemas/FraudMarkRequest'
       responses:
         '200':
           description: >-
-            The fraud state was set. The body reports the outcome flag, whether
-            the fraud row was inserted or updated, the verbatim outcome sentence
-            and the identity of the row written.
+            The fraud state was set on a fraud row that already existed, whose
+            state and report date were replaced. This is the update path, which
+            cbl/COPAUS2C.cbl reaches at L203 on the duplicate-key condition and
+            reports as 'UPDT SUCCESS' at L232. The confirmation the reference
+            detail screen displays for the state now reached is
+            'AUTH FRAUD REMOVED...' when a report was removed and
+            'AUTH MARKED FRAUD...' when one was made, from cbl/COPAUS1C.cbl L535
+            and L537; both are that program's eighty-character working field
+            feeding a seventy-eight-character message line and neither is a member
+            of this body, whose sentence is the fifty-character one.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/FraudTagResponse'
+                $ref: '#/components/schemas/FraudMarkResponse'
+        '201':
+          description: >-
+            The fraud state was set by creating a fraud row that did not exist,
+            which cbl/COPAUS2C.cbl reports as 'ADD SUCCESS' at L201. The body is
+            the same shape as the 200 body; the status code is what distinguishes
+            the two write paths, and the two confirmation sentences named on the
+            200 response apply here unchanged.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FraudMarkResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -545,15 +649,16 @@ components:
         carddemo-user. Presenting no usable token yields 401; presenting a valid
         token without the authority an operation requires yields 403.
 
-  # WHAT: the four request inputs this document accepts, each declared once and
-  #       referenced by every operation that takes it.
-  # WHY : Assumption: each is declared once here rather than restated per
+  # WHY : Assumptions: each is declared once here rather than restated per
   #       operation. An input re-typed at each operation is an input one of whose
-  #       copies ends up typed differently from the others, and the list and read
-  #       operations share three of these four.
+  #       copies ends up typed differently from the others, and the correlation
+  #       header is taken by ALL THREE operations while the list operation alone
+  #       takes the account scope, the cursor and the direction. The selector path
+  #       parameter is referenced at the path level rather than per operation, for
+  #       the reason written beside it.
   parameters:
 
-    # WHY : Assumption: the account identifier is the list's MANDATORY scope and
+    # WHY : Assumptions: the account identifier is the list's MANDATORY scope and
     #       not an optional filter. The reference program edits it before it
     #       reads anything -- cbl/COPAUS0C.cbl L264 rejects it blank or low
     #       values and L273 rejects it non-numeric, and only L283-L284 moves an
@@ -562,12 +667,12 @@ components:
     #       table is keyed on the account identifier alone. An unscoped list has
     #       no reference analogue at all: there is no traversal in that program
     #       that reaches a detail row without first positioning on its parent.
-    # WHY : Alternative considered: making it optional and returning every
+    # WHY : Alternatives Considered: making it optional and returning every
     #       account's pending authorizations when omitted. Rejected because that
     #       would publish one account holder's authorizations to a caller
     #       scoped to another, and no authority in this document distinguishes
     #       the two: both list callers hold carddemo-user.
-    # WHY : Assumption: eleven digits, carried as a digit string. The datum is
+    # WHY : Assumptions: eleven digits, carried as a digit string. The datum is
     #       PA-ACCT-ID PIC S9(11) COMP-3 at cpy/CIPAUSMY.cpy L19 and the column
     #       is BIGINT, and the wire type differs from the column type on purpose:
     #       an integer column is a statement about storage and arithmetic, not a
@@ -585,7 +690,7 @@ components:
       schema:
         $ref: '#/components/schemas/AccountId'
 
-    # WHY : Assumption: an ABSENT cursor means the opening page, and an empty
+    # WHY : Assumptions: an ABSENT cursor means the opening page, and an empty
     #       string is not a cursor. The reference program opens a page by moving
     #       LOW-VALUES into its forward position at cbl/COPAUS0C.cbl L422, and
     #       LOW-VALUES and SPACES are two different empty states in that program
@@ -610,7 +715,7 @@ components:
       schema:
         $ref: '#/components/schemas/CursorToken'
 
-    # WHY : Trade-off: the direction is an explicit input rather than being
+    # WHY : Trade-offs: the direction is an explicit input rather than being
     #       inferred from which envelope member the caller copied. Inferring it
     #       is impossible when one parameter carries both positions, and a
     #       request whose direction and cursor disagreed would otherwise have to
@@ -631,7 +736,7 @@ components:
       schema:
         $ref: '#/components/schemas/PageDirection'
 
-    # WHY : Assumption: the reference selector cannot travel in a path segment at
+    # WHY : Assumptions: the reference selector cannot travel in a path segment at
     #       all, which is why this parameter carries a different value rather
     #       than the same one in a different encoding. cbl/COPAUS0C.cbl L542-L545
     #       saves the raw eight packed bytes of PA-AUTHORIZATION-KEY into an
@@ -642,7 +747,7 @@ components:
     #       sign nibble is not a character at all, so it cannot be placed in a
     #       URL, and percent-encoding it would publish a storage representation
     #       as a public identifier.
-    # WHY : Refactoring rationale: the value this selector carries is the DECODED
+    # WHY : Refactoring Rationale: the value this selector carries is the DECODED
     #       composite of the account identifier, the Julian authorization date
     #       and the millisecond authorization time -- the three columns that form
     #       the detail table's primary key -- and never the nines complement. The
@@ -651,7 +756,7 @@ components:
     #       PostgreSQL orders descending directly. Carrying the complement would
     #       leave the selector superficially functional while every date and time
     #       derived from it came out inverted.
-    # WHY : Alternative considered: a delimited composite such as the three
+    # WHY : Alternatives Considered: a delimited composite such as the three
     #       values joined by a separator, which would have been readable and
     #       needed no key material. Rejected because the sealed token already
     #       exists in this migration and is already ENFORCED: common-lib's
@@ -677,14 +782,14 @@ components:
         $ref: '#/components/schemas/CursorToken'
       example: v1.MDAwMDAwMDAwMTE6MjYyMTU6OTE2NDQ5MDI.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-0
 
-    # WHY : Refactoring rationale: the correlation identity is declared on the
+    # WHY : Refactoring Rationale: the correlation identity is declared on the
     #       request side and not only on the response side. The shared filter in
     #       common-lib ACCEPTS an inbound value and refuses one that is over-long
     #       or carries an unsafe character, so the inbound shape is part of this
     #       contract whether or not the contract states it; declaring it on one
     #       direction only would leave a caller's value unchecked against
     #       anything.
-    # WHY : Assumption: it is OPTIONAL, and omitting it is a supported choice
+    # WHY : Assumptions: it is OPTIONAL, and omitting it is a supported choice
     #       rather than a degraded one. The filter mints a conforming identity
     #       when none arrives and returns it on the response either way, so a
     #       caller with no identity of its own gets one it can quote while a
@@ -701,12 +806,16 @@ components:
         published bound or carrying a character outside the published set is
         refused with 400 rather than silently replaced, so that a caller cannot
         believe it is correlating requests the service is in fact correlating
-        under a different identity.
+        under a different identity. A value whose shape is that of a
+        primary account number -- only digits and the three separators, with
+        thirteen or more digits -- is refused on the same terms, because this
+        identity is echoed and logged. The refusal carries the shared problem body
+        and the response correlation header, the same as any other 400, and it names
+        the rule it applied without ever repeating the value it refused.
       schema:
         $ref: '#/components/schemas/CorrelationId'
 
-  # WHAT: the one response header every response in this document carries.
-  # WHY : Assumption: it is declared once here rather than spelled out at each
+  # WHY : Assumptions: it is declared once here rather than spelled out at each
   #       response, because a header re-typed at every response is a header one of
   #       whose copies ends up typed differently from the others. It is required
   #       on the failures as well as the successes: the identity is the only
@@ -722,9 +831,35 @@ components:
       schema:
         $ref: '#/components/schemas/CorrelationId'
 
-  # WHAT: the six failure responses, each declared once and referenced by every
-  #       operation that can produce it.
-  # WHY : Trade-off: no response below carries a CICS response or reason code, a
+    # WHY : Refactoring Rationale: this header is declared because the service
+    #       actually sends it and an earlier revision of this document did not say
+    #       so. The 401 is rendered by the shared handler
+    #       common/error/ApiErrorSecurityHandlers.UnauthenticatedEntryPoint, which
+    #       delegates to the framework's BearerTokenAuthenticationEntryPoint FIRST
+    #       and only then writes the body, precisely so this challenge is composed
+    #       exactly as the OAuth 2.0 bearer-token specification requires. A client's
+    #       token-refresh logic reads this header, so leaving it undeclared left a
+    #       generated client with no typed access to the one header it needs on the
+    #       one response it needs it on.
+    # WHY : Assumptions: the value is not enumerated and no pattern is written for
+    #       it. The framework composes it from the error it detected -- a bare
+    #       scheme when no token was presented, and a scheme with an error code and
+    #       description when one was presented and rejected -- so pinning a shape
+    #       here would either be wrong for one of those two cases or would have to
+    #       be widened until it constrained nothing.
+    WwwAuthenticate:
+      description: >-
+        The bearer-token challenge for this refusal, composed by the resource
+        server from the error it detected. A bare scheme when no token was
+        presented; a scheme carrying an error code and description when a token was
+        presented and rejected. It accompanies the problem body rather than
+        replacing it.
+      required: true
+      schema:
+        type: string
+      example: Bearer
+
+  # WHY : Trade-offs: no response below carries a CICS response or reason code, a
   #       Db2 code, a SQLSTATE, a connection string or a stack trace, even though
   #       the reference programs do assemble such text -- cbl/COPAUS2C.cbl
   #       L211-L213 builds a sentence carrying a Db2 code and state, and
@@ -735,14 +870,38 @@ components:
   #       the operational record where that detail lives.
   responses:
 
+    # WHY : Refactoring Rationale: every reachable field-error KEY is enumerated
+    #       below, and an earlier revision named only accountId while listing four
+    #       distinct causes of this status. A client binds its form controls to
+    #       those keys, so an under-published set leaves it unable to mark the
+    #       control that failed for three of the four causes -- it receives a key
+    #       it was never told about and has nowhere to put the message. The keys
+    #       are the request member names this document declares, because that is
+    #       what the shared advice reports: a rejected body member is keyed by its
+    #       record component, a rejected query or path parameter by its parameter
+    #       name, and a refusal that names no member at all by the literal
+    #       "request".
+    # WHY : Assumptions: "request" is in the set and is not an oversight. The
+    #       shared advice keys an entry by that literal when the refusal it
+    #       received named no field -- a malformed body that could not be bound to
+    #       any member, or a payload-level refusal -- and a client has to have
+    #       somewhere to render such a message. Omitting it would leave the one
+    #       case with no control to mark undocumented.
     BadRequest:
       description: >-
         The request could not be accepted as presented. Raised for an account
         scope that is blank or carries a non-digit, for a selector or cursor that
         is not a sealed token, for a direction supplied without a cursor, and for
         a fraud action outside its two-value domain. The body carries the
-        per-field array, which for the account scope holds one entry keyed
-        accountId.
+        per-field array, whose entries are keyed by the request member concerned.
+        The complete set of keys this contract can produce is: accountId, the
+        account scope of the list operation; cursor, the paging token of the list
+        operation; direction, its paging direction; key, the selector in the path
+        of the detail and fraud operations; fraudAction, the body member of the
+        fraud operation; and request, used when a refusal names no member of its
+        own -- a body that could not be bound at all, for instance. Each entry
+        carries the sentence for its own condition; the two account-scope sentences
+        are carried verbatim from the reference program and are shown below.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -795,22 +954,42 @@ components:
                     message: 'Acct Id must be Numeric ...'
                 abend: null
 
+    # WHY : Refactoring Rationale: this response now states WHICH code and sentence
+    #       the body carries, because an earlier revision promised the shared problem
+    #       shape without naming its contents and the security chain did not produce
+    #       one at all. A refusal decided by the filter chain never reaches a
+    #       controller, so it never reaches the shared @RestControllerAdvice, and the
+    #       framework default answered with a status and a challenge header and no
+    #       body -- the exact opposite of what this response declared. The chain now
+    #       installs common/error/ApiErrorSecurityHandlers, whose 401 renderer emits
+    #       CARDDEMO-0401 with the sentence below and whose 403 renderer emits the
+    #       same code and sentence the shared advice already publishes for a denial
+    #       decided by a method-security check.
+    # WHY : Assumptions: the correlation identifier in the body is the SAME value as
+    #       the header beside it and as the log line for this refusal, the renderer
+    #       reading it from the diagnostic context the correlation filter established
+    #       ahead of the security chain. That equality is the whole reason the header
+    #       is required on a response whose body names no reason.
     Unauthorized:
       description: >-
         No usable bearer token was presented, or the token presented could not be
         validated against the configured issuer. The body names no reason beyond
         that, because distinguishing an absent token from an expired or
         badly-signed one would tell an unauthenticated caller which of the three
-        it had.
+        it had. It carries code CARDDEMO-0401 and the sentence "Sign on to
+        continue", identically on all three of those causes, alongside the
+        bearer-token challenge below.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
+        WWW-Authenticate:
+          $ref: '#/components/headers/WwwAuthenticate'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
-    # WHY : Refactoring rationale: this response exists because the fraud
+    # WHY : Refactoring Rationale: this response exists because the fraud
     #       operation requires the administrative authority, and that requirement
     #       is an ADDITION rather than a parity break. csd/CRDDEMO2.csd carries
     #       RESSEC(NO) CMDSEC(NO) on all three of this context's transactions --
@@ -826,7 +1005,11 @@ components:
         only carddemo-user. The authorization exists or does not exist
         independently of this outcome, and this response deliberately does not
         say which, so that an unauthorised caller cannot use the choice between
-        403 and 404 to discover whether a selector stands for a row.
+        403 and 404 to discover whether a selector stands for a row. The body
+        carries code CARDDEMO-0403 and the sentence "Not authorized for this
+        operation" -- the same pair the shared advice publishes for a denial decided
+        by a method-security check, so a caller cannot tell from the response where
+        in the stack the authority was checked.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -850,18 +1033,38 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
-    # WHY : Assumption: the sentence this response carries is the house string
+    # WHY : Assumptions: the sentence this response carries is the house string
     #       for a concurrent change and is reproduced character for character,
     #       including the two-word spelling of "some one" and the absence of a
     #       terminating full stop. It is published by the shared error type as
     #       COACTUPC_RECORD_CHANGED, so this document references one wording
     #       rather than retyping it into a second.
+    # WHY : Refactoring Rationale: the subsystem on this response is RELATIONAL and
+    #       the example below has always said so, but the shared advice used to
+    #       assemble it with a factory that hardcodes APPLICATION, so the one body a
+    #       client could actually receive contradicted the one this document
+    #       published. The advice now assembles a 409 through ApiError.ofConflict
+    #       with Subsystem.RELATIONAL for all three of the conflicts it recognises,
+    #       so the example and the emitted body agree. Assumptions: RELATIONAL is
+    #       the correct value rather than the convenient one -- all three conflicts
+    #       are raised by the datastore, being a version check, a lock acquisition
+    #       and a foreign-key check, and none of them is an application rule.
+    # WHY : Assumptions: the sentence is one of three and the code is the same on all
+    #       three, so a client discriminates on the sentence rather than on the code.
+    #       A stale version carries the reference system's own data-changed sentence;
+    #       an unavailable lock and a still-referenced row carry their own. This
+    #       context reaches only the first of the three today, its one write being
+    #       version-checked, and the other two are documented because the shared
+    #       advice can emit them on any path and a client that ignored them would
+    #       treat a 409 it can receive as unparseable.
     Conflict:
       description: >-
         The authorization changed underneath the fraud write, so the write was
         not applied. A caller re-reads the authorization and decides again. The
         shared advice raises this from an optimistic-lock failure, which is why
-        no operation below catches anything in order to choose a status.
+        no operation below catches anything in order to choose a status. The body
+        carries code CARDDEMO-0409 and subsystem RELATIONAL, the conflict being
+        decided by the datastore rather than by an application rule.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -882,24 +1085,43 @@ components:
             fieldErrors: []
             abend: null
 
-    # WHY : Assumption: the abend block is POPULATED on this response and null on
+    # WHY : Assumptions: the abend block is POPULATED on this response and null on
     #       the other five, and what a client receives is the reduced external
     #       form: the condition code survives while the culprit and the reason are
     #       the empty string and the operator sentence is a fixed client-safe
     #       line. The reduction is what allows the block to be surfaced at all --
     #       the internal culprit and reason name application components, which is
     #       the diagnostic detail every body in this document withholds.
+    # WHY : Refactoring Rationale: this response once promised the caller the
+    #       reference program's own per-path sentence. Each of those three
+    #       sentences ends by appending IMS-RETURN-CODE -- the raw datastore
+    #       status -- so honouring the promise would have published which
+    #       datastore call failed and how, to an unauthenticated-at-this-point
+    #       caller, on every fault. The body is now the shared advice's single
+    #       generic sentence, and the per-path wording plus the status it carries
+    #       moved to the correlated server log line.
+    # WHY : Alternatives Considered: returning the per-path sentence with the
+    #       trailing status stripped. Rejected: the three wordings name the
+    #       failing datastore operation on their own ("reading AUTH Details",
+    #       "repos. AUTH Details", "FRAUD Tagging, ROLLBACK"), so stripping the
+    #       digits would still tell a caller which internal step broke while
+    #       giving that caller nothing it can act on.
+    # WHY : Trade-offs: an operator reading only a client-visible response can no
+    #       longer tell the three paths apart. That is the intended cost, and the
+    #       X-Correlation-Id header below is the compensating control -- it is
+    #       minted on every request and stamped on the log line that does carry
+    #       the path wording and the status.
     InternalServerError:
       description: >-
-        The operation failed for a reason the caller cannot correct. Where the
-        reference program had a sentence for the failing path, that sentence is
-        the one carried: the read path uses the string assembled at
-        cbl/COPAUS0C.cbl L476-L481, the reposition path the one at L509-L514, and
-        the fraud path the rollback string at cbl/COPAUS1C.cbl L544-L549. The
-        three are never merged, and their concatenation markers differ -- the
-        first two mark the appended status with a code marker while the third
-        appends two vertical bars -- so a client must not pattern-match one
-        wording across all three.
+        The operation failed for a reason the caller cannot correct. The body is
+        the shared advice's generic sentence and is identical on every failing
+        path: it names neither the failing internal operation nor any datastore
+        status. Correlate with the X-Correlation-Id echoed below to reach the
+        server log line, which does record which path failed -- the read path at
+        cbl/COPAUS0C.cbl L476-L481, the reposition path at L509-L514, the fraud
+        rollback path at cbl/COPAUS1C.cbl L544-L549 -- together with the status
+        each of those reference sentences appended. A client must not pattern-
+        match this body to distinguish the paths, because it cannot.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -909,15 +1131,20 @@ components:
             $ref: '#/components/schemas/ApiError'
 
 
-  # WHAT: every schema this document publishes, including the two queue payload
-  #       contracts no HTTP operation returns.
-  # WHY : Assumption: every schema below is reachable by reference from this one
+  # WHY : Assumptions: every schema below is reachable by reference from this one
   #       file and no reference leaves it. A split document would let one
   #       fragment be updated while a sibling still described the old shape, and
   #       nothing in this build resolves references across files to notice.
+  # WHY : Assumptions: two of the schemas below -- AuthorizationRequestMessage and
+  #       AuthorizationReplyMessage -- describe QUEUE payloads that no HTTP
+  #       operation in this document returns, and they are published here anyway.
+  #       They are the only written description of those two wire formats, and a
+  #       consumer of the queue needs the same field-by-field contract an HTTP
+  #       caller gets; withholding them because no path references them would
+  #       leave the messaging contract described nowhere.
   schemas:
 
-    # WHY : Refactoring rationale: identifiers travel as digit strings and never
+    # WHY : Refactoring Rationale: identifiers travel as digit strings and never
     #       as JSON numbers, and this preserves the reference system's own
     #       treatment rather than introducing a new one. The account identifier
     #       is PA-ACCT-ID PIC S9(11) COMP-3 at cpy/CIPAUSMY.cpy L19, and the
@@ -925,12 +1152,12 @@ components:
     #       at cbl/COPAUS0C.cbl L264 and tested with IS NOT NUMERIC at L273 --
     #       that is, it is CHARACTERS that are checked for numeric content, not a
     #       number.
-    # WHY : Assumption: a JSON number is parsed into IEEE-754 binary floating
+    # WHY : Assumptions: a JSON number is parsed into IEEE-754 binary floating
     #       point by most clients, and eleven significant digits sit close enough
     #       to what that representation holds exactly that a caller cannot rely
     #       on the margin; leading zeros are lost outright, and an account
     #       identifier with a leading zero is a value this column admits.
-    # WHY : Assumption: the wire type and the column type differ on purpose and
+    # WHY : Assumptions: the wire type and the column type differ on purpose and
     #       must not be reconciled. db/migration/V1__authorization.sql stores
     #       account_id as BIGINT, and an integer column is a statement about
     #       storage and arithmetic rather than a licence to emit a JSON number at
@@ -956,14 +1183,14 @@ components:
         recorded on AccountId.
       example: '000000011'
 
-    # WHY : Assumption: the masked rendering is exactly twelve asterisks followed
+    # WHY : Assumptions: the masked rendering is exactly twelve asterisks followed
     #       by the last four digits, and the shape is not chosen here. It is what
     #       common-lib's CardNumberMasker produces for a sixteen-character value:
     #       its VISIBLE_TAIL_LENGTH is 4 and its MASK_CHARACTER is an asterisk,
     #       and it replaces every position before the tail. Publishing the shape
     #       rather than describing it in prose is what lets a client validate that
     #       it never received an unmasked number.
-    # WHY : Trade-off: the pattern refuses a value that is all digits, so a
+    # WHY : Trade-offs: the pattern refuses a value that is all digits, so a
     #       response that had somehow bypassed masking fails a contract check
     #       instead of reaching a client. The cost is that lengthening or
     #       re-styling the mask is then a breaking change to this document once a
@@ -983,7 +1210,7 @@ components:
         this context's record layouts and none is published here.
       example: '************1234'
 
-    # WHY : Assumption: money is a STRING carrying a plain decimal at scale two,
+    # WHY : Assumptions: money is a STRING carrying a plain decimal at scale two,
     #       and this preserves the reference contract rather than departing from
     #       it. The reference system already transports money as signed decimal
     #       TEXT while storing it packed: PA-RQ-TRANSACTION-AMT PIC +9(10).99 at
@@ -994,7 +1221,7 @@ components:
     #       intermediate and converts it with FUNCTION NUMVAL at L376-L377. A
     #       JSON string is therefore the migrated form of what already travelled;
     #       a JSON number would be the novel departure.
-    # WHY : Assumption: a JSON number is parsed into IEEE-754 binary64 by most
+    # WHY : Assumptions: a JSON number is parsed into IEEE-754 binary64 by most
     #       clients, and binary64 cannot represent most scale-two decimal
     #       fractions exactly, so a cent computed here can arrive elsewhere as a
     #       different cent. Eleven and twelve significant digits leave no margin
@@ -1002,7 +1229,7 @@ components:
     #       which renders through the exact plain-string form and rejects a scale
     #       other than two, so this document and the runtime agree by
     #       construction rather than by convention.
-    # WHY : Assumption: the SUMMARY precision is nine integer digits and the
+    # WHY : Assumptions: the SUMMARY precision is nine integer digits and the
     #       DETAIL precision is ten, and the two must not be flattened into one
     #       pattern. The six summary amounts are PIC S9(09)V99 COMP-3 at
     #       cpy/CIPAUSMY.cpy L23-L26 and L29-L30, stored NUMERIC(11,2); the two
@@ -1035,7 +1262,7 @@ components:
         and zero is 0.00.
       example: '123.45'
 
-    # WHY : Assumption: the message width in this context is SEVENTY-EIGHT
+    # WHY : Assumptions: the message width in this context is SEVENTY-EIGHT
     #       characters and not the house seventy-five, and four declarations
     #       agree on it: ERRMSGI PIC X(78) at cpy-bms/COPAU00.cpy L390 with
     #       ERRMSGO PIC X(78) at its L764, and ERRMSGI PIC X(78) at
@@ -1044,7 +1271,7 @@ components:
     #       cbl/COPAUS0C.cbl L37 is moved into the seventy-eight-position field at
     #       its L692 -- so the reference system drops the final two positions of a
     #       full-width message and seventy-eight is what a screen can hold.
-    # WHY : Trade-off: the house seventy-five-character pair CCARD-ERROR-MSG and
+    # WHY : Trade-offs: the house seventy-five-character pair CCARD-ERROR-MSG and
     #       CCARD-RETURN-MSG at app/cpy/CVCRD01Y.cpy L28-L29 does NOT govern
     #       here, and the reason is doubly decisive: the width differs, and that
     #       copybook is not COPY'd by any of this context's five programs, so its
@@ -1059,12 +1286,48 @@ components:
       description: >-
         A message line as one of this context's two screens carries it, at most
         seventy-eight characters. This is the width that governs a message in
-        this context and it is distinct from the seventy-five-character width
-        that governs the aggregate message of the shared error shape, which is
-        declared in a copybook none of this context's programs includes.
+        this context's OWN success-path members. It is deliberately NOT the width
+        of the shared error shape's sentence, which is SharedErrorMessage below.
       example: AUTH MARKED FRAUD...
 
-    # WHY : Assumption: these three sentences are navigation-boundary constants
+    # WHY : Refactoring Rationale: the shared error shape's sentence is bounded
+    #       here at SEVENTY-FIVE, and an earlier revision of this document bound it
+    #       at this context's own seventy-eight by pointing it at ScreenMessage.
+    #       That forked a SHARED member: ApiError is one shape emitted by one
+    #       kernel class across every service in this migration, and the four
+    #       sibling contracts publish seventy-five for the same member, so a client
+    #       holding one model of the shared shape found one service disagreeing
+    #       with the rest about it. A shape is shared or it is not; a width that
+    #       varies per service is not a shared width.
+    # WHY : Assumptions: nothing this context can emit is refused by the narrower
+    #       bound, which is what makes the correction free rather than a
+    #       compromise. The LONGEST message literal anywhere in this context's five
+    #       programs is forty-seven characters -- the system-error sentences at
+    #       cbl/COPAUS0C.cbl and cbl/COPAUS1C.cbl, which then append a status code
+    #       -- and the longest sentence that reaches the error shape at all is the
+    #       forty-four-character navigation boundary. Seventy-five leaves
+    #       twenty-eight characters of headroom over the longest of them.
+    # WHY : Trade-offs: the seventy-eight-character regime is real and is kept, on
+    #       this context's own members. ERRMSGI PIC X(78) at cpy-bms/COPAU00.cpy
+    #       L390 and cpy-bms/COPAU01.cpy L180 is what a screen line holds, and
+    #       WS-MESSAGE PIC X(80) at cbl/COPAUS0C.cbl L37 feeding it at L692 is why
+    #       the reference drops a message's final two positions. Those facts govern
+    #       screenMessage and NavigationBoundaryMessage, which are this context's
+    #       own; they do not govern a member the whole migration shares.
+    SharedErrorMessage:
+      type: string
+      maxLength: 75
+      description: >-
+        The aggregate sentence of the shared error shape, at most seventy-five
+        characters, which is the width every service in this migration publishes
+        for it. The width is the shared kernel's own documented rendering width,
+        from the CCARD-ERROR-MSG and CCARD-RETURN-MSG pair at app/cpy/CVCRD01Y.cpy
+        L28-L29. This context's screens carry a wider line and that wider width is
+        published separately as ScreenMessage; the two are distinct members with
+        distinct owners and are never substituted for one another.
+      example: Please enter Acct Id...
+
+    # WHY : Assumptions: these three sentences are navigation-boundary constants
     #       rather than errors, and they are enumerated in one schema because a
     #       caller renders all three the same way -- in the message line, with
     #       the rows already on display left as they stand. cbl/COPAUS0C.cbl L381
@@ -1074,7 +1337,7 @@ components:
     #       last-authorization sentence on the same footing. None of the three
     #       sets an error state, which is why they are published on the success
     #       path and never in the error shape.
-    # WHY : Trade-off: each sentence is reproduced character for character,
+    # WHY : Trade-offs: each sentence is reproduced character for character,
     #       including its three trailing full stops, because the spacing before
     #       an ellipsis in this context follows no derivable rule -- within one
     #       paragraph, cbl/COPAUS0C.cbl L269 has no space before its ellipsis
@@ -1082,7 +1345,7 @@ components:
     #       that must be revisited if the reference wording is ever restated, and
     #       the alternative -- describing the sentences and letting each caller
     #       compose them -- would let that spacing drift apart between callers.
-    # WHY : Assumption: the last-authorization sentence belongs here even though
+    # WHY : Assumptions: the last-authorization sentence belongs here even though
     #       the detail operation is keyed and cannot itself run out of rows. The
     #       reference detail screen reaches it by advancing from one
     #       authorization to the next until the segment ends, whereas a caller of
@@ -1127,7 +1390,7 @@ components:
         400.
       example: v1.MDAwMDAwMDAwMTE6MjYyMTU6OTE2NDQ5MDI.REDACTED-EXAMPLE-SIGNATURE-not-a-real-mac-0
 
-    # WHY : Assumption: the two member values are lower case and are next and
+    # WHY : Assumptions: the two member values are lower case and are next and
     #       previous, and they are not chosen here. They are the values the
     #       sibling contracts of this migration already publish for the same
     #       purpose, and one paging vocabulary across the migration is what keeps
@@ -1149,7 +1412,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
@@ -1160,10 +1423,20 @@ components:
         error record already carries a twenty-character event key, ERR-EVENT-KEY
         PIC X(20) at cpy/CCPAUERY.cpy L40. The empty string appears only inside
         an error body, and only for a failure raised before any identity had been
-        established.
+        established. The pattern additionally
+        refuses one narrow class the character set alone admits: a value made up
+        only of digits and the three separators, carrying thirteen or more digits.
+        That is the shape of a primary account number, in contiguous form and in
+        every separated form, and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for
+        the request -- so accepting one would copy a card number into both. Ordinary
+        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        and is accepted, and any value containing a letter is accepted whatever its
+        digits. A value the service mints begins CD, which is a non-numeric prefix
+        chosen so that a minted identity can never fall into the refused class.
       example: 4F1C0E423A554D219B7E6C0F
 
-    # WHY : Assumption: this is a five-digit JULIAN day-of-year integer and NOT a
+    # WHY : Assumptions: this is a five-digit JULIAN day-of-year integer and NOT a
     #       calendar date, and calling it a date is the single most likely
     #       misreading of this document. cbl/COPAUA0C.cbl L861-L866 asks one
     #       FORMATTIME for YYDDD, TIME and MILLISECONDS, its L868 takes only the
@@ -1171,7 +1444,7 @@ components:
     #       with the same constant at cbl/COPAUS2C.cbl L107 and cbl/CBPAUP0C.cbl
     #       L280 -- whose L282 then performs DAY ARITHMETIC directly on the
     #       decoded value, which is only meaningful for a day-of-year number.
-    # WHY : Assumption: the value published is the DECODED one and never the nines
+    # WHY : Assumptions: the value published is the DECODED one and never the nines
     #       complement. cbl/COPAUA0C.cbl L874 stores 99999 minus the Julian date
     #       and L875 stores 999999999 minus the millisecond time, because an IMS
     #       unique sequence field sorts ascending and complementing is what put
@@ -1179,7 +1452,7 @@ components:
     #       descending directly, so the complement has no work left to do.
     #       Publishing it would leave every rendered date inverted while the key
     #       still looked functional.
-    # WHY : Trade-off: the bounds are the DOMAIN and not the complement constants,
+    # WHY : Trade-offs: the bounds are the DOMAIN and not the complement constants,
     #       and both numbers appear in this rationale so that a reader cannot
     #       mistake one for the other. A two-digit year with a day-of-year of one
     #       to three hundred and sixty-six reaches at most 99366, whereas 99999
@@ -1217,20 +1490,20 @@ components:
       example: 91644902
 
 
-    # WHY : Assumption: the five account-status slots are FIVE DISCRETE members
+    # WHY : Assumptions: the five account-status slots are FIVE DISCRETE members
     #       and not an array, because PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES
     #       at cpy/CIPAUSMY.cpy L22 has a FIXED arity of five and the migration
     #       stores it as five columns. Five members let the schema itself enforce
     #       the arity; an array would need a minItems and maxItems pair to say the
     #       same thing and would still admit a client sending four, which no
     #       column arrangement can hold.
-    # WHY : Assumption: authStatus carries NO enumeration, and the absence is
+    # WHY : Assumptions: authStatus carries NO enumeration, and the absence is
     #       deliberate rather than an omission. PA-AUTH-STATUS PIC X(01) at
     #       cpy/CIPAUSMY.cpy L21 declares no 88-level condition name at all, so
     #       the reference tree closes no domain for it, and the migration
     #       accordingly declares no CHECK on the column. Inventing a domain here
     #       would refuse values the reference system permits and stores.
-    # WHY : Assumption: every CHECK the migrated schema does carry derives from a
+    # WHY : Assumptions: every CHECK the migrated schema does carry derives from a
     #       COBOL 88-level enforced only in program logic, not from a reference
     #       database constraint. ddl/AUTHFRDS.ddl declares no CHECK constraint at
     #       all across its twenty-six columns, so a domain published below is
@@ -1347,7 +1620,7 @@ components:
           description: >-
             The account's cash balance, from PA-CASH-BALANCE PIC S9(09)V99 COMP-3
             at cpy/CIPAUSMY.cpy L26.
-        # WHY : Assumption: the counters are bounded at plus and minus 9999
+        # WHY : Assumptions: the counters are bounded at plus and minus 9999
         #       because PA-APPROVED-AUTH-CNT and PA-DECLINED-AUTH-CNT are PIC
         #       S9(04) COMP at cpy/CIPAUSMY.cpy L27-L28 -- four digits, signed --
         #       and the migrated columns carry that range as an explicit CHECK.
@@ -1393,14 +1666,14 @@ components:
             one at cbl/CBPAUP0C.cbl L292, not its approved amount, because a
             declined authorization has no approved amount to subtract.
 
-    # WHY : Assumption: the row carries SEVEN data members and no more, because
+    # WHY : Assumptions: the row carries SEVEN data members and no more, because
     #       that is what the reference row projects. cbl/COPAUS0C.cbl L547-L553
     #       moves exactly seven values into the first row of the map -- the
     #       transaction identifier, the rendered date, the rendered time, the
     #       authorization type, the derived approval status, the match status and
     #       the amount -- and L555-L566 repeats the same seven for the second row.
     #       Adding an eighth would publish a column the terminal row never had.
-    # WHY : Assumption: the 3270 selection marker is NOT a member of this row. The
+    # WHY : Assumptions: the 3270 selection marker is NOT a member of this row. The
     #       reference program writes an attribute byte into it, unprotected at
     #       cbl/COPAUS0C.cbl L554 when the row is populated and protected at L614
     #       when the row is cleared, so it is a rendering attribute of a character
@@ -1425,7 +1698,7 @@ components:
         - cardNum
       additionalProperties: false
       properties:
-        # WHY : Assumption: each row carries its OWN selector, because the
+        # WHY : Assumptions: each row carries its OWN selector, because the
         #       reference program saves one key per displayed row for exactly this
         #       purpose: cbl/COPAUS0C.cbl L542-L545 stores the key of the first
         #       row into the first of five saved slots and repeats it per row, so
@@ -1450,7 +1723,7 @@ components:
             transaction_id CHAR(15). The reference row shows it first, at
             cbl/COPAUS0C.cbl L547.
           example: '000000000000123'
-        # WHY : Assumption: the STORED six characters are published and not the
+        # WHY : Assumptions: the STORED six characters are published and not the
         #       eight the screen shows, and the two are different values. The
         #       reference row renders a display form by slicing the stored field
         #       at cbl/COPAUS0C.cbl L531-L533 and assembling a month-first,
@@ -1461,7 +1734,7 @@ components:
         #       in width and in field order with the same member on the detail
         #       resource, which is exactly how one datum comes to have two
         #       incompatible readings.
-        # WHY : Assumption: no date type is published for it, and that follows the
+        # WHY : Assumptions: no date type is published for it, and that follows the
         #       migrated column rather than being a weaker choice. The column is
         #       CHAR(6) because the migration's type rule admits a date type only
         #       for a character date already in ISO order, which a year, month and
@@ -1507,7 +1780,7 @@ components:
             cpy/CIPAUDTY.cpy L25 and column auth_type CHAR(4), or null when the
             row carried none. No value domain is published: the reference
             declaration closes none.
-        # WHY : Assumption: this member is DERIVED and is stored nowhere. The
+        # WHY : Assumptions: this member is DERIVED and is stored nowhere. The
         #       reference program computes it inside the row projection at
         #       cbl/COPAUS0C.cbl L536-L540: it tests the two-character response
         #       code against '00' and moves 'A' when it matches or 'D' when it does
@@ -1539,7 +1812,7 @@ components:
             transaction. The four values are the condition names declared on
             PA-MATCH-STATUS at cpy/CIPAUDTY.cpy L46-L49, which is what closes the
             domain, and the migrated column carries the same four as a CHECK.
-        # WHY : Assumption: the row amount is the APPROVED amount and not the
+        # WHY : Assumptions: the row amount is the APPROVED amount and not the
         #       transaction amount. cbl/COPAUS0C.cbl L525 is the first statement of
         #       the row projection and it moves PA-APPROVED-AMT into the amount the
         #       row displays at L553. Substituting the transaction amount here
@@ -1556,7 +1829,7 @@ components:
             which is zero on a declined authorization and equal to the requested
             amount on an approved one. It is not the requested amount, which is
             published separately on the detail resource.
-        # WHY : Assumption: the masked card number on a row is ADDITIVE and is
+        # WHY : Assumptions: the masked card number on a row is ADDITIVE and is
         #       named as such. The verified reference row projection at
         #       cbl/COPAUS0C.cbl L547-L553 is the seven members above and does NOT
         #       include a card number, so this member is a client convenience
@@ -1573,14 +1846,14 @@ components:
             request, and masked because a full number on a list is a disclosure
             the reference list did not make.
 
-    # WHY : Assumption: this envelope is the FOUR members common-lib's
+    # WHY : Assumptions: this envelope is the FOUR members common-lib's
     #       PageResponse declares -- items, firstKey, lastKey and hasNext, in that
     #       order -- and every one of them is required. That type has no member it
     #       omits, so a serialisation of it carries all four and a contract
     #       declaring fewer would describe a body this service never sends.
     #       Absence of a position is spelled null, the member present with a null
     #       value, and not by the member being missing.
-    # WHY : Alternative considered: adding a total count, a page number or a page
+    # WHY : Alternatives Considered: adding a total count, a page number or a page
     #       size to this envelope, as offset pagination would. Rejected because
     #       offset pagination SKIPS AND REPEATS rows under concurrent inserts: a
     #       row inserted ahead of the current offset between two requests pushes a
@@ -1591,14 +1864,14 @@ components:
     #       browse by key -- it carries a saved key at cbl/COPAUS0C.cbl L121 and
     #       repositions on it at L491 -- so offset pagination would change
     #       observable behaviour rather than merely represent it differently.
-    # WHY : Alternative considered: exposing the reference page number, which
+    # WHY : Alternatives Considered: exposing the reference page number, which
     #       CDEMO-CPVS-PAGE-NUM PIC S9(04) COMP at cbl/COPAUS0C.cbl L122 does
     #       carry. Rejected because a page number is offset vocabulary: it is only
     #       meaningful if pages are fixed windows counted from the start, which is
     #       the property keyset paging deliberately does not have, so publishing it
     #       would invite exactly the arithmetic the cursors exist to avoid. The
     #       reference program keeps it to label a screen, not to position a read.
-    # WHY : Assumption: the reference system's twenty-deep backward history,
+    # WHY : Assumptions: the reference system's twenty-deep backward history,
     #       CDEMO-CPVS-PAUKEY-PREV-PG PIC X(08) OCCURS 20 TIMES at
     #       cbl/COPAUS0C.cbl L120, is NOT reproduced. Backward movement here is
     #       expressed by sending firstKey with direction previous, because the
@@ -1622,7 +1895,7 @@ components:
         - hasNext
       additionalProperties: false
       properties:
-        # WHY : Assumption: a full page carries FIVE rows, and the figure is not
+        # WHY : Assumptions: a full page carries FIVE rows, and the figure is not
         #       chosen here. Five independent declarations in the reference
         #       program agree on it: CDEMO-CPVS-AUTH-KEYS PIC X(08) OCCURS 5 TIMES
         #       at cbl/COPAUS0C.cbl L126, the page-fill loop bounded at
@@ -1631,7 +1904,7 @@ components:
         #       whose tests sit at L286, L290, L294, L298 and L302 with a catch-all
         #       at L306-L308, and the map's own last selection field
         #       02 SEL0005I PIC X(1) at cpy-bms/COPAU00.cpy L384.
-        # WHY : Trade-off: the bound is declared on the array itself rather than
+        # WHY : Trade-offs: the bound is declared on the array itself rather than
         #       left in prose. Five is a server-owned constant a client cannot
         #       vary, so it is a property of every response; a page carrying a
         #       sixth row would be a defect in this service, and one worth failing
@@ -1665,7 +1938,7 @@ components:
             read to settle hasNext, or null exactly when items is empty. It is
             also the position a caller pages forward from: send it as the cursor
             parameter with direction next.
-        # WHY : Assumption: this is settled by an explicit statement and not
+        # WHY : Assumptions: this is settled by an explicit statement and not
         #       inferred from the row count. The reference program carries a
         #       dedicated flag for it, CDEMO-CPVS-NEXT-PAGE-FLG PIC X(01) at
         #       cbl/COPAUS0C.cbl L123 with its two condition names at L124-L125,
@@ -1682,19 +1955,19 @@ components:
             is not one, because a full page and a final page can both carry five
             rows. When it is true, lastKey is present.
 
-    # WHY : Alternative considered: folding the summary members into the page
+    # WHY : Alternatives Considered: folding the summary members into the page
     #       envelope so that one flat object was returned. Rejected because
     #       PageResponse in common-lib is a fixed FOUR-component record shared by
     #       every service in this migration, so a fifth component would change a
     #       type seven other contexts also serialise -- and the summary is
     #       per-account data that has no meaning on any of their pages.
-    # WHY : Alternative considered: a fourth operation returning the summary on
+    # WHY : Alternatives Considered: a fourth operation returning the summary on
     #       its own, leaving this operation to return the page alone. Rejected
     #       because the reference screen shows the account header and its five
     #       rows in ONE screen turn, so splitting them would turn one turn into
     #       two round trips and would let a client render a header from one
     #       account beside rows from another if the two calls interleaved.
-    # WHY : Refactoring rationale: this composite shape differs from the module's
+    # WHY : Refactoring Rationale: this composite shape differs from the module's
     #       existing PendingAuthSummaryResponse record, which projects the summary
     #       screen as one flat payload of the map's own fields plus five row
     #       selectors. That record carries no cursor member and no availability
@@ -1703,8 +1976,11 @@ components:
     #       positions -- the transaction name, the two title bands and the current
     #       date and time -- which are chrome a browser client renders rather than
     #       data a service owns. The difference is resolved here because this
-    #       document is the contract of record and the two controllers that will
-    #       publish it are not yet authored; a body carrying map chrome and no
+    #       document is the contract of record; the schema's Java realisation is
+    #       PendingAuthSummaryView inside PendingAuthListView, built by
+    #       mapper/PendingAuthViewMapper.toListView, and the map projection is
+    #       retained as the record of what the terminal displayed rather than as a
+    #       second candidate for this body. A body carrying map chrome and no
     #       cursor would have to be re-shaped the moment paging was implemented
     #       against it.
     PendingAuthListResponse:
@@ -1731,7 +2007,7 @@ components:
           description: >-
             One page of this account's pending authorizations, with the cursor
             tokens and the forward availability indicator needed to walk the rest.
-        # WHY : Assumption: this member is OPTIONAL and null when no boundary was
+        # WHY : Assumptions: this member is OPTIONAL and null when no boundary was
         #       reached, because a boundary is not the ordinary outcome of a page
         #       request. cbl/COPAUS0C.cbl L381 and its L409-L410 both set their
         #       sentence in an ELSE arm, taken only when the requested move had
@@ -1750,7 +2026,7 @@ components:
             because the reference program leaves them in place in that arm.
 
 
-    # WHY : Assumption: this schema mirrors the migrated detail table column for
+    # WHY : Assumptions: this schema mirrors the migrated detail table column for
     #       column, in the declaration order of cpy/CIPAUDTY.cpy L19-L53, and its
     #       names are the camel-case form of that table's columns. The one place
     #       the two deliberately differ is the card number, which the table holds
@@ -1853,7 +2129,7 @@ components:
             The authorization type, from PA-AUTH-TYPE PIC X(04) at
             cpy/CIPAUDTY.cpy L25, or null when the segment carried none. No value
             domain is published: the reference declaration closes none.
-        # WHY : Assumption: the four STORED characters are published and not the
+        # WHY : Assumptions: the four STORED characters are published and not the
         #       five the screen shows. cbl/COPAUS1C.cbl L336 moves the first two
         #       characters of the stored field, L337 overlays a solidus at position
         #       three and L338 moves the remaining two, so the screen's five
@@ -1891,7 +2167,7 @@ components:
             The authorization message source as the acquirer supplied it, from
             PA-MESSAGE-SOURCE PIC X(06) at cpy/CIPAUDTY.cpy L28, or null when the
             segment carried none.
-        # WHY : Assumption: this identifier is NOT generated by this system. The
+        # WHY : Assumptions: this identifier is NOT generated by this system. The
         #       message-driven half echoes the request's own six-character
         #       authorization time into it -- cbl/COPAUA0C.cbl L662 moves
         #       PA-RQ-AUTH-TIME into the reply's authorization identity code -- so
@@ -1909,7 +2185,7 @@ components:
             six-character authorization time carried over from the request rather
             than a value this system generates, so it must not be treated as
             unique.
-        # WHY : Assumption: the domain is exactly the two values the decision
+        # WHY : Assumptions: the domain is exactly the two values the decision
         #       paragraph can produce. cbl/COPAUA0C.cbl L688 moves '05' on a
         #       decline and L693 moves '00' on an approval, and there is no third
         #       branch; the approved value is corroborated by the condition name
@@ -1931,7 +2207,7 @@ components:
             value, or null when the segment carried none. The single-character
             approval status a list row shows is derived from this member, so a
             client can reconcile the two.
-        # WHY : Assumption: the domain is EIGHT values and every one of them is a
+        # WHY : Assumptions: the domain is EIGHT values and every one of them is a
         #       statement in the decision paragraph rather than a code taken from a
         #       scheme specification. cbl/COPAUA0C.cbl L698 sets the approved value
         #       unconditionally and then, only on a decline, L700-L717 selects one
@@ -1965,7 +2241,7 @@ components:
             that the account was closed, that the card was flagged fraudulent,
             that the merchant was flagged fraudulent, and that the decline had
             none of those causes.
-        # WHY : Assumption: this is a DIGIT STRING and not an integer, because the
+        # WHY : Assumptions: this is a DIGIT STRING and not an integer, because the
         #       reference field is PIC 9(06) at cpy/CIPAUDTY.cpy L33 and the
         #       migrated column is CHAR(6). A six-digit processing code carries
         #       leading zeros as data, and an integer member would drop them, so a
@@ -1989,7 +2265,7 @@ components:
             S9(10)V99 COMP-3 at cpy/CIPAUDTY.cpy L34. It is the value the decision
             compares against the available amount, and it is NOT what a list row's
             amount member carries.
-        # WHY : Assumption: the approved amount is the REQUESTED amount on an
+        # WHY : Assumptions: the approved amount is the REQUESTED amount on an
         #       approval and ZERO on a decline, and both are stated because the
         #       equality on approvals is what makes a substitution between this
         #       member and transactionAmt invisible in testing.
@@ -2003,18 +2279,23 @@ components:
             cpy/CIPAUDTY.cpy L35: equal to the requested amount when the
             authorization was approved and zero when it was declined. This is the
             member a list row's amount carries.
-        # WHY : Refactoring rationale: the spelling is CORRECTED here and on the
-        #       persisted column, and it is NOT corrected on the queue payload.
-        #       The reference field is misspelled consistently --
+        # WHY : Refactoring Rationale: the spelling is CORRECTED here, on the
+        #       persisted column AND on the queue payload schema below, so exactly
+        #       one spelling of this property exists in this document. An earlier
+        #       revision corrected only two of the three and justified the third by
+        #       calling the queue payload's property name part of an agreement with
+        #       an external producer. It is not: that payload's normative form is
+        #       eighteen comma-separated values read by ordinal at
+        #       cbl/COPAUA0C.cbl L354-L374, so it transmits no field name for an
+        #       agreement to fix, and the split spelling only ever described a JSON
+        #       property the Java record never emitted.
+        # WHY : Assumptions: the reference field is misspelled consistently --
         #       PA-MERCHANT-CATAGORY-CODE at cpy/CIPAUDTY.cpy L36,
         #       PA-RQ-MERCHANT-CATAGORY-CODE at cpy/CCPAURQY.cpy L28, and
         #       MERCHANT_CATAGORY_CODE at ddl/AUTHFRDS.ddl L14 -- so the
         #       misspelling is the reference name rather than a typing slip in one
-        #       place. An internal name and a column name are this migration's to
-        #       choose and are corrected; a wire field is a contract with a party
-        #       that is not, so AuthorizationRequestMessage below keeps the
-        #       reference spelling. Correcting both would have broken a producer
-        #       this repository does not ship and cannot update.
+        #       place, and AAP transformation rule T1 names its correction as one of
+        #       exactly three permitted renames.
         merchantCategoryCode:
           type:
             - string
@@ -2024,8 +2305,8 @@ components:
             The merchant category code, from the four-character reference field at
             cpy/CIPAUDTY.cpy L36 and column merchant_category_code CHAR(4), or
             null when the segment carried none. The reference name of this field is
-            misspelled and the corrected spelling is used here and in the column;
-            the queue payload schema keeps the reference spelling deliberately.
+            misspelled; the corrected spelling is used here, in the column and in
+            the queue payload schema, so one spelling covers every JSON surface.
         acqrCountryCode:
           type:
             - string
@@ -2034,7 +2315,7 @@ components:
           description: >-
             The acquirer country code, from PA-ACQR-COUNTRY-CODE PIC X(03) at
             cpy/CIPAUDTY.cpy L37, or null when the segment carried none.
-        # WHY : Assumption: a digit string and not an integer, for the reason
+        # WHY : Assumptions: a digit string and not an integer, for the reason
         #       recorded on processingCode: the reference field is PIC 9(02) at
         #       cpy/CIPAUDTY.cpy L38 and an entry mode of a leading zero followed
         #       by a digit is ordinary, so an integer member would publish a
@@ -2059,7 +2340,7 @@ components:
           description: >-
             The merchant identifier, from PA-MERCHANT-ID PIC X(15) at
             cpy/CIPAUDTY.cpy L39, or null when the segment carried none.
-        # WHY : Assumption: the value is NOT trimmed, so trailing blanks are part
+        # WHY : Assumptions: the value is NOT trimmed, so trailing blanks are part
         #       of what is stored and what is returned. cbl/COPAUS2C.cbl L130 sets
         #       the variable-length host variable's length to
         #       LENGTH OF PA-MERCHANT-NAME -- the full twenty-two positions
@@ -2126,7 +2407,7 @@ components:
             pending, D authorization declined, E pending expired, M matched with a
             transaction. The domain is the four condition names at
             cpy/CIPAUDTY.cpy L46-L49 declared on the one-character field at L45.
-        # WHY : Assumption: the domain admits BLANK and NULL as well as the two
+        # WHY : Assumptions: the domain admits BLANK and NULL as well as the two
         #       tagged values, and omitting them would refuse rows the reference
         #       system routinely produces. cpy/CIPAUDTY.cpy L50 declares the
         #       one-character field and L51-L52 declare only the confirmed and
@@ -2154,7 +2435,7 @@ components:
             renders the tag character, a separator and the report date together at
             cbl/COPAUS1C.cbl L345-L347; that composition is a rendering and the
             two values are published separately here.
-        # WHY : Assumption: no pattern is published for this member even though it
+        # WHY : Assumptions: no pattern is published for this member even though it
         #       holds a date, and the omission follows the reference declaration.
         #       PA-FRAUD-RPT-DATE is PIC X(08) at cpy/CIPAUDTY.cpy L53 and a
         #       character picture guarantees no digits, so a digit-and-separator
@@ -2177,27 +2458,104 @@ components:
           example: 08/06/26
 
 
-    # WHY : Refactoring rationale: the member is named fraudAction and the
-    #       selector is carried in the PATH alone, which differs from the module's
-    #       existing FraudMarkRequest record in both respects: that record names
-    #       the command action and carries the selector as a body member beside
-    #       it. The difference is resolved here, because this document is the
-    #       contract of record and the controller that binds a body is not yet
-    #       authored. A selector in both the path and the body is the shape that
-    #       matters: the two can disagree in one request, and the service would
-    #       then have to choose silently between the resource the URL named and
-    #       the resource the body named -- a choice no status code can report.
-    FraudTagRequest:
+    # WHY : Refactoring Rationale: this body names the row by the THREE DECODED
+    #       columns of the detail table's primary key and not only by the path
+    #       selector, and it is named FraudMarkRequest to match the record the
+    #       controller binds. A preceding revision of this document named the
+    #       schema FraudTagRequest and reduced the body to the action alone, which
+    #       left one operation described by two names -- this document's own
+    #       rationale on components/parameters/AuthorizationKeyPath already refers
+    #       to the record as FraudMarkRequest -- and left the record and the
+    #       schema disagreeing on how many members a request has. One name and
+    #       one member list is the point: a client typed from this document and a
+    #       controller compiled from that record must not be describing different
+    #       requests.
+    # WHY : Assumptions: the row is named TWICE, in the path and in the body, and
+    #       that redundancy is a CHECKED INVARIANT rather than an ambiguity. The
+    #       service opens the path selector, recovers the account identifier and
+    #       the two key integers sealed inside it, and compares them against
+    #       accountId, authDateKey and authTimeKey here. A disagreement is
+    #       refused with 400 and the disagreeing members are named in the
+    #       per-field array, so the service never chooses silently between the row
+    #       the URL named and the row the body named.
+    # WHY : Alternatives Considered: carrying the action alone and taking the row
+    #       from the path selector only. Rejected because there would then be
+    #       nothing to compare the selector against, so a selector that had been
+    #       captured or replayed against the wrong row could not be detected at
+    #       all, and because the body would no longer correspond to the
+    #       request-direction fields of the baseline area -- WS-ACCT-ID at
+    #       cbl/COPAUS2C.cbl L75 and WS-CUST-ID at L76 are two of the three, and
+    #       L138 and L139 move both into the fraud row's own columns.
+    # WHY : Alternatives Considered: deriving the customer identifier server-side
+    #       from the summary row, which db/migration/V1__authorization.sql holds
+    #       as a not-null column on pending_auth_summary. Rejected because the
+    #       baseline persists the value the CALLER supplied, per that move at
+    #       L139, and the migration records acct_id and cust_id as arriving from
+    #       the caller because neither IMS segment carries them. A derived value
+    #       would differ silently from what the reference system stores on any
+    #       request where the two disagreed.
+    FraudMarkRequest:
       type: object
       description: >-
-        The fraud state to set on the authorization the path names. It carries the
-        state to end in rather than an operation to perform, which is what makes
-        a retried request a no-op instead of a second change.
+        The authorization to mark, the customer the fraud row is filed against,
+        and the fraud state to set on it. The state is the one to end in rather
+        than an operation to perform, which is what makes a retried request a
+        no-op instead of a second change. The three key members must name the
+        same row as the path selector; a request in which they disagree is
+        refused with 400 rather than resolved.
       required:
-        - fraudAction
+        - accountId
+        - customerId
+        - authDateKey
+        - authTimeKey
+        - action
       additionalProperties: false
       properties:
-        # WHY : Assumption: the two-value domain is closed by the reference
+        accountId:
+          allOf:
+            - $ref: '#/components/schemas/AccountId'
+          description: >-
+            The account the authorization belongs to and the first column of the
+            detail row's primary key, from WS-ACCT-ID PIC 9(11) at
+            cbl/COPAUS2C.cbl L75. Its L138 also writes this value to the fraud
+            row's own account column, so it is both part of the address and part
+            of what is recorded. It must equal the account sealed in the path
+            selector.
+        customerId:
+          allOf:
+            - $ref: '#/components/schemas/CustomerId'
+          description: >-
+            The customer the fraud row is filed against, from WS-CUST-ID PIC 9(9)
+            at cbl/COPAUS2C.cbl L76, which its L139 writes to the fraud row's
+            customer column. It is no part of any key and nothing is addressed by
+            it; it is recorded as supplied.
+        # WHY : Assumptions: this is the DECODED ordinal date and never the nines
+        #       complement held in PA-AUTH-DATE-9C at cpy/CIPAUDTY.cpy L20. The
+        #       schema it references bounds the value at the domain, year 99 and
+        #       day 366, rather than at the 99999 constant the complement is
+        #       subtracted from at cbl/COPAUA0C.cbl L874, so a complement that
+        #       reached this boundary by mistake is refused instead of addressing
+        #       a row the caller did not mean.
+        authDateKey:
+          allOf:
+            - $ref: '#/components/schemas/JulianAuthDate'
+          description: >-
+            The Julian authorization date of the row to mark, the second column of
+            the detail row's primary key. Read the rationale on JulianAuthDate
+            before treating it as a calendar date. It must equal the date sealed
+            in the path selector.
+        # WHY : Assumptions: the DECODED millisecond-of-day value, bounded at the
+        #       domain for the same reason as the date above -- the complement
+        #       constant here is the 999999999 at cbl/COPAUA0C.cbl L875.
+        authTimeKey:
+          allOf:
+            - $ref: '#/components/schemas/MillisecondAuthTime'
+          description: >-
+            The millisecond authorization time of the row to mark, the third
+            column of the detail row's primary key. Like authDateKey it is an
+            integer rather than a time of day. It must equal the time sealed in
+            the path selector.
+        # WHY : Assumptions: the two-value domain is closed by the reference
         #       declaration and by nothing else. WS-FRD-ACTION PIC X(01) at
         #       cbl/COPAUS2C.cbl L80 carries the condition names
         #       88 WS-REPORT-FRAUD VALUE 'F' at L81 and
@@ -2206,13 +2564,20 @@ components:
         #       this member carries IS the value persisted. A third character is
         #       therefore not an unhandled case but a value the reference program
         #       cannot represent.
-        # WHY : Trade-off: the domain is case-sensitive. A COBOL condition name
+        # WHY : Assumptions: the 'F' here and the 'F' on the response's
+        #       updateStatus are DIFFERENT facts and the collision is recorded
+        #       rather than left to be noticed. WS-FRD-ACTION reads 'F' as report
+        #       fraud at L81; WS-FRD-UPDATE-STATUS at L83 reads 'F' as update
+        #       failed at L85. The two fields are adjacent inside one group item,
+        #       which is exactly why a single shared type for both would be easy
+        #       to reach for and wrong.
+        # WHY : Trade-offs: the domain is case-sensitive. A COBOL condition name
         #       compares the bytes of its field against the literal it was declared
         #       with, so the lower-case forms would satisfy neither condition and
         #       would reach the fraud column as an untagged-looking value the
         #       detail screen would render as neither tagged nor removed. Admitting
         #       them would widen the domain rather than be lenient about spelling.
-        fraudAction:
+        action:
           type: string
           minLength: 1
           maxLength: 1
@@ -2222,175 +2587,138 @@ components:
           description: >-
             The fraud state to set: F to report this authorization as fraudulent,
             R to remove an existing report. Any other value, including the
-            lower-case forms, is refused with 400.
+            lower-case forms and the S that means success on the response, is
+            refused with 400.
           example: F
 
-    # WHY : Assumption: the insert-versus-update distinction is OBSERVABLE
-    #       behaviour and has to survive, which is why this body carries it as its
-    #       own member rather than leaving a client to parse the sentence.
-    #       cbl/COPAUS2C.cbl reaches the fraud row by attempting an insert and
-    #       falling back: L199-L201 reports 'ADD SUCCESS' when the insert
-    #       succeeded, and L203 detects the duplicate-key condition and performs
-    #       the update paragraph, whose L230-L232 reports 'UPDT SUCCESS'. A caller
-    #       could tell the two apart on the terminal, so a caller can tell them
-    #       apart here.
-    # WHY : Refactoring rationale: this body keeps the two members the module's
-    #       existing FraudMarkResponse record declares -- the outcome flag and the
-    #       fifty-character sentence -- and adds the outcome member and the row
-    #       identity. The record alone cannot express which of the two write paths
-    #       ran except by string-matching its own message, and a client
-    #       string-matching a message is a client that breaks when the message is
-    #       carried verbatim from a program that words two successes differently.
-    FraudTagResponse:
+    # WHY : Assumptions: the insert-versus-update distinction is OBSERVABLE
+    #       behaviour and has to survive, and it survives on the STATUS CODE
+    #       rather than as a member of this body. cbl/COPAUS2C.cbl reaches the
+    #       fraud row by attempting an insert and falling back: L199-L201 reports
+    #       'ADD SUCCESS' when the insert succeeded, and L203 detects the
+    #       duplicate-key condition and performs the update paragraph, whose
+    #       L230-L232 reports 'UPDT SUCCESS'. A caller could tell the two apart on
+    #       the terminal, so a caller can tell them apart here: an insert answers
+    #       201 and an update answers 200.
+    # WHY : Refactoring Rationale: this body carries EXACTLY the two members the
+    #       response direction of the baseline area declares -- WS-FRD-UPDATE-STATUS
+    #       at cbl/COPAUS2C.cbl L83 and WS-FRD-ACT-MSG at L86 -- and matches the
+    #       FraudMarkResponse record component for component. A preceding revision
+    #       of this document named the schema FraudTagResponse and added four
+    #       further members, which left the document and the record disagreeing on
+    #       how many members a reply has and left one operation described under two
+    #       names. Each addition is accounted for below rather than dropped
+    #       silently.
+    # WHY : Alternatives Considered: an enumerated outcome member reading INSERTED
+    #       or UPDATED. Rejected because it is a third representation of a fact the
+    #       protocol already carries, and carrying it would put a member in this
+    #       body that the record the controller returns does not have -- so either
+    #       the record gains a component the baseline area has no field for, or the
+    #       document publishes a member no handler can populate. The concern that
+    #       motivated it was real and is answered without a member: a client learns
+    #       the write path from 201 against 200 and never by string-matching a
+    #       sentence.
+    # WHY : Alternatives Considered: a screenMessage member carrying the
+    #       confirmation the detail screen displays. Rejected because that sentence
+    #       belongs to a different program and a different width -- cbl/COPAUS1C.cbl
+    #       L534 tests the removal condition and moves 'AUTH FRAUD REMOVED...' at
+    #       L535 or 'AUTH MARKED FRAUD...' at L537 into the eighty-character
+    #       working field feeding the seventy-eight-character message line, whereas
+    #       this body is the fifty-character regime of L86. Both sentences are
+    #       carried on the operation's success response instead, where the width
+    #       they belong to is not in question.
+    # WHY : Alternatives Considered: an authTs member returning the composed
+    #       timestamp that completes the fraud row's key. Rejected because the value
+    #       is SERVER-DERIVED and is no part of the response direction of the
+    #       baseline area: cbl/COPAUS2C.cbl L38-L51 composes twenty-three characters
+    #       from the acquirer-supplied original date and the decoded nines
+    #       complement, ending in a literal '000' at L51, so its lowest three
+    #       fractional digits carry no information. Returning it would publish a key
+    #       column a caller cannot use to address anything through this document,
+    #       since every operation here addresses a row by the detail table's key and
+    #       not by the fraud table's. The composition is documented on the operation
+    #       so that nobody later reads precision into it.
+    # WHY : Alternatives Considered: a fraudRptDate member. Rejected because the
+    #       date is already published where a caller reads the row it belongs to,
+    #       on the detail body, and a second copy on the write response would be a
+    #       value a client could cache against a row that a later write has since
+    #       re-dated -- cbl/COPAUS2C.cbl L224-L225 sets it to the current date on
+    #       every update rather than preserving the earlier one.
+    FraudMarkResponse:
       type: object
       description: >-
-        The result of setting a fraud state: whether the write succeeded, which of
-        the two write paths ran, the sentence the reference program reports for it,
-        and the identity of the fraud row that now holds the state.
+        The result of setting a fraud state: whether the write succeeded, and the
+        sentence the reference program reports for it. Which of the two write
+        paths ran is carried by the status code, 201 for an insert and 200 for an
+        update, rather than by a member.
       required:
         - updateStatus
-        - outcome
-        - screenMessage
-        - authTs
       additionalProperties: false
       properties:
-        # WHY : Assumption: the flag's two values are the condition names on
+        # WHY : Assumptions: the flag's declared domain is the condition names on
         #       WS-FRD-UPDATE-STATUS at cbl/COPAUS2C.cbl L83 -- 'S' for success at
         #       L84 and 'F' for failure at L85 -- and the collision with the fraud
         #       action's 'F' is the reason this member is documented rather than
         #       inferred: the same character means "report fraud" on the request
         #       and "the write failed" on the response.
+        # WHY : Refactoring Rationale: only 'S' is published on THIS response, and an
+        #       earlier revision published both. Publishing 'F' on a 200 described a
+        #       body that says the write FAILED inside a status that says the request
+        #       SUCCEEDED, which is a contradiction no client can resolve: a caller
+        #       checking the status would record a fraud report that was never
+        #       persisted. The reference has no such ambiguity to preserve, because
+        #       it has no status code -- cbl/COPAUS1C.cbl L255-L258 tests
+        #       WS-FRD-UPDT-SUCCESS and, when it does not hold, moves the failure
+        #       sentence into the message line and performs ROLL-BACK, so a failed
+        #       write reaches the operator as an error screen and never as a
+        #       confirmation. The migrated form of that error screen is a non-2xx
+        #       ApiError, which is why the failure value moved out of this member.
+        # WHY : Trade-offs: the member is KEPT rather than deleted even though its
+        #       domain is now a single value, because it is the migrated face of a
+        #       reference field a client may already read, and because its 'S' is
+        #       what distinguishes this body from a body of some future shape that
+        #       reports a partial write. Alternatives Considered: deleting it and
+        #       letting the 200 alone carry the meaning. Rejected on the same ground
+        #       the sibling discriminators are kept on: a body read away from its
+        #       envelope has to remain self-describing.
         updateStatus:
           type: string
           minLength: 1
           maxLength: 1
-          enum:
-            - S
-            - F
+          const: S
           description: >-
-            Whether the write succeeded: S for success, F for failure. This
-            character is not the fraud action: an F here means the write failed and
-            says nothing about which state was requested.
+            Always S on this response: the write succeeded. The reference program's
+            failure value F is not published here, because a failed write is
+            answered with a non-2xx ApiError rather than with this body -- see the
+            500 response below. This character is not the fraud action: the two
+            share a spelling and mean different things.
           example: S
-        outcome:
-          type: string
-          enum:
-            - INSERTED
-            - UPDATED
-          description: >-
-            Which of the two write paths ran: INSERTED when no fraud row existed
-            for this card and timestamp and one was created, UPDATED when one
-            existed and its fraud state and report date were replaced. The
-            reference program distinguishes the two in its own success sentence,
-            and this member carries the distinction so a client need not read that
-            sentence to learn it.
-          example: INSERTED
+        # WHY : Assumptions: this member is where the insert-versus-update
+        #       distinction is VISIBLE in prose, because the reference program words
+        #       the two successes differently -- 'ADD SUCCESS' at L201 and
+        #       'UPDT SUCCESS' at L232 -- and both are carried verbatim. It is
+        #       documented as prose a client may display and not as a value a client
+        #       should branch on; the status code is what a client branches on.
         message:
           allOf:
             - $ref: '#/components/schemas/FraudOutcomeMessage'
           description: >-
             The sentence the reference program reports for this outcome, carried
-            character for character, or absent when the outcome needs none. It is
-            the fifty-character regime and neither the seventy-eight-character
-            screen regime of this context's two maps nor the house
-            seventy-five-character regime governs it.
-        # WHY : Assumption: the confirmation a user sees is a DIFFERENT string
-        #       from the outcome sentence above, produced by a different program
-        #       and bounded by a different width, so both are carried rather than
-        #       one standing in for the other. cbl/COPAUS2C.cbl reports the
-        #       fifty-character outcome above, and the caller then selects the
-        #       confirmation on the state that was reached: cbl/COPAUS1C.cbl L534
-        #       tests whether the removal condition holds and moves the removal
-        #       wording at L535 or the marking wording at L537, into the
-        #       eighty-character working field that feeds the map's
-        #       seventy-eight-character message line. Collapsing the two into one
-        #       member would make a client choose which width it was reading.
-        # WHY : Assumption: exactly TWO values can arrive here on a success,
-        #       because L534 to L538 is a two-branch condition with no third arm,
-        #       which is why they are enumerated rather than left open. Both
-        #       carry three trailing full stops and both are reproduced as
-        #       written; a rollback carries the reference system's own rollback
-        #       sentence instead and is reported as 500, never as a success with
-        #       a different confirmation.
-        screenMessage:
-          allOf:
-            - $ref: '#/components/schemas/ScreenMessage'
-          enum:
-            - AUTH FRAUD REMOVED...
-            - AUTH MARKED FRAUD...
-          description: >-
-            The confirmation the reference detail screen displays for this write,
-            carried character for character from cbl/COPAUS1C.cbl L535 when a
-            report was removed and L537 when one was made. It is the
-            seventy-eight-character screen regime rather than the
-            fifty-character outcome regime of the member above.
-          example: AUTH MARKED FRAUD...
-        # WHY : Assumption: the fraud row is keyed on the card number and this
-        #       timestamp, per ddl/AUTHFRDS.ddl L28, so the pair is what identifies
-        #       the row this write touched. The card number is not repeated here
-        #       because the detail body already carries it masked and a masked
-        #       value cannot complete a key anyway; the timestamp is the part a
-        #       caller does not otherwise hold.
-        # WHY : Assumption: the value is composed and its lowest three fractional
-        #       digits are ALWAYS zero, which is a property of the composition
-        #       rather than of the clock. cbl/COPAUS2C.cbl L38-L51 builds a
-        #       twenty-three-character value from a two-digit year, month and day,
-        #       a space, an hour, a minute and a second joined by full stops, then
-        #       three digits of milliseconds, and then a literal '000' constant at
-        #       L51 -- and the Db2 conversion mask at its L227-L228 reads those
-        #       last six digits as microseconds. So the microsecond field carries
-        #       millisecond resolution and its final three digits carry no
-        #       information at all. A client computing a duration from two of these
-        #       values must not read precision into them that the composition does
-        #       not have.
-        # WHY : Trade-off: the wire form is the migration's twenty-six-character
-        #       timestamp rather than the reference system's twenty-three-character
-        #       composition. The reference form carries a two-digit year and full
-        #       stops inside the time, so it cannot be widened without a century
-        #       pivot and cannot be parsed by an ordinary timestamp reader; the
-        #       migrated column is a microsecond timestamp and this is the form the
-        #       shared error shape already publishes for one. The cost is that the
-        #       value does not look byte-identical to the reference string, which is
-        #       why the composition above is described in full beside it.
-        authTs:
-          type: string
-          minLength: 26
-          maxLength: 26
-          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
-          description: >-
-            The timestamp identifying the fraud row, in the migration's
-            twenty-six-character form of a date, a space and a time carrying
-            microseconds. Together with the card number it is the fraud row's
-            primary key. Its last three fractional digits are always zero, because
-            the reference composition supplies milliseconds and pads.
-          example: '2026-08-03 09:16:44.902000'
-        # WHY : Assumption: the fraud row's report date is a true DATE on that row
-        #       and eight characters on the detail row, and the difference is the
-        #       reference system's rather than this document's: ddl/AUTHFRDS.ddl
-        #       L25 declares FRAUD_RPT_DATE as DATE while cpy/CIPAUDTY.cpy L53
-        #       declares its counterpart PIC X(08). Both are carried in their own
-        #       form rather than reconciled, because reconciling them would mean
-        #       either parsing a character field that is not guaranteed to parse or
-        #       stringifying a date column that already is one.
-        fraudRptDate:
-          type:
-            - string
-            - 'null'
-          format: date
-          description: >-
-            The date recorded on the fraud row, as an ISO-8601 calendar date, or
-            null when the row carries none. On an update the reference program sets
-            it to the current date at cbl/COPAUS2C.cbl L225 rather than preserving
-            the earlier one.
-          example: '2026-08-06'
+            character for character, or absent when the outcome needs none. On a
+            success it is 'ADD SUCCESS' when the fraud row was inserted and
+            'UPDT SUCCESS' when an existing row was updated, from
+            cbl/COPAUS2C.cbl L201 and L232. It is the fifty-character regime and
+            neither the seventy-eight-character screen regime of this context's two
+            maps nor the house seventy-five-character regime governs it.
 
-    # WHY : Assumption: the fifty-character bound is the reference declaration and
+
+    # WHY : Assumptions: the fifty-character bound is the reference declaration and
     #       is corroborated from inside the same program. WS-FRD-ACT-MSG PIC X(50)
     #       at cbl/COPAUS2C.cbl L86 declares it, and the longest sentence that
     #       program assembles -- the database error string at its L211-L213 --
     #       fills all fifty. A declared width that the declaring program also fills
     #       exactly is a contract rather than a reading.
-    # WHY : Trade-off: this is a fourth message width in one module, alongside the
+    # WHY : Trade-offs: this is a fourth message width in one module, alongside the
     #       seventy-eight of this context's two maps, the seventy-five of the house
     #       error contract and the eighty of the working field that feeds the maps.
     #       It is declared as its own schema rather than as a bare bound on one
@@ -2410,47 +2738,161 @@ components:
       example: ADD SUCCESS
 
 
-    # WHY : Assumption: field ORDER and the comma delimiter ARE the interface for
+    # WHY : Refactoring Rationale: this schema exists because the two wire message
+    #       schemas below bounded every member by LENGTH and by nothing else, so a
+    #       merchant name of "ACME, HARDWARE" satisfied the published contract and was
+    #       then refused by the encoder. Nothing in the baseline quotes or escapes a
+    #       field: the UNSTRING at cbl/COPAUA0C.cbl L354-L355 splits on EVERY comma it
+    #       meets, so one comma inside a value is read as a field boundary and shifts
+    #       every value after it by one position. A contract that admits a value the
+    #       wire cannot carry sends a producer author to a runtime rejection for
+    #       something a schema check could have refused.
+    # WHY : Assumptions: the constraint is defined ONCE and referenced by all
+    #       twenty-four members of the two message schemas rather than repeated as a
+    #       pattern on each. Twenty-four copies of one regular expression is
+    #       twenty-four places to narrow it unevenly, and the delimiter is a property
+    #       of the WIRE rather than of any one field.
+    # WHY : Assumptions: the money members are included, not exempted, and they are the
+    #       least obvious beneficiaries. A grouped amount such as 1,250.00 is exactly
+    #       the spelling a producer might reasonably emit for money, and on a
+    #       comma-delimited wire it would split one field into two and shift the rest.
+    # WHY : Trade-offs: this is expressed with allOf rather than as a sibling of $ref.
+    #       OpenAPI 3.1 permits sibling keywords beside a reference, and the sibling
+    #       form would read more directly; allOf is chosen because support for the
+    #       sibling form still varies between generators and validators, and a
+    #       constraint some tools silently drop is worse than one written verbosely.
+    # WHY : Refactoring Rationale: the control-character rule below was published in an
+    #       earlier draft of this schema as the OPPOSITE policy -- the pattern admitted
+    #       U+0000 upward and the prose said a tab, a carriage return, a line feed or a
+    #       NUL "is transported as supplied". That was an accurate description of the
+    #       encoder at the time and an inaccurate one of the decoder, which already
+    #       refused every ISO control character across a whole payload. The asymmetry
+    #       was resolved in the CODEC and not in this contract: a field-level refusal
+    #       was added to CsvAuthCodec.characterField so that a payload the encoder
+    #       emits is always one the decoder accepts. Loosening the decoder instead was
+    #       rejected -- it would have let a forged line feed through into every
+    #       downstream line-oriented reader to buy nothing.
+    WireCharacterField:
+      type: string
+      pattern: '^[\x20-\x2B\x2D-\x7E\xA0-\xFF]*$'
+      description: >-
+        A value carried as one field of a comma-separated wire payload. Three rules
+        apply to every such field and all three are enforced by the codec that encodes
+        and decodes this wire,
+        services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java --
+        characterField refuses a value as it is encoded, and splitOnDelimiter refuses a
+        payload as it is decoded.
+
+
+        FIRST, the value must contain no comma. The delimiter has no quoted or escaped
+        form on this wire, so an embedded comma is not awkward but unrepresentable: it
+        would be read as a field boundary. A value carrying one is refused where it
+        enters, which is the only point at which the offending field is still
+        identifiable.
+
+
+        SECOND, every character must lie in the single-byte range U+0000 to U+00FF.
+        A character above it is refused rather than substituted. The surrogate case is
+        why: a supplementary code point is two UTF-16 units but encodes to one
+        substitute byte, so a payload carrying one would be emitted a byte short of
+        its declared length, every field after it would shift, and the resulting
+        under-width token would be absorbed silently.
+
+
+        THIRD, the value must carry no control character. Both ISO control ranges are
+        excluded -- U+0000 to U+001F and U+007F to U+009F -- so the delete character
+        and the upper range are refused as well as the familiar low one. Two hazards
+        close here: a carriage return or a line feed inside a value forges or splits a
+        record in any line-oriented log the value later reaches, so one message could
+        fabricate log entries that never happened; and an escape sequence reaching a
+        terminal or a log viewer is interpreted by it rather than displayed. The
+        reference contract admits none of them in any case, because every field it
+        declares is a display picture holding digits, upper-case letters, spaces or the
+        money mask's own punctuation.
+
+
+        The three rules together are exactly the codec's own: the pattern above admits
+        U+0020 to U+002B, U+002D to U+007E and U+00A0 to U+00FF, which is the
+        single-byte range less the comma and less both control ranges. A value this
+        contract admits is one the codec encodes, and a value the codec encodes is one
+        it reads back unchanged -- an invariant that class asserts directly, because it
+        did not always hold: the decoder refused control characters while the encoder
+        did not, so a payload could be emitted that its own decoder rejected.
+
+    # WHY : Assumptions: field ORDER and the comma delimiter ARE the interface for
     #       both payloads below, because both are declared as string-format
     #       messages: cbl/COPAUA0C.cbl L397 sets the string format on the request
     #       descriptor and L751 sets it on the reply descriptor. A string-format
     #       payload carries no field names, so nothing but position identifies a
     #       field, and a consumer that reordered two adjacent same-width fields
     #       would read each as the other with no error anywhere.
-    # WHY : Trade-off: these two schemas describe a QUEUE payload and are reachable
+    # WHY : Trade-offs: these two schemas describe a QUEUE payload and are reachable
     #       from no path in this document, which makes them the only schemas here a
     #       generated HTTP client will not use. They are declared anyway because
     #       one description of these wire formats has to exist and this is the
     #       context that owns them; the cost is two schemas a client may not need,
     #       and the alternative was a description that lived only in prose where
     #       nothing could reference it.
-    # WHY : Alternative considered: publishing a JSON envelope INSTEAD of the
+    # WHY : Alternatives Considered: publishing a JSON envelope INSTEAD of the
     #       comma-separated form. Rejected outright: the producer of the request
     #       payload is external and is not shipped in this repository, so it cannot
     #       be updated in step, and changing the field order, the field count or
-    #       the delimiter would break it silently. A JSON rendering of these
-    #       schemas is offered ADDITIVELY for a new consumer that wants one and
-    #       never as a replacement, and the comma-separated form remains normative.
-    # WHY : Assumption: TWO different measurements of this payload exist and each
-    #       is labelled for what it is, because quoting either as the other is the
-    #       mistake this schema is most likely to invite. The FIELD-WIDTH SUM is
-    #       153, which is the eighteen declared widths of cpy/CCPAURQY.cpy L19-L36
-    #       added together and is a fact about the layout. The figure 170 is a
-    #       DERIVATION from that sum by adding seventeen separators, and it is a
-    #       derivation rather than a measurement because it assumes no trailing
-    #       delimiter, which nothing in this repository establishes: the reference
-    #       program only ever PARSES this wire, at cbl/COPAUA0C.cbl L354-L374, and
-    #       an unstring on a comma tolerates a trailing delimiter or its absence
-    #       equally, so the parse cannot distinguish the two. No producer of this
-    #       payload is shipped here to measure against either.
-    # WHY : Trade-off: the reply schema below states its own transmitted length as
-    #       a fact while this one does not, and the asymmetry is deliberate rather
-    #       than an omission. The reply is built in this repository, so its length
-    #       is observable; the request is built outside it, so publishing a
-    #       transmitted length for the request would be an assertion about a party
-    #       whose code is not here. The cost is that the two schemas read
-    #       differently on the same question, which is why both say which kind of
-    #       figure they are giving.
+    #       the delimiter would break it silently. The comma-separated form is
+    #       therefore normative and is the only form either queue path handles
+    #       today: service/AuthorizationRequestListener decodes every payload with
+    #       CsvAuthCodec.decodeRequest and dispatches on no content type at all,
+    #       and service/OutboxPublisher stamps the reply with the single content
+    #       type domain/AuthReplyOutbox.CONTENT_TYPE_CSV declares, "text/csv".
+    # WHY : Refactoring Rationale: an earlier revision of this comment said a JSON
+    #       rendering "is offered ADDITIVELY" in the present tense. It is not: no
+    #       JSON codec and no content-type dispatch exists on either path, so a
+    #       consumer reading that sentence would have published a JSON payload the
+    #       listener would refuse as a malformed comma-separated record. The two
+    #       schemas below are published so a JSON rendering CAN be added additively
+    #       -- they are the field-for-field description one would need -- and this
+    #       document will say it is available when a content-type dispatch and a
+    #       JSON codec exist to serve it. Assumptions: describing the capability as
+    #       contracted-and-not-yet-served is the only honest option; withdrawing the
+    #       schemas would remove the one place these wire formats are described at
+    #       all, and the comma-separated form needs them regardless.
+    # WHY : Assumptions: THREE figures for this payload are easy to conflate and each
+    #       is labelled for what it is, because quoting one as another is the mistake
+    #       this schema is most likely to invite. The COPYBOOK'S FIELD-WIDTH SUM is
+    #       153, the eighteen declared widths of cpy/CCPAURQY.cpy L19-L36 added
+    #       together, from which the frequently quoted 170 follows by adding
+    #       seventeen separators. THIS CONTRACT'S OWN WIDTHS sum to 152, differing in
+    #       ordinal nine alone, and the TRANSMITTED LENGTH is 169.
+    # WHY : Assumptions: 169 is MEASURED here rather than derived, and the encoder
+    #       that settles it is
+    #       services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java
+    #       -- it declares REQUEST_WIRE_LENGTH as 169, appends no trailing delimiter,
+    #       and is asserted against the committed 169-character fixture at
+    #       services/authorization-service/src/test/resources/fixtures/auth-request-canonical-wire169.csv.
+    #       The reference program only ever PARSES this wire, at cbl/COPAUA0C.cbl
+    #       L354-L374, and an unstring on a comma tolerates a trailing delimiter or
+    #       its absence equally, so the parse alone could not have settled it.
+    # WHY : Assumptions: the sum is 152 rather than 153 for one field only.
+    #       cpy/CCPAURQY.cpy L27 declares the amount PIC +9(10).99, fourteen
+    #       characters, but the consumer receives it into WS-TRANSACTION-AMT-AN
+    #       PIC X(13) at cbl/COPAUA0C.cbl L63, and the UNSTRING at L364 places the
+    #       ordinal-nine token into that thirteen-byte field before FUNCTION NUMVAL
+    #       converts it at L376-L377. An alphanumeric move into a shorter field
+    #       truncates on the RIGHT, so a fourteen-character token loses a cents digit
+    #       and the value silently divides by ten. Thirteen is therefore what the
+    #       consumer actually reads, and 152 + 17 separators = 169.
+    # WHY : Trade-offs: the copybook's own arithmetic -- 153, and 170 with separators
+    #       -- is recorded here and deliberately NOT adopted, rather than deleted. A
+    #       reader who adds up the copybook widths arrives at 153 and has to be able
+    #       to find out why the emitted payload is one character shorter; deleting the
+    #       figure would make the discrepancy look like an error in this document. The
+    #       divergence is registered in
+    #       docs/architecture/cobol-to-service-traceability.md as an intentional one.
+    # WHY : Trade-offs: what this repository does NOT own is the production PRODUCER
+    #       of the request -- the point-of-sale client is out of scope here, and only
+    #       a stub for it exists under tests/. So 169 is published as the length this
+    #       service emits and accepts, not as an assertion about a party whose code is
+    #       absent; the reply schema below, whose producer IS here, states its length
+    #       on the same measured footing.
     AuthorizationRequestMessage:
       type: object
       description: >-
@@ -2463,15 +2905,33 @@ components:
         is cpy/CCPAURQY.cpy L19-L36.
 
 
-        Two measurements of this payload are easy to conflate, so both are named.
-        The FIELD-WIDTH SUM is 153: six, six, sixteen, four, four, six, six, six,
-        fourteen, four, three, two, fifteen, twenty-two, thirteen, two, nine and
-        fifteen. A frequently quoted figure of 170 is a DERIVATION from that sum
-        by adding seventeen separators, and it is a derivation rather than a
-        verified constant because no producer of this wire exists in this
-        repository to measure: the reference program only ever parses, and
-        unstringing on a comma tolerates a trailing delimiter or its absence
-        equally, so the transmitted length is not determined here.
+        Three measurements of this payload are easy to conflate, so all three are
+        named and only one is adopted. The COPYBOOK DECLARATION sums to 153 --
+        six, six, sixteen, four, four, six, six, six, FOURTEEN, four, three, two,
+        fifteen, twenty-two, thirteen, two, nine and fifteen -- from which the
+        frequently quoted figure of 170 derives by adding seventeen separators.
+        Neither figure is adopted here. THIS CONTRACT'S OWN WIDTHS sum to 152,
+        differing in one field only: ordinal nine is bounded at THIRTEEN below,
+        because the reference consumer parses it through a thirteen-character
+        intermediate and truncates the fourteenth. Adding the same seventeen
+        separators gives 169, which is the TRANSMITTED LENGTH this contract
+        publishes. That figure is measured rather than derived: CsvAuthCodec declares
+        it as REQUEST_WIRE_LENGTH, appends no trailing delimiter, and is asserted
+        against the committed 169-character canonical fixture. The baseline could not
+        have settled it, because the reference program only ever parses and
+        unstringing on a comma tolerates a trailing delimiter or its absence equally.
+
+
+        Read on INPUT the service is deliberately more tolerant than this schema
+        requires: a fourteen-character amount token is accepted and parsed in
+        full rather than truncated, so a producer built from the copybook alone is
+        understood rather than misread, while a token already truncated to
+        thirteen characters is refused by name. The service never EMITS fourteen.
+        That asymmetry is registered as D-AUTH-AMOUNT-TOLERANT-READ in
+        docs/architecture/cobol-to-service-traceability.md section 7.4, and the
+        two committed fixtures under
+        services/authorization-service/src/test/resources/fixtures/ make each half
+        executable.
       required:
         - authDate
         - authTime
@@ -2482,7 +2942,7 @@ components:
         - messageSource
         - processingCode
         - transactionAmt
-        - merchantCatagoryCode
+        - merchantCategoryCode
         - acqrCountryCode
         - posEntryMode
         - merchantId
@@ -2495,6 +2955,8 @@ components:
       properties:
         authDate:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           description: >-
             Field 1. The originating date the acquirer supplies, six characters,
@@ -2503,6 +2965,8 @@ components:
             exactly as sent.
         authTime:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           description: >-
             Field 2. The originating time the acquirer supplies, six characters,
@@ -2512,6 +2976,8 @@ components:
             the exchange.
         cardNum:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 16
           pattern: '^[0-9]{1,16}$'
           description: >-
@@ -2522,37 +2988,47 @@ components:
             can carry it whole.
         authType:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 4
           description: >-
             Field 4. The authorization type, four characters, from PA-RQ-AUTH-TYPE
             at cpy/CCPAURQY.cpy L22.
         cardExpiryDate:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 4
           description: >-
             Field 5. The card expiry in month and year order, four characters, from
             PA-RQ-CARD-EXPIRY-DATE at cpy/CCPAURQY.cpy L23.
         messageType:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           description: >-
             Field 6. The message type, six characters, from PA-RQ-MESSAGE-TYPE at
             cpy/CCPAURQY.cpy L24.
         messageSource:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           description: >-
             Field 7. The message source, six characters, from
             PA-RQ-MESSAGE-SOURCE at cpy/CCPAURQY.cpy L25.
         processingCode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           pattern: '^[0-9]{1,6}$'
           description: >-
             Field 8. The processing code, six digits, from
             PA-RQ-PROCESSING-CODE PIC 9(06) at cpy/CCPAURQY.cpy L26. Carried as a
             digit string so a leading zero survives.
-        # WHY : Assumption: the EFFECTIVE limit of this field is THIRTEEN
+        # WHY : Assumptions: the PUBLISHED limit of this field is THIRTEEN
         #       characters and not the fourteen its declaration implies, and the
         #       difference is a property of the reference parse rather than of the
         #       layout. The declared field is PIC +9(10).99 at cpy/CCPAURQY.cpy
@@ -2562,43 +3038,93 @@ components:
         #       intermediate -- so a full-width fourteen-character value is
         #       right-truncated before FUNCTION NUMVAL at L376-L377 ever sees it.
         #       Publishing fourteen here would document an amount this consumer
-        #       silently mangles.
+        #       silently mangles. Thirteen is therefore the width this service
+        #       EMITS, and it is the width a producer should emit.
+        # WHY : Trade-offs: publishing thirteen while the reader accepts fourteen
+        #       makes this bound the CONTRACTED width rather than the widest
+        #       acceptable one, and that is the intended direction. A schema is a
+        #       statement about what to send: a producer that honours it can never
+        #       be truncated by the reference receiver. Publishing fourteen instead
+        #       would document an amount the reference mangles and would put this
+        #       document at odds with the 169-byte length it derives above.
+        #       Alternatives Considered: publishing fourteen and refusing thirteen
+        #       -- rejected, because it inverts which side of the contract is safe.
         transactionAmt:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
+          minLength: 13
           maxLength: 13
+          pattern: '^(?:-[0-9]{9}|[0-9]{10})\.[0-9]{2}$'
           description: >-
-            Field 9. The amount requested, as signed decimal text. The layout
-            declares fourteen characters but the reference consumer parses it
-            through a thirteen-character intermediate and truncates the fourteenth,
-            so thirteen is the width that survives the parse and is the width
-            published here. It is text on the wire and exact fixed point in
-            storage; it is never a JSON number.
-          example: '+000000123.45'
-        # WHY : Refactoring rationale: this member keeps the reference system's
-        #       MISSPELLING, deliberately, where the persisted column and the
-        #       detail resource use the corrected spelling. The reference field is
-        #       PA-RQ-MERCHANT-CATAGORY-CODE at cpy/CCPAURQY.cpy L28 and the same
-        #       misspelling appears in the segment at cpy/CIPAUDTY.cpy L36 and in
-        #       the reference table at ddl/AUTHFRDS.ddl L14, so it is the reference
-        #       NAME rather than a slip. A wire field is a contract with a producer
-        #       this repository does not ship and cannot update; correcting the
-        #       spelling here would rename one side of an agreement unilaterally.
-        merchantCatagoryCode:
+            Field 9. The amount requested, as decimal text in exactly thirteen
+            characters. The layout declares fourteen but the reference consumer
+            parses it through a thirteen-character intermediate and truncates the
+            fourteenth, so thirteen is the width that survives the parse and is the
+            width published and emitted here. Two shapes fill those thirteen
+            characters and the pattern above admits both: a non-negative amount is
+            ten zero-padded integer digits, a point and two fractional digits, with
+            NO sign position, which is what preserves the picture's full 9(10)
+            domain; a negative amount is a minus then nine integer digits, the point
+            and two fractional digits. It is text on the wire and exact fixed point
+            in storage; it is never a JSON number. A producer that nonetheless emits
+            the declared fourteen characters is read in full rather than truncated --
+            see D-AUTH-AMOUNT-TOLERANT-READ in
+            docs/architecture/cobol-to-service-traceability.md section 7.4 -- but
+            thirteen is what this contract asks for.
+          example: '0000000250.00'
+        # WHY : Refactoring Rationale: this member was previously named with the
+        #       reference system's MISSPELLING, on the ground that a wire field is a
+        #       contract with a producer this repository cannot update. That ground
+        #       does not hold, and correcting it is what this entry is. The
+        #       normative wire form of this payload is POSITIONAL: eighteen values
+        #       separated by commas, parsed by the UNSTRING at
+        #       cbl/COPAUA0C.cbl L354-L374 into eighteen targets by ordinal alone.
+        #       No field NAME is transmitted, so no field name can be part of the
+        #       agreement -- what the agreement fixes is the ORDER and the
+        #       delimiter, and both are preserved exactly, this member staying at
+        #       ordinal ten. The JSON envelope this schema describes is published
+        #       so that a rendering CAN be added additively and never in place of
+        #       the delimited form -- no content-type dispatch and no JSON codec
+        #       serves it today -- so its property names are this migration's to
+        #       choose.
+        # WHY : Assumptions: the corrected spelling is not a preference, it is what
+        #       the implementation emits. Java record AuthorizationRequestPayload
+        #       declares the component merchantCategoryCode and carries no property
+        #       alias, so the misspelled property was one this service never
+        #       produced and never accepted -- a required property absent from every
+        #       message it sends. AAP transformation rule T1 names this correction
+        #       as the third of exactly three, alongside the account and card
+        #       expiration-date fields, so the target spelling is fixed rather than
+        #       chosen here. The reference names are recorded below as provenance:
+        #       PA-RQ-MERCHANT-CATAGORY-CODE at cpy/CCPAURQY.cpy L28, the bare form
+        #       PA-MERCHANT-CATAGORY-CODE at cpy/CIPAUDTY.cpy L36 and the column
+        #       MERCHANT_CATAGORY_CODE at ddl/AUTHFRDS.ddl L14 -- the misspelling is
+        #       the reference NAME rather than a slip in one place.
+        merchantCategoryCode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 4
           description: >-
-            Field 10. The merchant category code, four characters. The reference
-            name of this field is misspelled and the spelling is preserved on this
-            wire contract; the corrected spelling is used on the persisted column
-            and on the detail resource, and the two refer to one value.
+            Field 10. The merchant category code, four characters, from the
+            misspelled reference field PA-RQ-MERCHANT-CATAGORY-CODE at
+            cpy/CCPAURQY.cpy L28. The corrected spelling is used here, on the
+            persisted column and on the detail resource, and all three refer to one
+            value. The delimited wire form carries no field name at all, so this
+            correction changes no byte of it: the value stays at ordinal ten.
         acqrCountryCode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 3
           description: >-
             Field 11. The acquirer country code, three characters, from
             PA-RQ-ACQR-COUNTRY-CODE at cpy/CCPAURQY.cpy L29.
         posEntryMode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 2
           pattern: '^[0-9]{1,2}$'
           description: >-
@@ -2607,12 +3133,16 @@ components:
             digit string so a leading zero survives.
         merchantId:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 15
           description: >-
             Field 13. The merchant identifier, fifteen characters, from
             PA-RQ-MERCHANT-ID at cpy/CCPAURQY.cpy L31.
         merchantName:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 22
           description: >-
             Field 14. The merchant name, twenty-two characters, from
@@ -2621,24 +3151,32 @@ components:
             detail resource's own merchant name.
         merchantCity:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 13
           description: >-
             Field 15. The merchant city, thirteen characters, from
             PA-RQ-MERCHANT-CITY at cpy/CCPAURQY.cpy L33.
         merchantState:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 2
           description: >-
             Field 16. The merchant state, two characters, from
             PA-RQ-MERCHANT-STATE at cpy/CCPAURQY.cpy L34.
         merchantZip:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 9
           description: >-
             Field 17. The merchant postal code, nine characters, from
             PA-RQ-MERCHANT-ZIP at cpy/CCPAURQY.cpy L35.
         transactionId:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 15
           description: >-
             Field 18 and last. The transaction identifier, fifteen characters, from
@@ -2646,7 +3184,7 @@ components:
             deduplication identity for this message, because one transaction yields
             one authorization request.
 
-    # WHY : Assumption: this payload is FULLY determined in the repository, unlike
+    # WHY : Assumptions: this payload is FULLY determined in the repository, unlike
     #       the request, so its measurements are stated rather than derived.
     #       cbl/COPAUA0C.cbl L722-L731 builds it, and the shape is six fields each
     #       followed by a comma: the commas sit at L722, L723, L724, L725, L726 and
@@ -2654,7 +3192,7 @@ components:
     #       field. The field-width sum is 57 -- sixteen, fifteen, six, two, four
     #       and fourteen -- so the data on the wire is 57 plus 6, that is 63
     #       characters.
-    # WHY : Assumption: the TRANSMITTED length is 64 and not 63, because the length
+    # WHY : Assumptions: the TRANSMITTED length is 64 and not 63, because the length
     #       the reference program sends is a POINTER value rather than a count.
     #       WS-RESP-LENGTH PIC S9(4) VALUE 1 at cbl/COPAUA0C.cbl L46 starts the
     #       one-based pointer at one, the WITH POINTER phrase at L730 leaves it one
@@ -2663,7 +3201,7 @@ components:
     #       the character count. A frequently quoted "62 = 57 plus 5 commas" is
     #       wrong twice over: the delimiter count is six, not five, and the
     #       transmitted length is 64, not 62.
-    # WHY : Trade-off: this contract does NOT reproduce one property of that
+    # WHY : Trade-offs: this contract does NOT reproduce one property of that
     #       pointer. Nothing resets it between messages -- the initialisation
     #       paragraph at cbl/COPAUA0C.cbl L230-L247 contains only the trigger
     #       retrieve at L233-L236, the two trigger moves at L238-L239 and the wait
@@ -2711,6 +3249,8 @@ components:
       properties:
         cardNum:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 16
           pattern: '^[0-9]{1,16}$'
           description: >-
@@ -2720,29 +3260,35 @@ components:
             structured error record when a reply cannot be published, at its L777.
         transactionId:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 15
           description: >-
             Field 2. The transaction identifier, fifteen characters, echoed from
             the request at cbl/COPAUA0C.cbl L661.
-        # WHY : Assumption: this code is NOT generated. cbl/COPAUA0C.cbl L662 moves
+        # WHY : Assumptions: this code is NOT generated. cbl/COPAUA0C.cbl L662 moves
         #       the request's six-character originating TIME into it, so it is the
         #       request's own field echoed back under a different name. A reader
         #       will otherwise assume a minted authorization identifier and may
         #       treat it as unique or as opaque, and it is neither.
         authIdCode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 6
           description: >-
             Field 3. The authorization identity code, six characters. It is the
             request's originating time echoed back rather than a generated
             identifier, so it is not unique across cards or across days.
-        # WHY : Assumption: the domain is exactly two values because the decision
+        # WHY : Assumptions: the domain is exactly two values because the decision
         #       has exactly two outcomes: cbl/COPAUA0C.cbl L688 moves the declined
         #       value and L693 moves the approved value, with no third branch, and
         #       88 PA-AUTH-APPROVED VALUE '00' at cpy/CIPAUDTY.cpy L31 corroborates
         #       which of the two means approved.
         authRespCode:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 2
           enum:
             - '00'
@@ -2752,6 +3298,8 @@ components:
             declined value, and nothing else.
         authRespReason:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 4
           enum:
             - '0000'
@@ -2767,7 +3315,7 @@ components:
             cbl/COPAUA0C.cbl L698 and L700-L717 can produce. The same domain the
             detail resource publishes, because the reply's reason is what the
             stored segment keeps.
-        # WHY : Assumption: the WIRE rendering of this field is the EDIT-MASK form
+        # WHY : Assumptions: the WIRE rendering of this field is the EDIT-MASK form
         #       and not the layout's own picture, and the two differ in content
         #       while agreeing in length. The layout declares PIC +9(10).99 at
         #       cpy/CCPAURLY.cpy L24, but the value actually placed on the wire
@@ -2779,9 +3327,9 @@ components:
         #       leading blanks and digits under one and as a plus sign and zeros
         #       under the other. A consumer written to the layout's picture would
         #       mis-parse every value.
-        # WHY : Assumption: the amount is the REQUESTED amount on an approval and
+        # WHY : Assumptions: the amount is the REQUESTED amount on an approval and
         #       ZERO on a decline, per cbl/COPAUA0C.cbl L694-L695 and L689-L690.
-        # WHY : Assumption: the decline test is STRICTLY GREATER, so an amount
+        # WHY : Assumptions: the decline test is STRICTLY GREATER, so an amount
         #       exactly EQUAL to the available amount is APPROVED. The available
         #       amount is the credit limit minus the credit balance, taken from the
         #       summary segment at cbl/COPAUA0C.cbl L666-L667 or from the account
@@ -2793,6 +3341,8 @@ components:
         #       on the boundary.
         approvedAmt:
           type: string
+          allOf:
+            - $ref: '#/components/schemas/WireCharacterField'
           maxLength: 14
           description: >-
             Field 6 and last, followed on the wire by the trailing comma. The
@@ -2805,14 +3355,14 @@ components:
           example: '        123.45'
 
 
-    # WHY : Assumption: this shape MIRRORS the shared error record in common-lib
+    # WHY : Assumptions: this shape MIRRORS the shared error record in common-lib
     #       component for component and does not fork it. A locally-defined error
     #       type would let this document describe an eleven-member body while the
     #       shared advice serialised a different one, and no build step in this
     #       repository compares a YAML schema with a Java record, so the drift
     #       would surface only as a client failing to parse a failure -- the one
     #       response a client most needs a reliable shape for.
-    # WHY : Assumption: the aggregate sentence LATCHES to the first failure while
+    # WHY : Assumptions: the aggregate sentence LATCHES to the first failure while
     #       the per-field array ACCUMULATES every one, and the two are therefore not
     #       reconstructible from each other. That asymmetry is the reference
     #       system's: this context's own validation short-circuits, so
@@ -2821,7 +3371,7 @@ components:
     #       which is why blank wins over non-numeric and why exactly one entry
     #       arrives for that field. A client must not join the array to rebuild the
     #       sentence and must not assume the array holds one entry.
-    # WHY : Refactoring rationale: the per-field array is this migration's uniform
+    # WHY : Refactoring Rationale: the per-field array is this migration's uniform
     #       replacement for the reference field-highlight mechanism, in which a
     #       validation flag drove a colour attribute on a screen field. That
     #       mechanism is a repository-wide HOUSE pattern rather than this context's
@@ -2833,7 +3383,7 @@ components:
     #       disjunction -- blank is a KIND of error and not a third state beside
     #       valid and invalid -- and that reading is carried into the state member
     #       below.
-    # WHY : Assumption: there is NO re-entry discriminator anywhere in this
+    # WHY : Assumptions: there is NO re-entry discriminator anywhere in this
     #       document, and its absence is a design assertion rather than an
     #       oversight. The reference highlight is gated on a re-entry flag at
     #       app/cpy/CSSETATY.cpy L20, because a pseudo-conversational program has to
@@ -2860,40 +3410,55 @@ components:
         - fieldErrors
       additionalProperties: false
       properties:
+        # WHY : Refactoring Rationale: this bound is THIRTEEN and an earlier revision
+        #       declared nine, which made every response this service can send
+        #       schema-INVALID. Nine is the width of ERR-CODE-1 PIC X(09) at
+        #       cpy/CCPAUERY.cpy L37, and ApiError.CODE_WIDTH records it -- but the
+        #       kernel's own Javadoc records it as provenance and states plainly
+        #       that it is NOT enforced, because every migrated identifier is longer
+        #       by design. CARDDEMO-0409 is thirteen characters, as is every other
+        #       CARDDEMO-nnnn code and as is the example on this very member, so the
+        #       declared bound refused the value it was illustrated with.
+        # WHY : Alternatives Considered: a closed enum of the seven codes the kernel
+        #       declares, which would be tighter than any length bound. Rejected
+        #       because the kernel may add a code without every contract being
+        #       reissued, and a closed enum would then refuse a response the service
+        #       sends; a client matching on an unknown code degrades to reading the
+        #       status, whereas one validating against a closed enum rejects the
+        #       body outright. Alternatives Considered: removing the bound. Rejected
+        #       because an unbounded identifier gives a generated client no field
+        #       width at all.
         code:
           type: string
-          maxLength: 9
+          maxLength: 13
           description: >-
             The stable machine-readable identifier of the failure, matched on by
             clients and by operational tooling and never reworded. This service
             uses the shared identifiers of the kernel, whose numeric suffix aligns
-            with the HTTP status the shared advice assembles.
+            with the HTTP status the shared advice assembles. Thirteen characters
+            is the width those identifiers take; the nine-character width recorded
+            as ApiError.CODE_WIDTH is the baseline field's and is provenance only.
           example: CARDDEMO-0409
+        # WHY : Assumptions: the same thirteen-character bound as code above, because
+        #       a subordinate identifier is drawn from the same vocabulary. The
+        #       kernel normalises an absent value to the empty string at
+        #       ApiError.java L457 rather than to null, so the empty string is a
+        #       reachable value and the bound is an upper bound only.
         secondaryCode:
           type: string
+          maxLength: 13
           description: >-
             A subordinate identifier qualifying code, or the empty string when the
             failure has no second identifier. It is what discriminates conditions
             that share one status where the sentence alone cannot.
           example: ''
-        # WHY : Assumption: the aggregate sentence is bounded at this context's
-        #       SEVENTY-EIGHT and not at the house seventy-five, and the width is
-        #       single-sourced from ScreenMessage so that one bound governs both
-        #       this member and the per-field sentence below. The full derivation is
-        #       on that schema; the decisive part is that the house seventy-five
-        #       pair CCARD-ERROR-MSG and CCARD-RETURN-MSG at app/cpy/CVCRD01Y.cpy
-        #       L28-L29 lives in a copybook NONE of this context's five programs
-        #       includes, so its contract is not in scope here at all.
-        # WHY : Trade-off: this bound is three characters wider than the sibling
-        #       contracts of this migration publish for the same shared member, and
-        #       the difference is stated rather than hidden. The shared error record
-        #       DOCUMENTS seventy-five as a rendering width and enforces nothing, so
-        #       declaring seventy-eight describes no body this service cannot send;
-        #       declaring seventy-five would refuse the last three characters of a
-        #       sentence this context's own screens render whole. The cost is that a
-        #       reader comparing the sibling contracts finds one that differs, which
-        #       is why the reason sits here rather than in a change note.
-        # WHY : Assumption: null and the empty string are DIFFERENT states here and
+        # WHY : Assumptions: the aggregate sentence is bounded at the SHARED
+        #       seventy-five, single-sourced from SharedErrorMessage so that one
+        #       bound governs both this member and the per-field sentence below and
+        #       so that all five contracts of this migration publish one width for
+        #       one shared shape. The derivation, and the measurement showing that
+        #       nothing this context emits reaches it, are on that schema.
+        # WHY : Assumptions: null and the empty string are DIFFERENT states here and
         #       are not merged. Null is the migrated form of no message and the
         #       empty string the migrated form of an empty message, and the
         #       reference system distinguishes them: cbl/COPAUS0C.cbl L186 clears
@@ -2902,14 +3467,15 @@ components:
         #       and L302 each test both because both occur.
         message:
           oneOf:
-            - $ref: '#/components/schemas/ScreenMessage'
+            - $ref: '#/components/schemas/SharedErrorMessage'
             - type: 'null'
           description: >-
             The aggregate sentence, carried verbatim from the reference copybook or
             program that owns it wherever one does, or null when the failure
-            carries none. Bounded at the seventy-eight characters this context's own
-            screens declare rather than at the narrower house width, for the reason
-            recorded on ScreenMessage.
+            carries none. Bounded at the seventy-five characters every contract in
+            this migration publishes for this shared member, for the reason recorded
+            on SharedErrorMessage; this context's wider screen line is a separate
+            member and is not this one.
           example: Record changed by some one else. Please review
         severity:
           allOf:
@@ -2947,7 +3513,7 @@ components:
             request carried none and none had been minted. It is the intended route
             from this response to the operational record, which is where diagnostic
             detail lives.
-        # WHY : Assumption: nothing derived from a card number reaches this member.
+        # WHY : Assumptions: nothing derived from a card number reaches this member.
         #       Every path in this document carries a sealed selector rather than a
         #       card number, and the shared advice additionally masks any digit run
         #       long enough to be an account number before placing a path here, so a
@@ -2988,7 +3554,7 @@ components:
             response rather than present and blank. Of the six failures this
             document declares only the 500 is of that kind.
 
-    # WHY : Assumption: the two validation surfaces of this context BOTH map to the
+    # WHY : Assumptions: the two validation surfaces of this context BOTH map to the
     #       single logical field key accountId, and neither maps to a screen field
     #       name. cbl/COPAUS0C.cbl L271 and L280 both move the cursor-home value to
     #       the SAME screen field length, so the reference system itself treats the
@@ -3022,16 +3588,16 @@ components:
             Whether the field was blank or was present and wrong. Both are errors;
             the distinction lets a client render a missing field differently from a
             wrong one without treating either as acceptable.
-        # WHY : Assumption: this member takes the SAME bound as the aggregate
-        #       sentence, from one schema, rather than carrying a second number.
-        #       The two sentences it can hold are the two the account-scope edits
-        #       produce, and both reach the screen through the same
-        #       seventy-eight-character field, so a narrower bound here than on the
-        #       aggregate would refuse a sentence the aggregate accepted -- one
-        #       value described two ways.
+        # WHY : Assumptions: this member takes the SAME bound as the aggregate
+        #       sentence, from one schema, rather than carrying a second number. A
+        #       narrower bound here than on the aggregate would refuse a sentence the
+        #       aggregate accepted -- one value described two ways -- and both are
+        #       members of the SHARED error shape, so both take the shared width
+        #       rather than this context's screen width. The two sentences this
+        #       member can actually hold are twenty-two and thirty-one characters.
         message:
           allOf:
-            - $ref: '#/components/schemas/ScreenMessage'
+            - $ref: '#/components/schemas/SharedErrorMessage'
           description: >-
             The sentence describing what is wrong with this field, carried verbatim
             from the reference program. For the account scope the two sentences are
@@ -3072,7 +3638,7 @@ components:
         - CRITICAL
       example: WARNING
 
-    # WHY : Assumption: the domain is the reference system's own and is therefore
+    # WHY : Assumptions: the domain is the reference system's own and is therefore
     #       WIDER than the migrated runtime can produce. Two of its six values name
     #       platform components the migrated system does not run at all, and they
     #       are retained because the shared shape is single-sourced across every
@@ -3098,7 +3664,7 @@ components:
         - OBJECT_STORE
       example: RELATIONAL
 
-    # WHY : Assumption: the four members and their widths come from
+    # WHY : Assumptions: the four members and their widths come from
     #       app/cpy/CSMSG02Y.cpy, where the record opens at its L21 and its four
     #       fields are declared at L22, L24, L26 and L28 with widths of four,
     #       eight, fifty and seventy-two characters. That citation is stated
@@ -3107,7 +3673,7 @@ components:
     #       long, so any citation past it cannot be read. This context does include
     #       that copybook -- at cbl/COPAUS0C.cbl L141 and cbl/COPAUS1C.cbl L135 --
     #       so unlike the highlight copybook it is genuinely in scope here.
-    # WHY : Trade-off: all four members are required and yet two of them are always
+    # WHY : Trade-offs: all four members are required and yet two of them are always
     #       the empty string in any response a client can receive, which is
     #       deliberate rather than contradictory. The shared type is constructed for
     #       external use through a factory that supplies an empty culprit, an empty

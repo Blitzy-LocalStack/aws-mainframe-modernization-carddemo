@@ -26,6 +26,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -98,6 +99,16 @@ class AuthorizationRequestListenerTest {
      */
     private static final long CUSTOMER_ID = 999_999_999L;
 
+    /**
+     * The window size these tests configure, small enough to close several windows cheaply.
+     *
+     * <p>Assumptions: three rather than the production default of 500. The bound under test is the
+     * ARITHMETIC of when a window closes -- exactly on the quota rather than one past it -- and that
+     * arithmetic is identical at three and at 500, so driving 500 messages through a mock stack would cost
+     * time without testing anything the smaller number does not.</p>
+     */
+    private static final int WINDOW_LIMIT = 3;
+
     /** The summary repository mock. */
     private PendingAuthSummaryRepository summaries;
 
@@ -114,6 +125,15 @@ class AuthorizationRequestListenerTest {
     private AuthorizationRequestListener listener;
 
     /**
+     * The window sizes recorded by the boundary seam, one entry per window this test run closed.
+     *
+     * <p>Assumptions: the recorded value is the handled count the listener reports, not merely the fact
+     * that a boundary fired, so a window that closed one message early or one message late is
+     * distinguishable from one that closed exactly on its quota.</p>
+     */
+    private List<Integer> closedWindows;
+
+    /**
      * Builds a listener over fresh mocks, a real decision service and the fixed clock.
      *
      * <p>Assumptions: the decision service is the REAL one rather than a mock, because the assertions
@@ -126,9 +146,28 @@ class AuthorizationRequestListenerTest {
         this.details = mock(PendingAuthDetailRepository.class);
         this.outbox = mock(OutboxRepository.class);
         this.accounts = mock(AccountContextClient.class);
+        this.closedWindows = new ArrayList<>();
+        // WHY : Refactoring Rationale: the window boundary arrives as a lambda rather than as the
+        //       production container-cycling implementation. The bound is what these tests assert, and the
+        //       mechanism that acts on it needs a listener container registry and a live queue; separating
+        //       the two is what makes the bound assertable at all, and it is why the seam is an interface.
         this.listener = new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
                 new AuthorizationDecisionService(), this.accounts, List.of(ALLOWED_REPLY_QUEUE),
-                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC));
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                handled -> this.closedWindows.add(handled));
+    }
+
+    /**
+     * Builds a listener whose window size is the value supplied, over the same mocks.
+     *
+     * @param limit the window size to configure
+     * @return a listener bound to the shared mocks and the shared recording boundary
+     */
+    private AuthorizationRequestListener listenerWithWindow(int limit) {
+        return new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
+                new AuthorizationDecisionService(), this.accounts, List.of(ALLOWED_REPLY_QUEUE),
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), limit,
+                handled -> this.closedWindows.add(handled));
     }
 
     /**
@@ -429,5 +468,122 @@ class AuthorizationRequestListenerTest {
         return new AuthRequest("250801", "104530", CARD_NUM, "0100", "1230", "0100", "POS001",
                 "000000", amount, "5411", "840", "05", "MERCHANT0000001",
                 "TEST MERCHANT NAME 01", "SPRINGFIELD", "IL", "627010000", TRANSACTION_ID);
+    }
+
+    /**
+     * Builds one already-expired request, which the listener drops but still counts towards its window.
+     *
+     * @return a message the listener will drop as stale
+     */
+    private Message<String> expiredMessage() {
+        return MessageBuilder
+                .withPayload(CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99"))))
+                .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                .setHeader(AuthorizationRequestListener.HEADER_EXPIRES_AT,
+                        String.valueOf(FIXED_INSTANT.minusSeconds(1).toEpochMilli()))
+                .build();
+    }
+
+    /**
+     * A window closes on exactly its quota, not one message past it.
+     *
+     * <p>Assumptions: this is the assertion the whole bound exists for. The reference consumer declares a
+     * limit of 500 at {@code cbl/COPAUA0C.cbl} L40 but handles 501, its counter being incremented at L332
+     * and then tested with {@code >} at L339, so counts one through the limit all read another request. The
+     * target enforces the DECLARED number, and the check below is what would fail if the comparison here
+     * were ever loosened to reproduce the off-by-one.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a window closes on exactly its declared quota, not one message past it")
+    void aWindowClosesOnExactlyItsQuota() {
+        for (int handled = 1; handled < WINDOW_LIMIT; handled++) {
+            this.listener.onRequest(expiredMessage());
+            assertEquals(List.of(), this.closedWindows,
+                    "no window may close before the quota is reached");
+        }
+
+        this.listener.onRequest(expiredMessage());
+
+        assertEquals(List.of(WINDOW_LIMIT), this.closedWindows,
+                "the window must close on the quota-th message carrying the quota as its handled count");
+    }
+
+    /**
+     * The counter resets at a boundary, so successive windows each close on their own full quota.
+     *
+     * <p>Assumptions: two windows are driven rather than one, because a counter that closed the first
+     * window correctly and then never reset would show up only on the second -- and a consumer that closed
+     * one window and then ran unbounded forever is the failure this asserts against.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("successive windows each close on their own full quota")
+    void successiveWindowsEachCloseOnTheirOwnQuota() {
+        for (int handled = 0; handled < WINDOW_LIMIT * 2; handled++) {
+            this.listener.onRequest(expiredMessage());
+        }
+
+        assertEquals(List.of(WINDOW_LIMIT, WINDOW_LIMIT), this.closedWindows,
+                "two full windows must produce two boundaries, each reporting the full quota");
+    }
+
+    /**
+     * Every message the consumer takes off the queue counts, whatever the outcome of handling it.
+     *
+     * <p>Assumptions: a dropped stale request and a request that could not be decoded both count. The
+     * reference program increments its counter after the get returns and before any outcome is known, at
+     * {@code cbl/COPAUA0C.cbl} L332, so a request it could not act on still consumed one of its 500.
+     * Counting only successful decisions would let a flood of expired or malformed requests keep one window
+     * open indefinitely.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a dropped and a malformed request each count towards the window")
+    void everyReceivedMessageCountsTowardsTheWindow() {
+        AuthorizationRequestListener bounded = listenerWithWindow(2);
+
+        bounded.onRequest(expiredMessage());
+        assertEquals(List.of(), this.closedWindows, "one message must not close a two-message window");
+
+        assertThrows(AuthMessageFormatException.class,
+                () -> bounded.onRequest(MessageBuilder.withPayload("not,a,request")
+                        .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                        .build()));
+
+        assertEquals(List.of(2), this.closedWindows,
+                "a message whose handling threw must still have occupied its place in the window");
+    }
+
+    /**
+     * A window size that admits no request at all is refused at construction.
+     *
+     * <p>Assumptions: refusing at construction rather than at the first message is what turns a
+     * misconfiguration into a startup failure. A zero or negative window would otherwise close on every
+     * single message, cycling the container continuously and consuming the queue at the rate the cycle
+     * takes -- a fault that presents as a throughput problem rather than as a configuration error.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a non-positive window size is refused at construction")
+    void aNonPositiveWindowIsRefused() {
+        assertThrows(IllegalArgumentException.class, () -> listenerWithWindow(0));
+        assertThrows(IllegalArgumentException.class, () -> listenerWithWindow(-1));
+    }
+
+    /**
+     * The production default is the baseline's declared limit rather than a rounded convenience.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the default window is the baseline's declared five hundred")
+    void theDefaultWindowIsTheDeclaredLimit() {
+        assertEquals(500, AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT,
+                "the default must be the number cbl/COPAUA0C.cbl L40 declares, not the 501 it handles");
     }
 }

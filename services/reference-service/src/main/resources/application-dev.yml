@@ -222,9 +222,10 @@ springdoc:
     #       authenticates exactly as it would any other caller, so reaching the
     #       interface is not reaching a row. The page is NOT unauthenticated -
     #       config/SecurityConfig.java permits /actuator/health/** alone and closes
-    #       everything else with anyRequest().authenticated() - so serving it and
-    #       authorizing it are two independent decisions and this key makes only
-    #       the first.
+    #       everything else with a catch-all requiring one of the two group
+    #       authorities, so a token holding no recognised group does not reach it
+    #       either - serving it and authorizing it are two independent decisions
+    #       and this key makes only the first.
     enabled: true
 
 # =============================================================================

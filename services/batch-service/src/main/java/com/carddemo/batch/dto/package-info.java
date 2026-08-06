@@ -149,26 +149,30 @@
  * audits this file against, which is why the three real authorities are named
  * instead.</p>
  *
- * <h2>The roster: eleven types, of which FOUR are landed</h2>
+ * <h2>The roster: eleven types, of which EIGHT are landed</h2>
  *
  * <p>Eleven types, and no twelfth. The list is closed, so the question "which
  * type owns this contract" keeps a definite answer as the package fills.</p>
  *
- * <p>Refactoring Rationale: each entry below now states whether it is LANDED or PLANNED, and
- * an earlier revision of this charter stated all eleven in the present tense. Four are
- * authored at this checkpoint -- {@code BatchJobName}, {@code BusinessDate},
- * {@code BatchReturnCode} and {@code DatasetGeneration} -- and seven are not. A closed roster
- * written wholly in the present tense is worse than an open one, because a reader routing a
- * question to a type has no way to tell a contract that exists from one that is merely
- * intended, and will look for a file that is not there. The roster is still closed and still
- * answers "which type owns this contract"; it now also answers "does it exist yet".</p>
+ * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED. Eight
+ * are authored at this checkpoint -- {@code BatchJobName}, {@code BusinessDate},
+ * {@code BatchJobParameters}, {@code BatchReturnCode}, {@code BatchRunSummary},
+ * {@code DisclosureGroupKey}, {@code DatasetGeneration} and {@code BatchErrorEvent} -- and
+ * three are not: {@code RejectReason}, {@code PostingValidationResult} and
+ * {@code InterestRateLookup}. Two earlier revisions of this paragraph were each wrong in the
+ * opposite direction. The first stated all eleven in the present tense before they existed;
+ * the second over-corrected to FOUR landed and left four authored types marked PLANNED. Both
+ * failures have the same cost in opposite directions: a reader routing a question to a type
+ * either looks for a file that is not there, or writes one that already is. The roster is
+ * still closed and still answers "which type owns this contract"; it now also answers "does
+ * it exist yet" against the directory beside it.</p>
  *
- * <p>Assumptions: the seven planned entries are NOT authored here as empty types to make the
+ * <p>Assumptions: the three planned entries are NOT authored here as empty types to make the
  * roster true. A type with no consumer cannot have its contract exercised, so it would be a
  * placeholder standing where a reviewed contract is supposed to be, and the migration
- * forbids exactly that. Each arrives with the job or service that consumes it.</p>
- *
- * <dl>
+ * forbids exactly that. Each arrives with the job or service that consumes it -- which is
+ * equally the reason the eight that are here were correct to author: each has a landed
+ * consumer or is itself the argument contract a landed entry point decodes.</p>
  *
  * <dl>
  *   <dt>{@code BatchJobName}</dt>
@@ -191,11 +195,13 @@
  *       {@code PROCEDURE DIVISION USING EXTERNAL-PARMS}.</dd>
  *
  *   <dt>{@code BatchJobParameters}</dt>
- *   <dd>PLANNED, not yet authored. The decoded container command line as one immutable record: the job
+ *   <dd>The decoded container command line as one immutable record: the job
  *       token, the business date, and the per-step arguments a step needs. This
  *       is the type at which an orchestration decision becomes a Java one, so
- *       it is also the type at which a malformed argument list must be rejected
- *       rather than defaulted.</dd>
+ *       it is also the type at which a malformed combination of arguments is
+ *       rejected rather than defaulted. It carries the arguments the module
+ *       entry point parsed; it does not parse them itself, because a second
+ *       parser here would be one the entry point does not run.</dd>
  *
  *   <dt>{@code BatchReturnCode}</dt>
  *   <dd>The three process exit-status tiers a job reports to the orchestrator:
@@ -204,7 +210,7 @@
  *       that the state's catch handler routes to failure notification.</dd>
  *
  *   <dt>{@code BatchRunSummary}</dt>
- *   <dd>PLANNED, not yet authored. The per-step run summary, written to the durable
+ *   <dd>The per-step run summary, written to the durable
  *       {@code batch.batch_run} ledger and echoed to standard output. Its
  *       members align with the ledger columns the module's own migration
  *       defines -- run identifier, step name, status, start and finish
@@ -229,7 +235,7 @@
  *       reject path otherwise.</dd>
  *
  *   <dt>{@code DisclosureGroupKey}</dt>
- *   <dd>PLANNED, not yet authored. The three-component disclosure-group lookup key, and exactly three:
+ *   <dd>The three-component disclosure-group lookup key, and exactly three:
  *       {@code app/cpy/CVTRA02Y.cpy:6} declares
  *       {@code DIS-ACCT-GROUP-ID PIC X(10)}, line 7 declares
  *       {@code DIS-TRAN-TYPE-CD PIC X(02)} and line 8 declares
@@ -258,7 +264,7 @@
  *       every one of the ten carrying {@code LIMIT(5)} and {@code SCRATCH}.</dd>
  *
  *   <dt>{@code BatchErrorEvent}</dt>
- *   <dd>PLANNED, not yet authored. The terminal error-sink message envelope, and the only queue payload
+ *   <dd>The terminal error-sink message envelope, and the only queue payload
  *       this module publishes. One publisher and one sink is the whole of this
  *       module's asynchronous surface; the request-and-reply exchanges of the
  *       migration belong to other bounded contexts.</dd>

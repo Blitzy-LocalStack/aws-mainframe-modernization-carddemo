@@ -55,14 +55,6 @@ import org.hibernate.type.SqlTypes;
 public class PendingAuthSummary {
 
     /**
-     * The account this summary belongs to, and the row's whole key.
-     *
-     * <p>Assumptions: {@code PA-ACCT-ID PIC S9(11) COMP-3} at line 19 of the copybook, so eleven
-     * signed decimal digits. {@link Long} is the target because eleven digits exceed what a
-     * thirty-two-bit integer holds; the value is assigned by the caller rather than generated, because
-     * an account identifier originates in the account context and is never minted here.</p>
-     */
-    /**
      * The greatest value the reference counter fields can hold, from {@code PIC S9(04) COMP}.
      *
      * <p>Assumptions: four decimal digits, so 9999 rather than the halfword's own 32767. The schema's
@@ -80,6 +72,14 @@ public class PendingAuthSummary {
      */
     private static final int COUNTER_MIN = -9999;
 
+    /**
+     * The account this summary belongs to, and the row's whole key.
+     *
+     * <p>Assumptions: {@code PA-ACCT-ID PIC S9(11) COMP-3} at line 19 of the copybook, so eleven
+     * signed decimal digits. {@link Long} is the target because eleven digits exceed what a
+     * thirty-two-bit integer holds; the value is assigned by the caller rather than generated, because
+     * an account identifier originates in the account context and is never minted here.</p>
+     */
     @Id
     @Column(name = "account_id", nullable = false, updatable = false)
     private Long accountId;
@@ -293,6 +293,57 @@ public class PendingAuthSummary {
      */
     public String getAuthStatus() {
         return this.authStatus;
+    }
+
+    /**
+     * Returns the first of the five account-status slots.
+     *
+     * <p>Assumptions: the five slots are read through five accessors rather than one returning a list
+     * or an array, because the arity is fixed at five by {@code PA-ACCOUNT-STATUS PIC X(02) OCCURS 5
+     * TIMES} and is enforced by five discrete columns. A collection accessor would admit a fourth or a
+     * sixth slot in Java that the schema cannot store, and an array accessor would additionally hand
+     * callers a mutable view of persistent state.</p>
+     *
+     * @return the two stored characters, or {@code null} when the slot is unset
+     */
+    public String getAccountStatus1() {
+        return this.accountStatus1;
+    }
+
+    /**
+     * Returns the second of the five account-status slots.
+     *
+     * @return the two stored characters, or {@code null} when the slot is unset
+     */
+    public String getAccountStatus2() {
+        return this.accountStatus2;
+    }
+
+    /**
+     * Returns the third of the five account-status slots.
+     *
+     * @return the two stored characters, or {@code null} when the slot is unset
+     */
+    public String getAccountStatus3() {
+        return this.accountStatus3;
+    }
+
+    /**
+     * Returns the fourth of the five account-status slots.
+     *
+     * @return the two stored characters, or {@code null} when the slot is unset
+     */
+    public String getAccountStatus4() {
+        return this.accountStatus4;
+    }
+
+    /**
+     * Returns the fifth of the five account-status slots.
+     *
+     * @return the two stored characters, or {@code null} when the slot is unset
+     */
+    public String getAccountStatus5() {
+        return this.accountStatus5;
     }
 
     /**

@@ -3,10 +3,10 @@
 // contract: ambient test globals are declared per PROJECT, so admitting them here
 // would make `expect` and `vi` visible to production screens as well, where a
 // stray call would compile.
-import type { AxiosRequestConfig, AxiosResponse } from "axios";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AxiosRequestConfig, AxiosResponse } from 'axios';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getApiClient } from "./client";
+import { getApiClient } from './client';
 
 // Refactoring Rationale: the bound asserted below is restated here as a literal
 // rather than imported, because the value it must agree with lives in Java --
@@ -29,9 +29,9 @@ const CORRELATION_ID_MAX_LENGTH = 24;
 // "fixed" it by truncation, and a truncated UUID still carries a hyphen.
 const MINTED_SHAPE = /^[0-9A-F]{24}$/u;
 
-const API_BASE_URL = "https://api.carddemo.example";
+const API_BASE_URL = 'https://api.carddemo.example';
 
-const CORRELATION_HEADER = "X-Correlation-Id";
+const CORRELATION_HEADER = 'X-Correlation-Id';
 
 let transmitted: string[] = [];
 
@@ -40,9 +40,7 @@ let transmitted: string[] = [];
  * @param {AxiosRequestConfig} config - The request configuration after the client's interceptors ran.
  * @returns {Promise<AxiosResponse>} An empty success response carrying the same configuration back.
  */
-async function captureAdapter(
-  config: AxiosRequestConfig,
-): Promise<AxiosResponse> {
+async function captureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
   // Assumptions: the header bag is narrowed through `unknown` rather than read
   // straight off the configuration, because Axios types its header collection with
   // an index signature returning `any`, and ui/eslint.config.js refuses an unsafe
@@ -51,14 +49,14 @@ async function captureAdapter(
   // stringified object.
   const headers: unknown = config.headers;
   const header =
-    typeof headers === "object" && headers !== null
+    typeof headers === 'object' && headers !== null
       ? (headers as Record<string, unknown>)[CORRELATION_HEADER]
       : undefined;
-  transmitted.push(typeof header === "string" ? header : "");
+  transmitted.push(typeof header === 'string' ? header : '');
   return Promise.resolve({
     data: {},
     status: 200,
-    statusText: "OK",
+    statusText: 'OK',
     headers: {},
     config,
   } as AxiosResponse);
@@ -67,8 +65,8 @@ async function captureAdapter(
 /** Supplies the build-time configuration the client validates before it is constructed. */
 function stubBuildConfiguration(): void {
   transmitted = [];
-  vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
-  vi.stubEnv("VITE_CORRELATION_ID_HEADER", CORRELATION_HEADER);
+  vi.stubEnv('VITE_API_BASE_URL', API_BASE_URL);
+  vi.stubEnv('VITE_CORRELATION_ID_HEADER', CORRELATION_HEADER);
 }
 
 /** Restores the environment so no later file inherits this file's configuration. */
@@ -83,9 +81,9 @@ function restoreBuildConfiguration(): void {
 async function transmitOneRequest(): Promise<string> {
   const client = getApiClient();
   client.defaults.adapter = captureAdapter;
-  await client.get("/api/v1/cards");
+  await client.get('/api/v1/cards');
   const sent = transmitted.at(-1);
-  return sent === undefined ? "" : sent;
+  return sent === undefined ? '' : sent;
 }
 
 /** Asserts the transmitted identifier fits the bound the shared service filter enforces. */
@@ -98,7 +96,7 @@ async function transmitsAnIdentifierWithinTheServiceBound(): Promise<void> {
 /** Asserts the transmitted identifier is not the thirty-six-character value the filter refuses. */
 async function neverTransmitsARandomUuid(): Promise<void> {
   const sent = await transmitOneRequest();
-  expect(sent).not.toContain("-");
+  expect(sent).not.toContain('-');
   expect(sent.length).not.toBe(36);
 }
 
@@ -114,11 +112,11 @@ function requestCorrelationContract(): void {
   beforeEach(stubBuildConfiguration);
   afterEach(restoreBuildConfiguration);
   it(
-    "transmits an identifier within the bound the service filter enforces",
+    'transmits an identifier within the bound the service filter enforces',
     transmitsAnIdentifierWithinTheServiceBound,
   );
-  it("never transmits a random UUID", neverTransmitsARandomUuid);
-  it("correlates each request separately", correlatesEachRequestSeparately);
+  it('never transmits a random UUID', neverTransmitsARandomUuid);
+  it('correlates each request separately', correlatesEachRequestSeparately);
 }
 
-describe("request correlation contract", requestCorrelationContract);
+describe('request correlation contract', requestCorrelationContract);

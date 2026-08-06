@@ -50,7 +50,11 @@
  *
  * <p>Exactly five {@code .java} files constitute this package, mirroring the
  * five that constitute the main-tree package it verifies -- this charter, and
- * one integration test per repository interface:
+ * one integration test per repository interface. TWO are landed, this charter
+ * and the first entry below; the other three arrive with the queries they pin.
+ * The distinction is stated rather than left to the tense of the list, because
+ * a roster that cannot be told apart from a directory listing sends a reader
+ * looking for a file that was never written.
  *
  * <ul>
  *   <li>{@code package-info.java}, this charter;</li>
@@ -66,22 +70,29 @@
  *       {@code ledger} rather than to whatever else the connection can
  *       see;</li>
  *   <li>{@code DailyTransactionRepositoryIT}, which pins
- *       {@code ledger.daily_transactions}. Its distinguishing property is
- *       nullability: {@code proc_ts} is NULLABLE on this table while it is
- *       {@code NOT NULL} on {@code transactions}, and the feed carries neither
- *       a primary key nor an index, because the program that reads it front to
- *       back declares no record key at all;</li>
+ *       {@code ledger.daily_transactions}. Two properties distinguish it. The
+ *       first is nullability: {@code proc_ts} is NULLABLE on this table while it
+ *       is {@code NOT NULL} on {@code transactions}. The second is its key:
+ *       because the program that reads the feed front to back declares no
+ *       record key at all, no value the feed carries is unique, so none of the
+ *       thirteen copybook columns carries a key or an index and the table's
+ *       primary key {@code pk_daily_transactions} is over the generated
+ *       ingestion sequence {@code ingest_seq}. What that test has to pin is
+ *       therefore that a chunked scan returns BOTH rows of a feed repeating one
+ *       transaction identifier and that each stays individually addressable;</li>
  *   <li>{@code TransactionCategoryBalanceRepositoryIT}, which pins
  *       {@code ledger.transaction_category_balances} -- the only one of the
  *       four tables whose key is composite, spanning account identifier, type
  *       code and category code -- together with the create-versus-update
  *       decision, asserted along both paths separately;</li>
  *   <li>{@code TransactionRejectRepositoryIT}, which pins
- *       {@code ledger.transaction_rejects} and the 430-byte reject contract.
- *       The baseline appends to that stream and never reads it back, which
- *       makes the read side of this repository a migration affordance rather
- *       than a transcribed behaviour, and makes this test the only place the
- *       shape of the stream is checked at all.</li>
+ *       {@code ledger.transaction_rejects} and the 430-byte reject contract,
+ *       keyed like the feed above on a generated ordinal --
+ *       {@code reject_seq} -- because the same record image rejected on two
+ *       runs is two legitimate rows. The baseline appends to that stream and
+ *       never reads it back, which makes the read side of this repository a
+ *       migration affordance rather than a transcribed behaviour, and makes
+ *       this test the only place the shape of the stream is checked at all.</li>
  * </ul>
  *
  * <p>Alternatives Considered: extracting the container declaration, the

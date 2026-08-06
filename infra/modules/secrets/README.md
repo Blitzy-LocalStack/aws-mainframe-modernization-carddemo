@@ -1,15 +1,15 @@
-# Secrets Manager credentials and rotation module
+# Secrets Manager database-credential module
 
 > **Purpose.** This called Terraform module creates one Secrets Manager
-> credential for each CardDemo service database role, applies and rotates those
-> credentials through Aurora RDS Data API, and can store a caller-supplied
-> service TLS certificate and private key.
+> credential for each CardDemo service database role, generates each initial
+> value at apply time so that no credential is expressible in source, and
+> attaches a rotation schedule when — and only when — the calling root supplies a
+> rotation function of its own.
 >
 > **Source of truth.** The authoritative implementation is
 > [`versions.tf`](versions.tf), [`variables.tf`](variables.tf),
-> [`main.tf`](main.tf), [`outputs.tf`](outputs.tf), and
-> [`rotation_lambda.py`](rotation_lambda.py). The database-role inventory comes
-> from
+> [`main.tf`](main.tf) and [`outputs.tf`](outputs.tf). The database-role
+> inventory comes from
 > [`data-migration/sql/V0__schemas_and_roles.sql`](../../../data-migration/sql/V0__schemas_and_roles.sql).
 > The untouched baseline context is
 > [`app/cpy/CSUSR01Y.cpy`](../../../app/cpy/CSUSR01Y.cpy); it is cited as
@@ -37,8 +37,9 @@ For each member of `service_credential_names`, the module creates a
 customer-managed-key-encrypted secret, generates an initial alphanumeric
 password through the `random` provider's ephemeral resource, and sends the
 initial JSON document to Secrets Manager through the AWS provider's write-only
-argument. It then attaches a module-owned rotation Lambda that applies the
-credential to Aurora and performs scheduled alternating-user rotation.
+argument. Each document carries the role's own login name, the generated
+password, and the master role's login NAME as the escalation identity — never the
+master password, which RDS generates and owns.
 
 The service-role inventory is closed and defaulted so an omitted role fails
 configuration validation instead of surfacing later as a service that cannot
@@ -59,31 +60,64 @@ resolve a credential:
 as a `NOLOGIN` owner for the reporting schema, so generating a connection
 credential for it would contradict its database contract.
 
-The module also packages `rotation_lambda.py` with the `archive` provider and
-creates the rotation log group, permissions-bounded execution role, inline
-policy, Lambda function, and one Secrets Manager invocation permission per
-service secret. The function implements the standard `createSecret`,
-`setSecret`, `testSecret`, and `finishSecret` steps and alternates each base role
-with a bounded `_clone` login.
+### What the module deliberately does NOT provision
 
-When both sensitive TLS inputs are supplied, two additional scalar secrets hold
-the service certificate and private key. Supplying only one half is rejected;
-supplying neither creates no TLS entries and makes `service_tls_secrets` empty.
+**No rotation function.** Refactoring Rationale: this module previously packaged
+a Python rotation Lambda from a committed source file, together with an execution
+role, an inline policy, a log group and one invoke permission per secret. All of
+it was removed. Rotation of a secret VALUE is not this module's remit — the only
+rotation this infrastructure package owns is KMS *key* rotation, in
+[`../kms/`](../kms/) — and owning a function here pulled eight cross-module
+coordinates into the input contract (the cluster ARN, the RDS-managed master
+secret ARN, the writer endpoint, the port, the database name, a log-group key, a
+log retention value and an IAM permissions boundary) plus a third Terraform
+provider to build the deployment package. What remains is a pass-through hook: a
+root that has a rotation function passes `rotation_lambda_arn` together with
+`rotation_automatically_after_days`, and the module attaches one
+`aws_secretsmanager_secret_rotation` per secret. A root that has neither — which
+is the state of both environment roots in this package — gets no rotation
+resource at all. Trade-offs: the accepted cost is that credentials are not
+re-issued on a schedule until an operator supplies a function. Alternatives
+Considered: recreating the same function at the environment root instead, which
+was rejected because it relocates out-of-scope work rather than removing it.
 
-Assumptions: the caller supplies two different KMS key ARNs. `kms_key_arn`
-comes from the Secrets Manager key owned by [`../kms/`](../kms/) and encrypts
-database credentials and optional TLS material. `rotation_log_kms_key_arn`
-encrypts the CloudWatch log group under the shared data/logging key, so the Logs
-service grant does not widen the credential-store key policy.
+**No TLS certificate or private-key entries.** Refactoring Rationale: two
+`sensitive` PEM inputs and the two scalar secrets they fed were removed as well.
+A reusable module is the wrong custodian for private-key material, and — the
+sharper point — an *input* is the wrong channel for it: a Terraform variable can
+only be given a value from a committed tfvars file, a committed default, or a
+CI-carried environment variable, so `sensitive = true` changed how a plan
+*rendered* the value and nothing about whether a tfvars or state file could hold
+it. Both environment roots now generate the pair with the `tls` provider and
+write it into two root-owned Secrets Manager entries and into
+`aws_acm_certificate`, so the material has no input to arrive through.
+Alternatives Considered: keeping the inputs nullable and relying on both roots
+passing null — rejected as a convention rather than a control, and in fact both
+roots were passing them.
 
-Aurora owns its RDS-managed master credential. This module consumes that
-credential's ARN only so the rotation Lambda can authenticate to RDS Data API;
-it neither creates nor publishes the master credential.
+**No connection coordinates.** Assumptions: the writer endpoint, the listener
+port and the database name are non-secret, and
+[`../aurora-postgresql/`](../aurora-postgresql/) already publishes them to
+Parameter Store under the same `<prefix>/<environment>/aurora` path this module
+composes its secret names from. A consumer therefore reads the coordinates from
+Parameter Store and only the credential from Secrets Manager. Accepting them here
+as well would make this module a second, silently divergent copy of values
+another module owns.
 
-The version contract is Terraform `>= 1.15.0` with `hashicorp/aws ~> 6.56`,
-`hashicorp/random ~> 3.9`, and `hashicorp/archive ~> 2.7`. The generated
-reference below remains authoritative for those constraints and for the locked
-provider releases that terraform-docs renders.
+**No master credential.** Aurora owns its RDS-managed master credential; this
+module neither creates, stores nor publishes it. It records only the master
+role's login NAME, through `database_master_username`, whose default is the same
+value `aurora-postgresql`'s own `master_username` input defaults to.
+
+Assumptions: exactly one KMS key ARN is required. `kms_key_arn` comes from the
+Secrets Manager key owned by [`../kms/`](../kms/) and encrypts every value this
+module writes. There is no second, log-group key, because this module now creates
+no log group.
+
+The version contract is Terraform `>= 1.15.0` with `hashicorp/aws ~> 6.56` and
+`hashicorp/random ~> 3.9` — the two providers the package admits, and no third.
+The generated reference below remains authoritative for those constraints and for
+the locked provider releases that terraform-docs renders.
 
 
 ## The structural database-credential boundary
@@ -139,9 +173,8 @@ a second path and leaves the REFERENCE implementation intact.
 
 ## Ownership boundaries
 
-This module owns the eight service database credentials, their rotation
-function and optional storage of the service TLS pair. Three neighbouring
-owners remain separate:
+This module owns the eight service database credentials and nothing else.
+Four neighbouring owners remain separate:
 
 * [`../cognito/`](../cognito/) owns the Cognito app-client and seed-user
   secrets, together with the `carddemo-admin` and `carddemo-user` groups.
@@ -149,6 +182,11 @@ owners remain separate:
   RDS-managed master secret.
 * [`../kms/`](../kms/) owns the customer-managed keys; this module receives
   their ARNs and cannot change their policies.
+* Each environment root owns the service TLS certificate and private key. It
+  generates the pair with the `tls` provider, stores it in two root-owned Secrets
+  Manager entries and imports it into `aws_acm_certificate`. This module accepts
+  no PEM material at all, so there is no channel through which key material
+  could reach a tfvars file.
 
 Assumptions: each resource has one Terraform owner. If this module and the
 Cognito module declared the same secret, each state would claim authority over
@@ -167,22 +205,21 @@ variables:
     module "secrets" {
       source = "../../modules/secrets"
 
-      name_prefix                       = var.name_prefix
-      environment                       = var.environment
-      kms_key_arn                       = module.kms.secrets_key_arn
-      rotation_log_kms_key_arn          = module.kms.s3_key_arn
-      aurora_cluster_arn                = module.aurora.cluster_arn
-      aurora_master_secret_arn          = module.aurora.master_user_secret_arn
-      aurora_host                       = module.aurora.writer_endpoint
-      aurora_port                       = module.aurora.port
-      aurora_database_name              = module.aurora.database_name
-      rotation_permissions_boundary_arn = var.rotation_permissions_boundary_arn
+      name_prefix             = var.name_prefix
+      environment             = var.environment
+      kms_key_arn             = module.kms.secrets_key_arn
+      recovery_window_in_days = var.secret_recovery_window_in_days
     }
 
-The references above are placeholders resolved by the calling root; the
-example contains no deployment identifier or credential. Optional inputs,
-including the TLS pair and environment-specific recovery and rotation values,
-remain caller decisions and are listed in the generated contract.
+That is the whole call in both environment roots. The references above are
+placeholders resolved by the calling root; the example contains no deployment
+identifier and no credential. Every other input has a default:
+`database_master_username` defaults to the same value
+[`../aurora-postgresql/`](../aurora-postgresql/) defaults its own
+`master_username` to, so a root that overrides neither is consistent by
+construction; `service_credential_names` defaults to the eight roles the
+bootstrap SQL creates; and both rotation inputs default to null, which is why
+neither root passes them and no rotation schedule is created.
 
 The module is never applied directly. It has no backend block, provider
 configuration body, or nested module call. CI initializes it without a backend
@@ -213,7 +250,6 @@ automation silently repair and hide the drift.
 | Name | Version |
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.15.0 |
-| <a name="requirement_archive"></a> [archive](#requirement\_archive) | ~> 2.7 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | ~> 6.56 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.9 |
 
@@ -221,66 +257,36 @@ automation silently repair and hide the drift.
 
 | Name | Version |
 |------|---------|
-| <a name="provider_archive"></a> [archive](#provider\_archive) | 2.8.0 |
 | <a name="provider_aws"></a> [aws](#provider\_aws) | 6.57.1 |
 
 ### Resources
 
 | Name | Type |
 |------|------|
-| [aws_cloudwatch_log_group.rotation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
-| [aws_iam_role.rotation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
-| [aws_iam_role_policy.rotation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
-| [aws_lambda_function.rotation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
-| [aws_lambda_permission.secrets_manager](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
 | [aws_secretsmanager_secret.service](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
-| [aws_secretsmanager_secret.service_tls_certificate](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
-| [aws_secretsmanager_secret.service_tls_private_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
 | [aws_secretsmanager_secret_rotation.service](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_rotation) | resource |
 | [aws_secretsmanager_secret_version.service](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
-| [aws_secretsmanager_secret_version.service_tls_certificate](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
-| [aws_secretsmanager_secret_version.service_tls_private_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
-| [archive_file.rotation](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file) | data source |
-| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
-| [aws_iam_policy_document.rotation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
-| [aws_iam_policy_document.rotation_assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
-| [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 
 ### Inputs
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_aurora_cluster_arn"></a> [aurora\_cluster\_arn](#input\_aurora\_cluster\_arn) | ARN of the Aurora cluster whose service-role credentials this module<br/>rotates through RDS Data API. Supplied by aurora-postgresql. | `string` | n/a | yes |
-| <a name="input_aurora_database_name"></a> [aurora\_database\_name](#input\_aurora\_database\_name) | Initial Aurora database name used by RDS Data API during credential rotation. | `string` | n/a | yes |
-| <a name="input_aurora_host"></a> [aurora\_host](#input\_aurora\_host) | Writer endpoint of the Aurora cluster, embedded in each service credential document and checked by the rotation Lambda. | `string` | n/a | yes |
-| <a name="input_aurora_master_secret_arn"></a> [aurora\_master\_secret\_arn](#input\_aurora\_master\_secret\_arn) | ARN of the RDS-managed Aurora master secret used only by the rotation Lambda through RDS Data API. | `string` | n/a | yes |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment segment of every secret name this module composes, which is<br/>what allows a dev and a prod instantiation to coexist in one AWS account<br/>without name collisions. Deliberately has no default: the two environment<br/>roots differ only in values, so a silent default here would let a root that<br/>forgot to set it write secrets under another environment's names. | `string` | n/a | yes |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of the customer-managed KMS key that the values of every secret this<br/>module creates are encrypted under. Supplied by the calling environment<br/>root from the `kms` module's Secrets Manager key output. Required: there is<br/>no default, because falling back to the AWS-managed key would silently<br/>abandon customer-managed encryption for these values. | `string` | n/a | yes |
-| <a name="input_rotation_log_kms_key_arn"></a> [rotation\_log\_kms\_key\_arn](#input\_rotation\_log\_kms\_key\_arn) | Customer-managed KMS key ARN used only for the rotation Lambda CloudWatch log group. Kept separate from kms\_key\_arn so the Logs service grant does not widen the credential-store key policy. | `string` | n/a | yes |
-| <a name="input_rotation_permissions_boundary_arn"></a> [rotation\_permissions\_boundary\_arn](#input\_rotation\_permissions\_boundary\_arn) | Same-account customer-managed IAM policy ARN applied as the rotation Lambda execution role's permissions boundary. | `string` | n/a | yes |
-| <a name="input_aurora_port"></a> [aurora\_port](#input\_aurora\_port) | Aurora PostgreSQL listener port embedded in each service credential document. | `number` | `5432` | no |
-| <a name="input_initial_secret_version"></a> [initial\_secret\_version](#input\_initial\_secret\_version) | Monotonic version for the write-only initial secret documents. Increment<br/>only when deliberately replacing every initial value before rotation owns<br/>the credentials; ordinary applies keep this stable and store no password. | `number` | `1` | no |
+| <a name="input_database_master_username"></a> [database\_master\_username](#input\_database\_master\_username) | Login NAME of the Aurora cluster's master role -- an identifier, never a<br/>credential -- recorded in each service credential document so that an<br/>operator-supplied rotation function (see rotation\_lambda\_arn) knows which<br/>role to escalate through. The matching PASSWORD is not an input to this<br/>module and is not stored by it: RDS generates and owns the master password,<br/>and infra/modules/aurora-postgresql publishes only that secret's ARN.<br/>Defaults to the same value as that module's own master\_username input. | `string` | `"carddemo_admin"` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | First segment of every secret name this module composes, so that all of<br/>this stack's secrets sort together and are addressable by one IAM resource<br/>pattern. Also the value sibling modules use as the leading component of<br/>their resource names, which is why the accepted charset is narrower than<br/>Secrets Manager alone would require. | `string` | `"carddemo"` | no |
 | <a name="input_password_length"></a> [password\_length](#input\_password\_length) | Number of alphanumeric characters in each ephemeral initial service-role<br/>password. A generation parameter, not a credential. | `number` | `32` | no |
 | <a name="input_recovery_window_in_days"></a> [recovery\_window\_in\_days](#input\_recovery\_window\_in\_days) | Days a deleted secret remains recoverable before Secrets Manager removes it<br/>permanently, or 0 to delete immediately with no recovery. Defaults to the<br/>protected value. Set 0 only in an environment that is expected to be<br/>destroyed and recreated under the same secret names, because a non-zero<br/>window keeps those names reserved until it expires and a recreating apply<br/>will fail while it does. | `number` | `30` | no |
-| <a name="input_rotation_automatically_after_days"></a> [rotation\_automatically\_after\_days](#input\_rotation\_automatically\_after\_days) | Interval in days between automatic service-role credential rotations.<br/>Rotation is mandatory and the Lambda is created by this module. | `number` | `30` | no |
-| <a name="input_rotation_log_retention_in_days"></a> [rotation\_log\_retention\_in\_days](#input\_rotation\_log\_retention\_in\_days) | CloudWatch retention for the rotation Lambda log group. | `number` | `90` | no |
+| <a name="input_rotation_automatically_after_days"></a> [rotation\_automatically\_after\_days](#input\_rotation\_automatically\_after\_days) | Interval in days between automatic service-credential rotations, applied<br/>only when rotation\_lambda\_arn is also supplied. Null -- the default --<br/>configures no rotation schedule at all, which is the state of both<br/>environment roots in this package. | `number` | `null` | no |
+| <a name="input_rotation_lambda_arn"></a> [rotation\_lambda\_arn](#input\_rotation\_lambda\_arn) | ARN of an operator-supplied Lambda function that rotates the service<br/>credentials, or null to configure no rotation. This module does not create a<br/>rotation function; it only attaches a rotation schedule when both this input<br/>and rotation\_automatically\_after\_days are supplied. Nullable with a null<br/>default, so a root that has no rotation function still applies cleanly. | `string` | `null` | no |
 | <a name="input_service_credential_names"></a> [service\_credential\_names](#input\_service\_credential\_names) | Names of the per-service database roles that each need their own generated<br/>credential; one secret is created per element. Fixed at the eight roles<br/>data-migration/sql/V0\_\_schemas\_and\_roles.sql creates: the seven that own one<br/>schema per bounded context (carddemo\_auth, carddemo\_account, carddemo\_card,<br/>carddemo\_ledger, carddemo\_reference, carddemo\_batch and<br/>carddemo\_authorization) plus carddemo\_reporting, the read-only role the<br/>reporting service connects as. Note the carddemo\_ prefix: these are ROLE<br/>names, not the bare schema names, and the two are not interchangeable --<br/>"ledger" is the schema and carddemo\_ledger is the role that owns it.<br/>carddemo\_reporting\_owner is deliberately NOT accepted: it owns the reporting<br/>schema, is created NOLOGIN, and so has no credential to generate. Defaulted<br/>and validated rather than left to the caller, because a service whose secret<br/>was never created starts and then fails to resolve it. | `set(string)` | <pre>[<br/>  "carddemo_auth",<br/>  "carddemo_account",<br/>  "carddemo_card",<br/>  "carddemo_ledger",<br/>  "carddemo_reference",<br/>  "carddemo_batch",<br/>  "carddemo_authorization",<br/>  "carddemo_reporting"<br/>]</pre> | no |
-| <a name="input_service_tls_certificate"></a> [service\_tls\_certificate](#input\_service\_tls\_certificate) | PEM certificate or certificate chain presented by the CardDemo services'<br/>internal HTTPS listeners. Imported material: supply it through an operator<br/>secret channel, never a committed tfvars file. main.tf stores the complete<br/>scalar value under the Secrets Manager CMK so ECS can inject the base secret<br/>ARN directly into SERVER\_SSL\_CERTIFICATE. Leave null -- together with<br/>service\_tls\_private\_key -- when the calling root issues and owns the pair<br/>itself, in which case this module creates no TLS entry at all. Both<br/>environment roots in this package do exactly that, so null is their effective<br/>value and the two inputs exist for a root that imports material instead. | `string` | `null` | no |
-| <a name="input_service_tls_private_key"></a> [service\_tls\_private\_key](#input\_service\_tls\_private\_key) | PEM private key paired with service\_tls\_certificate. Imported material:<br/>supply it through an operator secret channel, never a committed tfvars file.<br/>main.tf stores the scalar value under the Secrets Manager CMK so ECS can<br/>inject its base ARN directly into SERVER\_SSL\_CERTIFICATE\_PRIVATE\_KEY. Leave<br/>null -- together with service\_tls\_certificate -- when the calling root issues<br/>and owns the pair itself. | `string` | `null` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every secret this module creates, merged by the caller into<br/>whatever this stack's common tag set contains. Applied per resource in<br/>main.tf because a module cannot configure a provider and therefore cannot<br/>use default\_tags. Defaults to empty so the module imposes no tag of its own. | `map(string)` | `{}` | no |
 
 ### Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_rotation_lambda_arn"></a> [rotation\_lambda\_arn](#output\_rotation\_lambda\_arn) | ARN of the module-owned Lambda that applies and rotates every service-role credential through RDS Data API. |
-| <a name="output_rotation_lambda_name"></a> [rotation\_lambda\_name](#output\_rotation\_lambda\_name) | Name of the module-owned service-role credential rotation Lambda, for alarms and operator inspection. |
-| <a name="output_rotation_log_group_arn"></a> [rotation\_log\_group\_arn](#output\_rotation\_log\_group\_arn) | ARN of the rotation Lambda CloudWatch log group, consumed by the exact encryption-context KMS policy assembled in the environment root. |
-| <a name="output_rotation_log_group_name"></a> [rotation\_log\_group\_name](#output\_rotation\_log\_group\_name) | Name of the rotation Lambda CloudWatch log group, consumed by operator diagnostics and root-level observability wiring. |
-| <a name="output_rotation_role_arn"></a> [rotation\_role\_arn](#output\_rotation\_role\_arn) | ARN of the module-owned rotation Lambda role, consumed by the Secrets Manager KMS key policy so rotation can decrypt and replace the exact managed credential documents. |
-| <a name="output_service_credential_secrets"></a> [service\_credential\_secrets](#output\_service\_credential\_secrets) | The Secrets Manager entry created for each per-service database role, as a<br/>map keyed by role name -- `carddemo_auth`, `carddemo_account` and the rest<br/>of the roles named in `service_credential_names` -- whose value carries<br/>that entry's base `arn` for IAM, its created `name` for by-name reads, and<br/>distinct `username_reference` / `password_reference` values in ECS's<br/>`<base-arn>:<json-key>::` syntax. One entry exists per element of that input,<br/>so the map is empty only if the input is. The calling root projects the<br/>`arn` fields into infra/modules/ecs-service's `secret_sources` input, keyed<br/>by the container environment-variable name each service expects, and scopes<br/>one `secretsmanager:GetSecretValue` statement per task role to the single<br/>ARN that role is entitled to read. The `name` fields are what a by-name<br/>reader passes as `SecretId`, matching the role name character for<br/>character.<br/><br/>These entries are not inert. Each value is APPLIED to the matching<br/>PostgreSQL role by the schema-bootstrap step, which reads the entry, passes<br/>the credential as a bound parameter on a session setting, and runs<br/>data-migration/sql/V0\_\_schemas\_and\_roles.sql -- which issues the ALTER ROLE<br/>inside the same transaction that creates the roles and refuses to commit<br/>while any role still lacks a credential. A caller therefore has two<br/>obligations, not one: grant the bootstrap identity read access to every<br/>entry in this map, and grant each task role read access to its own entry<br/>alone. |
-| <a name="output_service_tls_secrets"></a> [service\_tls\_secrets](#output\_service\_tls\_secrets) | Handles for the scalar certificate and private-key secrets used by the<br/>services' internal HTTPS listeners. Each object publishes the base `arn`,<br/>the created `name`, and a `value_reference`. Because each secret stores one<br/>scalar PEM value, `value_reference` intentionally equals `arn`: the same<br/>base ARN is valid for ECS injection and for the task execution role's IAM<br/>Resource. Empty when the caller left service\_tls\_certificate and<br/>service\_tls\_private\_key null, which is how a root that issues and owns its own<br/>pair says it does not want this module's entries -- a consumer therefore reads<br/>this map through `lookup` or `try` rather than indexing it unconditionally. |
+| <a name="output_service_credential_secrets"></a> [service\_credential\_secrets](#output\_service\_credential\_secrets) | The Secrets Manager entry created for each per-service database role, as a<br/>map keyed by role name -- `carddemo_auth`, `carddemo_account` and the rest<br/>of the roles named in `service_credential_names` -- whose value carries<br/>that entry's base `arn` for IAM, its created `name` for by-name reads, and<br/>distinct `username_reference` / `password_reference` values in ECS's<br/>`<base-arn>:<json-key>::` syntax. One entry exists per element of that input,<br/>so the map is empty only if the input is. The calling root projects the<br/>`arn` fields into infra/modules/ecs-service's `secret_sources` input, keyed<br/>by the container environment-variable name each service expects, and scopes<br/>one `secretsmanager:GetSecretValue` statement per task role to the single<br/>ARN that role is entitled to read. The `name` fields are what a by-name<br/>reader passes as `SecretId`, matching the role name character for<br/>character.<br/><br/>This module STORES each credential; it does not APPLY it. Binding a stored<br/>value to the matching PostgreSQL role -- the ALTER ROLE that lets the role<br/>authenticate with it -- belongs to whatever runs the schema bootstrap, and so<br/>does any later rotation. A caller therefore has three obligations, not one:<br/>grant each task role read access to its own entry alone, grant the<br/>bootstrapping identity read access to every entry in this map so it can bind<br/>the values it finds, and -- if the deployment wants rotation -- supply a<br/>rotation function through this module's `rotation_lambda_arn` input, because<br/>this module deliberately creates none. |
 <!-- END_TF_DOCS -->
 
 
@@ -292,21 +298,29 @@ publishes identifiers and runtime selectors only:
 | Output | Consumer-facing contract |
 |---|---|
 | `service_credential_secrets` | Role-keyed secret ARN, name, username selector, and password selector for task-role IAM and ECS injection |
-| `service_tls_secrets` | Conditional certificate and private-key ARN, name, and scalar value reference |
-| `rotation_lambda_arn` / `rotation_lambda_name` | Function identity for policy wiring, alarms, and operator inspection |
-| `rotation_role_arn` | Execution-role identity used by the Secrets Manager KMS policy |
-| `rotation_log_group_arn` / `rotation_log_group_name` | Log destination identity for key-policy and observability wiring |
 
-The dependency direction for the master credential is the reverse: the
-Aurora module supplies `aurora_master_secret_arn` to this module, and this
-module publishes no master-secret output.
+That is the module's entire public surface: **one** output. Refactoring
+Rationale: six others were withdrawn — a conditional TLS handle map, two
+rotation-function identifiers, a rotation execution-role ARN and two rotation
+log-group identifiers — because every resource they named was removed with the
+rotation function and the TLS entries. Withdrawing a published name is a breaking
+change for both environment roots, so it was done only after confirming that the
+roots reference none of them. Trade-offs: a caller that wants a rotation
+function's identity now holds it already, because the root that supplies the
+function is the root that creates it — an output here would only echo an input
+back.
 
-No output contains a generated password, rotated value, TLS scalar, SecretString,
-or secret-version identifier. ECS tasks resolve the database username and
+This module holds no reference to the master credential in either direction. The
+Aurora module creates and owns the RDS-managed master secret and publishes its
+ARN; this module neither consumes that ARN nor publishes one of its own, and
+records only the master role's login NAME so a rotation function has an
+escalation identity to resolve.
+
+No output contains a generated password, a rotated value, a SecretString, or a
+secret-version identifier. ECS tasks resolve the database username and
 password from Secrets Manager at runtime under a role-scoped
-`GetSecretValue` grant; TLS consumers resolve the two scalar secret handles the
-same way. Terraform outputs remain the only source of resource identifiers, but
-Secrets Manager remains the only source of credential values.
+`GetSecretValue` grant. Terraform outputs remain the only source of resource
+identifiers, but Secrets Manager remains the only source of credential values.
 
 Assumptions: a child-module output can move a value into the calling root's
 state even when the child validates in isolation. Publishing a credential would
@@ -331,42 +345,57 @@ The module therefore accepts either `0` or a service-supported protected
 window: the development root selects `0` for repeatable destroy/recreate, while
 the production root selects `30` for recovery.
 
-### Rotation
+### Rotation is NOT implemented here
 
-Rotation is implemented and mandatory for every service database credential.
-The first attachment uses `rotate_immediately = true` so the Lambda applies a
-credential to a role that the bootstrap SQL may have created without a
-password. Later runs generate a pending password, apply it to the alternate
-base-or-`_clone` login inside one database transaction, verify its bounded
-attributes and membership, and move `AWSCURRENT` only after the test succeeds.
+Rotation of a secret value is outside this module's remit, and the statement is
+made positively rather than left to be inferred from an absent resource. The only
+rotation this infrastructure package owns anywhere is KMS *key* rotation, in
+[`../kms/`](../kms/). This module accepts `rotation_lambda_arn` and
+`rotation_automatically_after_days` as a pass-through pair and attaches one
+`aws_secretsmanager_secret_rotation` per credential when both are supplied;
+supplying one without the other is refused at plan time, because an interval with
+no function rotates nothing and a function with no interval is not a schedule.
+Neither environment root supplies them.
 
-Trade-offs: a module-owned Lambda, IAM role, log group, packaging step, and Data
-API dependency add resources and failure modes. They remove manual `ALTER ROLE`
-handling, support the initial passwordless-role bridge, and keep generated
-values out of Terraform and command text. A native PostgreSQL driver was not
-packaged because its platform-specific binary dependency would make the Lambda
-archive depend on the build host; RDS Data API keeps the package reproducible
-and the target cluster IAM-scoped.
+Refactoring Rationale: a module-owned Python rotation Lambda, its execution role,
+inline policy, log group, source archive and per-secret invoke permission were
+all removed. Trade-offs: what that costs is real and is stated rather than
+glossed — a stored initial credential is no longer applied to its PostgreSQL role
+by this module, and is not re-issued on a schedule. Binding a stored value to its
+role is the schema-bootstrap step's responsibility, and scheduled re-issue waits
+on an operator-supplied function. What it buys is a module whose input contract is
+ten non-secret values rather than eighteen: owning a function here required the
+cluster ARN, the RDS-managed master secret ARN, the writer endpoint, the port, the
+database name, a log-group key, a log retention value and an IAM permissions
+boundary, none of which a credential store needs in order to store a credential,
+plus a third Terraform provider purely to build a deployment package.
+Alternatives Considered: recreating the same function at the environment root, so
+that the behaviour survived the boundary move. Rejected — it relocates
+out-of-scope work rather than removing it, and the root that would own it is the
+root that already owns the schema-bootstrap function the credential binding
+properly belongs to.
 
 ### State handling
 
 Assumptions: generated database passwords do not enter Terraform state. The
-ephemeral initial value is sent through `secret_string_wo`, and subsequent
-values are generated and managed by Secrets Manager plus the rotation Lambda.
-Only the non-secret write-only revision remains in state.
+ephemeral initial value is sent through `secret_string_wo`, and any subsequent
+value is written by whatever rotation function the calling root supplies. Only
+the non-secret write-only revision remains in state.
 
-The optional TLS pair has a different authority: ordinary sensitive inputs feed
-ordinary `secret_string` arguments so a caller-supplied renewal creates a new
-version. Those values are represented in the calling root's state. A root that
-uses this path must therefore protect state as credential-bearing material;
+Assumptions: no PEM material reaches this module's state, because there is no
+input through which it could arrive. The service certificate and private key are
+generated and stored by the environment root, and the root's `tls_private_key`
+resource does place key material in the ROOT's state. A root that uses that path
+must therefore protect its state as credential-bearing material;
 [`infra/bootstrap`](../../bootstrap/) provides the versioned, encrypted remote
-state bucket and locking controls used by the environment roots.
+state bucket and locking controls the environment roots use for exactly that
+reason.
 
 ### Tags
 
 Assumptions: a child module cannot configure a provider and therefore cannot
-use provider `default_tags`. This module merges `var.tags` into each taggable
-secret, log group, role, and Lambda resource. The
+use provider `default_tags`. This module merges `var.tags` into each secret it
+creates, which is now the only kind of taggable resource it has. The
 [`infra/bootstrap`](../../bootstrap/) root can use `default_tags` because it
 owns its provider configuration; the different mechanism follows the
 root-versus-module boundary rather than representing inconsistent tagging.
@@ -375,9 +404,8 @@ root-versus-module boundary rather than representing inconsistent tagging.
 
 The module can be formatted, initialized without a backend, validated, linted,
 documentation-drift checked, and policy scanned without claiming a live
-deployment. Applying an environment root to an AWS account, observing runtime
-rotation, and accepting the resulting cost remain operator actions outside
-this document's evidence.
+deployment. Applying an environment root to an AWS account and accepting the
+resulting cost remain operator actions outside this document's evidence.
 
 
 ## Validation gates
@@ -458,29 +486,32 @@ diff, and commit it with the HCL change. A newer terraform-docs binary is
 rejected because renderer changes would make unchanged contracts produce
 different bytes.
 
-### Apply shows no database-password diff after rotation
+### Apply shows no database-password diff
 
-This is expected. Terraform stores the stable `initial_secret_version`, not the
-write-only initial value or the Lambda-managed current value. There is no
-`ignore_changes` rule masking the credential. Increment
-`initial_secret_version` only for a deliberate initial-document replacement;
-ordinary applies must not take authority back from rotation.
+This is expected, and it is the write-only argument working rather than a masked
+change. Terraform records the stable write-only revision — pinned to `1` in
+`main.tf` — and never the value itself, so an apply has nothing to compare and
+proposes nothing. There is no `ignore_changes` rule involved. Advancing that
+revision is a reviewed edit to `main.tf` rather than a tfvars number, precisely
+because an increment re-issues every initial credential and would overwrite
+whatever a rotation function had since put in place.
 
-### Rotation cannot reach Aurora or write a new version
+### A service cannot authenticate with the credential in its secret
 
-Check the Lambda error log and the exact IAM/KMS boundaries rather than
-widening them. The execution-role permissions boundary must belong to the
-deployment account, the role must read the RDS-managed master secret, the
-credential key must allow use through Secrets Manager, and the cluster must
-accept RDS Data API calls. A failure in any one leaves the previous
-`AWSCURRENT` version in place.
+The credential exists but has not been bound to its PostgreSQL role. This module
+stores values; it does not run `ALTER ROLE`. Check that the schema-bootstrap step
+ran AFTER these secrets were created and that the bootstrapping identity holds
+`GetSecretValue` on every entry in `service_credential_secrets` — it needs to read
+each value in order to bind it, which is a wider grant than any single task role
+holds and is the one identity for which that is correct.
 
-### Only one TLS input is configured
+### Only one rotation input is configured
 
-Certificate and private key are a pair. Supply both through the caller's secret
-channel or leave both null. Creating one scalar secret without the other would
-publish an unusable listener configuration, so variable validation rejects the
-partial case before planning resources.
+`rotation_lambda_arn` and `rotation_automatically_after_days` are a pair. Supply
+both or leave both null. An interval with no function rotates nothing, and a
+function with no interval is not a schedule Secrets Manager will create, so
+variable validation rejects the half-supplied case before any resource is
+planned.
 
 
 ## Related documents

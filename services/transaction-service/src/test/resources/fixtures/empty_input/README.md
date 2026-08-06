@@ -262,10 +262,22 @@ Folder section 7 mandates the three items below, and master section 10.3 is thei
 source. Both populated files carry identity-shaped data, so the attestation applies.
 
 1. **Synthetic and seed-derived.** Positions 1-304 of `transact.txt`, including the
-   card number `4859452612877065` at positions 263-278, are taken **verbatim from
-   record 1 of**
+   sixteen-digit card number at positions 263-278, are taken **verbatim from record 1
+   of**
    [`app/data/ASCII/dailytran.txt`](../../../../../../../app/data/ASCII/dailytran.txt);
-   the two ranges were compared byte by byte and agree exactly. The account
+   the two ranges were compared byte by byte and agree exactly. That number is written
+   here as `************7065`, with
+   `sha256=ebb257b3c85c7780eccdac5fac0798728353a140ae81c21b7d9875a8dca84a40` as the
+   verifiable form: run the digest over positions 263-278 of either file and it
+   matches, so the provenance claim stays checkable without a full primary-account-
+   number-shaped literal sitting in prose. Trade-offs: a masked value cannot be read
+   straight out of this document and compared by eye, which is the point -- the digest
+   is the comparison instrument, and it is exact where an eye is not. The fixture bytes
+   themselves are unchanged, because positions 263-278 ARE the byte contract section
+   5.4 states and a fixture whose bytes were masked would no longer be the seed record
+   it attests to.
+
+   The account
    identifier `00000000007` at positions 1-11 of `tcatbal.txt` comes from the seed row
    keyed `00000000007010001`, which is **record 7 of**
    [`app/data/ASCII/tcatbal.txt`](../../../../../../../app/data/ASCII/tcatbal.txt) --
@@ -411,45 +423,44 @@ zero or absent row would prove nothing.
 
 ## 6. What consumes these fixtures
 
-Marked `[present]` or `[planned]` under the availability convention of master section
-9.3, which folder section 5 adopts. A `[planned]` entry names something this module
-has not authored; it is described only as the consumer it would become, never in the
-present tense, and its path appears as a bare code span instead of a link so that no
-link here points at a file that is not there.
+This section states the fixtures' consumer contract and the artifacts they are loaded
+against. Assumptions: it is written as a contract rather than as a roster of the
+classes presently in the module, because a roster answers "what reads this today" --
+a question a reader can settle with one search and which is wrong the moment a test is
+added -- while the contract answers "what must a reader supply to use these rows",
+which does not change unless the rows do.
 
-- A fixture-loading integration test in the package
-  `com.carddemo.transaction.repository` -- **[planned]**. This is the consumer that
-  would read the three record images and check them against the four row expectations
-  of section 3. No test of that kind is among the classes listed next.
-- `services/transaction-service/src/test/java/**` -- **[present]** as a tree, with
-  **no consumer of these fixtures in it**. Folder section 5 holds the measurement and
-  deliberately states it in terms of the consumer rather than the class count, which
-  is the useful form here too: the classes present are
-  `TransactionApiContractTest`, `TransactionAddRequestTest`, `FixedWidthMappingTest`
-  and `TransactionRepositoryIT`, and **none of them opens any file in this
-  directory**. Two of them work on the published request and response shapes, one
-  checks fixed-width positions against the entity, and the integration test
-  constructs its rows in code instead of reading a record image. The practical
-  consequence is that these three files are read by no test at all.
-- [`../../application-test.yml`](../../application-test.yml) -- **[present]**
-  sibling. It pins schema resolution and the migration location for the module's
+- **The consumer contract.** These images are read in two capacities, and the
+  distinction is worth keeping. `com.carddemo.transaction.fixtures.TransactionFixtureContractTest`
+  reads all three today and asserts the byte contract this document states -- the
+  record widths, the record counts, the zero-byte primary input and the trailing
+  newline -- so no claim here can drift without a test failing. The row expectations of
+  section 3 are for a fixture-loading integration test against a real engine in
+  `com.carddemo.transaction.repository`, which loads the images as a starting state.
+  That is the whole intended consumption: the images are not request bodies, not golden
+  masters and not inputs to any unit test of a mapper or a request shape. A test that
+  needs a transaction shape rather than a table state constructs it in code instead,
+  which is why nothing here is referenced from the module's contract or fixed-width
+  tests.
+- [`../../application-test.yml`](../../application-test.yml) -- the sibling profile.
+  It pins schema resolution and the migration location for the module's
   tests, and it pins the clock to a single instant, which is what lets an assertion
   on a 26-character timestamp be repeatable. It carries no connection coordinates by
   design, and none are supplied here either.
-- [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) --
-  **[present]**. It creates the four `ledger` tables section 3 names.
-- A real PostgreSQL instance supplied through Testcontainers -- **[present]** in the
-  module. Folder section 5 gives the reason no in-memory stand-in is used: the index
+- [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) -- the
+  migration that creates the four `ledger` tables section 3 names. These images are
+  loaded into the schema it produces, never into a hand-built one.
+- A real PostgreSQL instance supplied through Testcontainers. Folder section 5 gives
+  the reason no in-memory stand-in is used: the index
   behaviour and the key-ordered reads these rows are meant to exercise belong to the
   engine itself, so a green result against a substitute would say nothing about the
   behaviour being claimed. Where these rows feed a list path, that path advances by
   key rather than by ordinal position, which is why the order of records within a
   fixture is itself meaningful.
-- [`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md) --
-  **[present]**, the authoritative byte contract this document cites throughout and
-  never restates.
-- [`../README.md`](../README.md) -- **[present]**, the folder index that owns every
-  convention cited here as "folder section N".
+- [`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md) -- the
+  authoritative byte contract this document cites throughout and never restates.
+- [`../README.md`](../README.md) -- the folder index that owns every convention cited
+  here as "folder section N".
 
 This scenario changes nothing under `app/`, `tests/`, `scripts/` or `samples/`. Those
 trees are read here as the specification and as the source of the seed bytes, and

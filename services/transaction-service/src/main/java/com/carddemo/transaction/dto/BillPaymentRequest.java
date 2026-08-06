@@ -37,9 +37,13 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Trade-offs: requiring the full balance means a client of this endpoint cannot make a partial
  * payment, and that limitation is accepted deliberately. What is bought is behavioural parity with
- * the reference, which the golden-master comparison can verify; what is given up is flexibility
- * this interface never had. The alternative would introduce an operation with no reference
- * equivalent, so no comparison could establish whether its result was correct.
+ * the reference, established by transcription against the cited program lines; what is given up is
+ * flexibility this interface never had. Parity here is not established by golden master and is not
+ * claimed to be: the source program is an online CICS program, and {@code tests/README.md} records at
+ * its lines 83 to 85 that such programs cannot be run end to end without a CICS runtime, so no
+ * golden-master oracle exists for this path. The alternative would introduce an operation with no
+ * reference equivalent at all, so neither transcription nor comparison could establish whether its
+ * result was correct.
  *
  * <p><b>No paging component of any kind belongs on this type</b>, and the point is stated here
  * because the reference program does contain browse verbs that could be mistaken for one. It is

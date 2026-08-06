@@ -50,7 +50,9 @@
 #   programs cannot run end to end without a CICS runtime, which the runner
 #   does not have, and that only their extractable field-validation logic is
 #   unit tested. There is therefore NO golden-master oracle for any of these
-#   four paths. Parity rests on transcription fidelity against the cited
+#   four operations, which this contract carries on three paths -- the
+#   collection path serves both the list and the create. Parity rests on
+#   transcription fidelity against the cited
 #   source lines, and every user-visible string below is reproduced
 #   character for character from the line it is attributed to.
 #
@@ -727,9 +729,11 @@ paths:
         "201":
           description: >-
             The payment was posted and the account balance was reduced by the
-            amount paid. The body carries the assigned transaction identifier,
-            the amount paid and the resulting balance, and the Location header
-            addresses the transaction that was written.
+            amount paid, which for this operation is the whole balance. The body
+            carries the assigned transaction identifier and the balance as it stood
+            before the payment -- the figure the baseline screen displays and the
+            amount the transaction carries -- and the Location header addresses the
+            transaction that was written.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -912,7 +916,12 @@ components:
         published bound, or carrying a character outside the published set, is
         refused with 400 rather than being silently replaced, so a caller cannot
         believe it is correlating requests the service is in fact correlating
-        under a different identity.
+        under a different identity. A value whose shape is that of a
+        primary account number -- only digits and the three separators, with
+        thirteen or more digits -- is refused on the same terms, because this
+        identity is echoed and logged. The refusal carries the shared problem body
+        and the response correlation header, the same as any other 400, and it names
+        the rule it applied without ever repeating the value it refused.
       schema:
         $ref: "#/components/schemas/CorrelationId"
 
@@ -1086,10 +1095,17 @@ components:
     #       identifier, measured on the same data. app/cpy/CVTRA05Y.cpy L15
     #       declares TRAN-CARD-NUM PIC X(16), and 30 of the 300 card numbers at
     #       one-based offset 263 to 278 of app/data/ASCII/dailytran.txt begin
-    #       with a zero -- 0927987108636232, 0500024453765740 and
-    #       0923877193247330 among them -- as do 5 of the 50 in
+    #       with a zero -- 0***********6232, 0***********5740 and
+    #       0***********7330 among them -- as do 5 of the 50 in
     #       app/data/ASCII/carddata.txt. A numeric type loses that leading digit
     #       and turns a valid card number into a fifteen-digit one.
+    #       Trade-offs: the three are shown with their interior digits masked, in
+    #       the same twelve-asterisk form MaskedCardNumber publishes above. The
+    #       evidence this comment needs is that the first character is a zero and
+    #       that the field is sixteen positions wide; the remaining digits add
+    #       nothing to it and would place usable primary account numbers in a
+    #       published contract, which the masking rule elsewhere in this document
+    #       exists to prevent.
     CardNumber:
       type: string
       description: >-
@@ -1101,8 +1117,15 @@ components:
       minLength: 16
       maxLength: 16
       pattern: "^[0-9]{16}$"
+      # WHY : Assumptions: the example is SYNTHETIC and matches no row of any seed
+      #       extract, verified by search. It has to satisfy the sixteen-digit
+      #       pattern above, so it cannot be masked the way a response example
+      #       can; a real seed card number in its place would be a usable primary
+      #       account number published in a contract that clients copy examples
+      #       out of. Its leading zero is retained because that is the property
+      #       the comment above this schema measures.
       examples:
-        - "0927987108636232"
+        - "0123456789012345"
 
     # WHY : Assumptions: eleven digits as a string, measured rather than assumed.
     #       app/cpy-bms/COBIL00.CPY L60 declares ACTIDINI PIC X(11) and
@@ -1268,15 +1291,25 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: "^$|^[A-Za-z0-9_.-]{1,24}$"
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
-        stop. A value the service mints is exactly twenty-four upper-case
-        hexadecimal characters over twelve bytes of entropy; a value a caller
+        stop. A value the service mints is exactly the two-character prefix CD followed by twenty-two upper-case hexadecimal
+        characters over eleven bytes of entropy; a value a caller
         supplies need only fit the bound and the set. The empty string appears
         only inside an error body, and only for a failure raised before any
-        identity had been established.
+        identity had been established. The pattern additionally
+        refuses one narrow class the character set alone admits: a value made up
+        only of digits and the three separators, carrying thirteen or more digits.
+        That is the shape of a primary account number, in contiguous form and in
+        every separated form, and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for
+        the request -- so accepting one would copy a card number into both. Ordinary
+        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        and is accepted, and any value containing a letter is accepted whatever its
+        digits. The CD prefix on a minted identity is what keeps a minted value out
+        of the refused class.
       examples:
         - "4F1C0E423A554D219B7E6C0F"
 
@@ -2309,12 +2342,42 @@ components:
             or the refusal "You have nothing to pay..." from L198 when the
             balance is not positive.
 
+    # WHY : Refactoring Rationale: this schema was NARROWED to the four data
+    #       members the service actually emits plus the discriminator, and the
+    #       narrowing is a correction rather than a simplification. An earlier
+    #       revision declared seven members where
+    #       services/transaction-service/.../dto/BillPaymentResponse.java declared
+    #       four, and described its own currentBalance as the figure L234 computes
+    #       where that record documents the figure L194 displays -- so a client
+    #       generated from this document would have failed against a service that
+    #       was itself correct, and would have read the balance with the wrong
+    #       meaning even when the member was present. A mapper now constructs the
+    #       shape (TransactionMapper.toBillPaymentResponse), so the two sides are
+    #       held together by a build step instead of by review.
+    # WHY : Refactoring Rationale: the POST-PAYMENT balance member is gone because
+    #       it is information-free, not merely redundant. L224 moves the WHOLE
+    #       balance into the transaction amount and L234 subtracts that amount from
+    #       that balance, so the figure L234 leaves behind is ALWAYS exactly zero --
+    #       this baseline pays the balance in full and admits no partial amount. A
+    #       member whose every value is zero tells a caller nothing while costing it
+    #       a second money field to disambiguate from the one that carries the
+    #       figure. Alternatives Considered: keeping both and renaming them.
+    #       Rejected: there is only one number to report.
+    # WHY : Refactoring Rationale: the masked card number is gone because the
+    #       baseline screen has no field for it. L225 moves XREF-CARD-NUM into the
+    #       transaction record, so the number is persisted, but
+    #       app/cpy-bms/COBIL00.CPY declares no card field and the screen never
+    #       shows it -- publishing it here would be additive rather than
+    #       parity-preserving. A client needing the card the payment was written
+    #       against reads the transaction the Location header addresses.
     BillPaymentResponse:
       type: object
       description: >-
-        The outcome of a posted bill payment: the transaction that was written, the
-        amount it paid, and the balance the account was left with.
-      required: [transactionId, accountId, cardNumber, amountPaid, currentBalance, paid]
+        The outcome of a posted bill payment: the transaction that was written and
+        the balance that was paid. The baseline pays the balance in full, so the
+        balance reported here is both the figure the screen displays and the amount
+        the transaction carries.
+      required: [transactionId, accountId, currentBalance, paid]
       additionalProperties: false
       properties:
         transactionId:
@@ -2328,37 +2391,29 @@ components:
           allOf:
             - $ref: "#/components/schemas/AccountId"
           description: The account that was paid.
-        cardNumber:
-          allOf:
-            - $ref: "#/components/schemas/MaskedCardNumber"
-          description: >-
-            The card the payment transaction was written against, masked to its
-            last four digits. The baseline takes the unmasked number from the
-            cross-reference at app/cbl/COBIL00C.cbl L225.
-        amountPaid:
-          allOf:
-            - $ref: "#/components/schemas/AccountBalance"
-          description: >-
-            The amount paid, which is the balance the account carried before the
-            payment. The baseline moves exactly that value into the transaction
-            amount at app/cbl/COBIL00C.cbl L224.
-        # WHY : Assumptions: the resulting balance is reported because the baseline
-        #       computes and stores it -- app/cbl/COBIL00C.cbl L234 subtracts the
-        #       amount from the balance and L235 writes the account back -- so it
-        #       is a value the operation produces rather than one invented for this
-        #       response. Reporting it also spares a caller a follow-up read into
-        #       the account context, which this service does not own.
+        # WHY : Assumptions: this is the balance BEFORE the payment, and statement
+        #       order is what fixes it: app/cbl/COBIL00C.cbl L193 moves
+        #       ACCT-CURR-BAL into the display field, L224 reuses the same untouched
+        #       value as the transaction amount, L233 writes the transaction and only
+        #       L234 subtracts. Nothing refills the display field before L242 sends
+        #       it, so what the operator sees is the pre-payment figure -- which is
+        #       therefore also, exactly, the amount that was paid.
         currentBalance:
           allOf:
             - $ref: "#/components/schemas/AccountBalance"
           description: >-
-            The balance the account carries after the payment, as computed at
-            app/cbl/COBIL00C.cbl L234 and stored at L235.
+            The balance as it stood BEFORE the payment, which for this operation is
+            also the amount that was paid: app/cbl/COBIL00C.cbl L193 displays it and
+            L224 moves the same value into the transaction amount. It is not the
+            figure L234 leaves the account holding, which is always zero because
+            L234 subtracts the whole balance from itself.
         paid:
           type: boolean
           description: >-
             Always true on this response, stated explicitly so a body read on its
-            own is unambiguous about whether money moved.
+            own is unambiguous about whether money moved. BillPaymentPreview carries
+            the same member fixed to false, and BillPaymentResponse.posted is the
+            single site that sets this value, so the constant cannot drift.
           const: true
         returnMessage:
           allOf:
@@ -2407,21 +2462,39 @@ components:
       required: [code, secondaryCode, severity, subsystem, status, correlationId, path, timestamp, fieldErrors]
       additionalProperties: false
       properties:
+        # WHY : Refactoring Rationale: this bound is THIRTEEN and an earlier revision
+        #       declared nine, which made every response this service can send
+        #       schema-INVALID. Nine is the width of ERR-CODE-1 PIC X(09) in the
+        #       baseline's structured error record, and ApiError.CODE_WIDTH records
+        #       it -- but the kernel's own Javadoc records it as PROVENANCE and
+        #       states that it is not enforced, because every migrated identifier is
+        #       longer by design. CARDDEMO-0400 is thirteen characters, as is every
+        #       other CARDDEMO-nnnn code the kernel declares, so the earlier bound
+        #       refused every value the member can hold. The word "to match" was the
+        #       error: the two numbers were never meant to match.
+        # WHY : Alternatives Considered: a closed enum of the kernel's codes, which
+        #       would be tighter. Rejected because the kernel may add a code without
+        #       every contract being reissued, and a closed enum would then refuse a
+        #       response the service sends.
         code:
           type: string
           description: >-
             The stable machine-readable identifier for the failure, matched on by
-            clients and by operational tooling and never reworded. It is the
-            migrated counterpart of the nine-character ERR-CODE-1 the baseline's
-            structured error record declares, and ApiError.CODE_WIDTH is 9 to match.
-          maxLength: 9
+            clients and by operational tooling and never reworded. Thirteen
+            characters is the width the migrated identifiers take; the
+            nine-character ERR-CODE-1 the baseline's structured error record
+            declares is recorded as ApiError.CODE_WIDTH for provenance and is not
+            the bound on this member.
+          maxLength: 13
         secondaryCode:
           type: string
           description: >-
             The subordinate machine-readable identifier qualifying code, the
             counterpart of ERR-CODE-2, or the empty string when the failure has no
-            second code.
-          maxLength: 9
+            second code. It is bounded like code above, because it is drawn from the
+            same vocabulary; the kernel normalises an absent value to the empty
+            string rather than to null, so the bound is an upper bound only.
+          maxLength: 13
         message:
           allOf:
             - $ref: "#/components/schemas/ReturnMessage"

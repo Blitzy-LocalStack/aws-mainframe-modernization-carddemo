@@ -129,13 +129,17 @@ import com.carddemo.common.money.Money;
  *
  * <p>Assumptions: a span reaches this class already sliced to one field. A whole record is never
  * handed to a text decoder, because a record contains bytes that are not text: overpunch characters,
- * packed nibbles in the records that use them, and low values inside padding. A text decoder maps
- * every byte it cannot interpret to a replacement character of the same width, so the record still
- * has its declared length and still parses field by field afterwards; only the amounts are wrong.
- * The parity oracle takes the same position from the other direction, treating its
- * mainframe-character-set datasets as opaque binary and never transcoding them, and its helper
- * comments record that routing those bytes through a text write mangles them into replacement
- * characters.</p>
+ * packed nibbles in the records that use them, and low values inside padding. The rule is a
+ * prohibition rather than a prediction about what a decoder would do, because what it does depends on
+ * the charset. A single-byte charset maps all 256 values to some character, so it raises nothing,
+ * substitutes nothing and mistranslates in silence; a multi-byte charset substitutes replacement
+ * characters whose count need not equal the number of bytes consumed, so the record's declared length
+ * and every offset after the first ill-formed sequence can shift. Either way the amounts are wrong,
+ * and in the second case the field boundaries are wrong too, which is why the geometry may not be
+ * assumed to survive a whole-record decode. The parity oracle takes the same position from the other
+ * direction, treating its mainframe-character-set datasets as opaque binary and never transcoding
+ * them, and its helper comments record that routing those bytes through a text write mangles
+ * them.</p>
  *
  * <p>Trade-offs: the consequence for this class's surface is that it accepts a {@link CharSequence}
  * span and offers no byte-array entry point. Accepting bytes was considered and rejected on two

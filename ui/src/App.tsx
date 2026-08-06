@@ -1,13 +1,10 @@
-import type { ReactElement } from "react";
+import type { ReactElement } from 'react';
 
-import { ConfigProvider, Flex, Layout, Typography } from "antd";
+import { ConfigProvider, Flex, Layout, Typography } from 'antd';
 
-import {
-  APP_ORGANISATION_TITLE_DISPLAY,
-  APP_TITLE_DISPLAY,
-} from "./messages/messages";
-import { CardDemoRouter } from "./router";
-import { cardDemoTheme } from "./theme/antdTheme";
+import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from './messages/messages';
+import { CardDemoRouter } from './router';
+import { cardDemoTheme } from './theme/antdTheme';
 
 /**
  * Applies the single theme and shared shell around the CardDemo route tree.

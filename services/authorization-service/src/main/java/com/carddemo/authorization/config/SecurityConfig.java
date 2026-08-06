@@ -1,13 +1,19 @@
 package com.carddemo.authorization.config;
 
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import java.time.Clock;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.authorization.AuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
@@ -17,6 +23,8 @@ import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.IpAddressAuthorizationManager;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 
 /**
  * Configures who may reach this context's endpoints.
@@ -60,6 +68,62 @@ public class SecurityConfig {
     public static final String HEALTH_PATH = "/actuator/health/**";
 
     /**
+     * The management namespace, which is reachable only by an operator.
+     *
+     * <p>Assumptions: this pattern is declared AFTER {@link #HEALTH_PATH} in the rule set below, so the
+     * health group keeps its own more specific rule and stays open. Everything else this service exposes
+     * under {@code /actuator} -- {@code prometheus}, per the {@code management} block of {@code application.yml}
+     * -- describes the deployment rather than answering a business question, so it belongs to the operator
+     * rather than to every holder of a valid token.</p>
+     *
+     * <p>Trade-offs: a metrics scraper must now present a token carrying the administrator group. Nothing
+     * working breaks, because the previous rule already required a token for this namespace and no
+     * credential-free scraper could ever have read it; the change narrows WHICH token is accepted, and
+     * the narrower set is the one an operator holds.</p>
+     */
+    public static final String MANAGEMENT_PATH = "/actuator/**";
+
+    /**
+     * The authorities that satisfy the catch-all rule, in one place because the test reads the same list.
+     *
+     * <p>Assumptions: an administrator satisfies the rule as well as an ordinary user. The baseline agrees
+     * -- {@code SEC-USR-TYPE} at {@code app/cpy/CSUSR01Y.cpy} line 22 admits exactly two values and an
+     * administrator reached the ordinary screens through the same menu graph -- so this is not a
+     * privilege-escalating shortcut but the two-value domain the baseline already had.</p>
+     *
+     * <p>Refactoring Rationale: the pair is a named constant rather than two literals inside the chain
+     * below, so the accompanying test can assert on the SAME list the chain enforces. Restating the pair
+     * in the test would let the two drift and the test would keep passing while the rule narrowed to one
+     * authority or widened to a third.</p>
+     */
+    public static final List<String> BUSINESS_AUTHORITIES =
+            List.of(JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY);
+
+    /**
+     * The authorization decision the catch-all rule installs, exposed so a test can exercise the object
+     * the chain actually enforces.
+     *
+     * <p>Assumptions: this returns exactly what {@code hasAnyAuthority(...)} would have built. That
+     * builder method is itself a one-line wrapper around
+     * {@link AuthorityAuthorizationManager#hasAnyAuthority(String...)}, so naming the manager here and
+     * passing it to {@code access(...)} changes nothing about the rule and everything about whether it
+     * can be asserted: a test can invoke this manager directly, whereas a rule expressed only inside the
+     * builder lambda is reachable only by standing up a servlet context and issuing a request.</p>
+     *
+     * <p>Trade-offs: {@code access(businessAccess())} reads less immediately than
+     * {@code hasAnyAuthority(ADMIN, USER)} would. The cost is one indirection for a reader; the gain is
+     * that the catch-all -- the rule every route not named above depends on -- is covered by a unit test
+     * that needs no container, which is what stops it silently reverting to a weaker condition.</p>
+     *
+     * @return the manager that grants only a principal holding one of {@link #BUSINESS_AUTHORITIES},
+     *     never {@code null}
+     */
+    public static AuthorizationManager<RequestAuthorizationContext> businessAccess() {
+        return AuthorityAuthorizationManager.hasAnyAuthority(
+                BUSINESS_AUTHORITIES.toArray(String[]::new));
+    }
+
+    /**
      * The paths that mark an authorization as fraudulent.
      *
      * <p>Assumptions: fraud marking is restricted to administrators because the baseline reaches its
@@ -74,8 +138,11 @@ public class SecurityConfig {
      * configure this target's path patterns as {@code /api/v1/authorizations} and
      * {@code /api/v1/authorizations/*}. An earlier revision of this constant omitted the prefix. That was
      * not a cosmetic error -- the pattern matched no request the service could ever receive, so fraud
-     * marking fell through to the {@code anyRequest().authenticated()} rule below and any authenticated
-     * caller, including an ordinary {@code carddemo-user}, could mark an authorization fraudulent. It is
+     * marking fell through to the catch-all rule below, which at that time required only authentication,
+     * and any authenticated caller, including an ordinary {@code carddemo-user}, could mark an
+     * authorization fraudulent. That failure mode is why the catch-all is now {@code denyAll()}: a path
+     * gate matching nothing can only be as dangerous as whatever the request falls through to, so making
+     * the fall-through refuse everything bounds the damage of the next such mistake. It is
      * corrected rather than deleted here because a path gate that silently matches nothing is
      * indistinguishable from a correct one in review, and a reader who saw the earlier wording needs to
      * know which statement to trust.</p>
@@ -86,6 +153,46 @@ public class SecurityConfig {
      * line, where the reasoning is written down next to it.</p>
      */
     public static final String FRAUD_PATH_PATTERN = "/api/v1/authorizations/*/fraud";
+
+    /**
+     * The pending-authorization read surface, which the contract reserves to a CardDemo group.
+     *
+     * <p>Assumptions: the pattern covers the collection and every resource beneath it, which is the
+     * whole of this context's published surface apart from the fraud route above --
+     * {@code /api/v1/authorizations} and {@code /api/v1/authorizations/&#123;key&#125;} at lines 289
+     * and 363 of {@code openapi/authorization-api.yaml}. Both carry
+     * {@code x-required-authority: carddemo-user} at lines 332 and 391, and that document names THIS
+     * class as the place the marker is enforced.</p>
+     *
+     * <p>Refactoring Rationale: this rule exists because the read surface previously fell through to a
+     * catch-all requiring only authentication. The data behind it is financial -- an account's pending
+     * authorizations, their amounts and their merchants -- and a token carrying no CardDemo group at
+     * all satisfies {@code authenticated()}, so the declared authority was published but not
+     * enforced.</p>
+     */
+    public static final String READ_PATH_PATTERN = "/api/v1/authorizations/**";
+
+    /**
+     * The metric scrape path, reachable only from inside the task.
+     *
+     * <p>Assumptions: this module's exposure list is {@code include: health,prometheus}, so the scrape
+     * path is the ONE management endpoint beyond health that it admits -- there is no build-identity
+     * endpoint to grant here, unlike the card and reference contexts. Its only configured consumer is
+     * the task-local collector, which scrapes {@code 127.0.0.1:<container-port>} at
+     * {@code infra/modules/ecs-service/main.tf} lines 154 to 172 and presents no authorization header,
+     * so a rule requiring a token would break the scrape rather than secure it.</p>
+     */
+    public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
+
+    /**
+     * The loopback addresses the task-local collector can reach this service from.
+     *
+     * <p>Assumptions: both families are listed because the address a container resolves loopback to is
+     * a property of its network stack. The IPv4 form is the one Fargate presents under {@code awsvpc};
+     * the IPv6 form is included so a stack answering {@code ::1} does not silently lose its
+     * metrics.</p>
+     */
+    private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
 
     /**
      * Builds the filter chain.
@@ -101,26 +208,111 @@ public class SecurityConfig {
      * defends against cannot arise. Leaving it enabled would reject every non-browser client -- including
      * the load balancer and the queue-driven paths -- for no gain.</p>
      *
+     * <p>Assumptions: the catch-all requires one of the two GROUP authorities rather than merely
+     * requiring authentication. Those are not the same condition. {@link JwtRoleConverter} grants an
+     * EMPTY authority set for a token whose {@code cognito:groups} claim is absent, is not a collection,
+     * holds a non-textual entry, or names only groups this application does not recognise -- and every
+     * one of those tokens is still fully authenticated, because it carries a valid signature from the
+     * configured pool. A rule of {@code authenticated()} therefore admitted a principal that had been
+     * granted nothing, which is the missing-authorization defect the baseline does not have: the session
+     * structure at {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 always carries one of exactly two user
+     * types, so no reachable baseline state corresponds to a signed-on user belonging to neither.</p>
+     *
+     * <p>Alternatives Considered: leaving the catch-all as {@code authenticated()} and adding an explicit
+     * rule per published path, which is the shape the auth and card contexts use because each of those
+     * has a genuinely per-path authority split. Rejected here: the per-path table would restate the same
+     * authority set once per route and a route added later would default to the weaker rule again.
+     * Requiring the authority set in the catch-all makes the safe outcome the DEFAULT rather than
+     * something each new route has to remember to opt into.</p>
+     *
+     * <p>Trade-offs: a path this service does not publish now answers 403 rather than 404 for a token
+     * with no group, where a token WITH a group still receives 404. The leak is bounded to callers who
+     * already hold a validly signed token for this pool and reveals nothing about which paths exist,
+     * which is a smaller cost than admitting an unauthorized principal to every published route.</p>
+     *
      * @param http the chain builder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be {@code null}
+     * @param clock the clock the rendered refusal bodies read their failure instant from; must not be
+     *     {@code null}
      * @return the configured chain, never {@code null}
      * @throws Exception when the chain cannot be built, which the builder declares
      */
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
-            JwtAuthenticationConverter authenticationConverter) throws Exception {
+            JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(HEALTH_PATH).permitAll()
+                        // WHY : Assumptions: granted by NETWORK POSITION, not authority, because the
+                        //       only configured consumer is the task-local collector and it presents
+                        //       no token. See METRIC_SCRAPE_PATH.
+                        .requestMatchers(METRIC_SCRAPE_PATH).access(loopbackOnly())
+                        // WHY : Assumptions: the fraud rule stays FIRST because the chain matches in
+                        //       declaration order and the read pattern below also covers this path.
+                        //       Reversing the two would silently downgrade the administrative gate on
+                        //       fraud marking to the read authority.
                         .requestMatchers(FRAUD_PATH_PATTERN)
                         .hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY)
-                        .anyRequest().authenticated())
+                        // WHY : Assumptions: EITHER group satisfies the read surface, which is the
+                        //       authority model the contract publishes at its lines 266 to 275 --
+                        //       carddemo-user means either group, so an administrator is not denied a
+                        //       cardholder operation, while carddemo-admin excludes a user-only token.
+                        .requestMatchers(READ_PATH_PATTERN)
+                        .hasAnyAuthority(JwtRoleConverter.ADMIN_AUTHORITY,
+                                JwtRoleConverter.USER_AUTHORITY)
+                        // WHY : Assumptions: denyAll and NOT authenticated, so a valid token carrying
+                        //       neither group reaches nothing. Every path this service serves is
+                        //       granted by a rule above, so a route added without a rule fails closed.
+                        .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server
+                        // WHY : Assumptions: the bearer-token filter answers a request whose token was
+                        //       absent, expired or malformed BEFORE the exception stage below is reached,
+                        //       and it resolves neither handler from the application context, so both must
+                        //       be set here as well. Setting only the exception stage would leave the more
+                        //       common of the two refusals -- a missing token -- rendered as a bodyless
+                        //       status, which every published contract of this service contradicts.
+                        .authenticationEntryPoint(ApiErrorSecurityHandlers.entryPoint(clock))
+                        .accessDeniedHandler(ApiErrorSecurityHandlers.accessDeniedHandler(clock))
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)))
+                // WHY : Refactoring Rationale: the shared handlers render the ApiError body that this
+                //       service's OpenAPI document declares for 401 and 403. Without them the framework
+                //       default answers with a status and a WWW-Authenticate header and no body at all,
+                //       because a refusal decided by the filter chain never reaches a controller and so
+                //       never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
+                //       the framework's bearer-token entry point first, so the challenge header the OAuth
+                //       2.0 contract requires is composed exactly as before and only the body is added.
+                .exceptionHandling(ApiErrorSecurityHandlers.renderingRefusals(clock))
                 .build();
+    }
+
+
+    /**
+     * Builds the authorization manager that admits a request only from a loopback address.
+     *
+     * <p>Assumptions: composed from the framework's own address manager rather than written here, so
+     * the range parsing is the implementation the framework tests and this class contributes only the
+     * choice of ranges. {@code anyOf} makes the two families alternatives rather than requirements,
+     * which is what a single-stack container needs.</p>
+     *
+     * <p>Alternatives Considered: a security-group rule instead. Rejected because a security group
+     * cannot express a rule about a task's own loopback interface -- traffic that never leaves the task
+     * is not subject to it. The scrape target is nevertheless loopback precisely so the endpoint is
+     * never published through a security-group rule either, so the two narrowings compound rather than
+     * substitute.</p>
+     *
+     * @return an authorization manager granting access from any configured loopback range, never
+     *     {@code null}
+     */
+    private static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
+        @SuppressWarnings("unchecked")
+        AuthorizationManager<RequestAuthorizationContext>[] byRange = LOOPBACK_RANGES.stream()
+                .map(IpAddressAuthorizationManager::hasIpAddress)
+                .toArray(AuthorizationManager[]::new);
+
+        return AuthorizationManagers.anyOf(byRange);
     }
 
     /**

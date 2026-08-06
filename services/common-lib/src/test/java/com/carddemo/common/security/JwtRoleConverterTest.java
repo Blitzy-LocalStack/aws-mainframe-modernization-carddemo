@@ -53,6 +53,58 @@ class JwtRoleConverterTest {
     }
 
     /**
+     * Confirms a malformed claim encoding grants no authority and raises nothing.
+     *
+     * <p>Assumptions: the never-raises property is asserted here rather than inferred from which claim
+     * converters happen to be registered elsewhere, which is the reason this class reads the raw claim map
+     * instead of the convenience accessor -- the accessor raises on a shape it cannot convert, and a
+     * validator that raises inside a filter chain turns a route's own refusal into a 500.</p>
+     *
+     * <p>Refactoring Rationale: these two shapes were added because they are the reason a filter chain
+     * rule of "authenticated" was not sufficient. Both tokens below are validly signed, in-date tokens
+     * from the configured pool, so both are AUTHENTICATED while holding no authority whatsoever. That
+     * combination is what let a groupless principal reach business data before the chains required one of
+     * the two group authorities explicitly, so the empty result is asserted here at its source and the
+     * refusal is asserted in each service's own chain test.</p>
+     */
+    @Test
+    @DisplayName("a claim encoded as neither string nor collection, and a non-textual entry, grant nothing")
+    void malformedClaimEncodingGrantsNothing() {
+        assertThat(converter()
+                        .convert(token(Map.of(
+                                JwtRoleConverter.GROUPS_CLAIM,
+                                Map.of("group", JwtRoleConverter.ADMIN_AUTHORITY)))))
+                .as("a structured claim is a malformed claim, not a membership")
+                .isEmpty();
+        assertThat(converter()
+                        .convert(token(Map.of(JwtRoleConverter.GROUPS_CLAIM, List.of(42)))))
+                .as("a numeric entry is not a group name and must not be coerced into one")
+                .isEmpty();
+        assertThat(converter()
+                        .convert(token(Map.of(JwtRoleConverter.GROUPS_CLAIM, "carddemo-unknown"))))
+                .as("a scalar string IS an accepted encoding, so an unknown one must be refused by name")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms the one scalar encoding the converter documents as acceptable is in fact accepted.
+     *
+     * <p>Assumptions: this is the boundary of the previous assertion and not a duplicate of the first. A
+     * single group encoded as a JSON string rather than a one-element array is a legitimate membership, and
+     * discarding it would turn a real administrator into a forbidden response that reads like a defect in
+     * the mapping rather than like a denial.</p>
+     */
+    @Test
+    @DisplayName("a single group encoded as a scalar string is accepted")
+    void singleGroupEncodedAsScalarStringIsAccepted() {
+        assertThat(converter()
+                        .convert(token(Map.of(
+                                JwtRoleConverter.GROUPS_CLAIM, JwtRoleConverter.ADMIN_AUTHORITY))))
+                .extracting(GrantedAuthority::getAuthority)
+                .containsExactly(JwtRoleConverter.ADMIN_AUTHORITY);
+    }
+
+    /**
      * Confirms the returned authority collection cannot be changed by a caller.
      */
     @Test

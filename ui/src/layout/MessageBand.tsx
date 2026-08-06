@@ -43,18 +43,14 @@
  * literal and no `ConfigProvider`.
  */
 
-import { useEffect, useState } from "react";
-import type { CSSProperties, ReactElement } from "react";
+import { useEffect, useState } from 'react';
+import type { CSSProperties, ReactElement } from 'react';
 
-import { Alert, Flex, Tooltip, Typography, theme } from "antd";
+import { Alert, Flex, Tooltip, Typography, theme } from 'antd';
 
-import {
-  MESSAGE_BAND,
-  isMessageBandEmpty,
-  normaliseMessageBandValue,
-} from "../messages/messages";
-import type { AntdTokenName } from "../theme/tokens";
-import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from "../theme/tokens";
+import { MESSAGE_BAND, isMessageBandEmpty, normaliseMessageBandValue } from '../messages/messages';
+import type { AntdTokenName } from '../theme/tokens';
+import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 /*
  * Alternatives Considered: 78 and 80 were both evaluated as the band width and
@@ -120,7 +116,7 @@ export const MESSAGE_BAND_CONTENT_WIDTH = MESSAGE_BAND.workAreaWidth;
  * colour, so a severity is simultaneously the accessibility signal, the colour
  * decision and the alert variant.
  */
-export type MessageBandSeverity = "error" | "success" | "info";
+export type MessageBandSeverity = 'error' | 'success' | 'info';
 
 /*
  * Assumptions: the empty band is deliberately contentless, so it exposes no
@@ -137,7 +133,7 @@ export type MessageBandSeverity = "error" | "success" | "info";
  * Stable `data-testid` on the band's outer element, present in both the empty
  * and populated states so the reserved-space contract can be asserted.
  */
-export const MESSAGE_BAND_TEST_ID = "message-band";
+export const MESSAGE_BAND_TEST_ID = 'message-band';
 
 /*
  * Alternatives Considered: making the always-present band element a live
@@ -163,10 +159,10 @@ export const MESSAGE_BAND_TEST_ID = "message-band";
  * fidelity loss of the two.
  */
 const SEVERITY_ALERT_ROLES = {
-  error: "alert",
-  success: "status",
-  info: "status",
-} as const satisfies Record<MessageBandSeverity, "alert" | "status">;
+  error: 'alert',
+  success: 'status',
+  info: 'status',
+} as const satisfies Record<MessageBandSeverity, 'alert' | 'status'>;
 
 /*
  * Assumptions: these three token names come from the measured BMS colour
@@ -195,7 +191,7 @@ const SEVERITY_COLOR_TOKENS = {
  * alternative; it would force all 21 screens to restate a value the source
  * never varies.
  */
-const DEFAULT_SEVERITY: MessageBandSeverity = "error";
+const DEFAULT_SEVERITY: MessageBandSeverity = 'error';
 
 /*
  * Trade-offs: the `Alert` is a flex item with a zero basis and a zero minimum
@@ -218,7 +214,7 @@ const DEFAULT_SEVERITY: MessageBandSeverity = "error";
  * tree's component rules flatten away. Two declarations on the item are the
  * smaller of the two costs.
  */
-const ALERT_STYLE: CSSProperties = { flex: "1 1 0", minInlineSize: 0 };
+const ALERT_STYLE: CSSProperties = { flex: '1 1 0', minInlineSize: 0 };
 
 /*
  * Assumptions: the empty state is a declared state, not an inferred one.
@@ -358,8 +354,7 @@ export function MessageBand({
    * exactly the measurement below to be written anyway - with the reveal now
    * fighting the component for control of the same state.
    */
-  const [messageTextElement, setMessageTextElement] =
-    useState<HTMLSpanElement | null>(null);
+  const [messageTextElement, setMessageTextElement] = useState<HTMLSpanElement | null>(null);
   const [isMessageTruncated, setIsMessageTruncated] = useState(false);
 
   useEffect(
@@ -411,7 +406,7 @@ export function MessageBand({
 
       measure();
 
-      if (typeof ResizeObserver === "undefined") {
+      if (typeof ResizeObserver === 'undefined') {
         return undefined;
       }
 
@@ -486,13 +481,13 @@ export function MessageBand({
    * treatment, now the text component's own — are not put back by hand.
    */
   const bandStyle: CSSProperties = {
-    display: "flex",
-    inlineSize: "100%",
+    display: 'flex',
+    inlineSize: '100%',
     maxInlineSize: `${MESSAGE_BAND_CONTENT_WIDTH}ch`,
     blockSize: cssVar.controlHeightLG,
     fontFamily: cssVar.fontFamily,
     fontSize: cssVar.fontSize,
-    overflow: "hidden",
+    overflow: 'hidden',
   };
 
   if (isMessageBandEmpty(text)) {
@@ -608,7 +603,7 @@ export function MessageBand({
    * being read-only - so naming the two members is the only form that compiles
    * without a type assertion.
    */
-  const messageRevealTriggers: ("hover" | "focus")[] = ["hover", "focus"];
+  const messageRevealTriggers: ('hover' | 'focus')[] = ['hover', 'focus'];
 
   /*
    * Refactoring Rationale: the tooltip is always in the tree and is held closed
@@ -638,9 +633,7 @@ export function MessageBand({
    * keyboard-only operator, which is the audience this reveal exists for, never
    * produces the pointer event that triggers it.
    */
-  const messageRevealProps: { open?: false } = isMessageTruncated
-    ? {}
-    : { open: false };
+  const messageRevealProps: { open?: false } = isMessageTruncated ? {} : { open: false };
 
   /*
    * Trade-offs: the tab stop exists only while the message is clipped, so the
@@ -653,9 +646,7 @@ export function MessageBand({
    * that reveals nothing is the defect the finding described rather than a
    * mitigation of it.
    */
-  const messageFocusProps: { tabIndex?: 0 } = isMessageTruncated
-    ? { tabIndex: 0 }
-    : {};
+  const messageFocusProps: { tabIndex?: 0 } = isMessageTruncated ? { tabIndex: 0 } : {};
 
   return (
     <Flex align="center" data-testid={MESSAGE_BAND_TEST_ID} style={bandStyle}>
@@ -691,11 +682,7 @@ export function MessageBand({
            * this component's control. Passing a tooltip there as well would render
            * a second, pointer-only tooltip over the same text.
            */
-          <Tooltip
-            title={text}
-            trigger={messageRevealTriggers}
-            {...messageRevealProps}
-          >
+          <Tooltip title={text} trigger={messageRevealTriggers} {...messageRevealProps}>
             <Typography.Text
               ellipsis
               ref={setMessageTextElement}

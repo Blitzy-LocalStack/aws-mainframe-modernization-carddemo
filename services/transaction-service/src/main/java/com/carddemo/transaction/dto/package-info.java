@@ -3,24 +3,22 @@
  * response types forming the boundary between HTTP/JSON and the service layer
  * of the LEDGER bounded context.
  *
- * <h2>Target contract, and the tree state that authored it</h2>
+ * <h2>Target contract, not a directory listing</h2>
  *
  * <p>Assumptions: every type name and every inventory figure in this charter
- * states the package's target contract as the migration plan assigns it, not
- * the set of files sitting beside this one at the checkpoint that authored it.
- * At that checkpoint this directory holds this charter and nothing else. A type
- * named below that has no file yet is therefore planned rather than missing,
- * and a figure below is a target total rather than a measurement of the
- * directory.
+ * states the package's target contract as the migration plan assigns it. It is
+ * read against the plan rather than against a listing of the directory beside
+ * it, and it says as much about which shape may <em>not</em> be added here as
+ * about which belongs.
  *
- * <p>Alternatives Considered: withholding this charter until the seven records
- * it governs exist. Rejected, because the charter is what their authors work
- * from -- which shape belongs here, which may not, and where each declared
- * width comes from -- so a package holding records but no stated contract is
- * exactly the state in which a locally declared page envelope or a numeric
- * identifier gets added. The cost accepted is that the inventory reads as
- * present tense unless the distinction is declared, which is what the paragraph
- * above is for.
+ * <p>Alternatives Considered: deriving the inventory from the directory instead
+ * of from the plan. Rejected, because a charter that describes whatever happens
+ * to be present cannot say which shape may not be added -- and a package holding
+ * records but no stated contract is exactly the state in which a locally
+ * declared page envelope or a numeric identifier gets introduced. Stating the
+ * closed set costs a charter that must be revised when the contract itself
+ * changes, and buys a boundary a reviewer can enforce against a proposed
+ * addition.
  *
  * <p><b>Purpose.</b> This package holds the wire shapes of the four migrated
  * online transaction screens -- list, view, add and bill payment -- as request
@@ -46,20 +44,26 @@
  * ruleset audits at-clause bodies for emptiness, so a fabricated tag would be
  * either discarded or reported.
  *
- * <h2>The closed inventory: eight files, of which SEVEN are landed</h2>
+ * <h2>The closed inventory: eight files</h2>
  *
  * <p>Eight {@code .java} files constitute this package and no more. Seven are
- * records; the eighth is this charter. Each record is named with the reference
- * program and symbolic map it derives from, because that provenance is the only
- * authority for its component set.
+ * records; the eighth is this charter. All eight are landed, so this inventory is
+ * also a measurement of the directory and every entry below reads in the present
+ * tense. Each record is named with the reference program and symbolic map it
+ * derives from, because that provenance is the only authority for its component
+ * set.
  *
- * <p>Refactoring Rationale: the entry below that is not yet authored says so, and an
- * earlier revision of this charter wrote all eight in the present tense. Seven exist
- * at this checkpoint -- this charter and six records -- and {@code BillPaymentResponse}
- * does not. The distinction matters more here than the count does: the sibling mapper
- * charter quotes this inventory as its authority for how many mappers it needs, so a
- * roster that cannot be told apart from an inventory propagates one unauthored type
- * into a second false statement in another file.
+ * <p>Refactoring Rationale: all eight are landed, and every entry below is written in
+ * the present tense for that reason. Two earlier revisions of this paragraph were each
+ * wrong in the opposite direction: the first wrote all eight as present while
+ * {@code BillPaymentResponse} was unauthored, and the second over-corrected to "seven
+ * exist -- this charter and six records" and left that record marked PLANNED after it
+ * had landed. The distinction matters more here than the count does, and for a reason
+ * outside this file: the sibling mapper charter quotes this inventory as its authority
+ * for how many mappers it needs, so a roster that disagrees with the directory
+ * propagates into a second false statement in another file -- which is exactly what
+ * happened, since that charter had in turn described {@code BillPaymentResponse} as
+ * unauthored. Both were corrected together and both now agree with the tree.
  *
  * <ul>
  *   <li>{@code package-info.java} -- this charter.</li>
@@ -89,12 +93,22 @@
  *       {@code app/cbl/COBIL00C.cbl} and {@code app/cpy-bms/COBIL00.CPY} lines
  *       60 to 72, being the account identifier at {@code ACTIDINI PIC X(11)}
  *       and the one-character confirmation at {@code CONFIRMI PIC X(1)}.</li>
- *   <li>{@code BillPaymentResponse} -- PLANNED, not yet authored. The payment
- *       result, from the same two files. The reference program reports the balance
- *       through {@code CURBALI PIC X(14)} at line 66 of that map. It arrives with the
- *       service that produces it, because a response record with no producer could not
- *       have its component set exercised and would stand as a placeholder where a
- *       reviewed contract belongs.</li>
+ *   <li>{@code BillPaymentResponse} -- the payment result, from the same two files. Five
+ *       components, matching the published contract member for member: the minted
+ *       transaction identifier, the account identifier, the balance the reference program
+ *       reports through {@code CURBALI PIC X(14)} at line 66 of that map, the fixed
+ *       {@code paid} discriminator and the return message. The balance component is the
+ *       pre-payment figure, which {@code COBIL00C.cbl} fixes by statement order -- line 194
+ *       fills the screen field, line 224 reuses that same untouched value as the transaction
+ *       amount, line 233 writes and only line 234 subtracts. Its producer is
+ *       {@code BillPaymentMapper} in the sibling mapper package, because a response record
+ *       with no producer cannot have its component set exercised and would stand as a
+ *       placeholder where a reviewed contract belongs. Refactoring Rationale: an earlier
+ *       revision counted four components, which was the set before the discriminator landed,
+ *       and a later one counted seven by publishing the far side of line 234 and a masked
+ *       card number as well; the figure is re-measured from the record's own component list
+ *       rather than carried forward, because this roster is the authority the sibling mapper
+ *       charter quotes.</li>
  * </ul>
  *
  * <p>Assumptions: two different counts of eight meet in this module and must
@@ -508,12 +522,14 @@
  * constraint, and a reader could then no longer tell which of the two owned a
  * given boundary.
  *
- * <p>Assumptions: that rule class is authored at another index of the same
- * migration plan, so at the checkpoint that authored this charter no engine
- * enforces layering and the boundary is carried by review. This module declares
- * the ArchUnit engine at test scope in its own build manifest rather than
- * inheriting it, because the shared kernel binds no test-jar goal and so
- * publishes no test classes for another module to depend on.
+ * <p>Assumptions: that rule class lives in the shared kernel and reaches this
+ * module as a {@code test-jar} artifact, which the {@code architecture-rules}
+ * Surefire execution in {@code services/pom.xml} collects through
+ * {@code dependenciesToScan} and evaluates against this module's own classes. The
+ * boundary therefore fails the {@code test} phase here rather than failing a
+ * review. This module also declares the ArchUnit engine at test scope in its own
+ * build manifest, so the rules can be run against it without depending on
+ * another module's plugin configuration.
  *
  * <h2>The documentation contract this package is held to</h2>
  *

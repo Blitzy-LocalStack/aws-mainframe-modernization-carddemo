@@ -3,6 +3,7 @@ package com.carddemo.transaction.dto;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import com.carddemo.common.money.Money;
 import com.carddemo.common.web.CorrelationIdFilter;
 import jakarta.validation.constraints.Pattern;
 import java.io.InputStream;
@@ -243,6 +244,45 @@ class TransactionApiContractTest {
                 .anyMatch(componentName::equals);
     }
 
+    /**
+     * Returns the declared type of one record component.
+     *
+     * @param owner the record type declaring the component
+     * @param componentName the component to read
+     * @return the component's declared type
+     * @throws IllegalStateException if the record declares no component of that name, so the failure
+     *     names the member rather than surfacing as a null far from its cause
+     */
+    private static Class<?> componentType(Class<?> owner, String componentName) {
+        return Arrays.stream(owner.getRecordComponents())
+                .filter(component -> component.getName().equals(componentName))
+                .map(RecordComponent::getType)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        owner.getSimpleName() + " declares no component named " + componentName));
+    }
+
+    /**
+     * Returns the one schema reference a property composes through {@code allOf}.
+     *
+     * @param properties the property mapping to read from
+     * @param name the property name
+     * @return the referenced schema pointer
+     * @throws IllegalStateException if the property composes no reference, which would mean its
+     *     domain is declared inline and shares nothing with the schema it is meant to reuse
+     */
+    private static String composedReference(Map<String, Object> properties, String name) {
+        Object composed = mapping(properties, name).get("allOf");
+        if (composed instanceof List<?> parts) {
+            for (Object part : parts) {
+                if (part instanceof Map<?, ?> member && member.get("$ref") != null) {
+                    return String.valueOf(member.get("$ref"));
+                }
+            }
+        }
+        throw new IllegalStateException(name + " composes no schema reference");
+    }
+
     // WHY : Refactoring Rationale: the paths are asserted against the committed edge and load-balancer
     //       route tables rather than against one another, because the defect this closes was that the
     //       contract published three paths without the version prefix while every deployed route
@@ -439,6 +479,69 @@ class TransactionApiContractTest {
         assertThat(components)
                 .as("the amount is the member an earlier revision of this contract omitted")
                 .contains("amount");
+    }
+
+
+    /**
+     * Asserts that the posted-payment body describes exactly the record the service emits.
+     *
+     * <p>Refactoring Rationale: the review that prompted this test found the two sides describing
+     * different shapes under one name -- seven published members against four declared components, and
+     * a currentBalance the document read on the far side of the subtraction that the record reads on
+     * the near side -- with no mapper constructing either, so nothing could notice. Comparing the
+     * published property set with the record's components makes a future divergence a build failure
+     * instead of a discovery.</p>
+     *
+     * <p>Assumptions: the property set is compared for EXACT equality rather than containment, because
+     * both directions of drift were present and both matter. A published member the record does not
+     * carry is a value a generated client waits for and never receives; a component the document does
+     * not publish is a value a client discards.</p>
+     *
+     * <p>Assumptions: the required set is the components minus the message, which is the one member the
+     * baseline can genuinely omit -- {@code CVCRD01Y} attaches a low-values sentinel to
+     * {@code CCARD-RETURN-MSG} alone. Deriving the expectation that way rather than restating four
+     * names keeps it correct if a component is added.</p>
+     */
+    @Test
+    @DisplayName("the posted-payment body publishes exactly the response record's members")
+    void postedPaymentBodyPublishesExactlyTheRecordMembers() {
+        Map<String, Object> posted = schema("BillPaymentResponse");
+        List<String> components = Arrays.stream(BillPaymentResponse.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .toList();
+
+        assertThat(mapping(posted, "properties").keySet())
+                .as("a published member the record omits is a value a client waits for and never"
+                        + " receives, and the reverse is a value it discards")
+                .containsExactlyInAnyOrderElementsOf(components);
+        assertThat(strings(posted, "required"))
+                .containsExactlyInAnyOrderElementsOf(
+                        components.stream().filter(name -> !"returnMessage".equals(name)).toList());
+        assertThat(posted.get("additionalProperties")).isEqualTo(false);
+        assertThat(mapping(mapping(posted, "properties"), "paid").get("const"))
+                .as("the discriminator's published constant must be the value the record's factory"
+                        + " fixes, otherwise a body validates against the wrong one of the pair")
+                .isEqualTo(BillPaymentResponse.PAYMENT_POSTED);
+        assertThat(mapping(posted, "properties"))
+                .as("the masked card number is deliberately absent: app/cpy-bms/COBIL00.CPY declares"
+                        + " no card field, so the baseline screen never shows one")
+                .doesNotContainKey("cardNumber")
+                .as("one money member reports the balance and the amount, because they are one number")
+                .doesNotContainKey("amountPaid");
+
+        // WHY : Assumptions: the money member's own published shape and Java type are asserted here
+        //       rather than left to the property-set comparison above, because a set comparison sees
+        //       only names. A component renamed nowhere but retyped from the exact money type to a
+        //       bare decimal keeps every name in place and silently emits a JSON number, which is the
+        //       one failure in this body that a strict client would accept.
+        assertThat(composedReference(mapping(posted, "properties"), "currentBalance"))
+                .isEqualTo("#/components/schemas/AccountBalance");
+        assertThat(componentType(BillPaymentResponse.class, "currentBalance"))
+                .as("the declared type is what selects the quoted-string wire form")
+                .isEqualTo(Money.class);
+        assertThat(componentType(BillPaymentResponse.class, "paid"))
+                .as("a wrapper would admit a null the published constant refuses")
+                .isEqualTo(boolean.class);
     }
 
     /**

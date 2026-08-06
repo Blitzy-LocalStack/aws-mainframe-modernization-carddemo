@@ -187,16 +187,41 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 class TransactionRepositoryIT {
 
     /**
-     * The engine the assertions run against, pinned to the major version the deployed cluster
-     * targets.
+     * The engine image, named by manifest digest: PostgreSQL 17.10 on Alpine, which is the major
+     * line the deployed cluster targets.
      *
-     * <p>Assumptions: the tag is pinned to an exact minor line rather than left to drift, because
-     * the properties under test are engine behaviours -- whether a secondary index admits a
-     * duplicate key, and the collation a declared-width character column is ordered in. A floating
-     * tag would let either of those change between two runs of an unchanged repository, so a
-     * failure could not be attributed and, worse, a silently altered ordering could keep every
-     * assertion green while proving something different. The Alpine variant is chosen because this
-     * suite starts one container per class and the smaller image shortens that start.
+     * <p>Assumptions: the version above is measured from the image this digest names, whose
+     * environment declares {@code PG_MAJOR=17} and {@code PG_VERSION=17.10}, and it is recorded in
+     * prose because a digest states nothing a reader can recognise. The Alpine variant is chosen
+     * because this suite starts one container per class and the smaller image shortens that start.
+     */
+    // WHY : Refactoring Rationale: the image is named by DIGEST rather than by the tag
+    //       postgres:17-alpine, which an earlier revision used while documenting itself as pinned
+    //       to "an exact minor line". That tag pins the MAJOR line only -- the publisher moves it
+    //       to each new minor and patch release of 17 -- so the claim was false and the risk it
+    //       denied is real: the properties under test are engine behaviours, whether a secondary
+    //       index admits a duplicate key and the collation a declared-width character column is
+    //       ordered in. A moving tag would let either change between two runs of an unchanged
+    //       repository, so a failure could not be attributed and, worse, a silently altered
+    //       ordering could keep every assertion green while proving something different.
+    // WHY : Assumptions: this is a multi-architecture MANIFEST digest rather than a local image
+    //       identifier, so it resolves on every architecture the publisher builds for instead of
+    //       binding this suite to the one machine that recorded it.
+    // WHY : Trade-offs: a digest is unreadable, so the engine version it denotes survives only in
+    //       the documentation above and has to be updated with the pin. That is the same trade the
+    //       repository's own workflows already accept, pinning every action to a commit identifier
+    //       with the readable tag written beside it, and it is accepted here for the same reason:
+    //       an attributable failure is worth one comment that moves with the value.
+    // WHY : Alternatives Considered: an exact minor tag such as postgres:17.10-alpine, which reads
+    //       better than a digest. Rejected because it is still mutable -- a publisher may rebuild
+    //       and republish the same minor tag on a new base layer -- so it would narrow the drift
+    //       without closing it, and the claim being corrected here is precisely a tag being
+    //       described as immutable when it is not.
+    private static final String POSTGRES_IMAGE =
+            "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
+
+    /**
+     * The container the assertions run against, started once for this class.
      *
      * <p>Assumptions: the type comes from {@code org.testcontainers.postgresql} and NOT from
      * {@code org.testcontainers.containers}. Testcontainers 2.0.5 ships both -- the module jar
@@ -212,7 +237,7 @@ class TransactionRepositoryIT {
      */
     @Container
     @ServiceConnection
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
 
     /**
      * The number of rows a page of this suite returns, one fewer than every query below asks for.
@@ -726,7 +751,6 @@ class TransactionRepositoryIT {
         List<Transaction> slice = this.transactions
                 .findByCardNumOrderByTranIdAsc(SEED_CARD, Limit.of(PAGE_ROWS + 1));
 
-        // WHAT: read the slice the way a caller must, as a window plus an optional surplus row.
         // WHY : Assumptions: the surplus row's PRESENCE is the whole of the further-page signal, so
         //       it is tested for rather than counted, and it is dropped from the window rather than
         //       displayed. A caller that rendered the whole slice would show one row too many and
@@ -1043,7 +1067,6 @@ class TransactionRepositoryIT {
                 this.entityManager.persist(row);
             }
 
-            // WHAT: send the inserts, then empty the persistence context.
             // WHY : Assumptions: the order is not interchangeable. Clearing before the flush would
             //       discard the pending inserts unwritten, so the rows the following assertion
             //       reasons about would never exist and the assertion would fail for a reason that

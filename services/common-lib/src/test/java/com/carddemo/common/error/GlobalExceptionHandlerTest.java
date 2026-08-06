@@ -20,6 +20,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 
 /**
  * Verifies that the shared advice never lets a primary account number out of the process, through
@@ -297,12 +300,20 @@ class GlobalExceptionHandlerTest {
      * Transformation rule T7 makes the per-field array the way a rejection is expressed, so all five
      * properties are asserted together: the status, the code, the severity, the ABSENCE of the abend
      * block, and a non-empty array with something for a client to display.</p>
+     *
+     * <p>Refactoring Rationale: the failure handed in is a {@link ClientInputException} and no longer a
+     * bare {@code IllegalArgumentException}. The handler used to claim that whole family, which also
+     * carries every internal invariant in the migration, so a service defect was reported to the caller
+     * as a request to correct and never reached the 500 channel the alerting watches. This test now
+     * asserts the narrowed contract, and its counterpart below asserts that a bare
+     * {@code IllegalArgumentException} is answered as an internal failure instead.</p>
      */
     @Test
     @DisplayName("a rejected-input failure is answered 400 with a field array and no abend block")
     void rejectedCallerInputIsAnsweredAsFourHundred() {
         ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
-                new IllegalArgumentException("Open Date: date carries content at width 9"),
+                new ClientInputException("DATE_WIDTH", "openDate",
+                        "Open Date: date carries content at width 9"),
                 requestFor(CARD_PATH));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -313,32 +324,54 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody().message())
                 .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
         assertThat(response.getBody().fieldErrors()).hasSize(1);
+        assertThat(response.getBody().fieldErrors().get(0).field()).isEqualTo("openDate");
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+    }
+
+    /**
+     * Confirms a refusal that names no field is still keyed by the request as a whole.
+     *
+     * <p>Assumptions: this is the fallback branch of the same handler and it has to keep working, because
+     * the shared authorization codec raises refusals about a whole payload rather than about one member.
+     * Answering with an empty array would give a client a 400 with nothing to display, which
+     * transformation rule T7 forbids.</p>
+     */
+    @Test
+    @DisplayName("a refusal naming no field is keyed by the request")
+    void rejectedCallerInputWithoutFieldIsKeyedByRequest() {
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                new ClientInputException("AUTH_WIRE_MALFORMED", "payload carries 17 fields"),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().fieldErrors()).hasSize(1);
         assertThat(response.getBody().fieldErrors().get(0).field())
                 .isEqualTo(GlobalExceptionHandler.FIELD_REQUEST);
-        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
     }
 
     /**
      * Confirms the caught diagnostic is written to the operational record and never to the body.
      *
-     * <p>Assumptions: this is the half of the mapping that keeps the widened 400 safe. The handler
-     * claims the whole rejected-input family, including failures raised by libraries whose messages
-     * this repository does not control, so the client-facing sentence has to be fixed while the caught
-     * text goes to the log under the same correlation identity.</p>
+     * <p>Assumptions: the client-facing sentence is fixed while the caught text goes to the log under
+     * the same correlation identity. The caught text is safe to log ONLY because the claimed type
+     * guarantees its own message is redacted -- every subclass composes it through a per-field
+     * sensitivity gate -- which is why the stable code is asserted alongside it: an alert rule matches on
+     * the code, not on the sentence.</p>
      */
     @Test
-    @DisplayName("the rejected-input diagnostic is logged and never rendered")
+    @DisplayName("the rejected-input diagnostic and its stable code are logged, never rendered")
     void rejectedCallerInputDiagnosticIsLoggedNotRendered() {
         String diagnostic = "PA-RQ-TRANSACTION-ID arrived as 14 characters";
 
         ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
-                new IllegalArgumentException(diagnostic), requestFor(CARD_PATH));
+                new ClientInputException("AUTH_WIRE_MALFORMED", diagnostic), requestFor(CARD_PATH));
 
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().message()).doesNotContain(diagnostic);
         assertThat(this.captured.list).isNotEmpty();
         assertThat(this.captured.list.get(0).getFormattedMessage())
                 .contains("status=400")
+                .contains("reason=AUTH_WIRE_MALFORMED")
                 .contains(diagnostic)
                 .doesNotContain(CARD_NUMBER);
     }
@@ -348,26 +381,135 @@ class GlobalExceptionHandlerTest {
      *
      * <p>Assumptions: a component inside the application, and every test of the mapping, calls the
      * runtime handler directly rather than going through the framework's dispatch, so the two routes
-     * have to agree. A number that is not a number is included because it arrives as a
-     * {@code NumberFormatException}, which is a member of the family by inheritance rather than by
-     * name -- the property that lets one handler claim the money parser, the codecs and the date
-     * validator at once.</p>
+     * have to agree.</p>
+     *
+     * <p>Refactoring Rationale: the second half of this test asserts the OPPOSITE of what it used to. A
+     * bare {@code IllegalArgumentException} and a {@code NumberFormatException} were answered 400 here,
+     * on the reasoning that inheritance lets one handler claim the money parser, the codecs and the date
+     * validator at once. That reasoning also claimed every internal invariant, because this migration
+     * expresses those with the same exception: a transfer object refusing a component the service
+     * constructed it with, an edit mask refusing a band the service composed. Both now reach the internal
+     * answer, which is the correct classification -- a service that parses an unvalidated caller value
+     * with a platform parser is missing a validation, and reporting the missing validation as a server
+     * fault is what gets it fixed.</p>
      */
     @Test
-    @DisplayName("the runtime entry point maps rejected input to the same 400 answer")
+    @DisplayName("the runtime entry point maps a declared refusal to 400 and a bare one to 500")
     void runtimeEntryPointDelegatesRejectedInput() {
+        ResponseEntity<ApiError> fromDeclared = this.handler.onRuntimeFailure(
+                new ClientInputException("DATE_WIDTH", "width 9"), requestFor(CARD_PATH));
         ResponseEntity<ApiError> fromArgument = this.handler.onRuntimeFailure(
                 new IllegalArgumentException("width 9"), requestFor(CARD_PATH));
         ResponseEntity<ApiError> fromNumber = this.handler.onRuntimeFailure(
                 new NumberFormatException("not-a-number"), requestFor(CARD_PATH));
 
-        assertThat(fromArgument.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(fromNumber.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(fromDeclared.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(fromDeclared.getBody()).isNotNull();
+        assertThat(fromDeclared.getBody().abend()).isNull();
+        assertThat(fromDeclared.getBody().code()).isEqualTo(ApiError.CODE_VALIDATION);
+
+        assertThat(fromArgument.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(fromNumber.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
         assertThat(fromArgument.getBody()).isNotNull();
         assertThat(fromNumber.getBody()).isNotNull();
-        assertThat(fromArgument.getBody().abend()).isNull();
-        assertThat(fromNumber.getBody().abend()).isNull();
-        assertThat(fromNumber.getBody().code()).isEqualTo(ApiError.CODE_VALIDATION);
+        assertThat(fromArgument.getBody().abend()).isNotNull();
+        assertThat(fromNumber.getBody().code()).isEqualTo(ApiError.CODE_INTERNAL);
+    }
+
+    /**
+     * Confirms a contention a service declares carries the relational subsystem and the current version.
+     *
+     * <p>Assumptions: both properties are asserted together because each was separately unachievable
+     * before. The subsystem was always the application one, since every conflict was composed through a
+     * factory that hardcoded it, while the published contracts declare a contention refusal as arising in
+     * the relational store; and the version was reported nowhere at all, so a caller told the record had
+     * changed had to re-read it to learn what it changed to.</p>
+     */
+    @Test
+    @DisplayName("a declared contention carries the relational subsystem and the current version")
+    void declaredContentionCarriesSubsystemAndVersion() {
+        ResponseEntity<ApiError> response = this.handler.onRecordConflict(
+                new RecordConflictException(RecordConflictException.Kind.STALE_VERSION, 7L),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_CONFLICT);
+        assertThat(response.getBody().subsystem()).isEqualTo(ApiError.Subsystem.RELATIONAL);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_RECORD_CHANGED);
+        assertThat(response.getBody().fieldErrors()).hasSize(1);
+        assertThat(response.getBody().fieldErrors().get(0).field())
+                .isEqualTo(GlobalExceptionHandler.FIELD_VERSION);
+        assertThat(response.getBody().fieldErrors().get(0).message()).isEqualTo("7");
+    }
+
+    /**
+     * Confirms a contention with no version to report carries an empty field array rather than a filler.
+     *
+     * <p>Assumptions: a lock that could not be obtained compared nothing, so there is no version to
+     * report, and an entry naming one this response does not know would be a value invented for the
+     * shape's sake. An empty array is what every other non-validation problem shape in this class
+     * carries.</p>
+     */
+    @Test
+    @DisplayName("a contention with no version carries an empty field array")
+    void contentionWithoutVersionCarriesNoFieldEntry() {
+        ResponseEntity<ApiError> response = this.handler.onRecordConflict(
+                new RecordConflictException(RecordConflictException.Kind.LOCK_UNAVAILABLE),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().subsystem()).isEqualTo(ApiError.Subsystem.RELATIONAL);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_LOCK_UNAVAILABLE);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+    }
+
+    /**
+     * Confirms both entity-agnostic contention sentences are the baseline literals, character for
+     * character.
+     *
+     * <p>Refactoring Rationale: this assertion exists because both constants used to be paraphrases and
+     * neither needed to be. The lock sentence carried an inserted definite article, and the referential
+     * sentence described the rule in this migration's own words. Every published contract that quoted
+     * the baseline wording therefore described a body this advice would not return, and nothing in the
+     * build noticed, because the tests that touched these constants referred to them by NAME and so
+     * agreed with whatever they happened to say. Comparing against the literal is what makes a
+     * reversion fail here rather than in a reviewer's reading of an OpenAPI example.</p>
+     *
+     * <p>Assumptions: the expected strings are written out in full rather than read from the baseline at
+     * run time. The COBOL is reference-only and is not on the test classpath, so a run-time read would
+     * mean parsing fixed-format source to recover a level-88 literal -- which would make this test
+     * depend on a parser rather than on the text. The citations are given instead: line 205 to 206 of
+     * app/cbl/COCRDUPC.cbl and 181 to 182 of app/app-transaction-type-db2/cbl/COTRTUPC.cbl for the lock
+     * sentence, and line 1919 of that tree's COTRTLIC.cbl with line 1641 of its COTRTUPC.cbl for the
+     * referential one.</p>
+     */
+    @Test
+    @DisplayName("the two contention sentences are the baseline literals")
+    void contentionSentencesAreBaselineLiterals() {
+        assertThat(GlobalExceptionHandler.MESSAGE_LOCK_UNAVAILABLE)
+                .isEqualTo("Could not lock record for update");
+        assertThat(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW)
+                .isEqualTo("Please delete associated child records first:");
+
+        // WHY : Assumptions: the emitted BODY is asserted as well as the constant, because a contract
+        //       reader is promised the sentence a 409 carries and not the value of a field. A future
+        //       change that left the constant alone and selected a different one for a kind would
+        //       satisfy the two assertions above and still break the promise.
+        ResponseEntity<ApiError> referential = this.handler.onRecordConflict(
+                new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW),
+                requestFor(CARD_PATH));
+        ResponseEntity<ApiError> locked = this.handler.onRecordConflict(
+                new RecordConflictException(RecordConflictException.Kind.LOCK_UNAVAILABLE),
+                requestFor(CARD_PATH));
+
+        assertThat(referential.getBody()).isNotNull();
+        assertThat(locked.getBody()).isNotNull();
+        assertThat(referential.getBody().message())
+                .isEqualTo("Please delete associated child records first:");
+        assertThat(locked.getBody().message()).isEqualTo("Could not lock record for update");
     }
 
     /**
@@ -418,7 +560,7 @@ class GlobalExceptionHandlerTest {
         assertThat(this.handler.onAccessDenied(new AccessDeniedException("d"), request).getBody())
                 .isNotNull()
                 .satisfies(body -> assertThat(body.status()).isEqualTo(HttpStatus.FORBIDDEN.value()));
-        assertThat(this.handler.onRejectedCallerInput(new IllegalArgumentException("x"), request)
+        assertThat(this.handler.onRejectedCallerInput(new ClientInputException("X", "x"), request)
                 .getBody())
                 .isNotNull()
                 .satisfies(body ->
@@ -427,6 +569,88 @@ class GlobalExceptionHandlerTest {
                 .isNotNull()
                 .satisfies(body -> assertThat(body.status())
                         .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value()));
+    }
+
+    /**
+     * Confirms a body that declares a check order gets its entries ordered by it, and gets the FIRST
+     * declared failure as the aggregate message.
+     *
+     * <p>Refactoring Rationale: a validation provider reports constraint violations in an order it does
+     * not define, so the aggregate message a screen displays was previously whichever failure the
+     * provider happened to report first. The reference checks its fields in a fixed order and displays
+     * the first failure it reaches -- the sign-on program tests the user identifier before the password
+     * at lines 118 to 126 of {@code app/cbl/COSGN00C.cbl} -- so an unordered aggregate can show the
+     * second failure of two and send a user to the wrong control.</p>
+     *
+     * <p>Assumptions: the entries are handed in DEFERRED order -- password before user identifier -- so
+     * a passing assertion cannot be explained by the provider order already being correct. The
+     * unrecognised name is included because a declared order that omits a field must degrade to placing
+     * that field last rather than dropping its entry.</p>
+     */
+    @Test
+    @DisplayName("a body declaring a check order latches its first declared failure as the aggregate")
+    void declaredFieldOrderDecidesTheAggregateMessage() {
+        OrderedBody target = new OrderedBody();
+        BeanPropertyBindingResult binding = new BeanPropertyBindingResult(target, "orderedBody");
+        binding.addError(new FieldError("orderedBody", "password", "Please enter Password ...", false,
+                null, null, "Please enter Password ..."));
+        binding.addError(new FieldError("orderedBody", "surprise", "unknown field", false, null, null,
+                "unknown field"));
+        binding.addError(new FieldError("orderedBody", "userId", "Please enter User ID ...", false,
+                null, null, "Please enter User ID ..."));
+
+        ApiError body = this.handler
+                .onInvalidBody(new MethodArgumentNotValidException(null, binding), requestFor(CARD_PATH))
+                .getBody();
+
+        assertThat(body).isNotNull();
+        assertThat(body.message()).isEqualTo("Please enter User ID ...");
+        assertThat(body.fieldErrors()).extracting(ApiError.FieldError::field)
+                .containsExactly("userId", "password", "surprise");
+    }
+
+    /**
+     * A request body that declares its check order, standing in for a real one.
+     *
+     * <p>Assumptions: this is declared here rather than reusing a service transfer object, because the
+     * shared kernel may not depend on a service package and a test that did would make the shared
+     * assertion unrunnable from the kernel's own module.</p>
+     */
+    private static final class OrderedBody implements FieldOrdering {
+
+        /** The identifier field, checked first, matching the reference's own order. */
+        private String userId;
+
+        /** The secret field, checked second. */
+        private String password;
+
+        /**
+         * Reports the declared check order.
+         *
+         * @return the two field names in the order the reference checks them, never {@code null}
+         */
+        @Override
+        public java.util.List<String> fieldOrder() {
+            return java.util.List.of("userId", "password");
+        }
+
+        /**
+         * Reports the identifier, present so the declared field is a real property.
+         *
+         * @return the identifier, which may be {@code null}
+         */
+        String getUserId() {
+            return this.userId;
+        }
+
+        /**
+         * Reports the secret, present so the declared field is a real property.
+         *
+         * @return the secret, which may be {@code null}
+         */
+        String getPassword() {
+            return this.password;
+        }
     }
 
     /**

@@ -253,9 +253,11 @@
  *
  * <p>Assumptions: three baseline field names are misspelled, and the descriptors carry them EXACTLY as
  * the baseline declares them, because a descriptor whose names did not match the copybook would no
- * longer be a transcription of it. The corrected spelling exists only further out, in a database column
- * or a Java member, and the correspondence is recorded here so a test's expectation can never be
- * mistaken for a typing error:</p>
+ * longer be a transcription of it. The baseline declares the name shown in the left column and
+ * {@code app/**} is untouched; the target independently chooses the name in the right column for its
+ * own database column or Java member, and that naming divergence is registered in
+ * {@code docs/architecture/data-model-and-schema-mapping.md}. The correspondence is recorded here so a
+ * test's expectation can never be mistaken for a typing error:</p>
  *
  * <pre>
  * baseline name                 declared at                    target name
@@ -274,8 +276,9 @@
  *
  * <h2>What this package contains, and what it never will</h2>
  *
- * <p>This test package holds exactly four test classes and this charter, so five compilation units in
- * all:</p>
+ * <p>This test package holds exactly five test classes and this charter, so six compilation units in
+ * all -- one test class per production class, which is why the roster below and the roster of the
+ * five classes under test are the same length:</p>
  *
  * <pre>
  * test class               pins
@@ -283,20 +286,42 @@
  * PackedDecimalCodecTest   the packed nibbles, the binary width tiers and their refusals
  * FixedWidthCodecTest      whole-record decode and encode, and the layout registry through them
  * CsvAuthCodecTest         the request and reply payloads, their masks and their refusals
+ * CopybookLayoutTest       the registry's published set and every layout's internal geometry
  * </pre>
  *
- * <p>Alternatives Considered: a fifth test class named for the layout registry was evaluated and
- * rejected, and its assertions are folded principally into the whole-record test instead. A descriptor
- * is a declaration, so a test that only read one back would assert that a constant equals itself, which
- * passes whether or not the geometry is usable. Asserting the same geometry THROUGH a decode and an
- * encode of a whole record proves both that the declaration is right and that it is consumable, which
- * is the property that actually protects a caller. The registry's own refusals are exercised where they
- * are raised, at the codec that rejects the malformed descriptor.</p>
+ * <p>Refactoring Rationale: an earlier revision of this section said the package held exactly four
+ * test classes, stated in its closed-set assumption that there is no {@code CopybookLayoutTest}, and
+ * carried an Alternatives Considered paragraph recording that a fifth class named for the layout
+ * registry had been "evaluated and rejected". That class is present, so the denial was the most
+ * damaging kind of inaccuracy a charter can carry: it did not merely under-count, it instructed a
+ * reader that a file beside it was a design the package had refused, which invites its deletion as an
+ * unauthorised addition. The reasoning behind the refusal was also wrong on the merits, and it is
+ * corrected rather than quietly dropped, because the argument it made is one a reader could
+ * legitimately make again. It held that a descriptor is a declaration, so a test reading one back
+ * would assert that a constant equals itself and would pass whether or not the geometry is usable.
+ * That is true of a test that reads a single field's offset back. It is not true of the class that
+ * landed, which asserts relational properties no single declaration contains: that every layout covers
+ * its declared length contiguously with no gap and no overlap, that every declared key lies wholly
+ * inside the record it keys, that field names are distinct within a layout, that each base master's
+ * length matches its dataset contract and each derived record's matches its producing pipeline, and
+ * that the packed form is never wider than the zoned form for the same digits. A constant cannot
+ * satisfy those by construction; a wrong offset breaks contiguity and the suite fails.</p>
  *
- * <p>Assumptions: the contents above are the closed set. There is no {@code CopybookLayoutTest}, no
+ * <p>Trade-offs: the whole-record test continues to exercise the registry through a decode and an
+ * encode, so the two classes overlap deliberately rather than by oversight. The overlap is worth its
+ * cost because the two prove different things and fail differently. Geometry asserted THROUGH a
+ * round trip proves the declaration is consumable but localises poorly -- a gap in any of the fourteen
+ * layouts surfaces as one record-level mismatch. Geometry asserted directly names the offending layout
+ * and field, and covers layouts for which no whole-record vector is carried here. The registry's
+ * refusals remain exercised in both places: at the codec that rejects a malformed descriptor, and at
+ * the registry itself for an unknown layout name and a digit count beyond the platform maximum.</p>
+ *
+ * <p>Assumptions: the contents above are the closed set. There is no sixth test class, no
  * helper, base or parameter-source class, no integration-test class whose name ends in the reactor's
  * integration suffix, no test resource, no copy of a fixture and no nested folder beneath this
- * package. Every expectation is a literal transcribed from a reference
+ * package. Parameterised cases are supplied by methods and annotations on the class that consumes
+ * them, which is why no parameter-source class is needed to reach the per-layout coverage the
+ * registry test carries. Every expectation is a literal transcribed from a reference
  * artifact, so no test here reads a clock, a file under {@code app}, an environment variable, a database
  * or a network resource, and the whole package therefore runs on a machine with no emulator and no COBOL
  * compiler. Stating the closure is what lets a reader tell a class the contract never admitted from one

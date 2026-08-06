@@ -1,7 +1,7 @@
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 
-import { App } from "./App";
+import { App } from './App';
 
 /**
  * Resolves the single application mount point declared by `ui/index.html`.
@@ -9,11 +9,9 @@ import { App } from "./App";
  * @throws {Error} If the HTML entry contract is broken.
  */
 function applicationRoot(): HTMLElement {
-  const element = document.getElementById("root");
+  const element = document.getElementById('root');
   if (element === null) {
-    throw new Error(
-      "CardDemo cannot start because the application root element is missing.",
-    );
+    throw new Error('CardDemo cannot start because the application root element is missing.');
   }
   return element;
 }

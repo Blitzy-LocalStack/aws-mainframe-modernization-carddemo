@@ -29,12 +29,29 @@
  * each of those shapes is owned once by {@code com.carddemo.common} and is
  * referenced from here instead of being restated.
  *
- * <p>Seven {@code .java} files constitute this package and no more: this
+ * <p>Assumptions: the inventory below is this package's <b>target contract</b> as
+ * the migration plan assigns it, not a measurement of the files present today.
+ * Seven {@code .java} files constitute this package at target and no more: this
  * descriptor, and six records -- {@code SignOnRequest}, {@code SignOnResponse},
  * {@code UserSummary}, {@code UserResponse}, {@code CreateUserRequest} and
- * {@code UpdateUserRequest}. Between them they carry the payloads of the five
- * reference online programs {@code COSGN00C}, {@code COUSR00C},
- * {@code COUSR01C}, {@code COUSR02C} and {@code COUSR03C}.
+ * {@code UpdateUserRequest}. <b>Five of the seven exist at this checkpoint</b>:
+ * this descriptor and the first four records. {@code CreateUserRequest} and
+ * {@code UpdateUserRequest} are <b>planned and not yet authored</b> -- they are
+ * the two write payloads, and they arrive with the user-administration adapters
+ * in {@code com.carddemo.auth.api}, which is itself still planned. Between them
+ * the six carry the payloads of the five reference online programs
+ * {@code COSGN00C}, {@code COUSR00C}, {@code COUSR01C}, {@code COUSR02C} and
+ * {@code COUSR03C}; the four that exist today carry sign-on and the two read
+ * shapes, which is why the read side is complete and the write side is not.
+ *
+ * <p>Refactoring Rationale: an earlier revision stated "seven files and no more"
+ * and named all six records without qualification, which read as an inventory of
+ * the directory rather than as the closed set the plan assigns. Two of the six
+ * had no file. The two are marked rather than removed, because the closed-set
+ * claim is the useful part of this charter -- it tells an author of the write
+ * path which types to add and forbids a seventh -- and deleting them would
+ * discard exactly that. The wording follows the convention the test charter at
+ * {@code com.carddemo.auth.api} already established for the same situation.
  *
  * <h2>Where the declared widths come from</h2>
  *

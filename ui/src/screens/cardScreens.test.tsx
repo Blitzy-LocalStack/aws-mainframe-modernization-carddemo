@@ -35,18 +35,18 @@
 // global, because ui/vitest.config.ts sets `globals: false` and records that as a
 // contract; admitting ambient globals here would make them visible to production
 // screens as well.
-import { render, screen, waitFor } from "@testing-library/react";
-import type { ReactElement } from "react";
-import { MemoryRouter, Route, Routes } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { MemoryRouter, Route, Routes } from 'react-router';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getCard, listCards, updateCard } from "../api/cards";
-import type { CardDetail, CardSummary, PageResponse } from "../api/cards";
-import { MESSAGE_BAND_TEST_ID } from "../layout/MessageBand";
-import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from "../routes/cards";
-import { CardDetailScreen } from "./cardDetail";
-import { CardListScreen } from "./cardList";
-import { CardUpdateScreen } from "./cardUpdate";
+import { getCard, listCards, updateCard } from '../api/cards';
+import type { CardDetail, CardSummary, PageResponse } from '../api/cards';
+import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from '../routes/cards';
+import { CardDetailScreen } from './cardDetail';
+import { CardListScreen } from './cardList';
+import { CardUpdateScreen } from './cardUpdate';
 
 /**
  * Builds the mocked surface of the card transport module.
@@ -76,9 +76,11 @@ function mockCardTransportModule(): Record<string, unknown> {
  * concerns and its own failure modes and would make a presentation regression
  * indistinguishable from a transport one.
  */
-vi.mock("../api/cards", mockCardTransportModule);
+vi.mock('../api/cards', mockCardTransportModule);
 
-const OPAQUE_CARD_ID = "AbCdEfGhIjKlMnOpQrStUv";
+// Assumptions: a card is addressed by its sixteen-digit number, so a concrete route needs one.
+// This is the reserved test prefix with a fixed tail and identifies no real card.
+const CARD_NUMBER = '4111111111110011';
 
 const EMPTY_PAGE: PageResponse<CardSummary> = {
   items: [],
@@ -94,12 +96,11 @@ const EMPTY_PAGE: PageResponse<CardSummary> = {
  * a test file for no assertion's benefit.
  */
 const CARD: CardDetail = {
-  opaqueCardId: OPAQUE_CARD_ID,
-  displayCardNumber: "************0011",
-  accountId: "00000000011",
-  embossedName: "PAUL BUCK",
-  expirationDate: "2023-01-20",
-  activeStatus: "Y",
+  displayCardNumber: '************0011',
+  accountId: '00000000011',
+  embossedName: 'PAUL BUCK',
+  expirationDate: '2023-01-20',
+  activeStatus: 'Y',
   version: 1,
 };
 
@@ -116,11 +117,7 @@ const CARD: CardDetail = {
  * @param {ReactElement} element - The screen under test.
  * @returns {void} Nothing; the tree is rendered into the test document.
  */
-function renderAt(
-  path: string,
-  routePattern: string,
-  element: ReactElement,
-): void {
+function renderAt(path: string, routePattern: string, element: ReactElement): void {
   render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
@@ -143,7 +140,7 @@ function expectBandPresent(): void {
  * @returns {Promise<void>} Resolves once the alert is inside the band.
  */
 async function expectFailureInsideBand(): Promise<void> {
-  const alert = await screen.findByRole("alert");
+  const alert = await screen.findByRole('alert');
   expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toContainElement(alert);
 }
 
@@ -164,10 +161,10 @@ function resetTransportMocks(): void {
 async function listReservesBandWhenThereIsNoMessage(): Promise<void> {
   vi.mocked(listCards).mockResolvedValue(EMPTY_PAGE);
 
-  renderAt("/cards", "/cards", <CardListScreen />);
+  renderAt('/cards', '/cards', <CardListScreen />);
 
   await waitFor(expectBandPresent);
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 }
 
 /**
@@ -175,9 +172,9 @@ async function listReservesBandWhenThereIsNoMessage(): Promise<void> {
  * @returns {Promise<void>} Resolves once the failure has been rendered.
  */
 async function listSendsFailureToTheBand(): Promise<void> {
-  vi.mocked(listCards).mockRejectedValue(new Error("transport"));
+  vi.mocked(listCards).mockRejectedValue(new Error('transport'));
 
-  renderAt("/cards", "/cards", <CardListScreen />);
+  renderAt('/cards', '/cards', <CardListScreen />);
 
   await expectFailureInsideBand();
 }
@@ -189,7 +186,7 @@ async function listSendsFailureToTheBand(): Promise<void> {
 async function detailReservesBandWhenThereIsNoMessage(): Promise<void> {
   vi.mocked(getCard).mockResolvedValue(CARD);
 
-  renderAt(`/cards/${OPAQUE_CARD_ID}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
+  renderAt(`/cards/${CARD_NUMBER}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
 
   expect(await screen.findByTestId(MESSAGE_BAND_TEST_ID)).toBeEmptyDOMElement();
 }
@@ -199,9 +196,9 @@ async function detailReservesBandWhenThereIsNoMessage(): Promise<void> {
  * @returns {Promise<void>} Resolves once the failure has been rendered.
  */
 async function detailSendsFailureToTheBand(): Promise<void> {
-  vi.mocked(getCard).mockRejectedValue(new Error("transport"));
+  vi.mocked(getCard).mockRejectedValue(new Error('transport'));
 
-  renderAt(`/cards/${OPAQUE_CARD_ID}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
+  renderAt(`/cards/${CARD_NUMBER}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
 
   await expectFailureInsideBand();
 }
@@ -213,11 +210,7 @@ async function detailSendsFailureToTheBand(): Promise<void> {
 async function updateReservesBandWhenThereIsNoMessage(): Promise<void> {
   vi.mocked(getCard).mockResolvedValue(CARD);
 
-  renderAt(
-    `/cards/${OPAQUE_CARD_ID}/edit`,
-    CARD_EDIT_ROUTE,
-    <CardUpdateScreen />,
-  );
+  renderAt(`/cards/${CARD_NUMBER}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
 
   expect(await screen.findByTestId(MESSAGE_BAND_TEST_ID)).toBeEmptyDOMElement();
 }
@@ -227,13 +220,9 @@ async function updateReservesBandWhenThereIsNoMessage(): Promise<void> {
  * @returns {Promise<void>} Resolves once the failure has been rendered.
  */
 async function updateSendsFailureToTheBand(): Promise<void> {
-  vi.mocked(getCard).mockRejectedValue(new Error("transport"));
+  vi.mocked(getCard).mockRejectedValue(new Error('transport'));
 
-  renderAt(
-    `/cards/${OPAQUE_CARD_ID}/edit`,
-    CARD_EDIT_ROUTE,
-    <CardUpdateScreen />,
-  );
+  renderAt(`/cards/${CARD_NUMBER}/edit`, CARD_EDIT_ROUTE, <CardUpdateScreen />);
 
   await expectFailureInsideBand();
 }
@@ -246,29 +235,20 @@ function cardScreenBandCases(): void {
   afterEach(resetTransportMocks);
 
   it(
-    "reserves the band on the card list when there is no message",
+    'reserves the band on the card list when there is no message',
     listReservesBandWhenThereIsNoMessage,
   );
-  it("renders a card list failure inside the band", listSendsFailureToTheBand);
+  it('renders a card list failure inside the band', listSendsFailureToTheBand);
   it(
-    "reserves the band on the card detail when there is no message",
+    'reserves the band on the card detail when there is no message',
     detailReservesBandWhenThereIsNoMessage,
   );
+  it('renders a card detail failure inside the band', detailSendsFailureToTheBand);
   it(
-    "renders a card detail failure inside the band",
-    detailSendsFailureToTheBand,
-  );
-  it(
-    "reserves the band on the card update when there is no message",
+    'reserves the band on the card update when there is no message',
     updateReservesBandWhenThereIsNoMessage,
   );
-  it(
-    "renders a card update failure inside the band",
-    updateSendsFailureToTheBand,
-  );
+  it('renders a card update failure inside the band', updateSendsFailureToTheBand);
 }
 
-describe(
-  "card screens render outcomes through the shared message band",
-  cardScreenBandCases,
-);
+describe('card screens render outcomes through the shared message band', cardScreenBandCases);

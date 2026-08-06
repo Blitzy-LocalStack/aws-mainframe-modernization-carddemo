@@ -28,6 +28,23 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * components are not scanned -- they arrive through
  * {@code com.carddemo.common.CardDemoCommonAutoConfiguration}. A scan wide enough to reach them would
  * also reach another context's types, which is the coupling the layering test forbids.</p>
+ *
+ * <p>Refactoring Rationale: this image has TWO modes and the entry point chooses between them. It served
+ * only the web application before, and that was a defect rather than a simplification: the nightly state
+ * machine already dispatches {@code --job=generate-statements} and {@code --job=generate-reports} at this
+ * module's task definition -- the very same definition the online service runs, since the environment
+ * roots wire {@code reporting_task_definition_arn} to the reporting ECS service's own -- and the
+ * on-demand machine dispatches {@code --job=generate-report}. A container started by any of those three
+ * would have listened for requests and never terminated, so the state would have reported a TIMEOUT after
+ * its whole ceiling elapsed instead of reporting that the command was not implemented. Task mode is
+ * selected by the presence of {@code --job=} and is owned entirely by {@link ReportingTaskRunner}.</p>
+ *
+ * <p>Alternatives Considered: a second {@code @SpringBootApplication} class dedicated to task mode, which
+ * would separate the two entry points completely. Rejected because the repackaging plugin resolves a
+ * single main class by scanning, so a second one makes the executable jar ambiguous and the module would
+ * need the main class pinned in its {@code pom.xml} -- a third place for the two to disagree. One entry
+ * point that branches on its own arguments keeps the executable jar unambiguous and puts the choice
+ * beside the contract it implements.</p>
  */
 @SpringBootApplication
 public class ReportingApplication {
@@ -45,13 +62,25 @@ public class ReportingApplication {
     }
 
     /**
-     * Starts the context.
+     * Starts either the reporting service or one orchestrated reporting task.
      *
-     * @param args the command-line arguments, passed through so an operator can override any property
-     *     on the command line exactly as they can on every other service in this repository; must not
-     *     be {@code null}
+     * <p>Assumptions: task mode terminates the process explicitly with the runner's status, and service
+     * mode does not terminate at all. A web application is expected to run until it is stopped, whereas a
+     * task must both finish and report HOW it finished: returning normally from this method would exit
+     * with zero whatever the task did, because that is the status of a Java process that completes its
+     * main method, and every gate the orchestrator places on these states tests for equality with zero.
+     * A failed report would then present as a clean one and the chain would carry on.</p>
+     *
+     * @param args the command-line arguments. When any of them begins with
+     *     {@link ReportingTaskRunner#JOB_OPTION} the process runs that one task and exits with its
+     *     status; otherwise the arguments are passed through to the web application so an operator can
+     *     override any property on the command line exactly as on every other service in this repository.
+     *     Must not be {@code null}
      */
     public static void main(String[] args) {
+        if (ReportingTaskRunner.isTaskInvocation(args)) {
+            System.exit(ReportingTaskRunner.execute(args));
+        }
         SpringApplication.run(ReportingApplication.class, args);
     }
 }

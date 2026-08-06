@@ -297,7 +297,7 @@ document or a shared log.
 |:---|:---|
 | Sign-on | Authenticate through `POST /auth/signon`; complete `POST /auth/challenge` when the temporary credential requires a change. |
 | Account view/update | Read one account, update an allowed field, and verify a stale version returns conflict. |
-| Card list/update | List cards and address detail/update by opaque card identifier, never by PAN in the browser URL. |
+| Card list/update | List cards narrowed by account or card number, then address detail/update by the card's sixteen-digit number. The number reaches the request line and the shared masker redacts it from every operational record; the administrative full-number read sits on its own `/api/v1/admin/cards` path. |
 | Transaction add/list | Add a fixed-point amount and verify the list returns the same decimal string. |
 | Bill pay | Submit one payment and verify the account and ledger effects commit together. |
 | Posting batch | Start the Step Functions execution and verify posted, rejected, and return-code outcomes. |

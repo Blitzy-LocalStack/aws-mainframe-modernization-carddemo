@@ -132,63 +132,87 @@ import org.springframework.data.jpa.repository.JpaRepository;
  *
  * <p>Trade-offs: each method hands its caller the whole slice it read and trims nothing. The
  * compromise accepted is that a caller which asked for one row beyond its chunk must know to
- * process one fewer than it may receive; what is bought is that this interface stays the file-access
- * layer and holds no caller's bookkeeping. The baseline draws the line in the same place, discarding
- * its own surplus read inside a program paragraph rather than inside the file access it performs.
- * Where a caller does need a cursor envelope, the shared {@code com.carddemo.common.web.PageResponse}
- * is the one it assembles from such a slice; this interface neither returns nor imports it, and the
- * charter forbids re-declaring it. That envelope belongs to a batch or administrative caller here,
- * never to an online list screen, because this table has none.
+ * process one fewer than it may receive; what is bought is that this interface stays the
+ * file-access layer and holds no caller's bookkeeping. The baseline draws the line in the same
+ * place, discarding its own surplus read inside a program paragraph rather than inside the file
+ * access it performs. Where a caller does need a cursor envelope, the shared
+ * {@code com.carddemo.common.web.PageResponse} is the one it assembles from such a slice; this
+ * interface neither returns nor imports it, and the charter forbids re-declaring it. That envelope
+ * belongs to a batch or administrative caller here, never to an online list screen, because this
+ * table has none.
  *
- * <h2>The identifier is a mapped identity, not a declared key</h2>
+ * <h2>The key is an ingestion sequence, and the identifier is deliberately not one</h2>
  *
- * <p>Assumptions: the migration declares NO primary key, no unique constraint and no not-null
- * column over this table, and the entity nevertheless maps the identifier as its identity because
- * the persistence provider requires one. The type parameter of this interface is therefore
- * {@code String}, matching that identity, and it is a declared-width 16-character column named
- * {@code transaction_id}; the entity's own member is spelled {@code tranId}, so the derived names
- * below spell the MEMBER while this documentation names the column. The absence of a key is the
- * baseline contract rather than an omission: the feed is the sequential dataset cited above and the
- * posting job never keys into it.
+ * <p>Assumptions: the migration constrains NONE of the thirteen copybook columns -- no unique index,
+ * no not-null, no key -- and gives the table one further column that is not a copybook field at all.
+ * It declares the primary key {@code pk_daily_transactions} over {@code ingest_seq} at its line 469,
+ * an identity column it declares at line 365, and it declares no unique constraint over any copybook
+ * column of the table. The absence of a key over the copybook columns is the baseline contract rather
+ * than an omission: the feed is the sequential dataset cited above and the posting job never keys
+ * into it. The type parameter of this interface is therefore {@code Long}, matching that identity;
+ * the entity's own member is spelled {@code ingestSeq}, so the derived names below spell the MEMBER
+ * while this documentation names the column.
  *
- * <p>Assumptions: uniqueness of that identifier is an empirical property of the extract that exists
- * and NOT a constraint this interface may rely on. Measured directly, the 300 records of
- * {@code app/data/ASCII/dailytran.txt} carry 300 distinct identifiers at bytes 1 to 16, every one
- * of them 16 digits with no blank, and they are already in ascending order of it. Those counts
- * agree, so the scan below is well defined over the extract in hand. They are still a property of
- * one extract: because no unique constraint exists, a feed carrying a repeated identifier -- which
- * the sequential baseline would process without complaint -- loads without error, and a caller must
- * not treat either method below as returning at most one row per identifier.
+ * <p>Refactoring Rationale: an earlier revision of this interface keyed on {@code transaction_id} and
+ * resumed with a strict {@code >} over it, and documented the risk as an empirical caveat -- that
+ * uniqueness was a property of the extract rather than a constraint. That was wrong in two
+ * compounding ways rather than one, and the combination silently LOSES rows. The identifier is not
+ * unique in the source, so a chunk containing a repeated identifier collapsed to a single instance in
+ * the persistence context and the caller received the first row's amounts twice; and a continuation
+ * keyed STRICTLY beyond the last identifier then stepped over the second row carrying it, so the row
+ * the collapse had already hidden was skipped outright by the next query as well. The skipped rows
+ * are exactly the physical occurrences a sequential read is defined to process. The cursor now orders
+ * and resumes on the sequence, which the schema guarantees unique and monotonic, so the ordering is
+ * total, a chunked scan returns every physical row exactly once, and the strict comparison below is
+ * safe by construction rather than by measurement. A gap in an identity sequence cannot cause a skip
+ * either, because the predicate is a RANGE test and not an arithmetic step.
  *
- * <p>Assumptions: ordering that identifier is LEXICOGRAPHIC, and it is total and stable only
- * because every value occupies all 16 bytes, which the measurement above establishes for the
- * extract in hand. A declared-width character column is blank-padded by the engine on comparison,
- * so a value and the same value with trailing blanks are one value here, exactly as a
- * declared-width comparison in the reference tree treats them. A caller must not depend on the
- * opposite convention, and must not read the ordering as arithmetic.
+ * <p>Assumptions: uniqueness of the transaction identifier remains an empirical property of the
+ * extract in hand and NOT a constraint this interface may rely on. Measured directly, the 300 records
+ * of {@code app/data/ASCII/dailytran.txt} carry 300 distinct identifiers at bytes 1 to 16, every one
+ * of them 16 digits with no blank. That is a property of one extract: a feed carrying a repeated
+ * identifier -- which the sequential baseline processes without complaint -- now loads as two
+ * distinct rows, and a caller must still not treat either method below as returning at most one row
+ * per identifier.
+ *
+ * <p>Assumptions: the identifier could not have been rescued by paging INCLUSIVELY either, and
+ * stating both directions is what shows the cursor had no safe form over it. A strict comparison at a
+ * page boundary drops every remaining row sharing the boundary value; an inclusive one returns the
+ * whole tied group again. Against a feed the posting job walks, the first loses transactions that were
+ * never posted and the second posts transactions twice, and both do it silently. A total order removes
+ * the choice, because with a unique cursor there is no tied group for a boundary to fall inside.
+ *
+ * <p>Assumptions: ordering the ingestion sequence is ARITHMETIC over a generated integer, so it is
+ * total, stable and free of the blank-padding and lexicographic-versus-numeric questions a
+ * declared-width character key raises. It is also the order the reference read has, since
+ * {@code app/cbl/CBTRN02C.cbl} lines 29 to 31 read the dataset front to back in arrival order;
+ * ordering by the identifier instead imposed a sort no reference program performs.
  *
  * <h2>The physical contract is owned elsewhere, and this interface consumes it</h2>
  *
  * <p>Assumptions: the single normative physical contract is this module's
- * {@code db/migration/V1__ledger.sql}, which creates the table at its line 319, declares the
- * identifier at line 324 and the processed timestamp at line 397, and records at its lines 400 to
- * 413 why it declares neither a key nor an index over it. The module's {@code application.yml} sets
+ * {@code db/migration/V1__ledger.sql}, which creates the table at its line 321, declares the
+ * ingestion sequence at line 383, the identifier at line 390 and the processed timestamp at line 463,
+ * and records at its lines 465 to 500 why the key is the ingestion sequence and emphatically not the
+ * identifier. The module's {@code application.yml} sets
  * {@code ddl-auto: none} at its line 473, so the provider generates no schema and is purely a
  * CONSUMER of that migration. Nothing reconciles a query here against a column there at start-up,
  * so a mismatch stays invisible until the query runs, which is why every column named in this
  * documentation is named against the migration and every method name against the entity.
  *
  * <p>Alternatives Considered: restating physical shape as declarative metadata in this package --
- * index metadata, a column definition, a generated-value strategy. Rejected because with schema
- * generation switched off such metadata is never acted on: it would neither create nor verify
- * anything, so it could drift out of step with the migration that does own the shape while still
- * reading like a specification. Nothing in this file shapes DDL.
+ * index metadata or a column definition. Rejected because with schema generation switched off such
+ * metadata is never acted on: it would neither create nor verify anything, so it could drift out of
+ * step with the migration that does own the shape while still reading like a specification. Nothing
+ * in this file shapes DDL. The one generated-value strategy in play is declared on the entity rather
+ * than here, because the provider needs it to know that the identity is read back after an insert
+ * rather than supplied to one.
  *
  * <p>Alternatives Considered: a card-number finder, which the record contract superficially invites
  * because {@code app/cpy/CVTRA06Y.cpy} line 15 carries {@code DALYTRAN-CARD-NUM PIC X(16)} and the
  * posted master does offer that path. It is deliberately NOT added, on a reading of the migration
- * rather than a preference: that file creates exactly two secondary indexes, at its lines 269 and
- * 291, and BOTH are on {@code ledger.transactions}, leaving this table with none. The baseline
+ * rather than a preference: that file creates exactly two secondary indexes, at its lines 271 and
+ * 293, and BOTH are on {@code ledger.transactions}, leaving this table with none. The baseline
  * agrees -- its one alternate index over transaction data is defined at
  * {@code app/jcl/TRANIDX.jcl} line 25 and related at line 26 to the {@code TRANSACT} base cluster,
  * not to the feed, so the feed has no secondary access path at all. An unindexed finder here would
@@ -253,10 +277,10 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * documentation gate, the compiler and the tests that exercise this interface all have binary
  * outcomes.
  */
-public interface DailyTransactionRepository extends JpaRepository<DailyTransaction, String> {
+public interface DailyTransactionRepository extends JpaRepository<DailyTransaction, Long> {
 
     /**
-     * Reads the opening chunk of the feed, in ascending identifier order.
+     * Reads the opening chunk of the feed, in ascending ingestion-sequence order.
      *
      * <p>This is the entry into the sequential read at {@code app/cbl/CBTRN02C.cbl} line 346 on the
      * first pass, where the loop at line 202 has established no position yet and the read returns
@@ -266,11 +290,11 @@ public interface DailyTransactionRepository extends JpaRepository<DailyTransacti
      *     to its chunk size plus one when it wants the surplus row that answers whether the scan
      *     continues; must not be {@code null}
      * @return the first rows of the ordered set as a {@code List<DailyTransaction>}, ascending by
-     *     identifier, holding up to {@code limit} rows -- so up to chunk size plus one, the last of
-     *     which is that continuation probe rather than a row to process -- and empty when the feed
-     *     holds nothing, which is the loaded-but-empty case the reference read handles by setting
-     *     its end-of-file flag immediately. Any returned row may carry an absent processed
-     *     timestamp
+     *     ingestion sequence and therefore in the arrival order the reference read has, holding up to
+     *     {@code limit} rows -- so up to chunk size plus one, the last of which is that continuation
+     *     probe rather than a row to process -- and empty when the feed holds nothing, which is the
+     *     loaded-but-empty case the reference read handles by setting its end-of-file flag
+     *     immediately. Any returned row may carry an absent processed timestamp
      */
     // WHY : Refactoring Rationale: this is a separate member rather than the continuation method
     //       called with a sentinel cursor. The baseline spells the absence of a position as an
@@ -278,24 +302,32 @@ public interface DailyTransactionRepository extends JpaRepository<DailyTransacti
     //       sentinel to transcribe; inventing one would be a fourth thing a caller could test for
     //       wrongly, given that the neighbouring programs already spell an absent position three
     //       different ways. An unfiltered ordered read states "from the beginning" in the signature.
-    List<DailyTransaction> findAllByOrderByTranIdAsc(Limit limit);
+    // WHY : Refactoring Rationale: the ordering is the INGESTION SEQUENCE and no longer the
+    //       transaction identifier. The feed has no record key -- app/cbl/CBTRN02C.cbl L29-L31
+    //       selects it as ORGANIZATION IS SEQUENTIAL with none -- so the identifier is not unique by
+    //       contract, and ordering a resumable scan by a non-unique column is what allowed a
+    //       duplicate to be skipped at a chunk boundary. The sequence is unique and monotonic in
+    //       arrival order, so it reproduces the front-to-back order the reference read covers the
+    //       dataset in, which the identifier only did while an extract happened to be sorted.
+    List<DailyTransaction> findAllByOrderByIngestSeqAsc(Limit limit);
 
     /**
-     * Reads the chunk of the feed that follows a stated position, in ascending identifier order.
+     * Reads the chunk of the feed that follows a stated position, in ascending ingestion-sequence order.
      *
      * <p>This is the relational form of the next iteration of that same sequential read, resumed
      * from a cursor so that a chunked scan covers the dataset in the order the loop at
      * {@code app/cbl/CBTRN02C.cbl} lines 202 to 219 covers it.
      *
-     * @param lastKey the identifier of the last row the caller already holds, of type
-     *     {@code String}; the comparison is STRICT, so that row is excluded and the chunk begins at
-     *     the next identifier after it; must not be {@code null}
+     * @param lastKey the ingestion sequence of the last row the caller already holds, of type
+     *     {@code Long}; the comparison is STRICT, so that row is excluded and the chunk begins at
+     *     the next sequence after it. Because the sequence is unique, strictness here excludes
+     *     exactly one row rather than a group of rows sharing a value; must not be {@code null}
      * @param limit the maximum number of rows to read, of type {@code Limit}, which a caller sets
      *     to its chunk size plus one when it wants the continuation probe; must not be {@code null}
-     * @return the following rows as a {@code List<DailyTransaction>}, ascending by identifier,
-     *     holding up to {@code limit} rows -- so up to chunk size plus one, whose presence beyond
-     *     the chunk size is what reports that more of the feed remains -- and empty when the scan is
-     *     exhausted. Any returned row may carry an absent processed timestamp
+     * @return the following rows as a {@code List<DailyTransaction>}, ascending by ingestion
+     *     sequence, holding up to {@code limit} rows -- so up to chunk size plus one, whose presence
+     *     beyond the chunk size is what reports that more of the feed remains -- and empty when the
+     *     scan is exhausted. Any returned row may carry an absent processed timestamp
      */
     // WHY : Refactoring Rationale: the exclusion is written into the method name as a strict
     //       comparison because the baseline never wrote a boundary anywhere. Its feed read is
@@ -305,9 +337,27 @@ public interface DailyTransactionRepository extends JpaRepository<DailyTransacti
     //       artifact of the query instead of an artifact of the access method. Were the comparison
     //       inclusive, the first row of every chunk would repeat the last row of the previous one,
     //       and the posting job would post it twice.
-    // WHY : Assumptions: the cursor is a single scalar identifier and not a composite, because the
-    //       ordering it resumes has one component. The charter records that the reference cursor in
-    //       this bounded context is one 16-character identifier; here it is also the whole of the
-    //       ordering, since this table has no secondary access path to order within.
-    List<DailyTransaction> findByTranIdGreaterThanOrderByTranIdAsc(String lastKey, Limit limit);
+    // WHY : Assumptions: the cursor is a single scalar and not a composite, because the ordering it
+    //       resumes has one component: this table has no secondary access path to order within, so
+    //       the primary key is the whole of the ordering. It is now the ingestion sequence rather
+    //       than the transaction identifier, and the STRICT comparison is only SAFE because of that
+    //       change: strictness over a unique, monotonic column excludes exactly the row already
+    //       held, whereas strictness over the identifier excluded every row sharing it -- so two
+    //       rows repeating an identifier across a chunk boundary lost the second one silently. The
+    //       baseline processes every physical occurrence, so that loss was a parity defect and not a
+    //       tuning choice.
+    // WHY : Assumptions: no gap in the sequence can cause a skip. The comparison is a range
+    //       predicate rather than an arithmetic step, so a sequence that jumps -- which an identity
+    //       column does after a rolled-back insert -- simply yields the next existing row.
+    // WHY : Assumptions: a composite cursor exists to break ties in a non-unique leading column, and
+    //       there are no ties here, so a second component would carry no information. This is the
+    //       difference from the reference cursor the package charter describes, which is a
+    //       16-character identifier: that cursor pages the posted master, where the identifier IS the
+    //       declared primary key.
+    // WHY : Trade-offs: the boundary value a caller echoes back is a sequence with no business
+    //       meaning, so a cursor is no longer readable as a transaction identifier in a log line.
+    //       That is accepted, and it is arguably the safer property: the previous cursor was a value a
+    //       caller could construct, compare or guess, whereas this one is only ever a value the scan
+    //       handed out.
+    List<DailyTransaction> findByIngestSeqGreaterThanOrderByIngestSeqAsc(Long lastKey, Limit limit);
 }

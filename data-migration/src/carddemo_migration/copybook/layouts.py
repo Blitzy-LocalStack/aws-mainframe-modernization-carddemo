@@ -210,6 +210,7 @@ __all__ = [
     "mask_record",
     "names",
     "normalized_timestamp",
+    "opaque",
     "packed",
     "packed_width",
     "provenance_of",
@@ -312,7 +313,7 @@ class Kind(enum.Enum):
 
     Purpose
     -------
-    Record, once and statically, which of five storage regimes a field is stored in, so
+    Record, once and statically, which of six storage regimes a field is stored in, so
     that no decoder has to infer it at run time. A field's regime is a property of its
     declared ``USAGE`` and NOT of its picture clause, as the width rules below
     establish, and the regime is knowable for every field in the corpus.
@@ -333,10 +334,16 @@ class Kind(enum.Enum):
     described as seven characters and every field after it would decode as text. The
     Java parity anchor declares the same five members for the same reason.
 
+    Assumptions: the sixth member, :attr:`OPAQUE`, has no counterpart in the Java
+    anchor and is not a storage regime the language declares. It records a fact the
+    other five cannot express -- that an area's interior is described by a DIFFERENT
+    layout selected at run time -- and it exists because the corpus contains exactly one
+    such area. Its rationale sits on the member.
+
     Returns
     -------
     Kind
-        One of the five enumerated regimes.
+        One of the six enumerated regimes.
 
     Raises
     ------
@@ -379,6 +386,41 @@ class Kind(enum.Enum):
     #   such fields at its lines 16, 25, 57, 72, 87, 95 and 96, and CIPAUSMY.cpy
     #   declares two.
     BINARY = "BINARY"
+
+    # Refactoring Rationale: a MIXED-REGIME AREA whose interior is described by a
+    #   different layout, carried as raw bytes and never interpreted as anything by
+    #   itself. It exists because exactly one field in the corpus is one, and declaring
+    #   it TEXT -- which is what the copybook's own PIC X(460) invites -- routed a whole
+    #   payload of packed, binary, zoned and sensitive display spans through a character
+    #   code page. EXPORT-RECORD-DATA at app/cpy/CVEXPORT.cpy line 19 is that field: its
+    #   460 bytes are redefined five ways, and the five overlays between them declare a
+    #   primary account number, a card verification value, a national identifier, a
+    #   government-issued identifier, three COMP-3 amounts and seven COMP identifiers. A
+    #   character decode of that area succeeds, keeps its declared width and yields a
+    #   460-character string, so nothing raises and the damage is invisible.
+    # Assumptions: an OPAQUE field is ALWAYS sensitive, because its interior is
+    #   unknown to whatever holds it -- the discriminator that selects the interpretation
+    #   lives outside the field -- so nothing at this level can establish that the bytes
+    #   are safe to render. :func:`opaque` is the only factory that builds one and it
+    #   sets the flag unconditionally, which is what keeps a diagnostic from hex-dumping
+    #   a payload whose contents it cannot classify.
+    # Alternatives Considered: reusing PACKED or BINARY, since both already leave
+    #   this module as raw bytes and both are refused by the character path. Rejected
+    #   because either would then be handed to the computational codec by the record
+    #   decoder, and a 460-byte span is not a packed number or a machine word -- the
+    #   codec would refuse it on width and the failure would name a geometry fault where
+    #   the real answer is "this area needs a second, layout-driven decode".
+    OPAQUE = "OPAQUE"
+
+
+# Assumptions: the three kinds whose byte width comes from their OWN declared count
+#   rather than from a digit count are named ONCE, as a set, because three separate
+#   validations in FieldSpec have to agree about which they are. Writing the tuple out at
+#   each of the three sites is how one of them ends up missing a member: adding OPAQUE to
+#   two of three would have let an opaque area declare digit positions, and the digit
+#   counts of a 460-byte mixed area describe nothing at all. Its complement is exactly
+#   {ZONED, PACKED, BINARY}, which is the set the numeric width rule is total over.
+_NON_NUMERIC_KINDS: Final[frozenset[Kind]] = frozenset({Kind.TEXT, Kind.UINT, Kind.OPAQUE})
 
 
 class Provenance(enum.Enum):
@@ -707,10 +749,11 @@ def width_of(kind: Kind, int_digits: int, dec_digits: int) -> int:
     applies. A field whose kind and digit counts are known therefore has exactly one
     admissible width, and :class:`FieldSpec` rejects any other.
 
-    Assumptions: the two non-numeric kinds are refused rather than answered. A character
-    or unsigned display field takes its width from its declared character count, so a
-    width derived from digit counts is a caller error and not a value this function could
-    compute. Refusing keeps the numeric-width contract total.
+    Assumptions: the three non-numeric kinds are refused rather than answered. A
+    character or unsigned display field takes its width from its declared character
+    count and an opaque area from its declared byte count, so a width derived from digit
+    counts is a caller error and not a value this function could compute. Refusing keeps
+    the numeric-width contract total.
 
     Parameters
     ----------
@@ -730,9 +773,9 @@ def width_of(kind: Kind, int_digits: int, dec_digits: int) -> int:
     Raises
     ------
     LayoutError
-        If ``kind`` is not a :class:`Kind`, if ``kind`` is :attr:`Kind.TEXT` or
-        :attr:`Kind.UINT`, if either digit count is negative, if both are zero, or if
-        their sum exceeds :data:`MAX_DIGITS`.
+        If ``kind`` is not a :class:`Kind`, if ``kind`` is :attr:`Kind.TEXT`,
+        :attr:`Kind.UINT` or :attr:`Kind.OPAQUE`, if either digit count is negative, if
+        both are zero, or if their sum exceeds :data:`MAX_DIGITS`.
     """
     if not isinstance(kind, Kind):
         raise LayoutError(
@@ -746,8 +789,9 @@ def width_of(kind: Kind, int_digits: int, dec_digits: int) -> int:
     if kind is Kind.BINARY:
         return binary_width(int_digits, dec_digits)
     raise LayoutError(
-        f"the width of a {kind.name} field is its declared character count, not a digit-derived"
-        " width; only ZONED, PACKED and BINARY widths are derived from digit counts"
+        f"the width of a {kind.name} field is its own declared count of bytes, not a"
+        " digit-derived width; only ZONED, PACKED and BINARY widths are derived from digit"
+        " counts"
     )
 
 
@@ -887,24 +931,39 @@ class FieldSpec:
         #   digit positions in the copybook, but its byte width is already the length, and
         #   recording the eleven twice is exactly what would let the two disagree. Those
         #   digit counts stay recoverable from the length precisely because the two are
-        #   equal.
-        if self.kind in (Kind.TEXT, Kind.UINT) and (self.int_digits or self.dec_digits):
+        #   equal. An opaque area is included for a stronger reason: it holds no single
+        #   number at all, so any digit count on one would describe nothing.
+        if self.kind in _NON_NUMERIC_KINDS and (self.int_digits or self.dec_digits):
             raise LayoutError(
                 f"field {self.name} of kind {self.kind.name} must leave both digit counts at zero"
-                " because its width is its declared character count, but int_digits="
+                " because its width is its own declared count of bytes, but int_digits="
                 f"{self.int_digits} and dec_digits={self.dec_digits}"
             )
 
-        # Assumptions: neither non-numeric kind can carry a sign, and rejecting the
-        #   combination is the mechanical expression of the distinction Kind.UINT exists
-        #   to draw. An unsigned display field's low-order byte is an ordinary digit
-        #   character; marking it signed would tell the zoned decoder to fold that byte as
-        #   an overpunch, which turns a digit into a letter and makes the field
-        #   unparseable while every other field still reads correctly.
-        if self.kind in (Kind.TEXT, Kind.UINT) and self.signed:
+        # Assumptions: none of the three non-numeric kinds can carry a sign, and
+        #   rejecting the combination is the mechanical expression of the distinction
+        #   Kind.UINT exists to draw. An unsigned display field's low-order byte is an
+        #   ordinary digit character; marking it signed would tell the zoned decoder to fold
+        #   that byte as an overpunch, which turns a digit into a letter and makes the field
+        #   unparseable while every other field still reads correctly. An opaque area has no
+        #   low-order digit to fold in the first place.
+        if self.kind in _NON_NUMERIC_KINDS and self.signed:
             raise LayoutError(
                 f"field {self.name} of kind {self.kind.name} must not be signed because it carries"
                 " no sign representation at all"
+            )
+
+        # Assumptions: an opaque area is required to be SENSITIVE here rather than
+        #   only being marked so by its factory, because the factory is a convenience and
+        #   this constructor is the contract. The interior of such an area is described by a
+        #   layout this descriptor does not name, so nothing at this level can establish
+        #   that its bytes are safe to render; leaving the flag to a caller would let one
+        #   declaration re-open the hex-dump path this regime exists to close.
+        if self.kind is Kind.OPAQUE and not self.sensitive:
+            raise LayoutError(
+                f"field {self.name} of kind {self.kind.name} must be marked sensitive because its"
+                " interior is described by a layout this descriptor does not name, so no"
+                " diagnostic here can establish that rendering its bytes is safe"
             )
 
         # Assumptions: for the three numeric kinds the declared length and the digit
@@ -923,7 +982,28 @@ class FieldSpec:
 
     @property
     def end(self) -> int:
-        """Return the EXCLUSIVE zero-based end offset, being ``start + length``."""
+        """Return the exclusive zero-based end offset of this field.
+
+        Purpose
+        -------
+        Give callers the upper bound of the field's byte span so that a slice reads
+        ``record[field.start:field.end]`` without any caller recomputing the arithmetic.
+
+        Returns
+        -------
+        int
+            ``start + length``, the offset of the first byte AFTER this field. The value is
+            EXCLUSIVE: for a field at offset 0 of length 6 it is 6, not 5, so it is the
+            correct right-hand operand of a Python slice and is never a valid index into
+            this field.
+
+        Assumptions: exclusivity is stated in the return contract rather than left to the
+        reader because both conventions appear in this migration's own sources - an IDCAMS
+        ``KEYS(length offset)`` operand pair is zero-based while a DFSORT ``SYMNAMES``
+        position is one-based - so a caller who assumes the inclusive reading drops the
+        field's last byte on every read, and drops it silently, because a short slice still
+        decodes.
+        """
         return self.start + self.length
 
     def with_flags(self, normalize_ts: bool, sensitive: bool) -> FieldSpec:
@@ -1407,6 +1487,63 @@ def sensitive_binary(
         signed=signed,
         sensitive=True,
     )
+
+
+def opaque(name: str, start: int, length: int) -> FieldSpec:
+    """Declare a mixed-regime area whose interior another layout describes.
+
+    Purpose
+    -------
+    Build the descriptor for an area that is a container rather than a value: its bytes
+    hold several storage regimes at once, and which layout describes them is decided at
+    run time by a discriminator that sits OUTSIDE the area. The descriptor therefore
+    records the geometry and refuses every interpretation, so the only way to read the
+    interior is to slice it out and decode it against the layout that does describe it.
+
+    Refactoring Rationale: the one field in the corpus that needs this was declared with
+    :func:`text` because its copybook writes ``PIC X(460)``, and that reading is wrong in
+    a way nothing reports. ``EXPORT-RECORD-DATA`` at ``app/cpy/CVEXPORT.cpy`` line 19 is
+    redefined by five overlays whose fields between them include a primary account
+    number, a card verification value, a national identifier, a government-issued
+    identifier, three ``COMP-3`` amounts and seven ``COMP`` identifiers. Decoding that
+    area through a character code page succeeds, returns 460 characters, keeps the
+    record's declared width and leaves every later offset valid -- so the corruption is
+    silent, and it carries payment data through a transcoding step it must never enter.
+
+    Assumptions: the sensitivity flag is set here and cannot be declined, because a
+    caller of this factory does not know what the area holds either. The constructor
+    enforces the same rule independently, so this factory is a convenience over the
+    contract rather than the place the contract lives.
+
+    Trade-offs: no digit counts and no sign are accepted, so this factory takes the same
+    three arguments as :func:`text` and reads the same way at a declaration site. What
+    that gives up is the ability to describe an area that is mostly one number; what it
+    buys is that an opaque declaration can never carry a numeric contract a decoder might
+    act on.
+
+    Parameters
+    ----------
+    name : str
+        The field name exactly as the copybook declares it.
+    start : int
+        The ZERO-based byte offset of the area from the start of the record.
+    length : int
+        The declared byte width of the area, which is the width every layout that
+        describes its interior must also declare.
+
+    Returns
+    -------
+    FieldSpec
+        An opaque area descriptor, always marked sensitive and carrying no digit counts
+        and no sign.
+
+    Raises
+    ------
+    LayoutError
+        If the name is blank or malformed, the offset is negative, or the length is below
+        one.
+    """
+    return FieldSpec(name, start, length, Kind.OPAQUE, sensitive=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2915,7 +3052,24 @@ EXPORT_HEADER_LAYOUT: Final[RecordSpec] = RecordSpec(
         binary("EXPORT-SEQUENCE-NUM", 27, 9, 0, signed=False),  # CVEXPORT L16 PIC 9(9) COMP
         text("EXPORT-BRANCH-ID", 31, 4),  # CVEXPORT L17 PIC X(4)
         text("EXPORT-REGION-CODE", 35, 5),  # CVEXPORT L18 PIC X(5)
-        text("EXPORT-RECORD-DATA", 40, EXPORT_BRANCH_LENGTH),  # CVEXPORT L19 PIC X(460)
+        # Refactoring Rationale: this area is declared OPAQUE and not text, and the
+        #   change closes a silent data-integrity and disclosure defect rather than tidying
+        #   a label. The copybook writes PIC X(460) at CVEXPORT L19, so text was the literal
+        #   reading -- but the same 460 bytes are redefined by the five branch overlays
+        #   below, which between them declare a primary account number at L92, a card
+        #   verification value as 9(03) COMP at L96, a national identifier at L36, a
+        #   government-issued identifier at L37, three COMP-3 amounts at L41, L50 and L52 and
+        #   seven COMP identifiers. Declared text, the whole area went through cp037 on the
+        #   generic record path and came back as a 460-character string: the record kept its
+        #   declared width, every later offset stayed valid, nothing raised, and payment data
+        #   had crossed the one transcoding boundary in the repository. Declared opaque, the
+        #   area leaves as raw bytes, is refused by the character entry point outright, and
+        #   is marked sensitive so a failure reports its geometry and never its bytes.
+        #   Alternatives Considered: leaving it text and relying on callers to use the
+        #   payload constants instead of the generic decoder -- rejected, because a default
+        #   that is safe only when nobody takes the obvious path is not a safe default. The
+        #   interior is reached through export_branch and decode_export_record.
+        opaque("EXPORT-RECORD-DATA", 40, EXPORT_BRANCH_LENGTH),  # CVEXPORT L19 PIC X(460)
     ),
 ).validate_geometry()
 
@@ -3165,6 +3319,122 @@ def export_branch(record_type: str) -> RecordSpec:
 PA_ACCOUNT_STATUS_OCCURS: Final[int] = 5
 PA_ACCOUNT_STATUS_ELEMENT_LENGTH: Final[int] = 2
 
+# Refactoring Rationale: the two authorization segments used to mark exactly ONE field
+#   sensitive -- the primary account number -- and every other field's raw bytes were therefore
+#   renderable into a decode diagnostic. That was wrong on its own terms rather than merely
+#   conservative, because the SAME record content is classified far more widely one language
+#   over: services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java holds
+#   SENSITIVE_FIELD_NAMES over the authorization wire and puts the card expiry date, the
+#   transaction amount, the approved amount, the merchant identity, name, city and postal code
+#   and the transaction identity in it alongside the card number. One record cannot be two
+#   sensitivities: an extract decoded by this package and a message decoded by that codec carry
+#   the same fields, so a malformed byte here could emit in full precisely what the Java refuses
+#   to emit at all. The two lists below reconcile that, and the reconciliation is expressed as an
+#   ALLOWLIST so the default direction is closed.
+# Assumptions: this frozenset names every authorization field whose bytes MAY be rendered, and
+#   the line it draws is the Java policy's own -- closed-domain codes, dates, times, counters and
+#   pad on the disclosable side; cardholder-identifying or amount-bearing content on the other.
+#   Each name below is one of: a date or time (the Java note states these are deliberately not
+#   sensitive), a code from a small closed domain, a count rather than a money value, an account
+#   identifier the published contracts render in full, or the trailing pad. Merchant STATE is
+#   here and merchant CITY, ZIP, NAME and ID are not, which mirrors the Java set exactly: a
+#   two-character state is a closed domain, the other four narrow to a place or a party.
+# Trade-offs: an allowlist reads longer than the four extra sensitive markers it replaces, and
+#   that length is the point. With a denylist, a field added to either segment later would be
+#   disclosable until somebody remembered to mark it; with this allowlist it is withheld until
+#   somebody deliberately names it, so the failure mode of forgetting is silence rather than
+#   disclosure. Alternatives Considered: threading a record-level "withhold everything" flag
+#   through the twelve diagnostic sites of the sibling EBCDIC codec, which would fail closed for
+#   these segments without classifying anything. Rejected because it would also withhold the
+#   response code and the reason code -- the two values an operator debugging a malformed
+#   authorization extract actually needs -- and because the classification would then exist only
+#   in the codec, unavailable to the packed and zoned codecs that read the same descriptors.
+# Assumptions: the resulting policy is a target-only addition -- a copybook declares widths
+#   and usages and has no notion of a field whose content may not be logged -- so it is
+#   registered as D-AUTH-DIAGNOSTIC-DISCLOSURE in
+#   docs/architecture/cobol-to-service-traceability.md rather than presented as parity.
+_AUTHORIZATION_DISCLOSABLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # Summary segment: the account key, the two status fields, the two counters and the pad.
+        "PA-ACCT-ID",
+        "PA-AUTH-STATUS",
+        "PA-ACCOUNT-STATUS",
+        "PA-APPROVED-AUTH-CNT",
+        "PA-DECLINED-AUTH-CNT",
+        # Detail segment: the four date and time fields, the seven closed-domain codes and the
+        # two remaining narrow codes.
+        "PA-AUTH-DATE-9C",
+        "PA-AUTH-TIME-9C",
+        "PA-AUTH-ORIG-DATE",
+        "PA-AUTH-ORIG-TIME",
+        "PA-AUTH-TYPE",
+        "PA-MESSAGE-TYPE",
+        "PA-MESSAGE-SOURCE",
+        "PA-AUTH-ID-CODE",
+        "PA-AUTH-RESP-CODE",
+        "PA-AUTH-RESP-REASON",
+        "PA-PROCESSING-CODE",
+        "PA-MERCHANT-CATAGORY-CODE",
+        "PA-ACQR-COUNTRY-CODE",
+        "PA-POS-ENTRY-MODE",
+        "PA-MERCHANT-STATE",
+        "PA-MATCH-STATUS",
+        "PA-AUTH-FRAUD",
+        "PA-FRAUD-RPT-DATE",
+        # Both segments close with a trailing pad, which carries no value at all.
+        "FILLER",
+    }
+)
+
+
+def _close_authorization_disclosure(
+    fields: tuple[FieldSpec, ...],
+) -> tuple[FieldSpec, ...]:
+    """Mark every authorization field sensitive unless it is explicitly disclosable.
+
+    Purpose
+    -------
+    Apply the fail-closed disclosure policy of
+    :data:`_AUTHORIZATION_DISCLOSABLE_FIELDS` to one authorization segment's field tuple,
+    so that the sensitivity of these two records is decided by ONE list rather than by
+    remembering to reach for :func:`sensitive_text` at each declaration site.
+
+    Assumptions: only the ``sensitive`` flag is ever changed, and geometry is carried
+    through untouched by :meth:`FieldSpec.with_flags`, so applying this function cannot
+    move a field, resize one, or alter a storage regime. That is what lets it run between
+    the field declarations and :meth:`RecordSpec.validate_geometry`, leaving the
+    hundred-byte and two-hundred-byte sums to be checked exactly as before.
+
+    Trade-offs: ``normalize_ts`` is read off each field and written straight back rather
+    than being defaulted, because neither authorization segment declares a wall-clock stamp
+    today and a function that quietly cleared the flag would be wrong the moment one did.
+    Reading and restoring costs nothing and removes that trap.
+
+    Parameters
+    ----------
+    fields : tuple[FieldSpec, ...]
+        The segment's field descriptors exactly as transcribed from its copybook.
+
+    Returns
+    -------
+    tuple[FieldSpec, ...]
+        The same descriptors in the same order, each either unchanged because its name is
+        disclosable or marked sensitive because it is not.
+
+    Raises
+    ------
+    LayoutError
+        Never in practice; it is documented because :meth:`FieldSpec.with_flags` invokes
+        the validating constructor.
+    """
+    return tuple(
+        field
+        if field.name in _AUTHORIZATION_DISCLOSABLE_FIELDS
+        else field.with_flags(field.normalize_ts, True)
+        for field in fields
+    )
+
+
 # Assumptions: 100 bytes, and the sum closes only under the packed width rule: an
 #   eleven-digit key at six bytes, six eleven-digit amounts at six bytes each, two four-digit
 #   binary counters at two bytes each, a nine-byte display identifier, two single characters
@@ -3180,20 +3450,22 @@ PENDING_AUTH_SUMMARY_LAYOUT: Final[RecordSpec] = RecordSpec(
     100,
     6,
     0,
-    (
-        packed("PA-ACCT-ID", 0, 11, 0, signed=True),  # CIPAUSMY L19 S9(11) COMP-3 = 6
-        uint("PA-CUST-ID", 6, 9),  # CIPAUSMY L20 PIC  9(09) display
-        text("PA-AUTH-STATUS", 15, 1),  # CIPAUSMY L21 PIC  X(01)
-        text("PA-ACCOUNT-STATUS", 16, 10),  # CIPAUSMY L22 X(02) OCCURS 5 TIMES = 10
-        packed("PA-CREDIT-LIMIT", 26, 9, 2, signed=True),  # CIPAUSMY L23 COMP-3 = 6
-        packed("PA-CASH-LIMIT", 32, 9, 2, signed=True),  # CIPAUSMY L24 COMP-3 = 6
-        packed("PA-CREDIT-BALANCE", 38, 9, 2, signed=True),  # CIPAUSMY L25 COMP-3 = 6
-        packed("PA-CASH-BALANCE", 44, 9, 2, signed=True),  # CIPAUSMY L26 COMP-3 = 6
-        binary("PA-APPROVED-AUTH-CNT", 50, 4, 0, signed=True),  # CIPAUSMY L27 COMP = 2
-        binary("PA-DECLINED-AUTH-CNT", 52, 4, 0, signed=True),  # CIPAUSMY L28 COMP = 2
-        packed("PA-APPROVED-AUTH-AMT", 54, 9, 2, signed=True),  # CIPAUSMY L29 COMP-3 = 6
-        packed("PA-DECLINED-AUTH-AMT", 60, 9, 2, signed=True),  # CIPAUSMY L30 COMP-3 = 6
-        text("FILLER", 66, 34),  # CIPAUSMY L31 PIC X(34) trailing pad
+    _close_authorization_disclosure(
+        (
+            packed("PA-ACCT-ID", 0, 11, 0, signed=True),  # CIPAUSMY L19 S9(11) COMP-3 = 6
+            uint("PA-CUST-ID", 6, 9),  # CIPAUSMY L20 PIC  9(09) display
+            text("PA-AUTH-STATUS", 15, 1),  # CIPAUSMY L21 PIC  X(01)
+            text("PA-ACCOUNT-STATUS", 16, 10),  # CIPAUSMY L22 X(02) OCCURS 5 TIMES = 10
+            packed("PA-CREDIT-LIMIT", 26, 9, 2, signed=True),  # CIPAUSMY L23 COMP-3 = 6
+            packed("PA-CASH-LIMIT", 32, 9, 2, signed=True),  # CIPAUSMY L24 COMP-3 = 6
+            packed("PA-CREDIT-BALANCE", 38, 9, 2, signed=True),  # CIPAUSMY L25 COMP-3 = 6
+            packed("PA-CASH-BALANCE", 44, 9, 2, signed=True),  # CIPAUSMY L26 COMP-3 = 6
+            binary("PA-APPROVED-AUTH-CNT", 50, 4, 0, signed=True),  # CIPAUSMY L27 COMP = 2
+            binary("PA-DECLINED-AUTH-CNT", 52, 4, 0, signed=True),  # CIPAUSMY L28 COMP = 2
+            packed("PA-APPROVED-AUTH-AMT", 54, 9, 2, signed=True),  # CIPAUSMY L29 COMP-3 = 6
+            packed("PA-DECLINED-AUTH-AMT", 60, 9, 2, signed=True),  # CIPAUSMY L30 COMP-3 = 6
+            text("FILLER", 66, 34),  # CIPAUSMY L31 PIC X(34) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -3230,35 +3502,37 @@ PENDING_AUTH_DETAIL_LAYOUT: Final[RecordSpec] = RecordSpec(
     200,
     8,
     0,
-    (
-        packed("PA-AUTH-DATE-9C", 0, 5, 0, signed=True),  # CIPAUDTY L20 S9(05) COMP-3 = 3
-        packed("PA-AUTH-TIME-9C", 3, 9, 0, signed=True),  # CIPAUDTY L21 S9(09) COMP-3 = 5
-        text("PA-AUTH-ORIG-DATE", 8, 6),  # CIPAUDTY L22 PIC  X(06)
-        text("PA-AUTH-ORIG-TIME", 14, 6),  # CIPAUDTY L23 PIC  X(06)
-        sensitive_text("PA-CARD-NUM", 20, 16),  # CIPAUDTY L24 PIC  X(16)
-        text("PA-AUTH-TYPE", 36, 4),  # CIPAUDTY L25 PIC  X(04)
-        text("PA-CARD-EXPIRY-DATE", 40, 4),  # CIPAUDTY L26 PIC  X(04)
-        text("PA-MESSAGE-TYPE", 44, 6),  # CIPAUDTY L27 PIC  X(06)
-        text("PA-MESSAGE-SOURCE", 50, 6),  # CIPAUDTY L28 PIC  X(06)
-        text("PA-AUTH-ID-CODE", 56, 6),  # CIPAUDTY L29 PIC  X(06)
-        text("PA-AUTH-RESP-CODE", 62, 2),  # CIPAUDTY L30 PIC  X(02), 88 at L31
-        text("PA-AUTH-RESP-REASON", 64, 4),  # CIPAUDTY L32 PIC  X(04)
-        uint("PA-PROCESSING-CODE", 68, 6),  # CIPAUDTY L33 PIC  9(06) display
-        packed("PA-TRANSACTION-AMT", 74, 10, 2, signed=True),  # L34 S9(10)V99 COMP-3 = 7
-        packed("PA-APPROVED-AMT", 81, 10, 2, signed=True),  # L35 S9(10)V99 COMP-3 = 7
-        text("PA-MERCHANT-CATAGORY-CODE", 88, 4),  # CIPAUDTY L36 PIC X(04) misspelt
-        text("PA-ACQR-COUNTRY-CODE", 92, 3),  # CIPAUDTY L37 PIC  X(03)
-        uint("PA-POS-ENTRY-MODE", 95, 2),  # CIPAUDTY L38 PIC  9(02) display
-        text("PA-MERCHANT-ID", 97, 15),  # CIPAUDTY L39 PIC  X(15)
-        text("PA-MERCHANT-NAME", 112, 22),  # CIPAUDTY L40 PIC  X(22)
-        text("PA-MERCHANT-CITY", 134, 13),  # CIPAUDTY L41 PIC  X(13)
-        text("PA-MERCHANT-STATE", 147, 2),  # CIPAUDTY L42 PIC  X(02)
-        text("PA-MERCHANT-ZIP", 149, 9),  # CIPAUDTY L43 PIC  X(09)
-        text("PA-TRANSACTION-ID", 158, 15),  # CIPAUDTY L44 PIC  X(15)
-        text("PA-MATCH-STATUS", 173, 1),  # CIPAUDTY L45 X(01), 88s at L46-L49
-        text("PA-AUTH-FRAUD", 174, 1),  # CIPAUDTY L50 X(01), 88s at L51-L52
-        text("PA-FRAUD-RPT-DATE", 175, 8),  # CIPAUDTY L53 PIC  X(08)
-        text("FILLER", 183, 17),  # CIPAUDTY L54 PIC  X(17) trailing pad
+    _close_authorization_disclosure(
+        (
+            packed("PA-AUTH-DATE-9C", 0, 5, 0, signed=True),  # CIPAUDTY L20 S9(05) COMP-3 = 3
+            packed("PA-AUTH-TIME-9C", 3, 9, 0, signed=True),  # CIPAUDTY L21 S9(09) COMP-3 = 5
+            text("PA-AUTH-ORIG-DATE", 8, 6),  # CIPAUDTY L22 PIC  X(06)
+            text("PA-AUTH-ORIG-TIME", 14, 6),  # CIPAUDTY L23 PIC  X(06)
+            sensitive_text("PA-CARD-NUM", 20, 16),  # CIPAUDTY L24 PIC  X(16)
+            text("PA-AUTH-TYPE", 36, 4),  # CIPAUDTY L25 PIC  X(04)
+            text("PA-CARD-EXPIRY-DATE", 40, 4),  # CIPAUDTY L26 PIC  X(04)
+            text("PA-MESSAGE-TYPE", 44, 6),  # CIPAUDTY L27 PIC  X(06)
+            text("PA-MESSAGE-SOURCE", 50, 6),  # CIPAUDTY L28 PIC  X(06)
+            text("PA-AUTH-ID-CODE", 56, 6),  # CIPAUDTY L29 PIC  X(06)
+            text("PA-AUTH-RESP-CODE", 62, 2),  # CIPAUDTY L30 PIC  X(02), 88 at L31
+            text("PA-AUTH-RESP-REASON", 64, 4),  # CIPAUDTY L32 PIC  X(04)
+            uint("PA-PROCESSING-CODE", 68, 6),  # CIPAUDTY L33 PIC  9(06) display
+            packed("PA-TRANSACTION-AMT", 74, 10, 2, signed=True),  # L34 S9(10)V99 COMP-3 = 7
+            packed("PA-APPROVED-AMT", 81, 10, 2, signed=True),  # L35 S9(10)V99 COMP-3 = 7
+            text("PA-MERCHANT-CATAGORY-CODE", 88, 4),  # CIPAUDTY L36 PIC X(04) misspelt
+            text("PA-ACQR-COUNTRY-CODE", 92, 3),  # CIPAUDTY L37 PIC  X(03)
+            uint("PA-POS-ENTRY-MODE", 95, 2),  # CIPAUDTY L38 PIC  9(02) display
+            text("PA-MERCHANT-ID", 97, 15),  # CIPAUDTY L39 PIC  X(15)
+            text("PA-MERCHANT-NAME", 112, 22),  # CIPAUDTY L40 PIC  X(22)
+            text("PA-MERCHANT-CITY", 134, 13),  # CIPAUDTY L41 PIC  X(13)
+            text("PA-MERCHANT-STATE", 147, 2),  # CIPAUDTY L42 PIC  X(02)
+            text("PA-MERCHANT-ZIP", 149, 9),  # CIPAUDTY L43 PIC  X(09)
+            text("PA-TRANSACTION-ID", 158, 15),  # CIPAUDTY L44 PIC  X(15)
+            text("PA-MATCH-STATUS", 173, 1),  # CIPAUDTY L45 X(01), 88s at L46-L49
+            text("PA-AUTH-FRAUD", 174, 1),  # CIPAUDTY L50 X(01), 88s at L51-L52
+            text("PA-FRAUD-RPT-DATE", 175, 8),  # CIPAUDTY L53 PIC  X(08)
+            text("FILLER", 183, 17),  # CIPAUDTY L54 PIC  X(17) trailing pad
+        )
     ),
 ).validate_geometry()
 
@@ -4330,6 +4604,22 @@ def _validate_declarations() -> None:
             f" constants state offset {EXPORT_PAYLOAD_OFFSET} and length"
             f" {EXPORT_BRANCH_LENGTH}; a caller slicing with the constants would then decode"
             " the wrong bytes against every branch"
+        )
+
+    # Assumptions: the payload's REGIME is proven here and not only declared above,
+    #   because the regime is what keeps the area out of the character decoder and out of a
+    #   diagnostic. A future edit that restored the copybook's literal PIC X(460) reading
+    #   would compile, tile correctly and pass every offset check in this function while
+    #   routing a card number, a card verification value and three packed amounts through
+    #   cp037 again. This is the check that makes that edit fail at import.
+    if payload.kind is not Kind.OPAQUE or not payload.sensitive:
+        raise LayoutError(
+            f"the export payload field is {payload.describe()} with sensitive="
+            f"{payload.sensitive}, but it must be declared {Kind.OPAQUE.name} and sensitive:"
+            " its 460 bytes are redefined by five branch overlays carrying a primary account"
+            " number, a card verification value, a national identifier, three COMP-3 amounts"
+            " and seven COMP identifiers, so a character decode of the area succeeds, keeps"
+            " the record's width and corrupts every computational field in it without raising"
         )
     export_key = EXPORT_HEADER_LAYOUT.field("EXPORT-SEQUENCE-NUM")
     if (export_key.start, export_key.length) != (EXPORT_KEY_OFFSET, EXPORT_KEY_LENGTH):

@@ -1,53 +1,41 @@
-import {
-  Button,
-  Flex,
-  Form,
-  Input,
-  Result,
-  Select,
-  Spin,
-  Typography,
-} from "antd";
-import { useEffect, useState } from "react";
-import type { ReactElement } from "react";
-import { useNavigate, useParams } from "react-router";
+import { Button, Flex, Form, Input, Result, Select, Spin, Typography } from 'antd';
+import { useEffect, useState } from 'react';
+import type { ReactElement } from 'react';
+import { useNavigate, useParams } from 'react-router';
 
-import { getCard, updateCard } from "../../api/cards";
-import type { CardDetail, CardUpdateRequest } from "../../api/cards";
-import { MessageBand } from "../../layout/MessageBand";
-import {
-  cardDetailPath,
-  isOpaqueCardId,
-  requireOpaqueCardId,
-} from "../../routes/cards";
-import { navigateSafely, navigationHandler } from "../../routes/navigation";
+import { getCard, updateCard } from '../../api/cards';
+import type { CardDetail, CardUpdateRequest } from '../../api/cards';
+import { MessageBand } from '../../layout/MessageBand';
+import { cardDetailPath, isCardNumber, requireCardNumber } from '../../routes/cards';
+import { navigateSafely, navigationHandler } from '../../routes/navigation';
 
 interface CardFormValues {
   readonly embossedName: string;
   readonly expirationDate: string;
-  readonly activeStatus: "Y" | "N";
+  readonly activeStatus: 'Y' | 'N';
 }
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 
 /**
- * Renders the card update form addressed by an opaque selector rather than PAN.
+ * Renders the card update form addressed by the sixteen-digit card number in its route.
+ *
+ * Assumptions: the route parameter is validated before any request is issued, for the same reason
+ * recorded on the detail screen: a value that cannot address a card must not become a request.
  * @returns {ReactElement} The card update screen or a bounded invalid-link result.
  */
 export function CardUpdateScreen(): ReactElement {
   const navigate = useNavigate();
-  const { opaqueCardId: routeIdentifier } = useParams<{
-    opaqueCardId: string;
+  const { cardNumber: routeIdentifier } = useParams<{
+    cardNumber: string;
   }>();
   const [form] = Form.useForm<CardFormValues>();
   const [card, setCard] = useState<CardDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const opaqueCardId =
-    routeIdentifier !== undefined && isOpaqueCardId(routeIdentifier)
-      ? routeIdentifier
-      : null;
+  const cardNumber =
+    routeIdentifier !== undefined && isCardNumber(routeIdentifier) ? routeIdentifier : null;
 
   useEffect(
     /**
@@ -55,13 +43,13 @@ export function CardUpdateScreen(): ReactElement {
      * settles the loading state without a request when the selector is rejected.
      */
     () => {
-      if (opaqueCardId === null) {
+      if (cardNumber === null) {
         setLoading(false);
         return;
       }
 
       setLoading(true);
-      getCard(opaqueCardId).then(
+      getCard(cardNumber).then(
         /**
          * Seeds the form with the three editable fields and retains the loaded
          * record, whose version carries the optimistic-lock value the save needs.
@@ -82,13 +70,13 @@ export function CardUpdateScreen(): ReactElement {
          */
         () => {
           setError(
-            "Card data could not be loaded. No card identifier was included in this diagnostic.",
+            'Card data could not be loaded. No card identifier was included in this diagnostic.',
           );
           setLoading(false);
         },
       );
     },
-    [form, opaqueCardId],
+    [form, cardNumber],
   );
 
   /**
@@ -96,8 +84,8 @@ export function CardUpdateScreen(): ReactElement {
    * @param {CardFormValues} values - Values validated by the Ant Design form.
    */
   function save(values: CardFormValues): void {
-    if (opaqueCardId === null || card === null) {
-      setError("The card update cannot be submitted without a loaded record.");
+    if (cardNumber === null || card === null) {
+      setError('The card update cannot be submitted without a loaded record.');
       return;
     }
 
@@ -107,15 +95,20 @@ export function CardUpdateScreen(): ReactElement {
     };
     setSaving(true);
     setError(null);
-    updateCard(requireOpaqueCardId(opaqueCardId), request).then(
-      /**
-       * Returns to the detail screen on the selector the service echoed back,
-       * rather than the one submitted, so a re-keyed record is followed correctly.
-       * @param {CardDetail} updated - The record as the service stored it.
+    updateCard(requireCardNumber(cardNumber), request).then(
+      /*
+       * WHY : Assumptions: the return route is built from the number that ADDRESSED the card and not
+       *       from a member of the response, because the card number is the primary key of
+       *       card.cards and an update cannot change it -- the update operation carries the embossed
+       *       name, the expiration date, the active status and the version, and nothing else. An
+       *       earlier revision followed a selector the service echoed back so that a re-keyed record
+       *       would be followed correctly; no member of this response can re-key the row, so there is
+       *       nothing to follow.
        */
-      (updated) => {
+      /** Returns to the detail screen for the card that was addressed. */
+      () => {
         setSaving(false);
-        navigateSafely(navigate, cardDetailPath(updated.opaqueCardId));
+        navigateSafely(navigate, cardDetailPath(cardNumber));
       },
       /**
        * Reports a rejected update, including the optimistic-lock case, without
@@ -124,23 +117,19 @@ export function CardUpdateScreen(): ReactElement {
       () => {
         setSaving(false);
         setError(
-          "The card update was not accepted. Reload the record before retrying if another user changed it.",
+          'The card update was not accepted. Reload the record before retrying if another user changed it.',
         );
       },
     );
   }
 
-  if (opaqueCardId === null) {
+  if (cardNumber === null) {
     return (
       <Result
         status="error"
         title="Invalid card link"
         subTitle="The card selector is missing or malformed. Return to the card list and select the record again."
-        extra={
-          <Button onClick={navigationHandler(navigate, "/cards")}>
-            Back to cards
-          </Button>
-        }
+        extra={<Button onClick={navigationHandler(navigate, '/cards')}>Back to cards</Button>}
       />
     );
   }
@@ -166,20 +155,15 @@ export function CardUpdateScreen(): ReactElement {
        * is the one prop that changes.
        */}
       <MessageBand message={error} />
-      <Form<CardFormValues>
-        form={form}
-        layout="vertical"
-        onFinish={save}
-        requiredMark
-      >
+      <Form<CardFormValues> form={form} layout="vertical" onFinish={save} requiredMark>
         <Form.Item
           label="Embossed name"
           name="embossedName"
           rules={[
-            { required: true, message: "Embossed name is required." },
+            { required: true, message: 'Embossed name is required.' },
             {
               max: 50,
-              message: "Embossed name may contain at most 50 characters.",
+              message: 'Embossed name may contain at most 50 characters.',
             },
           ]}
         >
@@ -189,10 +173,10 @@ export function CardUpdateScreen(): ReactElement {
           label="Expiration date"
           name="expirationDate"
           rules={[
-            { required: true, message: "Expiration date is required." },
+            { required: true, message: 'Expiration date is required.' },
             {
               pattern: ISO_DATE_PATTERN,
-              message: "Expiration date must use YYYY-MM-DD.",
+              message: 'Expiration date must use YYYY-MM-DD.',
             },
           ]}
         >
@@ -201,21 +185,17 @@ export function CardUpdateScreen(): ReactElement {
         <Form.Item
           label="Status"
           name="activeStatus"
-          rules={[{ required: true, message: "Status is required." }]}
+          rules={[{ required: true, message: 'Status is required.' }]}
         >
           <Select
             options={[
-              { label: "Active", value: "Y" },
-              { label: "Inactive", value: "N" },
+              { label: 'Active', value: 'Y' },
+              { label: 'Inactive', value: 'N' },
             ]}
           />
         </Form.Item>
         <Flex gap="small">
-          <Button
-            onClick={navigationHandler(navigate, cardDetailPath(opaqueCardId))}
-          >
-            Cancel
-          </Button>
+          <Button onClick={navigationHandler(navigate, cardDetailPath(cardNumber))}>Cancel</Button>
           <Button type="primary" htmlType="submit" loading={saving}>
             Save
           </Button>

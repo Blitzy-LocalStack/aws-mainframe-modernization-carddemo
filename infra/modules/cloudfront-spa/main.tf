@@ -737,13 +737,12 @@ resource "aws_s3_bucket_policy" "spa" {
 #   source IP, and it offers no field allowlist -- so with it enabled a browser
 #   route would write whatever its path segment happens to hold into durable
 #   objects. Standard logging v2 accepts a field list, so the query string,
-#   cookie and referrer fields are simply not delivered, and the one path field
-#   retained (`cs-uri-stem`) is safe because ui/src/routes/cards.ts makes the
-#   only identifier-bearing SPA route carry a server-issued opaque token rather
-#   than a card number. Dropping logging altogether was the other alternative and
-#   is rejected too: it leaves an operator with no record of edge transport or
-#   routing failures at all, and the exposure it avoided is already avoided by
-#   the field list and the opaque route.
+#   cookie and referrer fields are simply not delivered, and neither is the URI
+#   stem -- ui/src/routes/cards.ts addresses a card by its number, so a browser
+#   path can hold one and no field in this delivery can be redacted. Dropping
+#   logging altogether was the other alternative and is rejected too: it leaves an
+#   operator with no record of edge transport or routing failures at all, and the
+#   exposure it avoided is already avoided by the field list.
 #
 #   Refactoring Rationale: standard logging v2 replaces the legacy distribution
 #   logging block because it supports a customer-managed KMS key, source-scoped
@@ -1053,9 +1052,33 @@ resource "aws_cloudwatch_log_delivery" "cloudfront_access" {
   delivery_destination_arn = aws_cloudwatch_log_delivery_destination.cloudfront_access.arn
   field_delimiter          = "\t"
 
-  # Query strings, cookies and referrers are deliberately absent. The remaining
-  # URI stem carries only opaque identifiers, so the durable audit record can
-  # diagnose routing and transport failures without retaining PAN metadata.
+  # WHY : Refactoring Rationale: `cs-uri-stem` is NOT delivered, and an earlier revision of
+  #       this list did deliver it on the ground that the only identifier-bearing browser
+  #       route carried a server-issued opaque token. That is no longer the case:
+  #       ui/src/routes/cards.ts addresses a card by its sixteen-digit number, so the routes
+  #       /cards/:cardNumber and /cards/:cardNumber/edit place a card number in a browser
+  #       path. Client-side navigation never reaches this distribution, but a refresh, a
+  #       bookmark or a pasted link requests that path so the SPA fallback can answer it, and
+  #       the field would then write the number into a durable log object. This module's own
+  #       earlier note stated the condition and the remedy -- if a route ever placed a real
+  #       identifier in a path, the field had to be removed -- and removing it is honouring
+  #       that condition rather than revisiting it.
+  # WHY : Trade-offs: an operator loses the requested path from the edge record, which is the
+  #       field that distinguishes one SPA fallback from another. What remains still
+  #       diagnoses the failures this delivery exists for: the status code says whether the
+  #       edge served or refused, the request id correlates the hop with the service-side
+  #       record, and the method, host, protocol, cipher and elapsed time cover transport.
+  #       The service-side path IS retained, in the API's own record, where common-lib's
+  #       CardNumberMasker redacts the number first -- so the path is observable exactly
+  #       where it can be redacted and nowhere it cannot.
+  # WHY : Alternatives Considered: keeping the field and redacting it. Rejected because
+  #       nothing in this delivery path can transform a field value -- the service accepts a
+  #       field allowlist and not a rewrite -- so redaction would have to happen after the
+  #       object was written, which is after the disclosure.
+  #
+  # Query strings, cookies, referrers and the URI stem are all deliberately absent, so the
+  # durable audit record can diagnose routing and transport failures without retaining any
+  # cardholder metadata.
   record_fields = [
     "date",
     "time",
@@ -1064,7 +1087,6 @@ resource "aws_cloudwatch_log_delivery" "cloudfront_access" {
     "c-ip",
     "cs-method",
     "cs(Host)",
-    "cs-uri-stem",
     "sc-status",
     "x-edge-request-id",
     "cs-protocol",
@@ -1160,14 +1182,12 @@ resource "aws_cloudfront_origin_access_control" "spa" {
 #       always records the resolved viewer URI and source IP, and admits no field
 #       allowlist, whereas the v2 delivery above omits the query string, cookie
 #       and referrer fields entirely.
-#       Assumptions: the one path field the v2 delivery keeps, `cs-uri-stem`,
-#       carries no cardholder data because the SPA's only identifier-bearing
-#       routes are `/cards/:opaqueCardId` and `/cards/:opaqueCardId/edit`, whose
-#       segment is a 22-character server-issued opaque token -- the contract
-#       stated in ui/src/routes/cards.ts and enforced at the edge by the
-#       `{opaqueCardId}` route template in infra/modules/api-gateway-http. If a
-#       future route were to place a real identifier in a path, this field would
-#       have to be removed from the delivery's record_fields list.
+#       Assumptions: the v2 delivery keeps NO path field at all, which is what
+#       keeps cardholder data out of it. The SPA's identifier-bearing routes are
+#       `/cards/:cardNumber` and `/cards/:cardNumber/edit` -- the contract stated
+#       in ui/src/routes/cards.ts -- so a path here can hold a card number, and
+#       the rationale on the delivery's record_fields records why the field was
+#       withdrawn rather than redacted.
 #       Alternatives Considered: disabling logging altogether, which an earlier
 #       revision did. Rejected because it removes the edge's transport and
 #       routing history for an exposure that the field list and the opaque route
@@ -1348,7 +1368,7 @@ resource "aws_cloudfront_distribution" "spa" {
   #
   #   Assumptions: ui/src/router.tsx owns all twenty-one screen routes ON THE
   #   CLIENT -- /signon, /menu, /admin, /account/view, /account/update, /cards,
-  #   /cards/:opaqueCardId, /cards/:opaqueCardId/edit, /transactions, /transactions/:id,
+  #   /cards/:cardNumber, /cards/:cardNumber/edit, /transactions, /transactions/:id,
   #   /transactions/new, /billpay, /reports, /users, /users/new,
   #   /users/:id/edit, /users/:id/delete, /authorizations, /authorizations/:key,
   #   /reference/transaction-types and /reference/transaction-types/:cd. The

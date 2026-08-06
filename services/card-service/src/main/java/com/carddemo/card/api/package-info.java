@@ -9,25 +9,20 @@
  * business logic. Persistence lives further down again, in the repository layer, and no type in
  * this package reaches it directly.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Target contract, not a directory listing</h2>
  *
  * <p>Assumptions: every class name, operation name, sibling package name and count anywhere in this
  * charter states the package's <b>target contract</b> as the migration plan assigns it, and not a
- * census of the directory that holds the charter. The two differ measurably at the checkpoint that
- * authored it: the roster below names one controller, while this directory holds one Java file,
- * which is this charter itself. A type named in a closed roster that has no file beside this one is
- * therefore <b>assigned</b> rather than absent, and every figure given is a contract total rather
- * than a measurement of the directory. Declaring that difference once, with both figures given, is
- * what lets the rest of this charter be read in the present tense without misleading anyone.
+ * census of the directory that holds the charter. It is read against the plan, and the roster below
+ * is closed: a type in this package that the roster does not name is outside the contract rather
+ * than merely new.</p>
  *
- * <p>Alternatives Considered: withholding this charter until the controller it governs exists.
- * Rejected on two independent grounds. The charter is what the author of that controller works
- * from, so writing it last would leave the package with no stated contract across exactly the
- * interval in which one is needed. Separately, {@code JavadocPackage} audits a directory rather
- * than a single compilation unit, so a controller landing here first would leave this whole
- * directory failing the documentation gate, and the module unbuildable, until this file caught up.
- * The cost accepted is that the inventory above reads as present tense unless the distinction is
- * declared, which is what the preceding paragraph is for.
+ * <p>Alternatives Considered: deriving the roster from the directory instead of from the plan.
+ * Rejected on two independent grounds. A roster that describes whatever is present cannot say what
+ * may <em>not</em> be added, which is the half of the contract a reader cannot reconstruct from the
+ * files. Separately, {@code JavadocPackage} audits a directory rather than a single compilation
+ * unit, so this charter has to govern the directory as a whole and be readable before any class in
+ * it is, or the whole directory fails the documentation gate and the module will not build.</p>
  *
  * <h2>Roster, and the operations it carries</h2>
  *
@@ -44,34 +39,42 @@
  *       served by {@code GET} on the collection path {@code /api/v1/cards}</li>
  *   <li>{@code getCard}, one card with its primary account number rendered to its last four
  *       digits, served by {@code GET} on the single-card path</li>
- *   <li>{@code getCardUnmasked}, the administrative read of that same card carrying the full
- *       primary account number, served by {@code GET} on the single-card path with an
- *       {@code /unmasked} segment appended</li>
+ *   <li>{@code getAdminCardDetail}, the administrative read of that same card carrying the full
+ *       primary account number, served by {@code GET} on {@code /api/v1/admin/cards/{cardNumber}},
+ *       which is its own path prefix rather than a segment appended beneath the card</li>
  *   <li>{@code updateCard}, the update of the three editable members of one card, served by
  *       {@code PUT} on the single-card path</li>
- *   <li>{@code lookUpCardByNumber}, a lookup of one card by its number, served by {@code POST} on
- *       {@code /api/v1/cards/lookup}</li>
  * </ul>
  *
- * <p>Alternatives Considered: those five operations sit on one controller rather than on three,
+ * <p>Alternatives Considered: those four operations sit on one controller rather than on three,
  * one per baseline program, which would have mirrored {@code COCRDLIC}, {@code COCRDSLC} and
  * {@code COCRDUPC} class for class. The per-program split was weighed and rejected. This bounded
  * context owns a single aggregate, the {@code card.cards} table the migration plan assigns it at
- * its section 0.4.1.3, and the five operations are five views of that one aggregate: the update
- * writes the row the detail read returns, and the list and the lookup answer with the same page
- * schema. Splitting one aggregate's HTTP surface across three classes would therefore spread a
- * single five-operation contract over three files while adding no seam that the domain actually
- * has, and it would leave no single file whose shape can be read against the contract of record as
- * a whole. The trade accepted is that the surviving class carries five handlers rather than one or
- * two, which is a size this layer can hold precisely because it holds no business rules.
+ * its section 0.4.1.3, and the four operations are four views of that one aggregate: the update
+ * writes the row the detail read returns, and the administrative read widens what is rendered of
+ * one member of that same row. Splitting one aggregate's HTTP surface across three classes would
+ * therefore spread a single four-operation contract over three files while adding no seam that the
+ * domain actually has, and it would leave no single file whose shape can be read against the
+ * contract of record as a whole. The trade accepted is that the surviving class carries four
+ * handlers rather than one or two, which is a size this layer can hold precisely because it holds
+ * no business rules.
  *
- * <p>Assumptions: the single-card path carries an opaque selector rather than a card number, and
- * no card number appears in any path in the contract, as that document records at its lines 40 to
- * 43. The fifth operation exists because of the same constraint: a query string is part of the
- * request line, so a filter carrying a full card number would be written into request history and
- * into access logs, and the contract therefore moves that one filter into a request body at its
- * lines 44 to 49. A reader who expects the baseline screen's card-number filter to arrive as a
- * query parameter should look in that body instead.
+ * <p>Assumptions: the single-card path carries the sixteen-digit card number, which is the primary
+ * key of {@code card.cards} and the value a user supplies -- the baseline's own detail and update
+ * screens are entered by typing it into the list screen's card-number filter field. A card number
+ * consequently reaches the request line, and the exposure that creates is answered by redaction
+ * rather than by indirection: common-lib's {@code CardNumberMasker} renders any sixteen-digit run
+ * embedded in a path down to its last four digits, and the shared error advice applies it to every
+ * path it records, so no operational record of this service carries a full number.
+ *
+ * <p>Refactoring Rationale: an intermediate revision of the contract of record addressed a card by
+ * an opaque token instead, and published a fifth operation -- a {@code POST} carrying a card number
+ * in a request body -- because the token left the primary key unpublishable and the list screen's
+ * second filter field had nowhere else to go. Both are withdrawn together. The contract publishes
+ * the four operations above, the two filter fields of the baseline list screen are both query
+ * parameters of the list operation, and the administrative read moved from a segment inside the card
+ * subtree to its own prefix, which removes the rule-ordering dependency its authority previously
+ * rested on.
  *
  * <p>Assumptions: {@code updateCard} answers HTTP 409 when an update cannot be applied against the
  * persisted state, and three distinct conditions reach that status without ever being merged: the

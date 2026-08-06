@@ -116,20 +116,24 @@ output "runtime_configuration" {
       database_admin    = aws_lambda_function.database_admin.arn
       dataset_retention = aws_lambda_function.dataset_retention.arn
 
-      # WHY : Assumptions: the credential-rotation function is NOT listed here
-      #       because this root no longer creates it. infra/modules/secrets owns it
-      #       so that the function, the secrets it rotates and the permission that
-      #       lets Secrets Manager invoke it are declared together; its ARN is
-      #       published as module.secrets.rotation_lambda_arn instead.
-      credential_rotation = module.secrets.rotation_lambda_arn
+      # WHY : Assumptions: there is deliberately no credential-rotation entry. No
+      #       rotation function exists anywhere in this stack -- infra/modules/secrets
+      #       implements none and this root supplies none through its
+      #       rotation_lambda_arn hook -- so a key here would have no ARN to carry.
+      #       Its absence is recorded rather than left to be read as an oversight.
     }
     # WHY : Assumptions: the internal listener material is published as the two
-    #       scalar secret handles the secrets module creates, rather than as one
-    #       root-owned JSON secret. The container reads each value directly, so
-    #       there is no JSON key for a consumer to guess.
+    #       scalar secret handles this root creates over the certificate and key it
+    #       generates. The container reads each value directly, so there is no JSON
+    #       key for a consumer to guess.
+    #       Refactoring Rationale: these were previously the secrets module's
+    #       entries, created from PEM values passed in as module inputs. A reusable
+    #       module is the wrong custodian for private-key material, and an input is
+    #       the wrong channel for it, so the entries moved to the root that already
+    #       holds the material as a resource attribute.
     internal_tls_secret_arns = {
-      certificate = module.secrets.service_tls_secrets["certificate"].arn
-      private_key = module.secrets.service_tls_secrets["private_key"].arn
+      certificate = aws_secretsmanager_secret.internal_tls_certificate.arn
+      private_key = aws_secretsmanager_secret.internal_tls_private_key.arn
     }
     internal_acm_certificate_arn = aws_acm_certificate.internal_service.arn
     database_bootstrap_result    = aws_lambda_invocation.database_bootstrap.result

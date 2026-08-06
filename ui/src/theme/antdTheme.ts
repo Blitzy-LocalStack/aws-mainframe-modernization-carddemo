@@ -33,8 +33,8 @@
  * the same seed value. Each block states its reasoning at the point of use, so
  * neither the emptiness nor the two exceptions can be read as accidental.
  *
- * WHY (non-obvious design decisions)
- * ----------------------------------
+ * Design decisions
+ * ----------------
  * Refactoring Rationale: the theme is a separate module from the component that
  * mounts it, rather than an object literal inline in that component. Under
  * CSS-variable theming a value written into a component does not merely duplicate
@@ -62,10 +62,10 @@
  * as a decision rather than as an oversight.
  */
 
-import { theme } from "antd";
-import type { ThemeConfig } from "antd";
+import { theme } from 'antd';
+import type { ThemeConfig } from 'antd';
 
-import { BMS_SEED_PALETTE_ANCHORS } from "./tokens";
+import { BMS_SEED_PALETTE_ANCHORS } from './tokens';
 
 /**
  * The theme handed to the application's only `ConfigProvider`.
@@ -148,7 +148,7 @@ export const cardDemoTheme: ThemeConfig = {
    * would have to know both. The cost accepted is that the properties carry the
    * library's default prefix rather than this application's name.
    */
-  cssVar: { key: "carddemo" },
+  cssVar: { key: 'carddemo' },
 
   /*
    * Trade-offs: this equals the library's own default at the pinned version and

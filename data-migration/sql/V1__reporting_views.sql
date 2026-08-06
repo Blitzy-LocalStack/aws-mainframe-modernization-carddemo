@@ -4,9 +4,11 @@
 -- Purpose:
 --   Create the four read-only relations the reporting bounded context reads, in
 --   the `reporting` schema, owned by carddemo_reporting_owner. reporting-service
---   owns no table, no index and no relational object of its own; it holds USAGE
---   on this schema and SELECT on the views named here, and nothing else. These
---   four views ARE that context's entire data surface, so the JPA projections in
+--   owns no table, no index and no relational object of its own; the role it
+--   connects as holds USAGE on this schema and SELECT on the seven views named
+--   here, and nothing else -- notably not on the one table this file creates.
+--   Those seven views ARE that context's entire readable data surface, so the JPA
+--   projections in
 --   services/reporting-service/src/main/java/com/carddemo/reporting/domain map
 --   one relation each and map nothing outside this file.
 --
@@ -15,20 +17,26 @@
 --   reporting.v_statement_transactions    StatementTransactionView
 --   reporting.v_transaction_types         TransactionTypeView
 --   reporting.v_transaction_categories    TransactionCategoryView
+--   reporting.v_accounts                  the account-backed projection
+--   reporting.v_customers                 the customer-backed projection
+--   reporting.v_card_xref                 the cross-reference projection
 --
---   WHAT THIS FILE DOES NOT YET CREATE, and why that is a statement rather than
---   an omission: the reporting domain package's charter declares a closed set of
---   SEVEN projections, so three further views -- over account.accounts,
---   account.customers and account.card_xref -- belong in this file and are NOT
---   here. The reason is mechanical: CREATE VIEW resolves its base references at
---   creation time, and account-service has no db/migration directory yet, so
---   those three tables do not exist and a view over them cannot be created.
---   Adding them now would make this whole file fail on its first statement and
---   would take the four views that CAN be created down with it. They must be
---   added to this file, in this transaction, in the same shape and with the same
---   grant, at the point account-service's V1__account.sql lands. Until then the
---   three projections that read them are planned rather than broken, and their
---   absence here is the single place a reader can see that.
+--   Refactoring Rationale: an earlier revision of this file created only the
+--   first FOUR of those relations and recorded, here, that the remaining three
+--   could not be created because account-service had no db/migration directory
+--   and CREATE VIEW resolves its base references at creation time -- so a view
+--   over account.accounts would have failed and taken the whole transaction with
+--   it. That reason was accurate when written and is now spent:
+--   services/account-service/src/main/resources/db/migration/V1__account.sql
+--   creates account.accounts, account.customers and account.card_xref, so the
+--   three views are created below and the reporting domain package's declared set
+--   of SEVEN projections is complete. The ORDERING that made the earlier state
+--   necessary has not gone away and is stated under "Prerequisites" below.
+--
+--   This file additionally creates ONE table, reporting.card_grouping_key, which
+--   is not a projection and is not readable by the reporting service role. It
+--   holds the secret described at the statement view, and it is the single
+--   relation in this schema that role may not select from.
 --
 -- WHY this file lives HERE and not in a service migration:
 --   - Assumptions: data-migration/sql/V0__schemas_and_roles.sql establishes the
@@ -148,9 +156,81 @@ SET LOCAL ROLE carddemo_reporting_owner;
 --       statement -- two cards sharing their last four digits would merge into one
 --       statement, and with a twelve-digit filler that collision is a certainty
 --       rather than a risk. The digest is deterministic, so it groups without
---       collision; it is used ONLY as a grouping key, is not reversible to a card
---       number by anyone who does not already hold that number, and no client sees
---       it.
+--       collision; it is used ONLY as a grouping key and no client ever sees it.
+-- WHY : Refactoring Rationale: that token is KEYED, and an earlier revision's
+--       unkeyed md5(rtrim(card_num)) was not. The earlier form was accompanied by
+--       the claim that it was "not reversible to a card number by anyone who does
+--       not already hold that number", and that claim was false in a way worth
+--       stating plainly, because it is the reason this section changed. A digest is
+--       only as hard to invert as its input space is large, and a card number is a
+--       sixteen-digit decimal string -- so holding the digest is enough to recover
+--       the number by exhaustive search, without any prior knowledge of it. Against
+--       a known issuer prefix and a check digit the search collapses further still.
+--       The masked card_num column beside it would then be masked in appearance
+--       only: a reader holding both columns could recover in full what the masking
+--       exists to withhold. Mixing in a secret the holder of the token does not
+--       have removes the search entirely, because the attacker no longer knows what
+--       to hash.
+-- -----------------------------------------------------------------------------
+-- 0. reporting.card_grouping_key -- the secret behind the statement grouping token.
+--
+-- WHY : Assumptions: ONE row, ONE column, and a value generated here rather than
+--       supplied. gen_random_uuid() is core PostgreSQL from version 13 onward, so
+--       this needs no extension -- pgcrypto is deliberately not a dependency, and
+--       sha256() below is core as well. The value never leaves the database and is
+--       never displayed, so its only requirement is that it be unpredictable and
+--       stable, which a random UUID satisfies.
+-- WHY : Assumptions: the single-row shape is enforced rather than assumed. A second
+--       row would make the join at the statement view multiply every transaction
+--       row it touches, silently doubling a statement; the primary key on a column
+--       fixed to one value is what makes that unrepresentable.
+-- WHY : Trade-offs: the token is a KEYED DIGEST rather than a random surrogate
+--       per card. A surrogate -- one generated identifier per distinct card, held
+--       in a mapping table -- is unconditionally unlinkable and therefore
+--       stronger, and it was rejected on operational cost rather than on strength:
+--       it needs a row inserted for every card that appears, which means a write
+--       path and a refresh step inside a context whose entire point is that it
+--       holds no writable relation and no maintenance job. The keyed digest needs
+--       neither, is computed on read, and covers cards that appear after this file
+--       ran. What it gives up is that the mapping is recoverable BY the holder of
+--       the key, which is the database owner and no one else.
+-- WHY : Assumptions: the value is stable for the life of the database, and
+--       ON CONFLICT DO NOTHING is what keeps it so. Re-running this file must not
+--       rotate the key: the token would change, and a statement run spanning the
+--       rotation would break one card into two groups. Rotation is therefore a
+--       deliberate operator act, not a side effect of re-running a migration.
+CREATE TABLE IF NOT EXISTS reporting.card_grouping_key (
+    singleton   boolean NOT NULL DEFAULT true,
+    key_value   text    NOT NULL,
+    CONSTRAINT pk_card_grouping_key PRIMARY KEY (singleton),
+    CONSTRAINT ck_card_grouping_key_singleton CHECK (singleton)
+);
+
+INSERT INTO reporting.card_grouping_key (singleton, key_value)
+VALUES (true, gen_random_uuid()::text)
+ON CONFLICT (singleton) DO NOTHING;
+
+ALTER TABLE reporting.card_grouping_key OWNER TO carddemo_reporting_owner;
+
+-- WHY : Assumptions: this REVOKE is required and is not merely defensive. The
+--       bootstrap sets a default privilege granting SELECT on TABLES in this schema
+--       to carddemo_reporting (data-migration/sql/V0__schemas_and_roles.sql), and
+--       PostgreSQL default privileges cannot distinguish a view from a table -- so
+--       without this statement the key table would be readable by the very role the
+--       key is being withheld from, and the token would be invertible again by
+--       anyone who could run two SELECTs. The bootstrap issues the same revoke,
+--       guarded, after its blanket grant; that one closes the window a re-run of the
+--       bootstrap opens, and this one closes the window creation opens. Neither
+--       makes the other redundant.
+REVOKE ALL ON reporting.card_grouping_key FROM carddemo_reporting;
+
+COMMENT ON TABLE reporting.card_grouping_key IS
+    'Single-row secret mixed into reporting.v_statement_transactions.card_fingerprint so that the '
+    'per-card grouping token cannot be inverted to a card number by exhaustive search. Readable by '
+    'carddemo_reporting_owner only; never granted to carddemo_reporting and never displayed.';
+
+
+-- -----------------------------------------------------------------------------
 CREATE VIEW reporting.v_report_transactions
     WITH (security_barrier = true) AS
 SELECT
@@ -216,7 +296,19 @@ CREATE VIEW reporting.v_statement_transactions
     WITH (security_barrier = true) AS
 SELECT
     ('************' || right(rtrim(t.card_num), 4))::character(16) AS card_num,
-    md5(rtrim(t.card_num))                                        AS card_fingerprint,
+    -- WHY : Assumptions: the key is joined in rather than read by a scalar
+    --       subquery per row, so it is read exactly once for the whole scan. The
+    --       join is a CROSS JOIN over a one-row table, which the single-row
+    --       primary key above guarantees cannot multiply the transaction rows.
+    -- WHY : Assumptions: convert_to(..., 'UTF8') rather than a bare cast, because
+    --       sha256 takes bytea and the conversion has to be EXPLICIT about its
+    --       encoding: an implicit one would make the token depend on the server
+    --       encoding, so the same card would fingerprint differently on two
+    --       databases holding the same data. The key is concatenated as a prefix
+    --       so that the card digits terminate the input, which keeps the token a
+    --       function of the whole trimmed number rather than of a prefix of it.
+    encode(sha256(convert_to(k.key_value || rtrim(t.card_num), 'UTF8')), 'hex')
+                                                                  AS card_fingerprint,
     t.transaction_id,
     t.type_cd,
     t.category_cd,
@@ -229,7 +321,8 @@ SELECT
     t.merchant_zip,
     t.orig_ts,
     t.proc_ts
-FROM ledger.transactions AS t;
+FROM ledger.transactions AS t
+CROSS JOIN reporting.card_grouping_key AS k;
 
 COMMENT ON VIEW reporting.v_statement_transactions IS
     'Card-ordered projection of ledger.transactions for statement generation (app/cbl/CBSTM03A.CBL '
@@ -308,10 +401,137 @@ ALTER VIEW reporting.v_transaction_categories OWNER TO carddemo_reporting_owner;
 
 
 -- -----------------------------------------------------------------------------
--- Grants: SELECT on these four relations, to the service login role, and nothing
--- else anywhere.
+-- 5. reporting.v_accounts -- the account master, without its money-bearing detail
+--    beyond what a statement or report prints.
 --
--- WHY : Assumptions: the grants name the four views individually and never use
+-- Supports the account-backed reporting the baseline performs from the account
+-- master: app/cbl/CBSTM03A.CBL reads it to head a statement, and
+-- app/cbl/CBTRN03C.cbl reaches it for the account a transaction posted to.
+--
+-- WHY : Assumptions: the projection is a strict SUBSET of account.accounts and
+--       omits three columns deliberately -- cash_credit_limit, curr_cyc_credit and
+--       curr_cyc_debit. None of the three is printed by any statement or report
+--       band in services/reporting-service, so including them would widen the
+--       reporting role's reach past what it renders. The columns that ARE here are
+--       the ones a band prints: the identifier, the status, the balance, the credit
+--       limit, the group and the three dates.
+-- WHY : Assumptions: no masking is applied to any column, and that is a statement
+--       about what an account identifier is rather than an omission. Unlike a card
+--       number it is not cardholder data and it appears in full on every printed
+--       statement and report in the baseline, so masking it here would break the
+--       output this context exists to reproduce while protecting nothing.
+CREATE VIEW reporting.v_accounts
+    WITH (security_barrier = true) AS
+SELECT
+    a.account_id,
+    a.active_status,
+    a.curr_bal,
+    a.credit_limit,
+    a.open_date,
+    a.expiration_date,
+    a.reissue_date,
+    a.group_id
+FROM account.accounts AS a;
+
+COMMENT ON VIEW reporting.v_accounts IS
+    'Read-only projection of account.accounts for statement and report heading data '
+    '(app/cbl/CBSTM03A.CBL, app/cbl/CBTRN03C.cbl). Omits cash_credit_limit and the two cycle '
+    'accumulators because no reporting band prints them.';
+
+ALTER VIEW reporting.v_accounts OWNER TO carddemo_reporting_owner;
+
+
+-- -----------------------------------------------------------------------------
+-- 6. reporting.v_customers -- the customer name and address a statement heads with,
+--    and nothing that identifies the customer nationally.
+--
+-- WHY : Assumptions: the two enciphered national-identifier columns of
+--       account.customers -- the ones the schema mapping records as the model's most
+--       sensitive attributes -- are ABSENT from this projection rather than masked in
+--       it. No statement or report band prints either, so the correct reach for this
+--       role is none at all: projecting a masked form would still give the role a
+--       column to read, and projecting the ciphertext would hand it material to
+--       attack offline. Omission is the only form of masking that cannot be undone
+--       by a later change to a mapper.
+-- WHY : Assumptions: those two columns are described here rather than NAMED, and the
+--       indirection is deliberate. data-migration/tests/test_reporting_views.py
+--       asserts that neither identifier appears anywhere in this file, comments
+--       included, precisely so that no protected column can be uncommented into a
+--       projection later. Spelling them out to explain their absence would defeat
+--       the check that guarantees the absence, so the explanation is kept and the
+--       identifiers are not.
+-- WHY : Assumptions: fico_credit_score is absent for the same reason -- it is a
+--       credit assessment, not statement heading data, and no band prints it.
+-- WHY : Assumptions: the three address lines are all projected, including
+--       addr_line_3, which app/cbl/COACTUPC.cbl treats as the city (:1615). A
+--       statement heading prints the whole address block, so dropping any line
+--       would truncate the rendered address.
+CREATE VIEW reporting.v_customers
+    WITH (security_barrier = true) AS
+SELECT
+    c.customer_id,
+    c.first_name,
+    c.middle_name,
+    c.last_name,
+    c.addr_line_1,
+    c.addr_line_2,
+    c.addr_line_3,
+    c.addr_state_cd,
+    c.addr_country_cd,
+    c.addr_zip,
+    c.dob
+FROM account.customers AS c;
+
+COMMENT ON VIEW reporting.v_customers IS
+    'Read-only projection of account.customers for statement heading data (app/cpy/COSTM01.CPY). '
+    'Deliberately omits the two enciphered national-identifier columns, the credit score, both '
+    'phone numbers and the transfer account reference: no reporting band prints any of them, so '
+    'the role reads none of them.';
+
+ALTER VIEW reporting.v_customers OWNER TO carddemo_reporting_owner;
+
+
+-- -----------------------------------------------------------------------------
+-- 7. reporting.v_card_xref -- card to customer and account, with the card masked.
+--
+-- Carries across the access path app/cbl/CBSTM03A.CBL uses to resolve the card a
+-- statement is being produced for to the account and customer it belongs to.
+--
+-- WHY : Assumptions: card_num is masked to its last four digits by the SAME
+--       expression the two transaction views use, and cast to character(16) so the
+--       column keeps the declared width of the field it projects. The reason is
+--       the reason recorded on v_report_transactions: masking in the view is the
+--       whole of the control, and projecting the full number here would hand the
+--       reporting role every primary account number in the cross-reference --
+--       defeating the masking on the other views, since this relation joins to
+--       both of them.
+-- WHY : Assumptions: NO fingerprint column here, unlike the statement view. A
+--       fingerprint exists to GROUP rows that a masked number would merge, and
+--       this relation is keyed one row per card rather than many rows per card, so
+--       there is nothing to group. Adding one would create a second place the
+--       grouping secret is read for no purpose.
+CREATE VIEW reporting.v_card_xref
+    WITH (security_barrier = true) AS
+SELECT
+    ('************' || right(rtrim(x.card_num), 4))::character(16) AS card_num,
+    x.customer_id,
+    x.account_id
+FROM account.card_xref AS x;
+
+COMMENT ON VIEW reporting.v_card_xref IS
+    'Read-only projection of account.card_xref resolving a card to its customer and account for '
+    'statement generation (app/cbl/CBSTM03A.CBL). The card number is masked to its last four '
+    'digits, as on every other card-bearing relation in this schema.';
+
+ALTER VIEW reporting.v_card_xref OWNER TO carddemo_reporting_owner;
+
+
+-- -----------------------------------------------------------------------------
+-- Grants: SELECT on these seven relations, to the service login role, and nothing
+-- else anywhere. The one TABLE this file creates is deliberately not among them;
+-- its own revoke is stated where it is created.
+--
+-- WHY : Assumptions: the grants name the seven views individually and never use
 --       GRANT ... ON ALL TABLES IN SCHEMA reporting. The two forms differ in
 --       future scope, not in effect today: ON ALL TABLES would also cover any
 --       relation later created in this schema, so a view added for one purpose
@@ -326,13 +546,18 @@ GRANT SELECT ON reporting.v_report_transactions    TO carddemo_reporting;
 GRANT SELECT ON reporting.v_statement_transactions TO carddemo_reporting;
 GRANT SELECT ON reporting.v_transaction_types      TO carddemo_reporting;
 GRANT SELECT ON reporting.v_transaction_categories TO carddemo_reporting;
+GRANT SELECT ON reporting.v_accounts               TO carddemo_reporting;
+GRANT SELECT ON reporting.v_customers              TO carddemo_reporting;
+GRANT SELECT ON reporting.v_card_xref              TO carddemo_reporting;
 
 -- WHY : Assumptions: no INSERT, UPDATE, DELETE or TRUNCATE is granted on any view
 --       above, and the absence is stated as a REVOKE rather than left implicit. A
 --       simple view over one table is AUTOMATICALLY UPDATABLE in PostgreSQL, so a
 --       projection that reads as read-only would accept a write the moment the
---       privilege existed -- and three of the four views here are simple enough to
---       qualify. The reporting context owns no table and writes nothing, so this is
+--       privilege existed -- and six of the seven views here are simple enough to
+--       qualify, every one except v_statement_transactions, whose join to the
+--       grouping-key table disqualifies it. The reporting context writes nothing, so
+--       this is
 --       a contract rather than an oversight, and revoking makes it one the catalogue
 --       records instead of one a reader has to infer from what is missing.
 --       Trade-offs: the statement is a no-op on a first run, because a freshly
@@ -344,7 +569,10 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
     ON reporting.v_report_transactions,
        reporting.v_statement_transactions,
        reporting.v_transaction_types,
-       reporting.v_transaction_categories
+       reporting.v_transaction_categories,
+       reporting.v_accounts,
+       reporting.v_customers,
+       reporting.v_card_xref
     FROM carddemo_reporting;
 
 -- WHY : Assumptions: the role reset is explicit rather than left to transaction

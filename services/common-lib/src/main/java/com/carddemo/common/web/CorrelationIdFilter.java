@@ -1,5 +1,8 @@
 package com.carddemo.common.web;
 
+import com.carddemo.common.error.ApiError;
+import com.carddemo.common.security.CardNumberMasker;
+import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.Filter;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -8,9 +11,15 @@ import jakarta.servlet.ServletResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Objects;
 import org.slf4j.MDC;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Threads one correlation identity through an HTTP request: accepted on the way in, published to the
@@ -336,15 +345,45 @@ public final class CorrelationIdFilter implements Filter {
     }
 
     /**
+     * The non-numeric prefix every minted identity opens with, {@code CD}.
+     *
+     * <p>Refactoring Rationale: a minted identity used to be twenty-four hexadecimal characters and
+     * nothing else, which put it inside the very class this filter refuses. Hexadecimal draws from ten
+     * digits and six letters, so a rendering of twelve random bytes is all digits with probability
+     * {@code (10/16)^24}, roughly one in twenty-one thousand -- rare, and therefore worse than common:
+     * such a value is minted, published, and then refused if it is ever presented back to this filter
+     * as an inbound identity, and it would be refused on one request in twenty-one thousand rather
+     * than reproducibly. A constant prefix removes the class entirely. Alternatives Considered:
+     * re-minting until the rendering carries a letter, which also works and was rejected because a
+     * retry loop makes the width contract depend on a random outcome and gives an operator nothing to
+     * recognise in a log.</p>
+     *
+     * <p>Assumptions: two characters, both ASCII letters, so a minted identity can never satisfy the
+     * bare-numeric shape at any length; and the prefix is counted INSIDE
+     * {@link #CORRELATION_ID_MAX_LENGTH} rather than added to it, so the published width is unchanged
+     * and the queue attribute the same identity round-trips through still carries it.</p>
+     *
+     * <p>Trade-offs: the prefix costs one byte of entropy compared with the previous rendering --
+     * eighty-eight bits rather than ninety-six -- because two characters of the fixed width are no
+     * longer random. Both figures are far beyond any enumeration this identity needs to resist, and
+     * what is bought is that a minted identity is recognisable as minted and can never collide with
+     * the refused class.</p>
+     */
+    private static final String GENERATED_ID_PREFIX = "CD";
+
+    /**
      * The count of random bytes rendered into a minted identity, twelve.
      *
-     * <p>Assumptions: hexadecimal rendering yields two characters per byte, so twelve bytes yield
-     * exactly {@code CORRELATION_ID_MAX_LENGTH} characters and carry ninety-six bits of entropy. The
-     * relationship between the two constants is arithmetic and is asserted by this module's tests
-     * rather than left as a coincidence for a maintainer to discover after changing one of
-     * them.</p>
+     * <p>Assumptions: hexadecimal rendering yields two characters per byte, so the count is the width
+     * remaining after {@link #GENERATED_ID_PREFIX} halved -- eleven bytes, twenty-two characters,
+     * eighty-eight bits of entropy, and a total of exactly
+     * {@code CORRELATION_ID_MAX_LENGTH} characters. It is DERIVED from the width and the prefix rather
+     * than written as a literal, so the three quantities cannot disagree after a change to any one of
+     * them, and the relationship is asserted by this module's tests rather than left as a coincidence
+     * for a maintainer to discover.</p>
      */
-    private static final int GENERATED_ID_RANDOM_BYTES = CORRELATION_ID_MAX_LENGTH / 2;
+    private static final int GENERATED_ID_RANDOM_BYTES =
+            (CORRELATION_ID_MAX_LENGTH - GENERATED_ID_PREFIX.length()) / 2;
 
     /**
      * The punctuation an inbound identity may contain, beyond letters and digits.
@@ -393,6 +432,33 @@ public final class CorrelationIdFilter implements Filter {
     private static final int ACCOUNT_NUMBER_MIN_DIGITS = 13;
 
     /**
+     * The media type the refusal body is written with.
+     *
+     * <p>Assumptions: this is the media type every other error in this stack is rendered as, because
+     * the refusal body is the same {@link ApiError} shape the shared advice produces. Answering a
+     * refusal with a different media type from every other error would make one client branch on the
+     * status to know how to parse the body.</p>
+     */
+    private static final String PROBLEM_MEDIA_TYPE = "application/json";
+
+    /**
+     * The writer that renders the refusal body.
+     *
+     * <p>Alternatives Considered: composing the JSON by hand in this class, which would avoid a
+     * mapper here altogether. Rejected because the body has to be the SAME shape a handler-rendered
+     * error carries, component for component, and a hand-written renderer is a second statement of
+     * that shape which can drift from the record without anything failing. Serialising the record
+     * itself cannot drift from it.</p>
+     *
+     * <p>Assumptions: a default mapper suffices because {@link ApiError} carries no money component
+     * and no temporal component -- its timestamp is already a formatted string -- so none of the
+     * modules a service registers changes how it serialises. That is asserted by this module's own
+     * tests rather than assumed, and it is the reason the filter does not need the application's
+     * configured mapper, which is unavailable to it at the point a refusal is written.</p>
+     */
+    private static final ObjectMapper PROBLEM_WRITER = JsonMapper.builder().build();
+
+    /**
      * The request attribute that marks this filter as already applied to the current request.
      *
      * <p>Assumptions: a servlet container runs the filter chain again for an internal dispatch, so a
@@ -428,27 +494,58 @@ public final class CorrelationIdFilter implements Filter {
     private static final HexFormat IDENTITY_RENDERER = HexFormat.of().withUpperCase();
 
     /**
-     * Creates a filter instance for a consuming service to register in its own chain.
+     * The clock the refusal body reads its failure instant from.
      *
-     * <p>Assumptions: a consuming service constructs this filter and places it in its chain; nothing
-     * in this module does so, because the shared kernel ships no configuration resource. The
-     * constructor takes no argument and the instance holds no state, so one instance serves every
-     * request thread and a service is free to hold it as a singleton.</p>
+     * <p>Refactoring Rationale: the filter holds a clock because it now RENDERS a problem shape, and
+     * that shape carries a timestamp. It previously held no state at all, which was correct while the
+     * refusal delegated its body to the container. Taking the clock as a constructor argument rather
+     * than reading the system clock inside the method is what lets a test assert the rendered body
+     * against a fixed instant -- the same arrangement {@code GlobalExceptionHandler} already uses, so
+     * a service configures one clock and both error paths read it.</p>
      *
-     * <p>Alternatives Considered: leaving the constructor implicit. Rejected, because the fact that
-     * this class is meant to be instantiated -- and instantiated by the consumer rather than by
-     * anything here -- is exactly the sort of thing a reader arrives wanting to know, and an implicit
-     * constructor is the one member of a class that cannot be documented. Declaring it costs one
-     * member and puts the registration contract where it is looked for.</p>
+     * <p>Assumptions: the field is immutable and the clock implementations used are thread-safe, so one
+     * instance still serves every request thread and a service is still free to hold it as a
+     * singleton.</p>
+     */
+    private final Clock clock;
+
+    /**
+     * Creates a filter instance reading the system clock in UTC.
+     *
+     * <p>Assumptions: this convenience form exists because a filter is frequently registered by hand
+     * in a test or a minimal deployment where no clock bean is available, and the instant it stamps a
+     * refusal with is not a business value -- it is a diagnostic. The system clock is therefore the
+     * right default and is named explicitly rather than left to the platform's default zone, since a
+     * zone-dependent timestamp in a shared log is unreadable across deployments.</p>
      */
     public CorrelationIdFilter() {
+        this(Clock.systemUTC());
+    }
+
+    /**
+     * Creates a filter instance reading a supplied clock.
+     *
+     * <p>Assumptions: a consuming service constructs this filter and places it in its chain; nothing
+     * in this module does so beyond its own auto-configuration, which passes the context's shared clock
+     * so that a refusal and a handler-rendered error stamp one request identically.</p>
+     *
+     * <p>Alternatives Considered: leaving the constructor implicit, which is no longer available now
+     * that the class holds a field, and reading the clock statically, which would leave the rendered
+     * timestamp unassertable. Declaring both forms costs two members and puts the registration contract
+     * where it is looked for.</p>
+     *
+     * @param clock the clock the refusal body reads its failure instant from; must not be {@code null}
+     * @throws NullPointerException if {@code clock} is {@code null}
+     */
+    public CorrelationIdFilter(Clock clock) {
         // WHY : Alternatives Considered: overriding init and destroy was evaluated and rejected. Both
         //       are default methods on the servlet filter interface with empty bodies, and this class
         //       has nothing to build up when a container starts it and nothing to release when the
-        //       container discards it -- its two shared instances are static, immutable and created
-        //       when the class loads. Overriding them would add two members asserting a lifecycle
-        //       this class does not have, and the documentation gate would then require both to be
-        //       described, so the cost would be paid in prose about behaviour that does not exist.
+        //       container discards it -- its shared instances are static, immutable and created when
+        //       the class loads. Overriding them would add two members asserting a lifecycle this class
+        //       does not have, and the documentation gate would then require both to be described, so
+        //       the cost would be paid in prose about behaviour that does not exist.
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
     /**
@@ -533,7 +630,7 @@ public final class CorrelationIdFilter implements Filter {
         //       an incident, when the log it was needed for has already been written.
         String inbound = inboundCorrelationId(request);
         if (inbound != null && !isContractConforming(inbound)) {
-            rejectNonconformingIdentity(request, response, inbound);
+            rejectNonconformingIdentity(request, response, inbound, this.clock);
             return;
         }
 
@@ -708,25 +805,41 @@ public final class CorrelationIdFilter implements Filter {
     /**
      * Refuses one request whose supplied correlation identity cannot be carried.
      *
-     * <p>Answers {@link HttpServletResponse#SC_BAD_REQUEST} with a message naming the constraint and
-     * the observed length, and does not invoke the remainder of the chain -- so no handler runs under
-     * an identity the caller did not choose.</p>
+     * <p>Answers {@link HttpServletResponse#SC_BAD_REQUEST} with the shared {@link ApiError} body and
+     * the response correlation header, and does not invoke the remainder of the chain -- so no handler
+     * runs under an identity the caller did not choose.</p>
      *
-     * <p>Assumptions: the rejected value is NOT reflected anywhere -- not into a response header, not
-     * into the message, and not into the logging context. Two separate reasons, and both matter. An
-     * untrusted value echoed into a header is how a carriage return in it introduces a second header
-     * into the response, which is the injection {@link #isContractConforming(String)} refuses the
-     * value for in the first place; echoing it while refusing it would reintroduce exactly that. And
-     * a caller is capable of putting anything in a header, including content that should not be
-     * copied into a shared log, so the diagnostic reports the value's SHAPE -- its length, against
-     * the permitted width -- which is what identifies the defect without carrying the value.</p>
+     * <p>Refactoring Rationale: the refusal is RENDERED HERE, where it previously delegated to
+     * {@code sendError}. Delegating was wrong in two ways that only appear together. A published
+     * contract states that 400 carries the problem shape and that every response carries the
+     * correlation header, and {@code sendError} produced neither: it hands the response to the
+     * container's error dispatch, which does not pass through the shared advice, so the body was
+     * whatever error page the deployment happened to configure and the header was absent because the
+     * refusal path returns before {@code publishToResponse} is reached. A client written against the
+     * contract therefore could not parse this one refusal and could not correlate it. Writing the
+     * record here makes the refusal identical in every deployment AND identical in shape to every
+     * other error this stack returns, which is what the earlier note was reaching for by committing the
+     * status.</p>
      *
-     * <p>Alternatives Considered: throwing an exception for the framework's error handling to render
-     * into the shared problem shape, which would give a machine-readable body consistent with every
-     * other error this stack returns. Rejected because a filter runs OUTSIDE the dispatcher, so an
-     * exception thrown here does not reach a controller advice; it surfaces as a container error page
-     * whose shape depends on the deployment. Committing the status here keeps the refusal identical in
-     * every deployment, and the framework's error dispatch still renders the body.</p>
+     * <p>Assumptions: the response carries a FRESHLY MINTED identity rather than the refused one. The
+     * caller's value cannot be echoed -- that is what it is being refused for -- but the header cannot
+     * simply be omitted either, because the contract makes it unconditional and an operator reading
+     * the refusal in a log needs a value to search on. Minting one satisfies both: the response is
+     * correlatable to this filter's own log line, and the client can tell it is not the value it sent
+     * because it is not the value it sent.</p>
+     *
+     * <p>Assumptions: the refused value is still NOT reflected anywhere -- not into the header, not
+     * into the message, not into the field entry, and not into the logging context. An untrusted value
+     * echoed into a header is how a carriage return in it introduces a second header into the response,
+     * which is the injection {@link #isContractConforming(String)} refuses the value for in the first
+     * place. A caller is equally capable of putting content into a header that must not be copied into
+     * a shared log, so the diagnostic reports the value's SHAPE -- its length, against the permitted
+     * width -- which identifies the defect without carrying the value.</p>
+     *
+     * <p>Alternatives Considered: throwing an exception for the framework's error handling to render.
+     * Rejected for the reason it always was: a filter runs OUTSIDE the dispatcher, so an exception
+     * thrown here never reaches a controller advice. The difference is that the conclusion is now to
+     * render the record rather than to accept whatever the container renders.</p>
      *
      * <p>Trade-offs: this is the one path through this filter that does not call the chain, and it is
      * deliberate rather than an oversight of the contract documented on
@@ -736,42 +849,93 @@ public final class CorrelationIdFilter implements Filter {
      *
      * @param request the request being refused, whose applied-once mark is cleared so a container
      *     that reuses the request object for an error dispatch is not left believing this filter has
-     *     already run
+     *     already run, and whose path is reported in the problem shape
      * @param response the response to write the refusal onto; a response that is not an HTTP response
      *     cannot carry a status, so the request is refused by not proceeding and nothing is written
      * @param inbound the nonconforming value, read only for its length and never reproduced
-     * @throws IOException if committing the error response fails
+     * @param clock the clock the problem shape reads its failure instant from
+     * @throws IOException if writing the refusal body fails
      */
-    private static void rejectNonconformingIdentity(
-            ServletRequest request, ServletResponse response, String inbound) throws IOException {
+    private static void rejectNonconformingIdentity(ServletRequest request, ServletResponse response,
+            String inbound, Clock clock) throws IOException {
 
-        // WHY : Assumptions: the mark set by the caller is cleared before the error response is
-        //       committed, because sendError triggers an ERROR dispatch that re-enters the filter
-        //       chain on the same request object. Leaving the mark set would make the guard at the
-        //       top of doFilter true for that dispatch, so the error page would be rendered with no
-        //       identity in the logging context at all -- the one request where a log line is most
-        //       wanted. Clearing it lets the error dispatch mint its own identity, which is correct:
-        //       the caller supplied none that could be used.
+        // WHY : Assumptions: the mark set by the caller is cleared even though this path no longer
+        //       triggers an ERROR dispatch, because a container is free to re-run the chain on the same
+        //       request object for reasons of its own and a stale mark would make the guard at the top
+        //       of doFilter true for that pass, leaving it with no identity in the logging context at
+        //       all. Clearing it costs one call and removes a dependence on container behaviour.
         request.removeAttribute(FILTER_APPLIED_ATTRIBUTE);
 
-        if (response instanceof HttpServletResponse httpResponse) {
-            httpResponse.sendError(
-                    HttpServletResponse.SC_BAD_REQUEST,
-                    // WHY : Assumptions: the numeric-shape rule is NAMED in the refusal, because a
-                    //       value of sixteen digits satisfies every other clause of the sentence and a
-                    //       caller told only the width and the alphabet would read the refusal as
-                    //       contradicting itself. The rule is stated as a shape, so the message
-                    //       explains the refusal without reproducing the value that caused it -- which
-                    //       is the whole point of refusing it.
-                    "The " + CORRELATION_ID_HEADER + " header must be 1 to "
-                            + CORRELATION_ID_MAX_LENGTH
-                            + " characters, each a letter, a digit or one of "
-                            + ACCEPTED_PUNCTUATION
-                            + ", and must not be a bare run of "
-                            + ACCOUNT_NUMBER_MIN_DIGITS
-                            + " or more digits; the supplied value is " + inbound.length()
-                            + " characters. Omit the header to have one generated.");
+        if (!(response instanceof HttpServletResponse httpResponse)) {
+            return;
         }
+
+        // WHY : Assumptions: the numeric-shape rule is NAMED in the refusal, because a value of
+        //       sixteen digits satisfies every other clause of the sentence and a caller told only the
+        //       width and the alphabet would read the refusal as contradicting itself. The rule is
+        //       stated as a shape, so the message explains the refusal without reproducing the value
+        //       that caused it -- which is the whole point of refusing it.
+        String detail = "The " + CORRELATION_ID_HEADER + " header must be 1 to "
+                + CORRELATION_ID_MAX_LENGTH
+                + " characters, each a letter, a digit or one of "
+                + ACCEPTED_PUNCTUATION
+                + ", and must not carry " + ACCOUNT_NUMBER_MIN_DIGITS
+                + " or more digits once separators are removed; the supplied value is "
+                + inbound.length() + " characters. Omit the header to have one generated.";
+
+        String correlationId = generateCorrelationId();
+        ApiError problem = ApiError.ofFieldErrors(detail, HttpServletResponse.SC_BAD_REQUEST,
+                correlationId, pathOf(httpRequestOf(request)),
+                List.of(new ApiError.FieldError(CORRELATION_ID_HEADER,
+                        FieldValidationFlag.NOT_OK, detail)),
+                clock);
+
+        byte[] body = PROBLEM_WRITER.writeValueAsString(problem).getBytes(StandardCharsets.UTF_8);
+
+        // WHY : Assumptions: the header, the status, the media type and the content length are all set
+        //       BEFORE the body is written, because a response commits as soon as enough of its body has
+        //       been written and a header set after that point is discarded silently. Setting the length
+        //       explicitly also keeps the refusal from being chunked, which matters only in that it
+        //       makes the response byte-identical across containers.
+        httpResponse.setHeader(CORRELATION_ID_HEADER, correlationId);
+        httpResponse.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+        httpResponse.setContentType(PROBLEM_MEDIA_TYPE);
+        httpResponse.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        httpResponse.setContentLength(body.length);
+        httpResponse.getOutputStream().write(body);
+        httpResponse.flushBuffer();
+    }
+
+    /**
+     * Narrows a servlet request to its HTTP form, or {@code null} when it has none.
+     *
+     * <p>Assumptions: a non-HTTP request has no path to report, and reporting {@code null} for the path
+     * is what {@link ApiError} already models for an absent one, so the two absences are the same
+     * absence and no substitute value has to be invented.</p>
+     *
+     * @param request the request to narrow
+     * @return the request as an HTTP request, or {@code null} when it is not one
+     */
+    private static HttpServletRequest httpRequestOf(ServletRequest request) {
+        return request instanceof HttpServletRequest httpRequest ? httpRequest : null;
+    }
+
+    /**
+     * Reads the path a refusal is attributed to, with any embedded card number masked.
+     *
+     * <p>Assumptions: the path is masked before it is placed in the response body, because a caller
+     * assembles its own request target and a refused request is exactly the case where that target was
+     * not one this service publishes a route for. The masking is delegated to
+     * {@code com.carddemo.common.security.CardNumberMasker} rather than restated, so the filter and the
+     * shared advice mask by one rule.</p>
+     *
+     * @param request the request to read, or {@code null} when the response has no HTTP request behind
+     *     it
+     * @return the masked request path, or {@code null} when there is no request to read one from
+     */
+    private static String pathOf(HttpServletRequest request) {
+        return request == null ? null
+                : CardNumberMasker.maskEmbeddedCardNumbers(request.getRequestURI());
     }
 
     /**
@@ -904,29 +1068,51 @@ public final class CorrelationIdFilter implements Filter {
      * wider than that single width deliberately, because a caller choosing to smuggle a number is not
      * bound by the width this system stores.</p>
      *
-     * <p>Trade-offs: a legitimate all-digit identity of thirteen or more digits is refused with it, and
-     * that is the accepted cost. Such a value is indistinguishable from a card number by inspection, so
-     * no rule could admit one and exclude the other; every all-digit identity shorter than thirteen
-     * characters, and every value carrying a letter or one of the accepted separators at any position,
-     * is unaffected.</p>
+     * <p>Refactoring Rationale: the test is applied to the value with its SEPARATORS REMOVED, and it
+     * previously was not. The alphabet admits a hyphen, a dot and an underscore, so
+     * {@code 4111-1111-1111-1111} carried no bare run of thirteen digits, conformed, and was published
+     * to the mapped diagnostic context, echoed onto the response header and written to every log line
+     * of the request -- the exact exposure this test was added to close, defeated by the three
+     * characters the alphabet had to admit for legitimate callers. Normalising first is what makes the
+     * rule about the VALUE rather than about its punctuation, and it is the same correction
+     * {@code com.carddemo.common.security.CardNumberMasker} carries for the rendering half of the same
+     * problem.</p>
+     *
+     * <p>Trade-offs: the refused class widens, and the cost is real and worth naming. A legitimate
+     * identity of thirteen or more digits is refused whether it is written bare or with separators, so
+     * a caller whose scheme is a separated timestamp such as {@code 2024-01-15-093000} -- fifteen
+     * digits once normalised -- is now refused where before it was echoed. That is accepted for two
+     * reasons: the same caller writing the same value WITHOUT separators was already refused, so
+     * admitting the separated form was an inconsistency rather than a feature; and a separated
+     * fifteen-digit value is indistinguishable from a separated card number by inspection, so no rule
+     * can admit one and exclude the other. Every value carrying a letter at any position is unaffected,
+     * which includes every identity this platform mints -- {@link #GENERATED_ID_PREFIX} guarantees
+     * it -- and the refusal names the rule so a caller can act on it.</p>
      *
      * @param candidate the value to classify, already known to be non-empty and token-safe
-     * @return {@code true} when every character is an ASCII digit and the length falls in the
-     *     card-number range, {@code false} otherwise
+     * @return {@code true} when the value carries only digits and accepted separators, and its digits
+     *     alone number {@link #ACCOUNT_NUMBER_MIN_DIGITS} or more; {@code false} otherwise
      */
     private static boolean isAccountNumberShaped(String candidate) {
-        if (candidate.length() < ACCOUNT_NUMBER_MIN_DIGITS) {
-            return false;
-        }
+        int digits = 0;
 
         for (int position = 0; position < candidate.length(); position++) {
             char character = candidate.charAt(position);
-            if (character < '0' || character > '9') {
+            if (character >= '0' && character <= '9') {
+                digits++;
+                continue;
+            }
+            // WHY : Assumptions: a separator does not disqualify the value and does not count towards
+            //       the digit total, while ANY other character disqualifies it outright. That
+            //       asymmetry is what keeps the rule narrow: a value carrying a letter is not a
+            //       written card number in any convention, so it is admitted immediately rather than
+            //       having its digits counted.
+            if (ACCEPTED_PUNCTUATION.indexOf(character) < 0) {
                 return false;
             }
         }
 
-        return true;
+        return digits >= ACCOUNT_NUMBER_MIN_DIGITS;
     }
 
     /**
@@ -954,8 +1140,9 @@ public final class CorrelationIdFilter implements Filter {
     /**
      * Mints a correlation identity occupying the contract width exactly.
      *
-     * @return a newly minted identity of exactly {@code CORRELATION_ID_MAX_LENGTH} upper-case
-     *     hexadecimal characters, each a single byte when encoded as ASCII
+     * @return a newly minted identity of exactly {@code CORRELATION_ID_MAX_LENGTH} characters: the
+     *     two-character {@link #GENERATED_ID_PREFIX} followed by upper-case hexadecimal, each a single
+     *     byte when encoded as ASCII, and never a bare run of digits
      */
     private static String generateCorrelationId() {
         // WHY : Alternatives Considered: the platform's universally unique identifier, whose canonical
@@ -971,9 +1158,14 @@ public final class CorrelationIdFilter implements Filter {
         //       requests, which turns an aid to reading logs into an aid to enumerating them. The
         //       identity authenticates nothing and carries no credential; unpredictability is chosen
         //       to deny that enumeration, not to protect the value itself.
+        //
+        //       Assumptions: the prefix is prepended rather than the rendering being post-processed,
+        //       so a minted identity is outside the refused bare-numeric class by CONSTRUCTION and not
+        //       by a test that could pass one value in twenty-one thousand. The reasoning is on
+        //       GENERATED_ID_PREFIX.
         byte[] entropy = new byte[GENERATED_ID_RANDOM_BYTES];
         ENTROPY_SOURCE.nextBytes(entropy);
-        return IDENTITY_RENDERER.formatHex(entropy);
+        return GENERATED_ID_PREFIX + IDENTITY_RENDERER.formatHex(entropy);
     }
 
     /**

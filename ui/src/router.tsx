@@ -1,16 +1,10 @@
-import { Button, Result, Spin } from "antd";
-import { lazy, Suspense } from "react";
-import type { ReactElement } from "react";
-import {
-  BrowserRouter,
-  Navigate,
-  Route,
-  Routes,
-  useNavigate,
-} from "react-router";
+import { Button, Result, Spin } from 'antd';
+import { lazy, Suspense } from 'react';
+import type { ReactElement } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router';
 
-import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from "./routes/cards";
-import { navigateSafely } from "./routes/navigation";
+import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from './routes/cards';
+import { navigateSafely } from './routes/navigation';
 
 /** Loads the browse screen only when a card route needs it. */
 const CardListScreen = lazy(
@@ -21,7 +15,7 @@ const CardListScreen = lazy(
    *   adapted to the default-export shape.
    */
   async () => {
-    const module = await import("./screens/cardList");
+    const module = await import('./screens/cardList');
     return { default: module.CardListScreen };
   },
 );
@@ -35,7 +29,7 @@ const CardDetailScreen = lazy(
    *   adapted to the default-export shape.
    */
   async () => {
-    const module = await import("./screens/cardDetail");
+    const module = await import('./screens/cardDetail');
     return { default: module.CardDetailScreen };
   },
 );
@@ -49,7 +43,7 @@ const CardUpdateScreen = lazy(
    *   adapted to the default-export shape.
    */
   async () => {
-    const module = await import("./screens/cardUpdate");
+    const module = await import('./screens/cardUpdate');
     return { default: module.CardUpdateScreen };
   },
 );
@@ -70,7 +64,7 @@ function NotFoundScreen(): ReactElement {
           onClick={
             /** Returns the operator to the browse screen from the not-found result. */
             () => {
-              navigateSafely(navigate, "/cards");
+              navigateSafely(navigate, '/cards');
             }
           }
         >

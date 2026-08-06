@@ -1,6 +1,8 @@
 package com.carddemo.common.codec;
 
+import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.OpaqueIdentifier;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -104,7 +106,9 @@ import java.util.Set;
  * transfer it addresses the position one past the last character written -- and is then moved
  * straight into the put's buffer length at line 756 and passed to the call at line 762. The baseline
  * therefore sends 64 bytes for the 63 it builds, the sixty-fourth being a space from the 200-byte
- * put buffer declared at line 108. This class implements 63; the divergence is documented. Inside
+ * put buffer declared at line 108. This class implements 63 and the divergence is registered as
+ * {@code D-REPLY-PUT-LENGTH} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Inside
  * this class a payload length and a scan position are always separate, differently named values,
  * because holding them in one is precisely what produced the extra byte.</p>
  *
@@ -236,6 +240,26 @@ public final class CsvAuthCodec {
     public static final int REQUEST_FIELD_COUNT = 18;
 
     /**
+     * The stand-in a rendering prints where a sensitive component is withheld rather than masked.
+     *
+     * <p>Assumptions: a marker is printed rather than the member being omitted, because an omitted
+     * member reads as an absent value while a marker reads as a deliberate withholding, and the two
+     * lead a reader to opposite conclusions about the message they are looking at.</p>
+     */
+    private static final String WITHHELD_MARKER = "<withheld>";
+
+    /**
+     * The note a request rendering prints in place of its fifteen withheld components.
+     *
+     * <p>Assumptions: the note names the CATEGORIES withheld rather than listing fifteen members
+     * against the marker, because the list would be longer than the rendering it belongs to and every
+     * entry would carry the same value. Naming the categories tells a reader what is missing and why
+     * in one line.</p>
+     */
+    private static final String WITHHELD_COMPONENTS_NOTE =
+            "amount, merchant, acquirer and message detail " + WITHHELD_MARKER;
+
+    /**
      * The sum of the eighteen field widths this class emits for a request, counting no delimiter.
      *
      * <p>Assumptions: 152 and not the copybook's 153, because the ordinal-nine money field is
@@ -301,13 +325,48 @@ public final class CsvAuthCodec {
      * former name was therefore wrong by nine characters in the direction that truncates. The two
      * quantities are now named apart so neither can be read as the other.</p>
      *
-     * <p>Assumptions: the rename is deliberately source-incompatible rather than additive. Leaving
-     * the old name in place beside a correctly named companion would keep a published constant whose
-     * name asserts something untrue, and changing its VALUE to 22 under the same name would silently
-     * halve a buffer a consumer had already sized -- a change no compiler could report. Removing the
-     * name makes every consumer stop compiling and re-decide which of the two quantities it meant.</p>
+     * <p>Assumptions: the rename does NOT remove the old name. Changing that name's VALUE to 22
+     * would have silently halved a buffer a consumer had already sized -- a change no compiler could
+     * report -- so the value stays where it is and only the name it is published under changes.
+     * {@link #CORRELATION_KEY_LENGTH} is retained beside it as a deprecated alias so that a consumer
+     * compiled against the earlier common-lib keeps compiling and is told, by a deprecation warning
+     * naming this constant, which of the two quantities it should have meant.</p>
      */
     public static final int CORRELATION_COMPOSITE_LENGTH = 31;
+
+    /**
+     * Deprecated alias of {@link #CORRELATION_COMPOSITE_LENGTH}, retained for source compatibility.
+     *
+     * <p>Refactoring Rationale: an earlier revision of this class DELETED this name outright when
+     * the correctly named constant was introduced, on the reasoning that a hard compile failure makes
+     * every consumer re-decide which quantity it meant. That reasoning is right about the goal and
+     * wrong about the mechanism available here: common-lib publishes no major-version boundary at
+     * which a source-incompatible removal is announced, and every one of the eight service modules
+     * resolves it as {@code 1.0.0-SNAPSHOT}, so the deletion broke compilation for consumers of the
+     * prior API with no declared break to point at. A deprecated alias achieves the same
+     * re-decision -- the compiler emits a warning naming the replacement at every use site -- without
+     * making the module's own version history dishonest. Removal belongs in a declared major-version
+     * break, and this alias is the thing that break will remove.</p>
+     *
+     * <p>Assumptions: the alias carries the SAME value as its replacement and is initialised from it
+     * rather than restating 31, so the two cannot drift apart. That is the whole safety property of
+     * an alias: a reader who finds either name finds one number.</p>
+     *
+     * <p>Trade-offs: the name is still the misleading one -- it says "correlation key" and measures
+     * the plaintext composite the key is derived from, which is nine characters wider than the token
+     * {@link #CORRELATION_TOKEN_LENGTH} publishes. Keeping a misleading name in the public surface is
+     * a real cost, and it is accepted only because the deprecation is what tells a reader the name is
+     * wrong. What is bought is that the correction is delivered as a warning a consumer can act on
+     * rather than as a build failure a consumer has to diagnose.</p>
+     *
+     * @deprecated use {@link #CORRELATION_COMPOSITE_LENGTH}, whose name states that the figure is the
+     *     width of the plaintext card-number and transaction-identifier composite. For the width of
+     *     the tokenised value the two {@code correlationKey} accessors return, use
+     *     {@link #CORRELATION_TOKEN_LENGTH} instead; the two quantities differ, and reading this
+     *     constant as the token width oversizes a buffer by nine characters.
+     */
+    @Deprecated(since = "1.0.0", forRemoval = true)
+    public static final int CORRELATION_KEY_LENGTH = CORRELATION_COMPOSITE_LENGTH;
 
     /**
      * The length of the correlation token that matches a reply to its request.
@@ -610,11 +669,25 @@ public final class CsvAuthCodec {
 
 
     /**
+     * The stable token an alert rule or a log query matches an authorization-wire refusal on.
+     *
+     * <p>Assumptions: one code for every format violation of this wire, because a consumer's response to
+     * all of them is the same -- the message goes to the dead-letter queue -- and a code that
+     * distinguished them would be matched on by nobody.</p>
+     */
+    private static final String REFUSAL_CODE = "AUTH_WIRE_MALFORMED";
+
+    /**
      * Reports that a payload or a field value violates the declared authorization message format.
      *
      * <p>Assumptions: a format violation on this wire is a caller-side defect rather than a
-     * recoverable condition, which is why this extends {@link IllegalArgumentException} rather than
-     * a checked type. Nothing downstream can retry its way out of a payload carrying the wrong field
+     * recoverable condition, which is why this extends {@link ClientInputException} -- itself an
+     * unchecked {@code IllegalArgumentException} -- rather than a checked type. Refactoring Rationale:
+     * the supertype was the bare {@code IllegalArgumentException} and is now the narrower one, because
+     * the shared advice no longer claims the whole family: that family also carries every internal
+     * invariant in the migration, so claiming it reported a service defect to a caller as a request to
+     * correct. This type satisfies the narrower supertype's redaction obligation already, through the
+     * per-field sensitivity gate every message in this codec is composed by. Nothing downstream can retry its way out of a payload carrying the wrong field
      * count or a money token with no decimal point; the message has to be rejected and reported, and
      * the consumer's dead-letter queue is where a rejected message goes.</p>
      *
@@ -624,7 +697,7 @@ public final class CsvAuthCodec {
      * it nested rather than as its own file follows the reasoning recorded on the enclosing
      * class.</p>
      */
-    public static final class AuthMessageFormatException extends IllegalArgumentException {
+    public static final class AuthMessageFormatException extends ClientInputException {
 
         /**
          * The serialisation identity of this exception type.
@@ -646,7 +719,12 @@ public final class CsvAuthCodec {
          *     diagnosed from the log line alone
          */
         public AuthMessageFormatException(String message) {
-            super(message);
+            // WHY : Assumptions: the stable code is fixed and no field key is supplied. Every refusal of
+            //       this type concerns one payload rather than one named member -- a wrong field count, a
+            //       wrong width, a money token with no decimal point -- so there is no member for a form
+            //       to draw a marker against, and the shared advice keys the entry by the request as a
+            //       whole when none is named.
+            super(REFUSAL_CODE, message);
         }
     }
 
@@ -885,6 +963,44 @@ public final class CsvAuthCodec {
 
             return tokeniser.token(GROUP_PURPOSE, cardNum);
         }
+
+        /**
+         * Renders this request for a log line or a diagnostic, disclosing no sensitive wire value.
+         *
+         * <p>Refactoring Rationale: the compiler-generated rendering a record receives by default
+         * prints EVERY component, so the inherited form emitted the full sixteen-digit primary account
+         * number along with the merchant identity and the amount authorization was sought for. The
+         * transfer objects that carry the same request over HTTP already mask, but this carrier is the
+         * one that travels the live queue path -- it is the value a consumer holds when it logs a
+         * failed decision, a redelivery or a poison message -- so it is the rendering most likely to
+         * reach a log aggregator, and it was the one still disclosing the number. Overriding is the
+         * only remedy available: a record's rendering cannot be suppressed by annotation.</p>
+         *
+         * <p>Assumptions: the card number is MASKED to its last four digits through the shared masker
+         * rather than withheld, because the suffix is what makes a log line actionable -- an operator
+         * correlating a customer report to a message needs to recognise the card without being handed
+         * it. Every other sensitive wire value is WITHHELD outright rather than masked: the amount, the
+         * merchant identity, the acquirer geography and the entry mode are together enough to
+         * reconstruct a cardholder's purchase, and none of them helps identify which message this is.
+         * The transaction identifier is retained in full because it is the correlation half a reader
+         * needs and it discloses nothing on its own.</p>
+         *
+         * <p>Trade-offs: what is given up is the ability to reconstruct a payload from a log line, so
+         * reproducing a decode failure requires the message itself rather than the record's rendering.
+         * That is accepted: the codec's own failure messages already name the offending field through
+         * {@link #fieldFailure(String, String, CharSequence)}, which withholds the value for exactly
+         * the fields withheld here, so the diagnostic path that genuinely needs field detail has it
+         * and the incidental path does not.</p>
+         *
+         * @return a rendering carrying the masked card number and the transaction identifier only,
+         *     never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "AuthRequest[cardNum=" + CardNumberMasker.mask(cardNum)
+                    + ", transactionId=" + transactionId
+                    + ", " + WITHHELD_COMPONENTS_NOTE + "]";
+        }
     }
 
 
@@ -987,6 +1103,41 @@ public final class CsvAuthCodec {
             return tokeniser.token(CORRELATION_PURPOSE,
                     buildCorrelationKey(cardNum, REPLY_FIELD_NAMES.get(0), transactionId,
                             REPLY_FIELD_NAMES.get(1)));
+        }
+
+        /**
+         * Renders this reply for a log line or a diagnostic, disclosing no sensitive wire value.
+         *
+         * <p>Refactoring Rationale: as on the request carrier, the compiler-generated rendering
+         * printed every component and therefore the full sixteen-digit primary account number. The
+         * reply is the value a producer holds when it logs a publication failure or an outbox retry,
+         * so it reaches the same log aggregator by the same route, and a record's rendering cannot be
+         * suppressed by annotation.</p>
+         *
+         * <p>Assumptions: the card number is masked to its last four digits and the approved amount is
+         * withheld, while the three decision fields -- the authorization identification code, the
+         * response code and the response reason -- are retained in full. That split follows what a
+         * reader needs: the decision fields are the whole reason to look at a reply, they are the
+         * values a parity comparison checks, and none of them says anything about the cardholder. The
+         * amount is withheld because an approved amount beside even a masked card number is
+         * transaction detail rather than an operational fact.</p>
+         *
+         * <p>Trade-offs: the withheld amount means a reader reconciling money has to consult the
+         * message or the stored decision rather than a log line, which is accepted for the same reason
+         * as on the request carrier: the paths that legitimately need the value have it, and an
+         * incidental rendering is not one of them.</p>
+         *
+         * @return a rendering carrying the masked card number, the transaction identifier and the
+         *     three decision fields, never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "AuthReply[cardNum=" + CardNumberMasker.mask(cardNum)
+                    + ", transactionId=" + transactionId
+                    + ", authIdCode=" + authIdCode
+                    + ", authRespCode=" + authRespCode
+                    + ", authRespReason=" + authRespReason
+                    + ", approvedAmount=" + WITHHELD_MARKER + "]";
         }
     }
 
@@ -1145,8 +1296,10 @@ public final class CsvAuthCodec {
      *
      * <p>Assumptions: this method emits 63 characters where the reference program's put transmits 64.
      * The extra byte is a consequence of {@code WS-RESP-LENGTH} serving as both the {@code STRING}
-     * cursor at line 730 and the put's buffer length at lines 756 and 762; the baseline sends 64, the
-     * Java emits 63, and the divergence is documented. The reciprocal tolerance lives in
+     * cursor at line 730 and the put's buffer length at lines 756 and 762, so the baseline sends one
+     * byte of uninitialised buffer past the payload it built. The divergence is registered as
+     * {@code D-REPLY-PUT-LENGTH} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. The reciprocal tolerance lives in
      * {@link #decodeReply(String)}.</p>
      *
      * @param reply the reply to render; must not be {@code null}
@@ -1351,8 +1504,8 @@ public final class CsvAuthCodec {
      *     digits
      * @throws NullPointerException if {@code amount} is {@code null}
      * @throws AuthMessageFormatException if {@code amount} carries more than {@code MONEY_SCALE}
-     *     decimal places, or if its magnitude does not fit the integer digits the sign leaves
-     *     available
+     *     decimal places, or if its magnitude needs more than {@code MONEY_INTEGER_DIGITS} integer
+     *     digits
      */
     public static String formatRequestMoney(BigDecimal amount, String fieldName) {
         BigDecimal canonical = canonicalAmount(amount, fieldName);
@@ -2015,6 +2168,31 @@ public final class CsvAuthCodec {
         if (normalised.length() > declaredWidth) {
             throw fieldFailure(cobolName, "is " + normalised.length() + " characters but the copybook"
                     + " declares " + declaredWidth, normalised);
+        }
+
+        // WHY : Refactoring Rationale: a control character is refused HERE, at the field, and this
+        //       check closes a genuine round-trip hole rather than adding a new rule. The decode path
+        //       already refuses any control character in a whole payload, in splitOnDelimiter, on the
+        //       ground that a carriage return or line feed inside a value forges or splits a record in
+        //       any line-oriented log the value later reaches and that an escape sequence reaching a
+        //       terminal is interpreted rather than displayed. The encode path did not, so this class
+        //       would EMIT a payload it then REFUSED TO READ: encodeRequest returned a full-length
+        //       payload and decodeRequest threw on it. An encoder whose output its own decoder rejects
+        //       is broken whichever of the two is right, and the decode side is the one that is right.
+        // WHY : Assumptions: the platform's ISO-control predicate is used rather than a comparison
+        //       against the space character, matching indexOfControlCharacter exactly. A numeric cutoff
+        //       at space would admit the delete character and the whole upper control range, which are
+        //       precisely the characters a log viewer or a terminal interprets rather than displays.
+        //       Trade-offs: refusing at the field costs one scan per field instead of one per payload,
+        //       and buys a diagnostic that names the field -- which the payload-level check cannot,
+        //       because by then the value is one substring among eighteen.
+        for (int position = 0; position < normalised.length(); position++) {
+            if (Character.isISOControl(normalised.charAt(position))) {
+                throw fieldFailure(cobolName, "carries a control character at position "
+                        + (position + 1) + "; every field this contract declares is a display picture,"
+                        + " so no control character is representable in one, and the decoder refuses a"
+                        + " payload carrying one", normalised);
+            }
         }
 
         // WHY : Refactoring Rationale: a character outside the wire's single-byte range used to be

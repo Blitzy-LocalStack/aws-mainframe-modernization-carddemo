@@ -32,10 +32,14 @@
  * {@code spring.datasource.hikari} and verifies, once, before any step runs, that the
  * connection's effective schema is the one Flyway was configured to migrate. That check
  * carries more weight in this module than in any sibling, because this is the only
- * module whose connections initialise a FIVE-schema search path
- * ({@code batch, ledger, account, card, reference}); a reordered path still resolves an
+ * module whose connections initialise a FOUR-schema search path
+ * ({@code batch, ledger, account, reference}); a reordered path still resolves an
  * unqualified write, against a real table in the wrong schema, so the failure would be a
- * plausible row rather than an error.</p>
+ * plausible row rather than an error. Refactoring Rationale: a fifth entry,
+ * {@code card}, was withdrawn because {@code app/cbl/CBTRN01C.cbl} opens
+ * {@code CARD-FILE} at {@code :309} without ever reading it, the cross-reference it does
+ * read at {@code :229} is mapped to {@code account.card_xref}, and no entity in this
+ * module declares {@code @Table(schema = "card")}.</p>
  *
  * <p>{@code BatchConfig} — planned. Its contract is the chunk-oriented step definitions
  * and their reader, processor and writer wiring. Assumptions: it is deliberately absent

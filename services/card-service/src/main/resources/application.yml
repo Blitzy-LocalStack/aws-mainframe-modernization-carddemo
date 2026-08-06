@@ -640,6 +640,34 @@ spring:
           #   one that does not start, because it looks like it is working.
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 
+  # Alternatives Considered: leaving this list untouched and letting the document
+  #   generated from the annotations be the published contract. Rejected because
+  #   ui/src/api/cards.ts is written against openapi/card-api.yaml, which makes
+  #   that file a published interface of this module rather than a developer
+  #   convenience; a generated document reflects whichever annotations happen to
+  #   be present and can drift from it, leaving two descriptions of one endpoint
+  #   and no rule for which a client should believe.
+  # Refactoring Rationale: this key was absent while springdoc below pinned the
+  #   Swagger UI path, so the contract this module publishes was on the class path
+  #   and reachable from nothing. The framework serves static content only from
+  #   the locations named here, and classpath:/openapi/ is not among its defaults,
+  #   so openapi/card-api.yaml answered 404 at every URL.
+  # Assumptions: this key REPLACES the framework's default list rather than adding
+  #   to it, which is why all four defaults are restated. Dropping
+  #   classpath:/META-INF/resources/ in particular would stop the Swagger UI assets
+  #   being served at all, because they ship inside a webjar under exactly that
+  #   path. classpath:/openapi/ is added rather than the class-path root
+  #   deliberately: the root would publish this configuration file itself,
+  #   placeholders and all, on an HTTP endpoint.
+  web:
+    resources:
+      static-locations:
+        - classpath:/META-INF/resources/
+        - classpath:/resources/
+        - classpath:/static/
+        - classpath:/public/
+        - classpath:/openapi/
+
 
 # -----------------------------------------------------------------------------
 # Trade-offs: (1) the health path is a deployment contract and is documented as one,
@@ -770,6 +798,21 @@ springdoc:
   #   permitted axes recorded in the closing block.
   swagger-ui:
     path: /swagger-ui.html
+
+    # Refactoring Rationale: this key was absent, so the page displayed the
+    #   GENERATED document while the note above named openapi/card-api.yaml as the
+    #   contract of record. The two claims could not both be true: what an operator
+    #   read was whatever the annotations produced, which at this checkpoint is an
+    #   empty paths object, and the hand-authored contract was reachable at no URL
+    #   at all. The path below is what spring.web.resources.static-locations above
+    #   resolves card-api.yaml to, and the two move together.
+    url: /card-api.yaml
+
+    # Assumptions: without this the view ALSO offers its own bundled sample
+    #   definition in the same selector as the contract above, so a reader can
+    #   silently end up reading a document that describes nothing in this service.
+    #   Disabling it leaves exactly one definition in the selector.
+    disable-swagger-default-url: true
 
   # Trade-offs: sorting the generated document's keys costs a little
   #   serialisation work on each request for it, and buys a document that is

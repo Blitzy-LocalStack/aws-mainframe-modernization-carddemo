@@ -9,11 +9,10 @@
 #   configuration relies on, and the exact provider majors whose resource
 #   schemas the module's resources are written against.
 #
-#   The module generates its service database passwords at apply time and
-#   imports environment-issued TLS material through required sensitive inputs.
-#   The random provider is therefore a genuine requirement for the database
-#   family rather than an incidental one; certificate issuance remains outside
-#   Terraform and needs no third provider.
+#   The module generates its service database passwords at apply time, so the
+#   random provider is a genuine requirement rather than an incidental one. It
+#   packages no deployment artifact and imports no certificate material, so it
+#   needs no third provider.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: this directory is a reusable MODULE, not a root. It is
@@ -33,10 +32,18 @@
 #     account, and declaring an alias would force every caller to pass an
 #     explicit provider map for no gain. `experiments`, `cloud` and
 #     `provider_meta` are absent for the same reason: nothing here needs them.
-#   - Trade-offs: exactly three providers are declared and no more. A fourth entry
-#     that no resource consumed would be reported by tflint's
-#     terraform_unused_required_providers rule, so this list is kept as a
-#     precise statement of what the module actually uses.
+#   - Trade-offs: exactly two providers are declared and no more, matching the
+#     two the whole infra/ tree admits. A third entry that no resource consumed
+#     would be reported by tflint's terraform_unused_required_providers rule, so
+#     this list is kept as a precise statement of what the module actually uses.
+#   - Refactoring Rationale: `hashicorp/archive` was declared here while this
+#     module packaged a Python credential-rotation Lambda of its own. That
+#     function was removed -- rotation of a secret VALUE is not this module's
+#     remit, and owning one dragged eight cross-module coordinates into the input
+#     contract -- so the provider that existed only to build its deployment
+#     package went with it. A root that supplies a rotation function through
+#     `rotation_lambda_arn` packages it in its own configuration, where it already
+#     packages the four Lambdas the batch state machine invokes.
 # =============================================================================
 
 terraform {
@@ -88,16 +95,6 @@ terraform {
     random = {
       source  = "hashicorp/random"
       version = "~> 3.9"
-    }
-
-    # WHY : Assumptions: the rotation Lambda source is committed as readable
-    #       Python and packaged deterministically during planning. Checking in a
-    #       binary zip would hide the reviewed source behind an opaque artifact;
-    #       a local-exec zip command would make correctness depend on whichever
-    #       shell utilities happen to exist on the apply host.
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.7"
     }
   }
 }

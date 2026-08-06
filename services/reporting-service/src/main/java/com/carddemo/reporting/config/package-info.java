@@ -12,29 +12,56 @@
  * L125 to L127, and the agreement between the two files is deliberate rather than
  * incidental: a reader who finds them disagreeing has found a defect in one of them.
  *
- * <p><strong>The roster is closed at four classes.</strong> Each owns one concern, and no
- * fifth configuration class is expected here:
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: the roster below is this package's <b>target contract</b> as the
+ * migration plan assigns it, not a measurement of the directory. Measured at the
+ * checkpoint that authored this section, three of the five have landed --
+ * {@code SecurityConfig}, {@code DataSourceConfig} and {@code JwtDecoderConfig} -- while
+ * {@code OpenApiConfig} and {@code StepFunctionsConfig} are <b>planned</b>, not missing,
+ * and are authored at a later index of the same plan. Each planned entry says so at its
+ * own bullet, so a reader never has to infer presence from a name.</p>
+ *
+ * <p><strong>The roster is closed at five classes.</strong> Each owns one concern, and no
+ * sixth configuration class is expected here:
  * <ul>
- *   <li>{@code SecurityConfig} -- the Cognito JWT resource server. It wires
+ *   <li>{@code JwtDecoderConfig} -- LANDED. The token decoder, and the reason this roster
+ *       is five rather than four. Refactoring Rationale: an earlier revision of this
+ *       charter closed the roster at four and omitted this class, which left a landed and
+ *       load-bearing type outside the stated contract -- the worst of both readings, since
+ *       a reader auditing the roster would have concluded the file was surplus and a
+ *       reader auditing the directory would have concluded the charter was stale. It is
+ *       assigned here rather than removed because what it does is not optional: one Cognito
+ *       user pool issues tokens for every app client registered against it and mints two
+ *       token kinds per sign-in, so signature, issuer, audience and time checks alone
+ *       accept an identity token and a token minted for an unrelated client. This class
+ *       composes the token-kind, minting-client and scope checks into the decision itself.
+ *       Alternatives Considered: folding it into {@code SecurityConfig}. Rejected because
+ *       neither check is expressible as a property in any release of this framework, so
+ *       the code has to live somewhere, and putting it in the filter-chain class would mix
+ *       the question "is this credential acceptable" into the class that answers "what may
+ *       this credential reach" -- two decisions with different reasons to change.</li>
+ *   <li>{@code SecurityConfig} -- LANDED. The Cognito JWT resource server. It wires
  *       {@code com.carddemo.common.security.JwtRoleConverter} so that the
  *       {@code cognito:groups} claim becomes Spring Security authorities, applies
  *       group-claim authorization to this context's routes, and registers
  *       {@code com.carddemo.common.web.CorrelationIdFilter}.</li>
- *   <li>{@code DataSourceConfig} -- the database role holding {@code SELECT} and nothing
+ *   <li>{@code DataSourceConfig} -- LANDED. The database role holding {@code SELECT} and nothing
  *       else, the schema search path that role reads across, and the connection pool
  *       sizing.</li>
- *   <li>{@code OpenApiConfig} -- the OpenAPI 3.1 document metadata consumed by springdoc,
+ *   <li>{@code OpenApiConfig} -- PLANNED, not yet authored. The OpenAPI 3.1 document
+ *       metadata consumed by springdoc,
  *       whose starter is the dependency declared at this module's {@code pom.xml} L234.</li>
- *   <li>{@code StepFunctionsConfig} -- the client through which a
+ *   <li>{@code StepFunctionsConfig} -- PLANNED, not yet authored. The client through which a
  *       {@code states:StartExecution} call starts a report execution. The AWS SDK Step
  *       Functions artifact backing it is declared at this module's {@code pom.xml}
  *       L280.</li>
  * </ul>
  *
- * <p>Alternatives Considered: folding these four concerns into the context root package,
+ * <p>Alternatives Considered: folding these concerns into the context root package,
  * or into one combined configuration class, rather than giving them a package of their
- * own. Rejected on the strength of the module's own dependency set, which shows the four
- * concerns arriving from four unrelated directions: the resource server from the security
+ * own. Rejected on the strength of the module's own dependency set, which shows the
+ * concerns arriving from unrelated directions: the resource server from the security
  * and OAuth2 starters at {@code pom.xml} L185 and L190, the datasource from the JPA
  * starter and the driver at L153 and L220, the document metadata from springdoc at L234,
  * and the execution client from the AWS SDK at L280. One class holding all four would take

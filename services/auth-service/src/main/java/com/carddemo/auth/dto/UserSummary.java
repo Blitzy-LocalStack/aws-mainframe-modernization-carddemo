@@ -168,15 +168,23 @@ import jakarta.validation.constraints.Size;
  * enumeration would also make an unrecognised letter a deserialisation failure of the whole payload
  * instead of one reportable field error, which loses the per-field detail a caller needs.
  *
- * <p>Trade-offs: this record declares no member of its own -- no compact constructor, no explicit
- * accessor and no overridden method -- so its whole behaviour is what the record header generates.
- * The alternative, a compact constructor that trimmed the padding of the reference record or
- * rejected an inadmissible letter, was evaluated and rejected because this type has no invariant
- * spanning two components for such a constructor to enforce; each of the four constraints below is
- * independent, and a constraint annotation reports every failing component at once whereas a
- * constructor that raises stops at the first. Padding is likewise not this type's concern: the
- * copybook's trailing blanks are record padding rather than name data, and they are removed where
- * the record is decoded, upstream of this projection.
+ * <p>Trade-offs: this record declares no compact constructor and no explicit accessor, so every
+ * behaviour except its string form is what the record header generates. The alternative, a compact
+ * constructor that trimmed the padding of the reference record or rejected an inadmissible letter, was
+ * evaluated and rejected because this type has no invariant spanning two components for such a
+ * constructor to enforce; each of the four constraints below is independent, and a constraint
+ * annotation reports every failing component at once whereas a constructor that raises stops at the
+ * first. Padding is likewise not this type's concern: the copybook's trailing blanks are record
+ * padding rather than name data, and they are removed where the record is decoded, upstream of this
+ * projection.
+ *
+ * <p>Refactoring Rationale: the string form is the one generated behaviour this record does override,
+ * and the reason is that leaving it generated is not the neutral choice it appears to be. A record
+ * prints every component beside its value, so the generated form publishes a given name and a family
+ * name for each of the ten rows a page carries; declining to override does not withhold them, it
+ * discloses them, and it does so in log lines, assertion messages and exception details rather than in
+ * the response a caller asked for. Overriding is therefore the narrower behaviour, not the additional
+ * one.
  *
  * @param userId the row's identifier, at most eight characters, from {@code USRID01I PIC X(8)} at
  *     {@code app/cpy-bms/COUSR00.CPY} line 78 and {@code SEC-USR-ID PIC X(08)} at offset 0 of
@@ -214,4 +222,52 @@ public record UserSummary(
         //   at app/cpy/COCOM01Y.cpy lines 27 and 28 is a well-formed character outside the domain.
         //   The pattern matches the whole value, so it admits exactly one of the two letters.
         @NotNull @Size(min = 1, max = 1) @Pattern(regexp = "[AU]") String userType) {
+
+    /**
+     * The placeholder that stands in for a component this record refuses to render.
+     *
+     * <p>Assumptions: the literal matches the one {@code com.carddemo.auth.dto.SignOnResponse} uses
+     * for its token values and the one {@code com.carddemo.auth.dto.UserResponse} uses for its
+     * personal values, so a log store holding lines from all three types shows one placeholder
+     * vocabulary. It is declared here rather than borrowed from either sibling because a placeholder
+     * reached across type boundaries would couple two projections that have no other relationship,
+     * and the cost of the duplication is one literal whose value carries no behaviour.
+     */
+    private static final String REDACTED_PERSONAL = "REDACTED";
+
+    /**
+     * Renders this row for diagnostics with both name components replaced by a placeholder.
+     *
+     * <p>Refactoring Rationale: this record is a page item, so the exposure it carries is multiplied
+     * by the ten rows a page holds -- one stringified page publishes ten given names and ten family
+     * names. That is the difference between this record and a single-row response: the same generated
+     * behaviour discloses a list of people rather than one, which is the shape a log store is most
+     * useful to an attacker in.
+     *
+     * <p>Trade-offs: {@code userId} and {@code userType} print in full and the two names do not.
+     * {@code userId} is the row locator a caller places in the request path, assigned by the system
+     * rather than a fact about the person, and a rendering that located no row could not correlate
+     * anything; {@code userType} is a two-valued role classification with no personal content. What is
+     * given up is being able to tell two instances of the same row apart from their printed form, which
+     * costs nothing here because a page never holds one row twice -- the ordering the cursor pages over
+     * is by the identifier that prints.
+     *
+     * <p>Assumptions: only the string form is narrowed. Equality, hashing and serialisation are
+     * untouched, so the page envelope this record travels in still carries every value the published
+     * contract promises to the caller that asked for it.
+     *
+     * @return a single-line description of this row naming every component in contract order, in which
+     *     the given name and the family name are each represented by a placeholder and never rendered
+     */
+    @Override
+    public String toString() {
+        // Assumptions: the generated form's shape is reproduced deliberately, component order
+        //   included, so that a reader who knows what a record prints is not led to think some other
+        //   type produced this line. Only the two name values depart from it.
+        return "UserSummary[userId=" + userId
+                + ", firstName=" + REDACTED_PERSONAL
+                + ", lastName=" + REDACTED_PERSONAL
+                + ", userType=" + userType
+                + "]";
+    }
 }

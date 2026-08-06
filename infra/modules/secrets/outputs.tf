@@ -4,10 +4,11 @@
 # Purpose:
 #   The COMPLETE public contract of the `secrets` module. Everything a caller is
 #   able to learn about the credentials created in
-#   infra/modules/secrets/main.tf, it learns from the three outputs below.
+#   infra/modules/secrets/main.tf, it learns from the single output below.
 #
-#   Every one of them is an IDENTIFIER -- a secret ARN, a secret name, or a
-#   Lambda identifier. Not one is, or is derived from, a credential. A consumer that needs an
+#   Every member of it is an IDENTIFIER -- a secret ARN, a secret name, or an
+#   ECS field selector built from one. Not one is, or is derived from, a
+#   credential. A consumer that needs an
 #   actual credential reads it from Secrets Manager at run time, using the ARN or
 #   the name published here and holding an IAM grant scoped to that entry; the
 #   value itself never travels through a Terraform output, never appears in a
@@ -56,25 +57,33 @@
 #   that file carries under its own "Return values".
 #
 # Return values -- this file IS the return-value contract, in full:
-#   service_credential_secrets ...... role name -> { arn, name }, one per role
-#   rotation_lambda_arn ............. module-owned rotation function ARN
-#   rotation_lambda_name ............ module-owned rotation function name
+#   service_credential_secrets ...... role name -> { arn, name,
+#                                     username_reference, password_reference },
+#                                     one per role
 #
-#   Deliberately absent, so that a later editor does not add either back
+#   Deliberately absent, so that a later editor does not add any of them back
 #   believing it was overlooked:
 #     - Any output carrying a credential VALUE, for the reason given above.
-#     - The version identifier of either secret version resource. See the note
+#     - The version identifier of the secret version resource. See the note
 #       at the foot of this file; it is omitted for a stronger reason than
 #       having no consumer.
+#     - Any rotation-function identifier. This module creates no rotation
+#       function; a schedule is attached only from an ARN the calling ROOT
+#       supplies, so the root already holds every identifier it could publish and
+#       an output here would only echo an input back.
+#     - Any TLS certificate or private-key handle. Those entries, and the
+#       secret-bearing inputs that fed them, were removed: a reusable module is
+#       the wrong custodian for private-key material, and the calling root now
+#       owns both the material it generates and the entries it writes it to.
 #
 # Errors / Exceptions:
-#   No output below declares a `precondition`, so none of them can fail a plan on
+#   The output below declares no `precondition`, so it cannot fail a plan on
 #   its own -- an output is an expression over resources this module already
 #   created, and every failure worth naming belongs to main.tf (an unacceptable
-#   generated value, a name still reserved by an earlier deletion, a rotation
-#   function that cannot reach the cluster) or to the `validation` blocks in
-#   variables.tf. One ordering hazard IS this file's to close, and `depends_on`
-#   below closes it by waiting for every initial service-secret version.
+#   generated value, or a name still reserved by an earlier deletion) or to the
+#   `validation` blocks in variables.tf. One ordering hazard IS this file's to
+#   close, and `depends_on` below closes it by waiting for every initial
+#   service-secret version.
 #
 # WHY (the decisions that govern the whole file, recorded once here):
 #   - Assumptions: the module publishes HANDLES because the run-time contract is
@@ -119,15 +128,15 @@ output "service_credential_secrets" {
     reader passes as `SecretId`, matching the role name character for
     character.
 
-    These entries are not inert. Each value is APPLIED to the matching
-    PostgreSQL role by the schema-bootstrap step, which reads the entry, passes
-    the credential as a bound parameter on a session setting, and runs
-    data-migration/sql/V0__schemas_and_roles.sql -- which issues the ALTER ROLE
-    inside the same transaction that creates the roles and refuses to commit
-    while any role still lacks a credential. A caller therefore has two
-    obligations, not one: grant the bootstrap identity read access to every
-    entry in this map, and grant each task role read access to its own entry
-    alone.
+    This module STORES each credential; it does not APPLY it. Binding a stored
+    value to the matching PostgreSQL role -- the ALTER ROLE that lets the role
+    authenticate with it -- belongs to whatever runs the schema bootstrap, and so
+    does any later rotation. A caller therefore has three obligations, not one:
+    grant each task role read access to its own entry alone, grant the
+    bootstrapping identity read access to every entry in this map so it can bind
+    the values it finds, and -- if the deployment wants rotation -- supply a
+    rotation function through this module's `rotation_lambda_arn` input, because
+    this module deliberately creates none.
   EOT
 
   # WHY : Trade-offs: a MAP KEYED BY ROLE NAME rather than a list of objects, and
@@ -182,102 +191,30 @@ output "service_credential_secrets" {
     }
   }
 
-  # Assumptions: the same ordering guarantee as the master credential outputs above
-  #       holds here, applied
-  #       to the whole family at once. `depends_on` accepts a resource address
-  #       but not an indexed one, so every entry in this map waits for every
-  #       service version rather than only for its own. That is a wider
-  #       constraint than each entry strictly needs and it is accepted for the
-  #       same reason main.tf accepts it on the service rotation resource: the
-  #       alternative available in the language is no ordering guarantee at all.
+  # WHY : Assumptions: an entry's ARN and name exist as soon as the secret shell
+  #       is created, but a consumer that resolves the entry expects a value to be
+  #       there, so this output waits for every initial version to be written.
+  #       Trade-offs: `depends_on` accepts a resource address but not an indexed
+  #       one, so every entry in this map waits for every service version rather
+  #       than only for its own. That is a wider constraint than each entry
+  #       strictly needs, and it is accepted because the alternative available in
+  #       the language is no ordering guarantee at all.
   depends_on = [aws_secretsmanager_secret_version.service]
 }
-
-output "rotation_lambda_arn" {
-  description = "ARN of the module-owned Lambda that applies and rotates every service-role credential through RDS Data API."
-  value       = aws_lambda_function.rotation.arn
-}
-
-output "rotation_lambda_name" {
-  description = "Name of the module-owned service-role credential rotation Lambda, for alarms and operator inspection."
-  value       = aws_lambda_function.rotation.function_name
-}
-
-output "rotation_role_arn" {
-  description = "ARN of the module-owned rotation Lambda role, consumed by the Secrets Manager KMS key policy so rotation can decrypt and replace the exact managed credential documents."
-  value       = aws_iam_role.rotation.arn
-}
-
-output "rotation_log_group_name" {
-  description = "Name of the rotation Lambda CloudWatch log group, consumed by operator diagnostics and root-level observability wiring."
-  value       = aws_cloudwatch_log_group.rotation.name
-}
-
-output "rotation_log_group_arn" {
-  description = "ARN of the rotation Lambda CloudWatch log group, consumed by the exact encryption-context KMS policy assembled in the environment root."
-  value       = aws_cloudwatch_log_group.rotation.arn
-}
-
 # =============================================================================
 # The version identifier is deliberately NOT published, and the reason is
 # stronger than "no caller needs it".
 #
-#   Assumptions: `aws_secretsmanager_secret_version.*.version_id` records the
-#   version THIS configuration created, and main.tf is built so that that
-#   version stops being the current one. Its write-only initial document hands
-#   authority for subsequent values to the module-owned rotation function; the
-#   first rotation therefore moves the AWSCURRENT label to a version this module
-#   has never seen. An output named for the current version would then be
-#   confidently wrong -- and wrong precisely when someone reached for it, which is
-#   after a rotation. Nothing consumes it either: the container secrets
-#   mechanism resolves from the ARN and the ETL helper resolves by name. A stale identifier that
-#   nobody asked for is worth less than the absence of one, so it is absent, and
-#   the absence is recorded here so it reads as a decision rather than a gap.
+#   Assumptions: `aws_secretsmanager_secret_version.service[*].version_id`
+#   records the version THIS configuration created, and main.tf is built so that
+#   that version stops being the current one wherever rotation is configured. Its
+#   write-only initial document hands authority for subsequent values to whatever
+#   rotation function the calling ROOT supplies, so the first rotation moves the
+#   AWSCURRENT label to a version this module has never seen. An output named for
+#   the current version would then be confidently wrong -- and wrong precisely
+#   when someone reached for it, which is after a rotation. Nothing consumes it
+#   either: the container secrets mechanism resolves from the ARN and the ETL
+#   helper resolves by name. A stale identifier that nobody asked for is worth
+#   less than the absence of one, so it is absent, and the absence is recorded
+#   here so it reads as a decision rather than a gap.
 # =============================================================================
-
-output "service_tls_secrets" {
-  description = <<-EOT
-    Handles for the scalar certificate and private-key secrets used by the
-    services' internal HTTPS listeners. Each object publishes the base `arn`,
-    the created `name`, and a `value_reference`. Because each secret stores one
-    scalar PEM value, `value_reference` intentionally equals `arn`: the same
-    base ARN is valid for ECS injection and for the task execution role's IAM
-    Resource. Empty when the caller left service_tls_certificate and
-    service_tls_private_key null, which is how a root that issues and owns its own
-    pair says it does not want this module's entries -- a consumer therefore reads
-    this map through `lookup` or `try` rather than indexing it unconditionally.
-  EOT
-
-  # WHY : Refactoring Rationale: publishing these handles closes the gap between
-  #       mandatory SERVER_SSL_CERTIFICATE properties and the infrastructure
-  #       graph. A root can inject the exact entries this module created instead
-  #       of relying on manually populated environment variables.
-  # WHY : Assumptions: presence is decided from the RESOURCE count rather than from
-  #       local.create_service_tls_secrets, even though the two are always equal. The
-  #       local is derived from two `sensitive` inputs, and a conditional that reads a
-  #       sensitive value makes the whole result sensitive -- which would force this
-  #       output to be marked sensitive and would redact the very ARNs a reviewer of a
-  #       least-privilege grant has to see. The resource count carries the same fact
-  #       with none of the sensitivity.
-  value = length(aws_secretsmanager_secret.service_tls_certificate) > 0 ? {
-    certificate = {
-      arn             = aws_secretsmanager_secret.service_tls_certificate[0].arn
-      name            = aws_secretsmanager_secret.service_tls_certificate[0].name
-      value_reference = aws_secretsmanager_secret.service_tls_certificate[0].arn
-    }
-    private_key = {
-      arn             = aws_secretsmanager_secret.service_tls_private_key[0].arn
-      name            = aws_secretsmanager_secret.service_tls_private_key[0].name
-      value_reference = aws_secretsmanager_secret.service_tls_private_key[0].arn
-    }
-  } : {}
-
-  # WHY : Assumptions: secret shells are created before their versions. This
-  #       edge makes the published scalar references wait until both PEM values
-  #       have been written, so a dependent ECS service cannot start against an
-  #       empty entry during the same apply.
-  depends_on = [
-    aws_secretsmanager_secret_version.service_tls_certificate,
-    aws_secretsmanager_secret_version.service_tls_private_key,
-  ]
-}

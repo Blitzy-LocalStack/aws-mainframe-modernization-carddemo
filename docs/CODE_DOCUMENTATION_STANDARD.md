@@ -50,7 +50,7 @@ Its job is narrow and complete: state the obligation once for every language in
 the new tree, give a conforming example per language, and name — separately — the
 part of the obligation a gate can decide and the part that only review can.
 
-**Assumptions — the machine half and the review half are not the same size, and
+Assumptions: **the machine half and the review half are not the same size, and
 saying so is the point of this section.** A linter can decide whether a docstring
 is *present* and whether its at-clauses *cover* the members they must cover. No
 linter in any of these languages can decide whether the prose in a docstring is
@@ -171,7 +171,7 @@ example, never an obligation: the clause's "etc." already extends the requiremen
 to any language the migration authors, and the section below discharges it for all
 seven.
 
-**Alternatives Considered: extending the obligation to languages that have no
+Alternatives Considered: **extending the obligation to languages that have no
 docstring construct.** The clause ends in "etc.", and that trailing "etc." is the
 textual authority for the second half of this standard. Four of the seven
 languages below — HCL, SQL, Dockerfile and YAML — have no docstring construct at
@@ -280,7 +280,7 @@ obligation established above. The declarative data formats are covered by the no
 immediately below, and two shorter notes close the section — shell entry points and
 Markdown itself.
 
-**Assumptions — why seven, and what "seven" is a count of.** Seven is the number
+Assumptions: **why seven, and what "seven" is a count of.** Seven is the number
 of languages in which this migration authors **implementation or configuration
 logic**: code that computes, provisions, builds or gates something, and in which a
 non-obvious decision can therefore hide. Every one of the seven governs real files
@@ -341,7 +341,7 @@ configuration in `config/checkstyle/checkstyle.xml` therefore sets `scope="priva
 and clears `allowedAnnotations`, accepting more Javadoc to write in exchange for a
 gate whose coverage matches the rule instead of a subset of it.
 
-**Assumptions — the scope is all visibilities, and the ruleset splits it in a way
+Assumptions: **the scope is all visibilities, and the ruleset splits it in a way
 worth knowing exactly.** Rule 1 says "every new or modified function, class, and
 module entry point" and attaches no visibility qualifier, so a private method is in
 scope exactly as a public one is. The Checkstyle configuration implements that scope
@@ -373,17 +373,17 @@ and the configuration could be read differently, the configuration wins — so t
 prose is what moves.
 
 **Mechanical gate — live today.**
-[`config/checkstyle/checkstyle.xml`](../config/checkstyle/checkstyle.xml)
-with its companion
+[`config/checkstyle/checkstyle.xml`](../config/checkstyle/checkstyle.xml) with
+its companion
 [`config/checkstyle/suppressions.xml`](../config/checkstyle/suppressions.xml),
-driven by `maven-checkstyle-plugin` and bound to the Maven **`validate`** phase in
-[`services/pom.xml`](../services/pom.xml) under the execution id
+driven by `maven-checkstyle-plugin` and bound to the Maven **`validate`** phase
+in [`services/pom.xml`](../services/pom.xml) under the execution id
 `checkstyle-documentation-gate`. Binding to `validate` rather than to a
 verification phase is deliberate: the gate runs on **every local build**, before
-compilation, so a missing Javadoc surfaces on the developer's machine rather than
-only in CI. The TypeScript, Python, HCL, and workflow gates described below are
-also live; this one is distinguished by running at Maven's earliest validation
-phase.
+compilation, so a missing Javadoc surfaces on the developer's machine rather
+than only in CI. The TypeScript, Python, HCL, and workflow gates described below
+are also live; this one is distinguished by running at Maven's earliest
+validation phase.
 
 **What this gate cannot decide.** It decides presence and coverage: that a Javadoc
 block exists on each audited element, that `@param` names every parameter, that
@@ -450,54 +450,100 @@ so that adding either one is understood as removing the gate:
 
 ### TypeScript
 
-**Required form.** JSDoc or TSDoc on **every function, every class and every
-module entry point, regardless of export visibility**, with `@param`, `@returns`
-and `@throws` as applicable. Trivial accessors may use the single-line form. An
-un-exported helper carries the same docstring obligation as an exported component;
-the inline-comment requirement applies **in addition**, never instead.
+**Required form.** JSDoc or TSDoc on **every exported function, every exported
+class and every module entry point**, with `@param`, `@returns` and `@throws` as
+applicable. Trivial accessors may use the single-line form. The inline-comment
+requirement applies **in addition**, never instead, and — unlike the block
+requirement — it is **not** scoped to exports: a module-private helper that
+makes a non-obvious choice owes its WHY comment exactly as an exported one does.
 
-**`@param` and `@returns` carry the TYPE as well as the name and the
-description** — `@param {string} accountId - ...`, `@returns {AccountView} ...`.
-Rule 1's Parameters element asks for "name, type and description for each
-parameter" and its Return values element for the "type and description of what is
-returned", and it draws no distinction between a language whose signature happens
-to carry the type and one whose signature does not. A docstring that omits the
-type does not satisfy that clause merely because the information is recoverable
-from the line below it.
+**Assumptions — the block scope is exports, and that is assigned rather than
+chosen.** AAP §0.2.1.6 lists `ui/eslint.config.js` as "`eslint-plugin-jsdoc`
+requiring JSDoc on exported components and functions", and §0.8.1 repeats it
+verbatim: "TypeScript is checked by `eslint-plugin-jsdoc` rules in
+`ui/eslint.config.js` requiring documentation on exported components and
+functions". An exported symbol is the module's contract — what another file may
+consume and what a reader arrives at first — so it is where a block is
+load-bearing.
 
-**Trade-offs — an earlier wording of this section left the type to the
-signature.** The argument was that a second copy of the type inside the docstring
-is unchecked prose which can drift from the signature, and that argument is sound
-as far as it goes; it was overruled because it answers a question the rule does
-not ask. Two things bound the drift it worried about. The signature remains the
-compiler's truth, so a stale type in a docstring can mislead a reader but cannot
-let a type error through. And `jsdoc/check-param-names` fails the build when a
-documented parameter no longer exists, which catches the commonest shape of drift
-mechanically. Set against that, leaving the clause to the signature meant the
-TypeScript gate enforced a narrower rule than the one it exists to enforce, and
-enforced it differently from the JavaScript in the same package.
+**Refactoring Rationale — an earlier wording of this section extended the block
+requirement to every symbol regardless of visibility.** It argued from Rule 1's
+"every new or modified function, class, and module entry point", which attaches
+no visibility qualifier, and that reading of Rule 1 is correct. It was
+nonetheless withdrawn, because it resolved a conflict in the wrong direction:
+the AAP is the frozen specification, it assigns this gate the exported scope in
+the two sentences quoted above, and a standard that asserts a wider scope than
+the AAP describes a gate that does not run. **Trade-offs:** the practical cost
+is that an inline closure — an `onClick`, a `.map` body, a `useMemo` factory —
+no longer needs a block, and the wider wording was reaching for something real
+in wanting one. That is recovered by the inline-comment requirement above, which
+the exported scope does not touch, so a non-obvious private helper is still
+covered; what is given up is the ceremony of a block on a throwaway closure, and
+a gate that reports a hundred of those is one reviewers learn to skip.
 
-**Refactoring Rationale — an earlier wording of this paragraph limited the
-obligation to exported members, and that was a narrowing of the rule rather than a
-reading of it.** Rule 1's Docstring Requirements say "every new or modified
-function, class, and module entry point" with no visibility qualifier, and its
-Forbidden Patterns list "adding docstrings that omit parameters, return values, or
-purpose" with no visibility qualifier either. An un-exported helper is where a
-migration's non-obvious logic most often lands — a copybook field-slice, a
-sign-overpunch normaliser, a keyset-cursor comparator — so exempting it would
-exempt exactly the code most in need of a docstring. The narrowed wording came from
-working backwards from what one lint rule is convenient to configure, which
-inverts this document's own precedence: the rule sets the obligation and the
-configuration implements as much of it as it can.
+**Assumptions — the GATE's scope and the RULE's obligation are two different
+statements, and only the first is narrowed here.** Rule 1 asks for a docstring on
+every function with no visibility qualifier, and nothing above licenses omitting
+one from an un-exported member: a copybook field-slice, a sign-overpunch
+normaliser or a keyset-cursor comparator is exactly where this migration's
+non-obvious logic lands, and each of them earns a block on its own merits. What
+the exported scope decides is only which of those omissions a linter can FAIL a
+build for. Writing the two down separately is what keeps a reader from reading a
+configuration limit as permission.
+
+**In TypeScript the SIGNATURE carries the type; `@param` and `@returns` carry
+the name and the description** — `@param accountId - ...`, `@returns The account
+view ...`. A `{Type}` annotation is **permitted** and a good deal of this tree
+still carries one, but it is never **required**, and the two forms pass the gate
+equally. Rule 1's Parameters element asks for "name, type and description for
+each parameter" and its Return values element for the "type and description of
+what is returned"; a typed signature beside a named, described tag states all
+three, with the type held by the half of the pair the compiler checks.
+
+**Trade-offs — a `{Type}` tag duplicates a checked fact with unchecked prose.**
+That is why it is not required. The two can disagree, and when they do only the
+prose can be wrong, so a docstring confidently naming the wrong type is worse
+than one naming none — a reader trusts it and stops reading the signature. This
+migration has a specific reason to refuse second sources of truth about types:
+field widths and decimal scale are transcribed from the copybooks under
+Transformation Rule T1, and a drifted annotation is exactly how a `string` money
+field silently acquires a documented `number`. The cost accepted in exchange is
+that a reader skimming only the block reads one line further to find the type.
+
+**Assumptions — the split by language is deliberate.** In plain JavaScript the
+JSDoc types *are* the type system, so the tag is the only place a type can be
+stated and `jsdoc/require-param-type` and `jsdoc/require-returns-type` are
+enforced there. In TypeScript the signature holds it and those rules sit at the
+plugin's TypeScript-aware default of off. One clause, two mechanisms, because
+the languages genuinely differ. Permitted-but-not-required is not the same as
+unchecked: `jsdoc/no-undefined-types` stays on, so a `{Accont}` typo in an
+annotation someone did write is still a build failure, and
+`jsdoc/check-param-names` still fails the build when a documented parameter no
+longer exists.
+
+**Refactoring Rationale — an earlier wording of this section required the type
+in the tag as well, in TypeScript as in JavaScript.** Its argument was that Rule
+1 draws no distinction between a language whose signature carries the type and
+one whose signature does not. That is a fair reading, and it was withdrawn for a
+concrete rather than a stylistic reason: requiring the tag obliges the plugin's
+`jsdoc/no-types` prohibition to be lifted, which then admits type expressions
+everywhere and makes the annotation — not the signature — the thing an author
+maintains. The narrower configuration keeps the compiler as the single authority
+on types and leaves the docstring responsible for the things a compiler cannot
+state: what the parameter means and why the function exists.
 
 **Mechanical gate — live today.** `eslint-plugin-jsdoc` rules configured in
-[`ui/eslint.config.js`](../ui/eslint.config.js), run by the `lint` script declared
-in [`ui/package.json`](../ui/package.json) as `eslint . --max-warnings=0`. That
-threshold is what makes the gate a gate: every configured JSDoc rule is set to
-`error`, and even a warning would fail the run. The plugin's dependency is pinned in
-`ui/package.json`, which fixes the version the gate runs at.
-`.github/workflows/ui-ci.yml` invokes that same script as a required step, so the
-gate runs both locally and on every push.
+[`ui/eslint.config.js`](../ui/eslint.config.js), run by the `lint` script
+declared in [`ui/package.json`](../ui/package.json) as `eslint .
+--max-warnings=0`. That threshold is what makes the gate a gate: every JSDoc
+rule this document relies on is set to `error`, and even a warning would fail
+the run. The four `jsdoc/*` entries deliberately set to `off` are the type-tag
+rules discussed above, plus the `jsdoc/no-types` prohibition they replace; each
+is annotated at its line with what it admits, and none of them relaxes one of
+Rule 1's four elements. The plugin's dependency is pinned in `ui/package.json`,
+which fixes the version the gate runs at. `.github/workflows/ui-ci.yml` invokes
+that same script as a required step, so the gate runs both locally and on every
+push.
 
 **What that gate does and does not decide.** `eslint-plugin-jsdoc` decides
 presence and tag coverage on the declarations its rule configuration selects. Two
@@ -558,27 +604,49 @@ nobody upgrades it later without understanding what breaks.
 class and function, using the Args / Returns / Raises structure. Purpose first,
 then each parameter with its type, then the return value, then anything raised.
 
-**Mechanical gate — configured, build-failing, and narrower than the requirement above.**
-The pydocstyle **`D`** rule family, selected under `[tool.ruff.lint]` in
-[`data-migration/pyproject.toml`](../data-migration/pyproject.toml). That single
-`select` entry is the entire mechanical enforcement of this standard for Python;
-narrowing it, or letting a convention setting switch off its presence checks,
-switches off most of a review gate for a whole language rather than tidying a lint
-configuration. `.github/workflows/services-ci.yml` installs the hash-locked
-development toolchain from `data-migration/requirements-dev.txt` and runs
-`ruff check`, so the same gate executes locally and on every covered push.
+**Mechanical gate — two configured, build-failing halves, together still narrower than
+the requirement above.** The first half is the pydocstyle **`D`** rule family, selected
+under `[tool.ruff.lint]` in
+[`data-migration/pyproject.toml`](../data-migration/pyproject.toml); narrowing that
+`select` entry, or letting a convention setting switch off its presence checks, switches
+off most of a review gate for a whole language rather than tidying a lint configuration.
+The second half is
+[`data-migration/tests/test_docstring_gate.py`](../data-migration/tests/test_docstring_gate.py),
+which walks the package and its suite with the standard library's `ast` and asserts a
+non-blank docstring on every module, class and function at **every** visibility and
+**every** nesting depth. `.github/workflows/services-ci.yml` installs the hash-locked
+development toolchain from `data-migration/requirements-dev.txt`, runs `ruff check`, and
+runs this package's pytest suite with no tolerance, so both halves execute locally and on
+every covered push.
 
-**What this gate cannot decide, stated precisely because the gap is wide.** The
-`D` family checks that a docstring **exists** on a module, class or function, and
-checks its formatting — one-line summary, imperative mood, blank lines, closing
-quotes. It does **not** check that the Args, Returns and Raises sections are
-present or complete: a single-line docstring on a five-parameter function satisfies
-every `D` rule and still violates Rule 1's Docstring Requirements and its second
-Forbidden Pattern. Assumptions: pydocstyle has no rule that cross-checks a
-docstring's parameter list against a signature, so that half of the obligation
-cannot be delegated to it at all and is a **required human-review check** on every
-Python change. It is called out here rather than left implied because the presence
-of a configured `D` family is easy to mistake for full coverage.
+**Why the second half exists, measured rather than assumed.** `D101`, `D102`, `D103` and
+`D106` are *public*-declaration checks. Verified against the pinned ruff: a declaration is
+invisible to them when its own name carries a single leading underscore, when any
+enclosing class is privately named — a plainly public method of a `_Private` class raises
+no `D102` — or when it is declared inside a function body, at any depth and any
+visibility. A module follows the same single-underscore convention, so `_x.py` raises no
+`D100` while `__init__.py` is public and does raise `D104`. Measured **when that gate was
+added**, and deliberately not carried as a standing figure: **90 of the 221** declarations
+in the package source were invisible to those checks, and **32 of the 107** in its suite;
+the live figures are whatever the gate reports, because a count written into prose goes
+stale on the next authored function and the staleness is invisible. The formatting rules
+(`D400`, `D403`, `D205` and the rest) were measured to reach every docstring ruff finds
+regardless of visibility or nesting, so the `ast` gate checks presence only and duplicates
+none of them. Both halves are load-bearing: removing either leaves an unenforced half of
+the same obligation.
+
+**What neither half can decide, stated precisely because the gap is wide.** The `D` family
+checks that a docstring **exists** on a public declaration and checks its formatting —
+one-line summary, imperative mood, blank lines, closing quotes — and the `ast` gate
+extends only the existence half to the rest. Neither checks that the Args, Returns and
+Raises sections are present or complete: a single-line docstring on a five-parameter
+function satisfies every `D` rule, satisfies the presence gate, and still violates Rule 1's
+Docstring Requirements and its second Forbidden Pattern. Assumptions: pydocstyle has no
+rule that cross-checks a docstring's parameter list against a signature, and a presence
+walker cannot judge content at all, so that half of the obligation cannot be delegated and
+is a **required human-review check** on every Python change. It is called out here rather
+than left implied because a configured `D` family plus a green test run is easy to mistake
+for full coverage.
 
 The example below is an **excerpt**: the function body is elided as `...` after the
 comment that is the point of the example.
@@ -958,9 +1026,17 @@ each one belongs in the code that implements it, not only here.
    looking like the conventional choice. Every screen and the router module import
    from the core package directly.
 
-9. **No resilience library is added at all.** Alternatives Considered: the
-   application framework's own core retry support covers the need, so an external
-   library would add a dependency that duplicates it. Trade-offs: a
+9. **No resilience library is declared, and no first-party class uses one.**
+   Alternatives Considered: the application framework's own core retry support
+   covers the need, so an external library would add a dependency that duplicates
+   it. Assumptions: the claim is about declaration and use rather than about the
+   classpath, and the distinction is part of what makes this a worked example —
+   the older retry project arrives as a compile-scoped transitive of the queue
+   starter in four modules and cannot be excluded without breaking that
+   integration's own polling back-off, so an unqualified "added at all" would be
+   a documented decision that a dependency report contradicts. An architecture
+   rule forbids first-party code from depending on it, which is what turns the
+   narrower claim into something a build can check. Trade-offs: a
    circuit breaker is separately and deliberately omitted: the only synchronous
    service-to-service hops are inside the private network behind an internal load
    balancer with bounded connect and read timeouts, so a breaker would **add a
@@ -980,11 +1056,11 @@ decides whether prose is true.
 |---|---|---|---|---|
 | Java | Javadoc on every class, every method at every visibility, every module entry point; `@param`, `@return`, `@throws` | presence at **every** visibility including private, with the default `Override` exemption cleared; at-clause coverage and non-empty bodies at all visibilities — `config/checkstyle/checkstyle.xml` + `config/checkstyle/suppressions.xml`, bound to the Maven `validate` phase in `services/pom.xml` and covering test sources | accuracy of the prose; `WHY` comments present, specific and on the non-obvious line | **live** locally and in `.github/workflows/services-ci.yml` |
 | TypeScript | JSDoc/TSDoc on every function, class and module entry point, exported or not; `@param`, `@returns`, `@throws` | docstring presence and tag coverage on the selected declaration contexts, including function and arrow **expressions** in every position — `eslint-plugin-jsdoc` rules in `ui/eslint.config.js`, run at `--max-warnings=0` | accuracy and `WHY` quality; keeping the rule contexts un-narrowed and free of suppression comments | **live** through `npm run lint` and `.github/workflows/ui-ci.yml` |
-| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
+| Python | module, class and function docstrings; Args / Returns / Raises | docstring **presence** and formatting only, in two halves: formatting everywhere plus presence on **public** declarations — pydocstyle `D` family under `[tool.ruff.lint]` in `data-migration/pyproject.toml`; presence at **every** visibility and **every** nesting depth — `data-migration/tests/test_docstring_gate.py` | **Args / Returns / Raises completeness** (no `D` rule checks a docstring against a signature, and a presence walker cannot judge content), accuracy, `WHY` quality | **live** locally and in `.github/workflows/services-ci.yml` |
 | HCL | file header, `description` on every `variable` and `output`, why-comment per non-obvious argument | `description` presence and the declared file set — `infra/.tflint.hcl`; generated-table freshness — `infra/.terraform-docs.yml` | the file-header block and every why-comment; the prose in all sixteen module READMEs, both environment READMEs, and the bootstrap README | **live** through TFLint and terraform-docs checks in `.github/workflows/infra-ci.yml` |
 | SQL | header block, why-comment per non-obvious constraint or index | **none** | the whole obligation | review only |
-| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves** — the image build | the header and every justification, including the pin's | review plus image builds for authored Dockerfiles; service and UI Dockerfiles remain planned |
-| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | workflow syntax and pinned-action validation | rationale accuracy and least-privilege review | **live** for `services-ci.yml`, `ui-ci.yml`, `infra-ci.yml`, and `deploy.yml` |
+| Dockerfile | header, justification on the base-image pin and layer ordering | that the base-image pin **resolves**, and that the image builds at all — the eight service images are built by the `java-services` job under a count assertion, so a broken pin or a failed build fails the run | the header and every justification, including the pin's | **live** for the eight service Dockerfiles through `.github/workflows/services-ci.yml`; review only for `data-migration/Dockerfile`, which no workflow builds; `ui/Dockerfile` does not exist yet and is the one genuinely outstanding artifact of the ten |
+| YAML | header, justification on job ordering and caching, least-privilege `permissions`, SHA-pinned actions | **none for the documentation semantics.** GitHub itself rejects a syntactically invalid workflow at dispatch, and a mistyped `uses:` reference fails the step that runs it — but neither is a gate this repository configures, and NO linter, action-pin checker or policy scanner runs over `.github/**` (measured: no `actionlint`, `zizmor`, `ratchet` or equivalent appears anywhere under `.github/`) | the header and every rationale; least-privilege review of each `permissions` block; and confirming by inspection that every `uses:` carries a 40-character commit SHA rather than a moving tag | review only — the four migration workflows exist and each carries the required header, `permissions` block and SHA pins, but nothing mechanically enforces that they keep doing so |
 
 **What the gates in that table do NOT check.** Assumptions: every gate above is a
 presence-and-shape check, and none of them reads prose. Specifically:
@@ -1021,10 +1097,24 @@ drift, and policy checks are build gates. Applying the configuration to a live
 AWS account remains an operator action outside this scope, so static success is
 not represented as evidence that a provisioned environment exists.
 
-**The gate-coverage boundary.** Java, TypeScript/JavaScript, Python, HCL, and
-workflow syntax have build-failing machine checks. SQL rationale, Dockerfile
-rationale, and every language's semantic `WHY` quality still require review.
-No machine gate is represented as proving the parts of Rule 1 it cannot read.
+**The gate-coverage boundary.** Java, TypeScript/JavaScript, Python and HCL have
+build-failing machine checks for docstring presence. YAML does **not**: no linter,
+action-pin checker or policy scanner runs over `.github/**` in this repository, so
+workflow rationale, `permissions` scoping and SHA pinning are review obligations —
+what the workflows gate is the code they run, not their own shape. SQL rationale,
+Dockerfile rationale beyond the image build, and every language's semantic `WHY`
+quality also require review. No machine gate is represented as proving the parts of
+Rule 1 it cannot read.
+
+Refactoring Rationale: an earlier wording of this paragraph listed "workflow syntax"
+among the languages with build-failing machine checks, and the YAML row of the table
+above claimed "workflow syntax and pinned-action validation" with a status of
+**live**. Neither was true, and this is the one direction of inaccuracy a
+gate-coverage summary must not point: a reader auditing Rule 1 would have counted
+YAML as mechanically covered and stopped reading it, which is exactly how an
+unpinned action or a widened `permissions` block reaches the default branch. The
+absence was measured — no `actionlint`, `zizmor`, `ratchet` or equivalent appears
+anywhere under `.github/` — and is now stated as an absence in both places.
 
 
 ## Conflicts

@@ -694,4 +694,3 @@ public record DisclosureGroupKey(
         return accountGroupId + transactionTypeCode + transactionCategoryCodeField();
     }
 }
-

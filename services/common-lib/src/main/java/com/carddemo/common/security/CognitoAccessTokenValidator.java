@@ -72,7 +72,16 @@ public final class CognitoAccessTokenValidator implements OAuth2TokenValidator<J
      */
     public static final String ERROR_CODE = "invalid_token";
 
-    /** The app client id a token must name, or null when the audience check alone is relied on. */
+    /**
+     * The app client id a token must name, or null when the client check is not applied at all.
+     *
+     * <p>Assumptions: this field is null ONLY when the caller passed a null or blank id, and that input
+     * is fail-open by construction -- the check below is skipped entirely and the validator reports
+     * nothing about having skipped it. Every caller in this repository therefore refuses a blank value
+     * while its application context is being built rather than passing it here; the collapse to null
+     * survives so that a future caller with a genuine audience validator can express "the client is
+     * pinned elsewhere", not because any caller today may rely on it.</p>
+     */
     private final String requiredClientId;
 
     /** The scopes of which a token must carry at least one. */
@@ -81,9 +90,14 @@ public final class CognitoAccessTokenValidator implements OAuth2TokenValidator<J
     /**
      * Creates a validator for one client and one set of acceptable scopes.
      *
-     * @param requiredClientId the app client id a token's client claim must equal; may be
-     *     {@code null} or blank to skip the check, which is appropriate only where the audience
-     *     validator already pins the same client and the provider populates both claims identically
+     * @param requiredClientId the app client id a token's client claim must equal. A {@code null} or
+     *     blank value SKIPS the client check silently, so this parameter is deliberately hostile to a
+     *     caller that supplies an unset property: it is appropriate only where an audience validator
+     *     already pins the same client and the provider populates both claims identically, which is
+     *     true of no caller in this repository. Every service here rejects a blank value at context
+     *     build time instead, and this validator does not raise on it because a shared kernel cannot
+     *     tell an unset property from a deliberate delegation -- only the caller reading the property
+     *     can
      * @param requiredScopes the scopes of which a token must carry at least one; an empty list skips
      *     the scope check, which is appropriate only for a service publishing no scope of its own
      * @throws NullPointerException if {@code requiredScopes} is {@code null}; an empty list is the way
@@ -105,8 +119,10 @@ public final class CognitoAccessTokenValidator implements OAuth2TokenValidator<J
     /**
      * Applies the token-kind, client and scope checks to one decoded token.
      *
-     * @param token the decoded token, already signature-, issuer-, audience- and time-validated by the
-     *     validators the framework composes before this one
+     * @param token the decoded token, already signature-, issuer- and time-validated by the validators
+     *     the framework composes before this one. Audience is deliberately NOT among them: no caller in
+     *     this repository configures an audience validator, because a Cognito access token carries no
+     *     audience claim, which is exactly why the client check below exists
      * @return a success result when every configured check passes, or a failure result carrying one
      *     error naming the check that did not
      * @throws NullPointerException if {@code token} is {@code null}, which would mean the framework

@@ -228,17 +228,28 @@ rounding control, which is the single hardest requirement this migration has
 long-established, which keeps [ADR-002](ADR-002-compute-platform.md) and
 [ADR-003](ADR-003-datastore-targets.md) free of language-specific workarounds;
 and the framework's own core now supplies the retry capability that would
-otherwise be an added dependency, which is why this migration adds no
-resilience library at all. That decision belongs to
+otherwise be an added dependency, which is why this migration **declares** no
+resilience library. Declares is the precise verb and is chosen over "adds none at
+all": `org.springframework.retry:spring-retry` still arrives transitively at
+compile scope through the Spring Cloud AWS SQS starter in four of the nine
+reactor modules, so an absolute absence claim would be false, and what is
+actually guaranteed is non-**use** rather than non-presence. That guarantee is
+enforced rather than asserted — an ArchUnit rule forbids any `com.carddemo` class
+from depending on `org.springframework.retry..` or `io.github.resilience4j..`,
+and it runs in every module of the reactor. That decision belongs to
 [ADR-002](ADR-002-compute-platform.md), which records it in full alongside the
 container base-image pin; it appears as item 9 of
 [`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) as a
 worked example of a documented non-obvious choice, and again at its point of use
-in the dependency rationale in [`services/pom.xml`](../../services/pom.xml)
-**L125–L150**, where the two candidate libraries are named and rejected — one
-because its published artifact targets the previous framework generation, the
-other as superseded by the core relocation — and where the deliberate absence of
-a circuit breaker is recorded alongside them. This record states only the
+in the dependency rationale in [`services/pom.xml`](../../services/pom.xml), in
+the comment block immediately preceding the `<parent>` element, where the two
+candidate libraries are named and rejected — one because its published artifact
+targets the previous framework generation, the other as superseded by the core
+relocation — and where the deliberate absence of a circuit breaker is recorded
+alongside them. That block is cited by position rather than by line number
+deliberately: an earlier revision of this record cited **L125–L150**, the block
+then moved and grew, and the citation silently went stale — whereas its position
+immediately above `<parent>` does not drift. This record states only the
 consequence for the language choice: the framework generation that arrives with
 the chosen parent is what makes the added dependency unnecessary.
 

@@ -231,8 +231,11 @@ logging:
     #       dominate the log bill for the whole environment, and it would do so
     #       exactly when an operator was least able to afford the noise. The
     #       diagnostic those levels buy is a parity-verification diagnostic, and
-    #       parity is verified in dev against the golden masters under
-    #       tests/golden/ rather than in production.
+    #       parity is verified outside production -- against the batch golden
+    #       masters under tests/golden/reporting and tests/golden/statement for the
+    #       report and statement paths, and by transcription against the cited
+    #       program lines for everything the goldens do not reach -- rather than by
+    #       reading a production log.
     #       (4) Assumptions: INFO stays traceable across services without any of
     #       that, because CorrelationIdFilter in com.carddemo.common.web publishes
     #       correlationId and requestId into the mapped diagnostic context and the

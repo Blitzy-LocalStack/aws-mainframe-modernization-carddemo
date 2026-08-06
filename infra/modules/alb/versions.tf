@@ -11,7 +11,7 @@
 #   that installs the module reads it, so the module's other files (main.tf,
 #   variables.tf, outputs.tf) never restate a version constraint. It declares
 #   NOTHING else -- no provider configuration, no backend, no variable, no
-#   output, no resource -- for the reasons recorded under WHY below.
+#   output, no resource -- for the reasons recorded under Design decisions below.
 #
 # Parameters:
 #   HCL has no parameter list, so the analogue is the two constraints declared

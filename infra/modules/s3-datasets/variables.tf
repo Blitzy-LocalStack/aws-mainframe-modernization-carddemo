@@ -26,17 +26,16 @@
 #   should be added.
 #
 # Parameters:
-#   The thirteen `variable` blocks below ARE this file's parameters, so the
+#   The twelve `variable` blocks below ARE this file's parameters, so the
 #   name, type and description obligation is discharged on each block directly
 #   rather than duplicated into a list here that could drift from it. In
 #   declaration order: name_prefix, environment, kms_key_arn,
 #   dataset_families, non_generation_prefixes, noncurrent_version_retention,
 #   noncurrent_version_transition_days,
 #   noncurrent_version_transition_storage_class,
-#   abort_incomplete_multipart_upload_days, object_created_lambda_arn,
-#   access_log_bucket_name, force_destroy and tags. Exactly three of them --
-#   `environment`, `kms_key_arn` and `object_created_lambda_arn` -- have no
-#   default and are therefore required of the caller.
+#   abort_incomplete_multipart_upload_days, access_log_bucket_name,
+#   force_destroy and tags. Exactly two of them -- `environment` and
+#   `kms_key_arn` -- have no default and are therefore required of the caller.
 #
 # Return values:
 #   None. This file returns nothing: it IS the module's input contract. The
@@ -47,8 +46,7 @@
 #
 # Errors:
 #   `terraform validate` fails before any plan is produced when a caller omits
-#   `environment`, `kms_key_arn` or `object_created_lambda_arn`, because none
-#   has a default. Five
+#   `environment` or `kms_key_arn`, because neither has a default. Five
 #   variables carry `validation` blocks that reject a value at plan time with
 #   a stated message: `name_prefix` and `environment` on charset and length,
 #   which together guarantee the composed bucket name cannot exceed the S3
@@ -570,23 +568,26 @@ variable "abort_incomplete_multipart_upload_days" {
   }
 }
 
-# WHY : Refactoring Rationale: lifecycle version retention cannot enforce a
-#       count across distinct dt=/gen= object keys. This hook invokes the
-#       generation-retention Lambda for every completed object write so it can
-#       list generation prefixes and delete all but the newest five.
-# WHY : Alternatives Considered: a twelfth Step Functions state. Rejected
-#       because the batch contract fixes exactly eleven states and ad-hoc
-#       writers would bypass a state-machine-only cleanup path.
-variable "object_created_lambda_arn" {
-  description = "ARN of the Lambda function invoked for S3 ObjectCreated events to enforce five-generation retention across distinct dt=/gen= keys. Required because lifecycle version retention cannot enforce a count across different object keys."
-  type        = string
-  nullable    = false
-
-  validation {
-    condition     = can(regex("^arn:[a-z0-9-]+:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+(:[A-Za-z0-9_-]+)?$", var.object_created_lambda_arn))
-    error_message = "object_created_lambda_arn must be a Lambda function ARN, optionally qualified by version or alias."
-  }
-}
+# WHY : Refactoring Rationale: an `object_created_lambda_arn` input stood here,
+#       and with it an aws_lambda_permission and an aws_s3_bucket_notification in
+#       main.tf that invoked a caller-supplied function on every completed object
+#       write. All three were removed. The module's remit is the versioned dataset
+#       bucket, the ten generation-dataset prefix families and their lifecycle
+#       rules; wiring a bucket to an arbitrary caller-supplied function is an
+#       event-integration concern that belongs to whichever root owns that
+#       function, and an aws_s3_bucket_notification is a WHOLE-BUCKET resource, so
+#       declaring one here also took the bucket's only notification slot away from
+#       every consumer of this module.
+#       Alternatives Considered: keeping the input and making it nullable.
+#       Rejected: it would leave the notification slot claimed conditionally, which
+#       is harder to reason about than not claiming it, and the input would still
+#       not be one this module's contract admits.
+#       Trade-offs: the five-generation retention the removed hook enforced across
+#       distinct dt=/gen= keys is now the calling root's to wire, over the bucket
+#       name this module publishes. The noncurrent-version lifecycle rule this
+#       module does own is unaffected -- it bounds versions of one key, which is a
+#       different guarantee, and the two were always complementary rather than
+#       alternatives.
 
 # -----------------------------------------------------------------------------
 # Auditing, teardown and tagging.
@@ -617,17 +618,24 @@ variable "access_log_bucket_name" {
   # where a caller reading the input will see it.
 }
 
-variable "audit_log_retention_days" {
-  description = "Finite lifecycle horizon for validated CloudTrail dataset object-access logs."
-  type        = number
-  nullable    = false
-  default     = 2557
-
-  validation {
-    condition     = floor(var.audit_log_retention_days) == var.audit_log_retention_days && var.audit_log_retention_days >= 365 && var.audit_log_retention_days <= 3653
-    error_message = "audit_log_retention_days must be a whole number from 365 through 3653."
-  }
-}
+# WHY : Refactoring Rationale: an `audit_log_retention_days` input stood here,
+#       defaulting to seven years and driving an expiration and a
+#       noncurrent-version expiration on the audit bucket's lifecycle rule. It was
+#       removed. A compliance retention horizon is an organisational policy
+#       decision, not a property of a dataset bucket module, and the module had no
+#       basis for the seven-year figure it defaulted to -- which is precisely the
+#       kind of non-obvious default this repository's documentation rule requires a
+#       named rationale for and which none of the four categories could honestly
+#       supply. infra/bootstrap declares its own, separate variable of the same
+#       name for its own state-access audit bucket; that one is untouched.
+#       Trade-offs: the audit bucket's lifecycle rule now expires nothing, so
+#       objects accumulate until an owner sets a horizon. That is the safe
+#       direction for an audit trail -- objects are versioned, encrypted and
+#       public-access blocked -- and it is preferable to this module asserting a
+#       horizon it cannot justify. The rule retains its
+#       abort_incomplete_multipart_upload action, which cleans up abandoned
+#       multipart uploads and is a storage-hygiene concern rather than a retention
+#       policy.
 
 variable "force_destroy" {
   description = "Whether Terraform may delete this bucket while it still holds objects, including noncurrent versions. False makes a destroy of a non-empty bucket fail rather than discard its contents."

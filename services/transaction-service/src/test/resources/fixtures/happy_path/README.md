@@ -48,11 +48,22 @@ The copybook field name on line 414 is the baseline spelling
 name is what the program compiles against.
 
 The account values the two gates read are seed row 7 of
-[`app/data/ASCII/acctdata.txt`](../../../../../../../app/data/ASCII/acctdata.txt),
-which is the account that this record's card number resolves to through row 7 of
-[`app/data/ASCII/cardxref.txt`](../../../../../../../app/data/ASCII/cardxref.txt):
-credit limit `00000020650{` at positions 25-36, expiration date `2024-12-13` at
-positions 59-68.
+[`app/data/ASCII/acctdata.txt`](../../../../../../../app/data/ASCII/acctdata.txt) --
+account `00000000007`, credit limit `00000020650{` at positions 25-36, expiration
+date `2024-12-13` at positions 59-68, all measured.
+
+This record's card number `4859452612877065` reaches that account through row **21**
+of
+[`app/data/ASCII/cardxref.txt`](../../../../../../../app/data/ASCII/cardxref.txt),
+whose 36 characters read `485945261287706500000000700000000007`.
+
+Assumptions: the cross-reference row number and the account row number are **not**
+the same figure, and they are stated separately here because assuming otherwise is
+the specific mistake this paragraph once carried. The account is row 7 *because its
+identifier is 7*; the cross-reference entry for this card happens to sit at row 21,
+and nothing orders that file by account. A sibling scenario records the same
+measurement independently at
+[`../reject_101_acct_missing/README.md`](../reject_101_acct_missing/README.md).
 
 ---
 

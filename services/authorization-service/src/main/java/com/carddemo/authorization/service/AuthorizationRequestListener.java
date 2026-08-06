@@ -19,7 +19,9 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -115,6 +117,25 @@ public class AuthorizationRequestListener {
     public static final int DEFAULT_REPLY_EXPIRY_SECONDS = 5;
 
     /**
+     * How many requests one processing window handles before intake is closed and reopened.
+     *
+     * <p>Assumptions: read from {@code 05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} line 40. The DECLARED limit is 500 and
+     * that is the number enforced here; the reference program's own control flow handles 501, its counter
+     * being incremented at line 332 and then tested with {@code >} rather than {@code >=} at line 339, so
+     * counts one through 500 all read another request and only count 501 ends the run. The off-by-one is
+     * an artifact of the order of increment and comparison rather than a rule anything states, and it is
+     * not reproduced. The correction is registered as divergence D-AUTH-REQUEST-WINDOW in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Refactoring Rationale: it is a default rather than a fixed value, overridable by
+     * {@code carddemo.messaging.request-process-limit}, so later performance work can change the window
+     * size on measured evidence instead of by editing this class. The default is the baseline's declared
+     * number so that an unconfigured deployment behaves as the contract published.</p>
+     */
+    public static final int DEFAULT_REQUEST_PROCESS_LIMIT = 500;
+
+    /**
      * The multiplier that places a two-digit year ahead of a three-digit day of year.
      *
      * <p>Assumptions: this reproduces the five-digit ordinal date the baseline takes from the platform's
@@ -196,6 +217,32 @@ public class AuthorizationRequestListener {
     private final Clock clock;
 
     /**
+     * How many requests this window may still handle before intake is closed.
+     */
+    private final int requestProcessLimit;
+
+    /**
+     * The action that closes a full window and opens the next.
+     */
+    private final RequestWindowBoundary windowBoundary;
+
+    /**
+     * How many requests the current window has handled.
+     *
+     * <p>Assumptions: an atomic counter rather than a plain field, because the listener container delivers
+     * messages on several threads concurrently -- its concurrency is configured on the annotation below --
+     * so a non-atomic increment would lose counts and the window would run past its quota by an amount
+     * nothing bounds.</p>
+     *
+     * <p>Trade-offs: the counter is per INSTANCE and therefore per task, not per queue. Two tasks each
+     * handle up to the quota before each closes its own window, so the platform-wide figure is the quota
+     * times the task count. That matches the reference system, where the limit bounded one running program
+     * and the queue could trigger more than one, and a shared counter would need a coordination round trip
+     * on the hot path of every authorization to achieve nothing the bound is for.</p>
+     */
+    private final AtomicInteger handledInWindow = new AtomicInteger();
+
+    /**
      * Creates the consumer.
      *
      * <p>Assumptions: every collaborator arrives through the constructor rather than through field
@@ -216,12 +263,27 @@ public class AuthorizationRequestListener {
      * @param replyQueueAllowlist the reply destinations this consumer may publish to; must not be empty
      * @param clock the clock staleness, timestamps and authorization keys are read from; must not be
      *     {@code null}
+     * @param requestProcessLimit how many requests one window handles before intake is closed; must be
+     *     positive
+     * @param windowBoundary the action that closes a full window and opens the next; must not be
+     *     {@code null}
+     * @throws IllegalArgumentException if {@code requestProcessLimit} is not positive, a non-positive
+     *     window admitting no request at all
      */
     public AuthorizationRequestListener(PendingAuthSummaryRepository summaries,
             PendingAuthDetailRepository details, OutboxRepository outbox,
             AuthorizationDecisionService decisions, AccountContextClient accounts,
             @Value("${carddemo.messaging.reply-queue-allowlist}") List<String> replyQueueAllowlist,
-            Clock clock) {
+            Clock clock,
+            @Value("${carddemo.messaging.request-process-limit:" + DEFAULT_REQUEST_PROCESS_LIMIT + "}")
+            int requestProcessLimit,
+            RequestWindowBoundary windowBoundary) {
+        if (requestProcessLimit <= 0) {
+            throw new IllegalArgumentException(
+                    "carddemo.messaging.request-process-limit must be positive but was "
+                            + requestProcessLimit
+                            + "; a non-positive window would close before handling any request");
+        }
         this.summaries = summaries;
         this.details = details;
         this.outbox = outbox;
@@ -229,6 +291,8 @@ public class AuthorizationRequestListener {
         this.accounts = accounts;
         this.replyQueueAllowlist = List.copyOf(replyQueueAllowlist);
         this.clock = clock;
+        this.requestProcessLimit = requestProcessLimit;
+        this.windowBoundary = Objects.requireNonNull(windowBoundary, "windowBoundary must not be null");
     }
 
     /**
@@ -248,7 +312,8 @@ public class AuthorizationRequestListener {
      * @param message the received message, whose payload is the delimited request and whose headers
      *     carry the reply destination, expiry and correlation identifier; must not be {@code null}
      */
-    @SqsListener(queueNames = "${carddemo.messaging.pauth-request-queue}",
+    @SqsListener(id = ContainerCyclingWindowBoundary.REQUEST_CONTAINER_ID,
+            queueNames = "${carddemo.messaging.pauth-request-queue}",
             maxConcurrentMessages = "${carddemo.messaging.max-concurrent-messages:10}",
             maxMessagesPerPoll = "${carddemo.messaging.max-messages-per-poll:10}",
             pollTimeoutSeconds = "${carddemo.messaging.poll-timeout-seconds:5}")
@@ -282,7 +347,37 @@ public class AuthorizationRequestListener {
             handleNewRequest(message, request, correlationId, now);
         } finally {
             MDC.remove(MDC_CORRELATION_ID);
+            countTowardsWindow();
         }
+    }
+
+    /**
+     * Counts this message towards the current window and closes the window when it is full.
+     *
+     * <p>Assumptions: the count is taken in the {@code finally} block, so every message this consumer took
+     * off the queue counts -- including one dropped as stale and one whose reply was a replay of a decision
+     * already recorded. That matches the reference program, whose counter is incremented at
+     * {@code cbl/COPAUA0C.cbl} line 332 after the get returns and before any outcome is known, so a
+     * request it could not act on still consumed one of its 500. Counting only decisions would let a
+     * flood of expired requests run a window indefinitely.</p>
+     *
+     * <p>Assumptions: a message whose handling THREW counts as well, the {@code finally} running on the
+     * exceptional path too, and that is deliberate rather than incidental. A request that failed was still
+     * received and still occupied the window; not counting it would let one poison message that redelivers
+     * indefinitely keep a window open indefinitely.</p>
+     *
+     * <p>Refactoring Rationale: the counter is reset BEFORE the boundary is invoked rather than after, so
+     * the next window starts counting immediately even while the boundary is still cycling the container
+     * on its own thread. Resetting afterwards would leave a window that is nominally full but still
+     * receiving, and every message arriving in that gap would fire the boundary again.</p>
+     */
+    private void countTowardsWindow() {
+        int handled = this.handledInWindow.incrementAndGet();
+        if (handled < this.requestProcessLimit) {
+            return;
+        }
+        this.handledInWindow.addAndGet(-handled);
+        this.windowBoundary.onWindowComplete(handled);
     }
 
     /**

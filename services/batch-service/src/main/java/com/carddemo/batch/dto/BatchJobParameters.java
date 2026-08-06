@@ -5,8 +5,19 @@ import java.util.Optional;
 /**
  * The decoded container command line of one batch step, held as one immutable record.
  *
- * <p>This is the type at which an orchestration decision becomes a Java one, and therefore the type
- * at which a malformed argument list is rejected rather than defaulted. The reference platform
+ * <p>Refactoring Rationale: this record CARRIES the decoded arguments and no longer decodes them
+ * itself. It previously did both, through a {@code fromArguments(String[])} factory that
+ * {@code com.carddemo.batch.BatchApplication} never called -- that class had its own parser -- so two
+ * implementations read the same argument vector and only one of them ran. They had already diverged on
+ * a rule that matters: the factory here admitted six of the seven jobs with no business date, while
+ * the entry point required one for every job, and a test suite covering the factory could stay green
+ * while the parsing that actually ran drifted. The factory is removed rather than the entry point's
+ * parser, because the entry point neutralises a rejected token before it reaches any message and
+ * because it is the boundary the process arguments actually arrive at. What remains here is the
+ * INVARIANTS -- which are enforced in production now that the entry point constructs this record.
+ *
+ * <p>This is still the type at which an orchestration decision becomes a Java one, and therefore the
+ * type at which a malformed combination of arguments is rejected rather than defaulted. The reference platform
  * started a step by naming a program and, where that program needed one, a parameter string:
  * {@code app/jcl/INTCALC.jcl:22} reads {@code //STEP15 EXEC PGM=CBACT04C,PARM='2022071800'}. The
  * migrated platform starts a step by running a container task whose command overrides carry the same
@@ -143,8 +154,9 @@ import java.util.Optional;
  *
  * <p>Refactoring Rationale: no framework type appears anywhere in this file, and the omission is
  * load-bearing rather than incidental. The adaptation from the framework's own arguments abstraction
- * to the plain {@code String[]} that {@link #fromArguments(String[])} accepts belongs to
- * {@code com.carddemo.batch.BatchApplication}, which already owns the process boundary. Keeping it
+ * to the plain {@code String[]} the argument parser accepts belongs to
+ * {@code com.carddemo.batch.BatchApplication}, which already owns the process boundary and, since the
+ * parsers were consolidated, owns the parsing itself. Keeping it
  * there means this record is constructible and assertable in a plain unit test with no application
  * context, no datasource and no credential, and it keeps the whole parameter layer free of the
  * framework. Importing the arguments abstraction here would be the convenient change and would cost
@@ -158,7 +170,7 @@ import java.util.Optional;
  * <p>Trade-offs: a family of seven per-job parameter records was considered and rejected. The seven
  * jobs share one two-option surface and six of them take at most a business date and a generation
  * coordinate, so seven types would model one shape seven times. The rejected design also carries
- * concrete machinery this one does not: {@link #fromArguments(String[])} would need a seven-way
+ * concrete machinery this one does not: the argument parser would need a seven-way
  * dispatch on the decoded token to choose which record to build, and every holder of the result --
  * the module entry point among them -- would need a common supertype to declare, which is more
  * structure than a two-option surface earns. The compromise accepted is that the requiredness rule
@@ -230,8 +242,8 @@ import java.util.Optional;
  *     itself is never {@code null}, because an absent date is expressed as an empty {@code Optional}
  *     and never as a null one
  * @param targetGeneration the generation coordinate this step reads or creates, empty whenever the
- *     caller supplied none -- which includes every set of parameters produced by
- *     {@link #fromArguments(String[])}, since no option supplies a coordinate; the {@code Optional}
+ *     caller supplied none -- which includes every set of parameters the module entry point builds
+ *     from a command line, since no option supplies a coordinate; the {@code Optional}
  *     itself is never {@code null}
  */
 public record BatchJobParameters(
@@ -270,16 +282,6 @@ public record BatchJobParameters(
      */
     public static final String BUSINESS_DATE_OPTION = "--business-date=";
 
-    /**
-     * The one accepted character width of a business-date token, ten.
-     *
-     * <p>Assumptions: the number comes from {@code PARM-DATE PIC X(10)} at
-     * {@code app/cbl/CBACT04C.cbl:178}, and it is held privately for the reason {@link BusinessDate}
-     * gives for holding its own copy privately: the published authority for this number in this
-     * module is the module entry point, and a third public constant for one value would let a caller
-     * compile against whichever of the three it happened to find first.</p>
-     */
-    private static final int BUSINESS_DATE_LENGTH = 10;
 
     /**
      * Rejects any combination of components that could not describe a real step invocation.
@@ -374,78 +376,6 @@ public record BatchJobParameters(
         }
     }
 
-    /**
-     * Decodes a container command line into one set of batch job parameters.
-     *
-     * <p><strong>Any argument this method does not recognise is ignored rather than rejected.</strong>
-     * Only {@link #JOB_OPTION} and {@link #BUSINESS_DATE_OPTION} are read. Every other element of the
-     * vector is skipped, whether it is another framework option such as a profile selection or a
-     * property override, or a bare word carrying no option prefix at all. The one argument whose
-     * absence is fatal is {@link #JOB_OPTION}, because no default job exists to fall back to.</p>
-     *
-     * <p>A worked example, using the container command overrides the orchestration state supplies
-     * verbatim:</p>
-     *
-     * <pre>{@code
-     * // "Command": ["--job=calculate-interest", "--business-date=2022-07-18"]
-     * BatchJobParameters parameters = BatchJobParameters.fromArguments(
-     *         new String[] {"--job=calculate-interest", "--business-date=2022-07-18"});
-     *
-     * parameters.jobName();                       // BatchJobName.CALCULATE_INTEREST
-     * parameters.requireBusinessDate().token();   // "2022-07-18", byte for byte as supplied
-     * parameters.targetGeneration();              // empty: no option supplies a coordinate
-     * }</pre>
-     *
-     * <p>The compact form the reference baseline itself injects decodes identically:
-     * {@code app/jcl/INTCALC.jcl:22} supplies {@code PARM='2022071800'}, and a vector carrying that
-     * ten-character token yields exactly {@code 2022071800} with no separator inserted and nothing
-     * reformatted.</p>
-     *
-     * @param arguments the container command arguments to decode; {@code null} is accepted and is
-     *     treated as carrying no options at all, as is an empty array and an array whose elements are
-     *     all unrecognised, and each of those three therefore fails on the absent job option
-     * @return the decoded parameters, carrying the resolved job, the business date when one was
-     *     supplied, and always an empty generation coordinate; never {@code null}
-     * @throws IllegalArgumentException if {@link #JOB_OPTION} is absent, blank or supplied more than
-     *     once; if its value is not byte-identical to one of the seven job tokens; if
-     *     {@link #BUSINESS_DATE_OPTION} is supplied more than once or carries a token that is not
-     *     exactly ten characters of ASCII digits and ASCII hyphen-minus; or if the decoded
-     *     combination is one the constructor refuses
-     */
-    public static BatchJobParameters fromArguments(String[] arguments) {
-        String jobToken = optionValue(arguments, JOB_OPTION);
-
-        // WHY : Assumptions: an absent job option is fatal rather than defaulted, and the entry point
-        //       is what makes that the only safe answer -- it bakes in no default job, so there is no
-        //       workload that is legitimately the one to run when nobody said which. Choosing one
-        //       would run a job nobody asked for, to completion, against production data, with
-        //       nothing in the log marking it as unasked-for. The message names the option so that a
-        //       container log identifies the malformed command without access to this source.
-        if (jobToken == null) {
-            throw new IllegalArgumentException(JOB_OPTION
-                    + " is required and was not supplied; no default job exists");
-        }
-
-        BatchJobName resolvedJob = BatchJobName.resolve(jobToken);
-        String dateToken = optionValue(arguments, BUSINESS_DATE_OPTION);
-
-        Optional<BusinessDate> decodedDate;
-        if (dateToken == null) {
-            decodedDate = Optional.empty();
-        } else {
-            requireWellFormedBusinessDateToken(dateToken);
-            decodedDate = Optional.of(new BusinessDate(dateToken));
-        }
-
-        // WHY : Trade-offs: no option supplies a generation coordinate, so this method always yields
-        //       an empty one. A --generation= flag was considered and rejected: no reference driver
-        //       passes anything of the kind, and the coordinate needs a family, which is the job's own
-        //       knowledge rather than the operator's -- an operator naming the wrong family would
-        //       direct a step's output at another domain's prefix. A caller needing a coordinate
-        //       builds it at the site that already knows the family and uses the canonical
-        //       constructor.
-        return new BatchJobParameters(resolvedJob, decodedDate, Optional.empty());
-    }
 
     /**
      * Returns the job this invocation selects.
@@ -480,8 +410,8 @@ public record BatchJobParameters(
      * Returns the dataset generation this step reads or creates, if one was supplied.
      *
      * <p>An empty result means no coordinate was supplied, which is the case for every set of
-     * parameters {@link #fromArguments(String[])} produces, since no command-line option carries a
-     * coordinate. It does not mean the job creates no generation: four of the seven jobs do, and each
+     * parameters the module entry point builds from a command line, since no command-line option
+     * carries a coordinate. It does not mean the job creates no generation: four of the seven jobs do, and each
      * of them knows its own family, so the coordinate reaches this record from the job rather than
      * being inferred here.</p>
      *
@@ -526,96 +456,5 @@ public record BatchJobParameters(
                 + " and the running job requires one"));
     }
 
-    /**
-     * Reads the single value of one option out of an argument vector, ignoring everything else.
-     *
-     * @param arguments the container command arguments to search, which may be {@code null} and is
-     *     then treated as carrying no options at all
-     * @param option the option prefix to match, including its trailing equals sign
-     * @return the text following the prefix, or {@code null} when the option is absent from the vector
-     *     or is present with a blank value
-     * @throws IllegalArgumentException if the option appears more than once in the vector
-     */
-    private static String optionValue(String[] arguments, String option) {
-        if (arguments == null) {
-            return null;
-        }
 
-        String found = null;
-        for (String argument : arguments) {
-            // WHY : Alternatives Considered: rejecting an argument this method does not recognise was
-            //       evaluated and rejected outright. The vector is SHARED with the framework, which
-            //       consumes its own --key=value options for profile selection and property overrides,
-            //       and the orchestration state or an operator may add more. A strict parser would
-            //       therefore turn an ordinary framework option into a failed step, and it would fail
-            //       at container start with a diagnostic pointing at the argument list rather than at
-            //       whatever actually needed attention -- so the run would look broken in the one
-            //       place it was not. Skipping what this method does not own is the permissive half of
-            //       a deliberate asymmetry: unforgiving about the one option nothing else can supply,
-            //       permissive about every option it does not own.
-            if (argument == null || !argument.startsWith(option)) {
-                continue;
-            }
-
-            // WHY : Assumptions: a repeated option is rejected rather than resolved by taking the
-            //       first or the last occurrence. Both conventions silently discard half of an
-            //       ambiguous instruction and the two disagree with each other, so a command assembled
-            //       from two overlapping sources would run whichever job the convention happened to
-            //       favour and no reader of the log could tell which. This matches the entry point,
-            //       which rejects a repeat for the same reason, so one vector cannot be accepted by
-            //       one reader and refused by the other.
-            if (found != null) {
-                // WHY : Assumptions: the message names the option and echoes neither conflicting
-                //       value. They are the values in dispute, so a reader gains nothing from them
-                //       that the option name does not already give, and echoing them would place two
-                //       unbounded caller-supplied strings into a log record instead of none.
-                throw new IllegalArgumentException(option + " was supplied more than once");
-            }
-            found = argument.substring(option.length());
-        }
-
-        // WHY : Assumptions: a present-but-blank option is indistinguishable from an absent one for
-        //       every caller of this method, so both take one path and produce one diagnostic.
-        //       Treating a blank value as supplied would push an empty token into job resolution,
-        //       whose failure would report an unrecognised job rather than the missing argument that
-        //       actually caused it.
-        if (found == null || found.isBlank()) {
-            return null;
-        }
-        return found;
-    }
-
-    /**
-     * Asserts that a business-date token has the accepted width and character class.
-     *
-     * @param token the candidate business-date token, never {@code null}
-     * @throws IllegalArgumentException if {@code token} is not exactly ten characters, or if any
-     *     character is neither an ASCII digit nor an ASCII hyphen-minus
-     */
-    private static void requireWellFormedBusinessDateToken(String token) {
-        // WHY : Assumptions: this check belongs here because BusinessDate deliberately does not carry
-        //       it. That type validates width alone and records that the character class is "gated
-        //       upstream", naming the module entry point as the only construction site in the module
-        //       and asking any second construction site to gate it too. This factory IS that second
-        //       site, so gating here keeps the layered contract whole instead of opening a hole in it,
-        //       and the alternative -- moving the predicate down into BusinessDate -- would rewrite a
-        //       contract this file does not own.
-        // WHY : Assumptions: the digit test is written against the ASCII range rather than delegated
-        //       to the platform's is-a-digit predicate, which accepts every decimal digit in Unicode.
-        //       A fullwidth or Arabic-Indic digit would pass that predicate, be forwarded verbatim as
-        //       this contract requires, and then occupy more than one byte in a fixed-width record,
-        //       shifting every field after it.
-        boolean wellFormed = token.length() == BUSINESS_DATE_LENGTH;
-        for (int index = 0; wellFormed && index < token.length(); index++) {
-            char character = token.charAt(index);
-            boolean asciiDigit = character >= '0' && character <= '9';
-            wellFormed = asciiDigit || character == '-';
-        }
-
-        if (!wellFormed) {
-            throw new IllegalArgumentException(BUSINESS_DATE_OPTION + " value '" + token
-                    + "' is not exactly " + BUSINESS_DATE_LENGTH
-                    + " characters of ASCII digits and hyphen-minus");
-        }
-    }
 }

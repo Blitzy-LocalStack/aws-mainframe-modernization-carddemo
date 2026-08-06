@@ -15,20 +15,30 @@ field-oriented forms -- :func:`decode_packed_field`, :func:`encode_packed_field`
 located by a field descriptor, which keeps a caller anchored on the declared offset rather
 than on anything it found in the data.
 
-Every entry point here takes and returns ``bytes`` and NEVER ``str``. A packed field is
-binary: its bytes hold nibbles, not characters, and a span such as ``0x00 0x00 0x00 0x00
-0x00 0x00 0x0C`` contains six NUL bytes that no character decoder can carry. Passing such a
-span through one maps each uninterpretable byte to a replacement character of the same
-width, so the field keeps its declared length, every offset after it still looks valid, and
-only the amount is wrong. The parity oracle takes the same position from the other
-direction: ``tests/helpers/localstack_setup.py`` uploads its mainframe-character-set
-datasets straight from disk because those bytes include NULs and overpunch sign bytes
-(around its line 729), records that round-tripping one through a text write would corrupt
-it (around its line 741), and reads them back as raw bytes because a text decode mangles
-invalid sequences into replacement characters (around its line 1068). Character conversion
-is therefore ``carddemo_migration.copybook.ebcdic_codec``'s work and happens one field at a
-time; this module receives bytes that were never decoded at all, which is exactly what a
-packed field requires.
+The STORED SPAN crosses every boundary here as ``bytes`` and NEVER as ``str``: a decoder takes
+``bytes``, ``bytearray`` or ``memoryview`` and refuses a string outright, and an encoder returns
+``bytes``. The NUMERIC VALUE beside it is a different thing and is carried as a number rather
+than as bytes: :func:`decode_packed`, :func:`decode_binary` and the four field-oriented forms
+RETURN a :class:`decimal.Decimal` at the field's declared scale, and :func:`encode_packed` and
+:func:`encode_binary` ACCEPT ``Decimal | int | str``, where the ``str`` form is an exact decimal
+literal such as ``"-1234.56"`` and is parsed rather than encoded -- it is a way of writing a
+decimal without importing one, not a character rendering of the stored bytes. Reading the
+distinction the other way round is the mistake worth naming: handing a decoder a string is
+refused, and expecting a decoder to hand back the raw span is expecting the wrong direction.
+
+The span half of that rule is what the regime demands. A packed field is binary: its bytes hold
+nibbles, not characters, and a span such as ``0x00 0x00 0x00 0x00 0x00 0x00 0x0C`` contains six
+NUL bytes that no character decoder can carry. Passing such a span through one maps each
+uninterpretable byte to a replacement character of the same width, so the field keeps its declared
+length, every offset after it still looks valid, and only the amount is wrong. The parity oracle
+takes the same position from the other direction: ``tests/helpers/localstack_setup.py`` uploads
+its mainframe-character-set datasets straight from disk because those bytes include NULs and
+overpunch sign bytes (around its line 729), records that round-tripping one through a text write
+would corrupt it (around its line 741), and reads them back as raw bytes because a text decode
+mangles invalid sequences into replacement characters (around its line 1068). Character conversion
+is therefore ``carddemo_migration.copybook.ebcdic_codec``'s work and happens one field at a time;
+this module receives bytes that were never decoded at all, which is exactly what a packed field
+requires.
 
 Nothing else in the package converts these bytes, and this module converts no others.
 Zoned display decimal belongs to ``carddemo_migration.copybook.zoned``, cp037 character
@@ -341,7 +351,7 @@ from typing import Final
 
 from carddemo_migration.copybook.layouts import FieldSpec, Kind, binary_width, packed_width
 
-# WHY (Trade-offs): the import boundary is the standard library plus ``layouts`` and nothing
+# WHY : Trade-offs: the import boundary is the standard library plus ``layouts`` and nothing
 #   more, which is what lets a packed decode be reproduced on a bare checkout before anything
 #   else is installed. Five specific dependencies the package uses elsewhere are deliberately
 #   absent here: the PostgreSQL driver, the AWS SDK, that SDK's own core library, the
@@ -352,7 +362,7 @@ from carddemo_migration.copybook.layouts import FieldSpec, Kind, binary_width, p
 #   transcoding and persistence stay outside this module; the benefit is that the one decision
 #   in the pipeline that fails silently can be tested with nothing else present.
 
-# WHY (Trade-offs): the two width functions are RE-EXPORTED from ``layouts`` rather than
+# WHY : Trade-offs: the two width functions are RE-EXPORTED from ``layouts`` rather than
 #   defined again here, even though they are part of this module's advertised surface. A
 #   second definition would be a second statement of the rule that decides whether
 #   ``PIC S9(10)V99 COMP-3`` is six bytes or seven, and two statements of one rule can
@@ -360,7 +370,7 @@ from carddemo_migration.copybook.layouts import FieldSpec, Kind, binary_width, p
 #   the other. The accepted cost is that a reader looking for the arithmetic has to follow one
 #   import; the benefit is that the arithmetic, and both of its proofs, exist exactly once.
 
-# WHY (Assumptions): the public surface is declared explicitly and in sorted order so a
+# WHY : Assumptions: the public surface is declared explicitly and in sorted order so a
 #   consumer's import list can be checked against it mechanically, and so the two error types
 #   are advertised as part of the contract rather than left to be discovered by a caller
 #   writing an except clause. The sibling codec and the geometry module declare their surfaces
@@ -380,7 +390,7 @@ __all__ = [
     "packed_width",
 ]
 
-# WHY (Assumptions): the sign occupies the low-order nibble of a packed field's final byte and
+# WHY : Assumptions: the sign occupies the low-order nibble of a packed field's final byte and
 #   takes one of exactly three values in this corpus, all three of which are observable in
 #   real data rather than taken from documentation. A signed negative value lays down 0x0D, a
 #   signed non-negative value 0x0C, and a field declared without the leading S lays down 0x0F
@@ -392,7 +402,7 @@ _SIGN_SIGNED_POSITIVE: Final[int] = 0x0C
 _SIGN_SIGNED_NEGATIVE: Final[int] = 0x0D
 _SIGN_UNSIGNED: Final[int] = 0x0F
 
-# WHY (Alternatives Considered): 0x0A, 0x0B and 0x0E are the alternate sign nibbles some
+# WHY : Alternatives Considered: 0x0A, 0x0B and 0x0E are the alternate sign nibbles some
 #   encoders emit, and this codec rejects all three, as does the Java parity codec. Blanket
 #   tolerance of every nibble value was the alternative and was rejected: an unexpected nibble
 #   in the sign position is the clearest available evidence that the field offset is wrong, and
@@ -405,7 +415,7 @@ _SIGN_UNSIGNED: Final[int] = 0x0F
 #   did not come from this baseline.
 _LOWEST_SIGN_NIBBLE: Final[int] = 0x0A
 
-# WHY (Assumptions): a nibble above nine in a DIGIT position is not a tolerable variant; it is
+# WHY : Assumptions: a nibble above nine in a DIGIT position is not a tolerable variant; it is
 #   proof that the read is wrong. Either the offset is misaligned, or the field is not packed at
 #   all, or a sign nibble has been reached early. Masking such a nibble down into range instead
 #   would manufacture a digit that was never written, and the resulting amount would be
@@ -416,25 +426,25 @@ _NIBBLE_MASK: Final[int] = 0x0F
 _HIGH_NIBBLE_SHIFT: Final[int] = 4
 _NIBBLES_PER_BYTE: Final[int] = 2
 
-# WHY (Assumptions): the hexadecimal digits are indexed out of a constant rather than produced
+# WHY : Assumptions: the hexadecimal digits are indexed out of a constant rather than produced
 #   by a format specifier, which keeps a diagnostic independent of the ambient locale. A
 #   locale-sensitive case conversion of a formatted hexadecimal digit yields a different
 #   character under a locale whose dotless letter maps unexpectedly, and a diagnostic that reads
 #   differently per locale cannot be matched against a known message.
 _HEX_DIGITS: Final[str] = "0123456789ABCDEF"
 
-# WHY (Assumptions): the ten ASCII digits are named explicitly rather than checked with
+# WHY : Assumptions: the ten ASCII digits are named explicitly rather than checked with
 #   ``str.isdigit``, which also accepts the decimal digits of other scripts. Such a character
 #   subtracted from the ASCII zero yields a digit value in the hundreds, so admitting one would
 #   turn a rejected string into an accepted amount off by orders of magnitude.
 _DECIMAL_DIGITS: Final[str] = "0123456789"
 
-# WHY (Assumptions): a computational field's magnitude is right-aligned within its declared
+# WHY : Assumptions: a computational field's magnitude is right-aligned within its declared
 #   digit positions and padded on the LEFT with this character, exactly as the display regime
 #   pads a zoned field. Padding on the right would multiply every short value by a power of ten.
 _PAD_DIGIT: Final[str] = "0"
 
-# WHY (Assumptions): binary fields are stored most significant byte first. This is not a
+# WHY : Assumptions: binary fields are stored most significant byte first. This is not a
 #   platform property to be probed at run time but a property of the data already written to
 #   disk, and it is measurable: reading EXPORT-SEQUENCE-NUM as four big-endian bytes at
 #   zero-based offset 27 of the export dataset yields 1, 10, 266 and 509 for records 0, 9, 265
@@ -444,7 +454,7 @@ _PAD_DIGIT: Final[str] = "0"
 #   counter into a nine-figure identifier that no verification of type or width would question.
 _BINARY_BYTE_ORDER: Final[str] = "big"
 
-# WHY (Trade-offs): the encode path quantises inside a private decimal context whose precision
+# WHY : Trade-offs: the encode path quantises inside a private decimal context whose precision
 #   is the declared digit count plus this margin. The margin exists so that a value WIDER than
 #   the field still quantises successfully and is then refused by the explicit capacity check
 #   with a message naming both counts, rather than failing as an inscrutable precision error
@@ -452,14 +462,16 @@ _BINARY_BYTE_ORDER: Final[str] = "big"
 #   since the widest declaration anywhere is twelve digit positions.
 _QUANTIZE_PRECISION_MARGIN: Final[int] = 8
 
-# WHY (Assumptions): only these two of the five storage regimes are computational regimes, so
+# WHY : Assumptions: only these two of the six storage regimes are computational regimes, so
 #   only these two can reach this module. A zoned or unsigned display field is one printable
-#   digit per byte and belongs to ``zoned``; a character field has no numeric reading at all.
-#   Naming the admissible set once means a mis-routed field is refused with one message instead
-#   of having its bytes read as nibbles and returning a number that looks like an amount.
+#   digit per byte and belongs to ``zoned``; a character field has no numeric reading at all;
+#   and an opaque area is a container of several regimes at once whose interior another layout
+#   describes, so it has no single numeric reading either. Naming the admissible set once means
+#   a mis-routed field is refused with one message instead of having its bytes read as nibbles
+#   and returning a number that looks like an amount.
 _COMPUTATIONAL_KINDS: Final[frozenset[Kind]] = frozenset({Kind.PACKED, Kind.BINARY})
 
-# WHY (Assumptions): the three buffer types below are the ones a caller legitimately holds a
+# WHY : Assumptions: the three buffer types below are the ones a caller legitimately holds a
 #   record in -- an immutable read, a mutable build and a zero-copy slice of either. ``int`` is
 #   deliberately NOT among them even though ``bytes(7)`` succeeds, because it succeeds by
 #   allocating seven NUL bytes: an accidental integer argument would decode as a zero amount
@@ -467,7 +479,7 @@ _COMPUTATIONAL_KINDS: Final[frozenset[Kind]] = frozenset({Kind.PACKED, Kind.BINA
 _BUFFER_TYPES: Final[tuple[type, ...]] = (bytes, bytearray, memoryview)
 
 
-# WHY (Assumptions): every contract violation in this module is enforced with an explicit
+# WHY : Assumptions: every contract violation in this module is enforced with an explicit
 #   exception rather than an ``assert``. Optimised Python removes assertions outright, so a
 #   width, pad-nibble or sign check written as an assertion would vanish in exactly the
 #   deployment where a misread amount costs money. Both public errors remain ValueError
@@ -529,7 +541,7 @@ class PackedSpanWidthError(PackedDecimalError):
     """
 
 
-# WHY (Trade-offs): the disclosure policy is graded by how much a rendering reveals, and the
+# WHY : Trade-offs: the disclosure policy is graded by how much a rendering reveals, and the
 #   gate tightens as the rendering widens. Geometry -- name, offset, length, kind -- is always
 #   reported, because it is never content. One offending NIBBLE is reported unless the
 #   descriptor marks the field sensitive, because four bits cannot reconstruct a value and it is
@@ -537,7 +549,7 @@ class PackedSpanWidthError(PackedDecimalError):
 #   span or of the whole value is reported to NOBODY, sensitive or not: a packed span has no
 #   partial form that is useful without being identifying, so there is nothing here
 #   corresponding to the last-four concession the display path can make.
-# WHY (Assumptions): the reference implementation's zoned decoder echoes the offending raw value
+# WHY : Assumptions: the reference implementation's zoned decoder echoes the offending raw value
 #   in its error text, which suits a test harness reading committed fixtures; this module
 #   deliberately does not, and the divergence is documented rather than silent. It is a
 #   difference in what is REPORTED and not in what is rejected -- a sensitive field is validated
@@ -578,7 +590,7 @@ def _describe(kind: Kind, width: int, field: FieldSpec | None) -> str:
         return f"unnamed {kind.name} field of length {width}"
     described = f"field {field.describe()}"
     if field.sensitive:
-        # WHY (Assumptions): a reader who sees a diagnostic with no content cannot otherwise
+        # WHY : Assumptions: a reader who sees a diagnostic with no content cannot otherwise
         #   tell whether the codec had nothing to report or withheld it deliberately, and would
         #   reasonably suspect the message itself was defective. Naming the suppression makes
         #   the omission legible and stops anyone from adding the content back to fill the gap.
@@ -681,7 +693,7 @@ def _first_non_digit(text: str) -> int | None:
     ------
     None.
     """
-    # WHY (Alternatives Considered): the sibling display codec compiles a regular expression
+    # WHY : Alternatives Considered: the sibling display codec compiles a regular expression
     #   for this check because it validates a caller-supplied span on every single decode. Here
     #   the only strings scanned are ones this module produced itself from a Decimal, on the
     #   encode path alone, so a plain scan does the same work without importing ``re`` at all --
@@ -745,7 +757,7 @@ def _require_geometry(
             f" not {kind.name}"
         )
     for name, count in (("int_digits", int_digits), ("dec_digits", dec_digits)):
-        # WHY (Assumptions): ``bool`` is an ``int`` subclass, so a digit count of ``True`` would
+        # WHY : Assumptions: ``bool`` is an ``int`` subclass, so a digit count of ``True`` would
         #   otherwise pass as one and produce a one-digit field with no complaint. Rejecting it
         #   here keeps the width rule from being handed a value that means a flag.
         if isinstance(count, bool) or not isinstance(count, int):
@@ -753,7 +765,7 @@ def _require_geometry(
     if not isinstance(signed, bool):
         raise TypeError(f"signed must be bool, not {type(signed).__name__}")
 
-    # WHY (Assumptions): the width comes from ``layouts`` and its digit-count validation comes
+    # WHY : Assumptions: the width comes from ``layouts`` and its digit-count validation comes
     #   with it, so the admissible range of one to eighteen positions is enforced in one place
     #   for all three regimes. Its LayoutError is translated rather than propagated because a
     #   caller of this codec guards against this module's error type, and a geometry fault
@@ -809,10 +821,11 @@ def _require_buffer(raw: object, kind: Kind, width: int, field: FieldSpec | None
     Raises
     ------
     TypeError
-        If ``raw`` is a :class:`str`, or is not one of :class:`bytes`, :class:`bytearray` or
-        :class:`memoryview`.
+        If ``raw`` is a :class:`str`, is not one of :class:`bytes`, :class:`bytearray` or
+        :class:`memoryview`, or is a :class:`memoryview` that is not a one-dimensional view
+        of single bytes.
     """
-    # WHY (Assumptions): ``str`` is refused by name and with its own message rather than
+    # WHY : Assumptions: ``str`` is refused by name and with its own message rather than
     #   falling through to the generic one, because it is the single most likely wrong argument
     #   and the reason it is wrong is not obvious. A packed span is nibbles: the seven bytes of
     #   a PIC S9(10)V99 COMP-3 zero are six NULs and a 0x0C, and a character decoder maps every
@@ -840,6 +853,36 @@ def _require_buffer(raw: object, kind: Kind, width: int, field: FieldSpec | None
                 field,
             )
         )
+
+    # WHY : Refactoring Rationale: the SHAPE of a memoryview is now checked before the
+    #   conversion, and the check is new. This function's own Raises clause and the docstring of
+    #   every public entry point that reaches it already said the view had to be one-dimensional
+    #   and single-byte, and ``bytes()`` enforced neither: measured,
+    #   ``memoryview(record).cast("H")`` -- one dimension, two-byte items -- reached the packed
+    #   and binary field decoders and was converted without complaint. The identical guard was
+    #   already implemented one module away, at ``layouts._require_byte_chunk``, so the rule was
+    #   settled and only its application here was missing.
+    # WHY : Assumptions: both properties matter and for the same reason. A packed field's
+    #   sign nibble is located by a BYTE index and a binary field's value is read as big-endian
+    #   BYTES, so a view whose items are wider counts positions in the wrong unit, and a view of
+    #   more than one dimension has no single linear order for them. What makes refusing better
+    #   than converting is that the conversion succeeds and flattens to the HOST's byte order, so
+    #   a caller that assembled its buffer from integers reads one amount on a little-endian
+    #   machine and a different one on a big-endian machine, with nothing raising either way.
+    if isinstance(raw, memoryview) and (raw.ndim != 1 or raw.itemsize != 1):
+        raise TypeError(
+            _failure(
+                "computational decoding requires a ONE-DIMENSIONAL view of SINGLE bytes, but"
+                f" was given a memoryview of {raw.ndim} dimensions and {raw.itemsize}-byte"
+                " items; cast it with .cast('B') first, because a sign nibble is located by a"
+                " byte index and a wider view flattens to the host's own byte order rather"
+                " than raising",
+                kind,
+                width,
+                field,
+            )
+        )
+
     return bytes(raw)
 
 
@@ -907,7 +950,7 @@ def _pad_nibbles(digits: int, width: int) -> int:
     ------
     None.
     """
-    # WHY (Assumptions): the surplus is computed from the geometry rather than from the parity
+    # WHY : Assumptions: the surplus is computed from the geometry rather than from the parity
     #   of the digit count, because the geometry is arithmetic while the parity is a claim that
     #   is easy to state backwards -- and stating it backwards is not a harmless slip. A field
     #   occupies ``width * 2`` nibbles and uses ``digits + 1`` of them, so the surplus is
@@ -1032,7 +1075,7 @@ def _assemble(digit_text: str, negative: bool, dec_digits: int) -> Decimal:
     integer_boundary = len(digit_text) - dec_digits
     integer_part = digit_text[:integer_boundary] or _PAD_DIGIT
 
-    # WHY (Trade-offs): the value is built from one explicitly assembled decimal string rather
+    # WHY : Trade-offs: the value is built from one explicitly assembled decimal string rather
     #   than by integer arithmetic on the accumulated digits followed by a scaling operation. The
     #   string costs one allocation per field and buys two properties arithmetic does not. It is
     #   exact for the full twelve digits of the widest packed money field with no intermediate
@@ -1042,12 +1085,12 @@ def _assemble(digit_text: str, negative: bool, dec_digits: int) -> Decimal:
     #   that context.
     number = f"{integer_part}.{digit_text[integer_boundary:]}" if dec_digits else integer_part
 
-    # WHY (Assumptions): keeping exactly ``dec_digits`` characters after the point is what
+    # WHY : Assumptions: keeping exactly ``dec_digits`` characters after the point is what
     #   preserves the declared scale, and the result is deliberately never passed through
     #   ``normalize()``. Normalising would make 1020.00 and 1020 compare equal while discarding
     #   the exponent -- two values that encode to different bytes would then look identical, and
     #   the golden-master comparison that decides parity is a byte comparison.
-    # WHY (Assumptions): the sign is applied only when at least one digit is non-zero, which is
+    # WHY : Assumptions: the sign is applied only when at least one digit is non-zero, which is
     #   what keeps a negatively-signed zero out of the result. Python's Decimal, unlike the
     #   BigDecimal the Java parity codec uses, CAN carry a negative zero, so this normalisation
     #   has to be performed rather than inherited: without it the same span would decode to
@@ -1097,7 +1140,7 @@ def _require_capacity(
         If ``magnitude`` is not a plain ASCII digit run, or if it needs more digit positions
         than the field declares.
     """
-    # WHY (Assumptions): the run is revalidated here rather than trusted, even though every
+    # WHY : Assumptions: the run is revalidated here rather than trusted, even though every
     #   caller produces it from a Decimal that has already been scaled to an integer. An
     #   unexpected exponent form -- a value rendered as 5E+2 rather than as 500 -- must raise
     #   visibly; coercing it through ``int()`` instead would succeed and would silently drop a
@@ -1178,7 +1221,7 @@ def _require_encodable(
     """
     digits = int_digits + dec_digits
 
-    # WHY (Assumptions): a binary floating-point value cannot represent ten cents exactly, and
+    # WHY : Assumptions: a binary floating-point value cannot represent ten cents exactly, and
     #   ``bool`` is an ``int`` subclass despite not being an amount at all. Refusing both before
     #   any conversion stops 0.10 from carrying a hidden approximation into a money column and
     #   stops ``True`` from silently becoming one unit of currency.
@@ -1237,13 +1280,13 @@ def _require_encodable(
             )
         )
 
-    # WHY (Assumptions): the quantum is constructed from Decimal's exact tuple form rather than
+    # WHY : Assumptions: the quantum is constructed from Decimal's exact tuple form rather than
     #   through arithmetic in the caller's active context, so a low ambient precision cannot
     #   change the target exponent and make the same amount encode differently in two batch
     #   processes.
     quantum = Decimal((0, (1,), -dec_digits))
 
-    # WHY (Trade-offs): encoding is lossless or it raises. Silent truncation and silent rounding
+    # WHY : Trade-offs: encoding is lossless or it raises. Silent truncation and silent rounding
     #   were both rejected, because a codec that picks a rounding rule takes a business decision
     #   that never reaches the audit trail -- and the scale and mode for money are declared in
     #   the target's own money type, where the decision is visible. Quantising privately and then
@@ -1276,7 +1319,7 @@ def _require_encodable(
             )
         )
 
-    # WHY (Trade-offs): the sign is taken from an ordering comparison and not from Decimal's own
+    # WHY : Trade-offs: the sign is taken from an ordering comparison and not from Decimal's own
     #   sign flag, which deliberately makes a negative zero non-negative. A value of
     #   Decimal('-0.00') therefore encodes with the positive sign nibble, which is what makes the
     #   documented round-trip exception a single well-defined normalisation rather than a
@@ -1334,7 +1377,7 @@ def _decode_sign_nibble(
     """
     sign = raw[width - 1] & _NIBBLE_MASK
 
-    # WHY (Assumptions): a value below 0x0A in the sign position is a digit, and a digit here
+    # WHY : Assumptions: a value below 0x0A in the sign position is a digit, and a digit here
     #   means one of two specific things -- the field is zoned display rather than packed, or the
     #   read is off by one nibble. Naming that case separately is worth the extra branch because
     #   it points at the actual defect instead of reporting an unrecognised sign, and those two
@@ -1363,7 +1406,7 @@ def _decode_sign_nibble(
             )
         )
 
-    # WHY (Alternatives Considered): the nibble is cross-checked against the caller's declared
+    # WHY : Alternatives Considered: the nibble is cross-checked against the caller's declared
     #   sign contract rather than merely classified, and this is the packed analogue of the
     #   sibling codec's refusal of a plain trailing digit in a signed display field. Both exist
     #   for one reason: a mismatch means the descriptor the caller passed and the bytes on disk
@@ -1420,7 +1463,7 @@ def _sign_nibble_for(signed: bool, negative: bool) -> int:
     ------
     None.
     """
-    # WHY (Assumptions): a field declared without a sign takes the unsigned nibble regardless of
+    # WHY : Assumptions: a field declared without a sign takes the unsigned nibble regardless of
     #   the value, which is why the sign contract is consulted before the sign. Emitting 0x0C for
     #   a non-negative value in an unsigned field would produce a span this module's own decoder
     #   then refuses as a declaration-versus-data mismatch, so the encode and decode contracts
@@ -1463,7 +1506,7 @@ def _field_geometry(field: FieldSpec, kind: Kind) -> tuple[int, int, bool]:
     if not isinstance(field, FieldSpec):
         raise TypeError(f"field must be FieldSpec, not {type(field).__name__}")
     if field.kind is not kind:
-        # WHY (Assumptions): the regime is matched exactly and not merely checked for membership
+        # WHY : Assumptions: the regime is matched exactly and not merely checked for membership
         #   in the computational set, because packed and binary are different byte layouts of the
         #   same picture clause. app/cpy/CVEXPORT.cpy declares PIC S9(10)V99 at line 50 as seven
         #   packed bytes and at line 57 as eight binary bytes, so reading one entry point's span
@@ -1525,7 +1568,7 @@ def _require_record_reach(
             )
         )
 
-    # WHY (Assumptions): the read is anchored on the declared offset and never on a scan for
+    # WHY : Assumptions: the read is anchored on the declared offset and never on a scan for
     #   something that looks like a packed field. A scan cannot work here at all: unlike a display
     #   field, a packed span has no printable form to recognise, and any seven bytes whose last
     #   low nibble happens to be 0x0C decode as a valid amount. The declared offset is the only
@@ -1594,7 +1637,7 @@ def decode_packed(
 
     pad_nibbles = _pad_nibbles(digits, width)
     if pad_nibbles:
-        # WHY (Assumptions): the pad nibble is validated rather than skipped, and checking that
+        # WHY : Assumptions: the pad nibble is validated rather than skipped, and checking that
         #   it is zero is the cheapest detector of a displaced read this codec has. A real digit
         #   where the pad belongs means the span did not begin where the caller thinks it did,
         #   and accepting it shifts every true digit one place while prepending a foreign one:
@@ -1617,7 +1660,7 @@ def decode_packed(
                 )
             )
 
-    # WHY (Assumptions): the digits are read high nibble then low nibble across each byte from
+    # WHY : Assumptions: the digits are read high nibble then low nibble across each byte from
     #   the pad offset forward, which is the order the storage form uses. Reading them from the
     #   back instead would be correct only for a field with no pad, so it would reverse nothing
     #   and shift everything: PIC S9(10)V99 COMP-3, the widest money field in the authorization
@@ -1702,7 +1745,7 @@ def encode_packed(
     pad_nibbles = _pad_nibbles(digits, width)
     target = bytearray(width)
 
-    # WHY (Assumptions): the digits are laid down from the LEFT into the nibble positions the pad
+    # WHY : Assumptions: the digits are laid down from the LEFT into the nibble positions the pad
     #   leaves free, which mirrors the decode loop exactly and is what makes the round trip
     #   reproduce the original bytes rather than merely the original value. Writing them from the
     #   right instead would be correct only when nothing pads, so it would silently shift every
@@ -1717,7 +1760,7 @@ def encode_packed(
         _sign_nibble_for(signed, negative),
     )
 
-    # WHY (Assumptions): an immutable copy is returned rather than the working buffer, so a
+    # WHY : Assumptions: an immutable copy is returned rather than the working buffer, so a
     #   caller cannot mutate a span this codec has already validated and then present it back for
     #   a round-trip comparison that would silently pass against altered bytes.
     return bytes(target)
@@ -1777,7 +1820,7 @@ def decode_binary(
     span = _require_buffer(raw, Kind.BINARY, width, field)
     _require_span(span, width, Kind.BINARY, field)
 
-    # WHY (Assumptions): ``COMP`` and ``BINARY`` are the SAME usage under two spellings, and both
+    # WHY : Assumptions: ``COMP`` and ``BINARY`` are the SAME usage under two spellings, and both
     #   occur in the language, so one decode path serves both and neither spelling gets a rule of
     #   its own. Handling only one of them would leave every field declared with the other sized
     #   by the display rule instead -- eleven digit positions read as eleven bytes rather than
@@ -1785,7 +1828,7 @@ def decode_binary(
     stored = int.from_bytes(span, _BINARY_BYTE_ORDER, signed=signed)
     negative = stored < 0
 
-    # WHY (Assumptions): the magnitude's digit count is checked against the field's declared
+    # WHY : Assumptions: the magnitude's digit count is checked against the field's declared
     #   positions, which is what catches a span whose bytes hold more than the picture clause can
     #   describe. This subsumes the overflow guard the Java parity codec needs explicitly: that
     #   codec accumulates into a fixed sixty-four-bit integer and so has to refuse an unsigned
@@ -1852,7 +1895,7 @@ def encode_binary(
         value, int_digits, dec_digits, signed, Kind.BINARY, width, field
     )
 
-    # WHY (Assumptions): the whole number is rebuilt from the validated digit text rather than
+    # WHY : Assumptions: the whole number is rebuilt from the validated digit text rather than
     #   read out of the value's own unscaled form, because the digit text has already been padded
     #   to exactly the declared decimal places. Reading the unscaled form directly would encode
     #   two units as though they were two hundredths: a scale of zero and a scale of two hold the
@@ -1863,7 +1906,7 @@ def encode_binary(
     try:
         return stored.to_bytes(width, _BINARY_BYTE_ORDER, signed=signed)
     except OverflowError as exc:
-        # WHY (Trade-offs): this guard is unreachable while the width rule and the digit-position
+        # WHY : Trade-offs: this guard is unreachable while the width rule and the digit-position
         #   check agree, because the widest admissible magnitude at every tier fits its tier --
         #   eighteen digits need at most sixty bits and the eight-byte tier provides
         #   sixty-three. It is kept, and the platform error is translated rather than propagated,

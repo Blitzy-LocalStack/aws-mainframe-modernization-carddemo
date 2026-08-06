@@ -43,23 +43,191 @@ class CopybookLayoutTest {
     }
 
     /**
-     * Confirms the registry publishes exactly the eleven base masters and the three derived records.
+     * Confirms the registry publishes exactly eleven base masters, three derived records and two IMS
+     * segments.
      *
-     * <p>Assumptions: the split is asserted rather than the total, because the two groups have different
-     * obligations -- a base master has a shipped extract to load and a byte-count to agree with, while a
-     * derived record is produced by the pipeline and has neither. A layout in the wrong group would be
-     * verified against the wrong contract.</p>
+     * <p>Assumptions: the split is asserted rather than the total, because the three groups have
+     * different obligations -- a base master has a shipped extract to load and a byte-count to agree
+     * with, a derived record is produced by the pipeline and has neither, and an IMS segment is
+     * transcribed from a copybook whose length a database descriptor declares independently. A layout in
+     * the wrong group would be verified against the wrong contract.</p>
+     *
+     * <p>Assumptions: the total is asserted as well as the split, and it is the sum of the three, so a
+     * layout registered under a fourth provenance would fail here rather than be silently unaccounted
+     * for. That is what the three containsAll assertions plus the size assertion together state.</p>
      */
     @Test
-    @DisplayName("publishes eleven base masters and three derived records, and nothing else")
+    @DisplayName("publishes eleven base masters, three derived records and two IMS segments")
     void publishesTheDeclaredRegistry() {
         assertThat(CopybookLayout.baseMasterNames()).hasSize(11);
         assertThat(CopybookLayout.derivedNames()).hasSize(3);
+        assertThat(CopybookLayout.imsSegmentNames()).hasSize(2);
         assertThat(CopybookLayout.names())
-            .hasSize(14)
+            .hasSize(16)
             .containsAll(CopybookLayout.baseMasterNames())
             .containsAll(CopybookLayout.derivedNames())
+            .containsAll(CopybookLayout.imsSegmentNames())
             .doesNotHaveDuplicates();
+    }
+
+    /**
+     * Confirms the two IMS segments carry the lengths and keys their database descriptor declares.
+     *
+     * <p>Assumptions: the numbers are asserted as literals read from
+     * {@code app/app-authorization-ims-db2-mq/ims/DBPAUTP0.dbd} rather than computed from the field
+     * list, because computing them from the same declaration they are meant to check would make this
+     * test pass for any self-consistent transcription. The descriptor is the independent witness: the
+     * summary segment declares BYTES=100 with a six-byte packed sequence field, and the detail segment
+     * BYTES=200 with an eight-byte character one.</p>
+     *
+     * @param name the segment layout name under test
+     * @param expectedLength the record length the database descriptor declares
+     * @param expectedKeyLength the sequence-field length the database descriptor declares
+     */
+    @ParameterizedTest
+    @CsvSource({"PAUTSUM0, 100, 6", "PAUTDTL, 200, 8"})
+    @DisplayName("every IMS segment's declared length and key match its database descriptor")
+    void imsSegmentGeometryMatchesTheDatabaseDescriptor(String name, int expectedLength,
+            int expectedKeyLength) {
+        RecordSpec spec = CopybookLayout.layout(name);
+
+        assertThat(spec.reclen()).isEqualTo(expectedLength);
+        assertThat(spec.keyLength()).isEqualTo(expectedKeyLength);
+        assertThat(spec.keyOffset()).isZero();
+    }
+
+    /**
+     * Confirms the authorization summary segment transcribes every field of its copybook exactly.
+     *
+     * <p>Assumptions: the whole field list is asserted rather than a sample, because a segment decoded
+     * against a wrong offset returns a well-formed number from the wrong bytes, and the two packed money
+     * pairs at lines 23 to 26 and 29 to 30 are adjacent and identically shaped -- a transposition
+     * between them would leave every width correct and every value wrong.</p>
+     *
+     * <p>Assumptions: the five-occurrence account-status table is asserted as ONE ten-byte field, which
+     * is the transcription decision recorded at the declaration. Asserting it here is what stops the
+     * decision being reversed to five two-byte fields without the reason being revisited.</p>
+     */
+    @Test
+    @DisplayName("the authorization summary segment transcribes CIPAUSMY field for field")
+    void summarySegmentTranscribesItsCopybook() {
+        RecordSpec spec = CopybookLayout.layout("PAUTSUM0");
+
+        assertThat(spec.fields()).extracting(FieldSpec::name)
+            .containsExactly("PA-ACCT-ID", "PA-CUST-ID", "PA-AUTH-STATUS", "PA-ACCOUNT-STATUS",
+                "PA-CREDIT-LIMIT", "PA-CASH-LIMIT", "PA-CREDIT-BALANCE", "PA-CASH-BALANCE",
+                "PA-APPROVED-AUTH-CNT", "PA-DECLINED-AUTH-CNT", "PA-APPROVED-AUTH-AMT",
+                "PA-DECLINED-AUTH-AMT", "FILLER");
+
+        assertThat(fieldNamed(spec, "PA-ACCT-ID"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(6, FieldSpec::length)
+            .returns(0, FieldSpec::start);
+        assertThat(fieldNamed(spec, "PA-ACCOUNT-STATUS"))
+            .returns(Kind.TEXT, FieldSpec::kind)
+            .returns(10, FieldSpec::length);
+        assertThat(fieldNamed(spec, "PA-APPROVED-AUTH-CNT"))
+            .returns(Kind.BINARY, FieldSpec::kind)
+            .returns(2, FieldSpec::length);
+        assertThat(fieldNamed(spec, "PA-DECLINED-AUTH-AMT"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(6, FieldSpec::length)
+            .returns(60, FieldSpec::start);
+    }
+
+    /**
+     * Confirms the authorization detail segment transcribes every field of its copybook exactly.
+     *
+     * <p>Assumptions: the two twelve-digit money fields are asserted at SEVEN bytes each, which is the
+     * rung the segment's own declared length proves -- at six the field widths sum to 198 and leave two
+     * bytes unclaimed. Asserting the width here as well as on the arithmetic keeps the corroboration
+     * beside the record that corroborates it.</p>
+     *
+     * <p>Assumptions: the misspelt merchant-category field name is asserted verbatim, so the
+     * transcription cannot be quietly corrected here. The correction belongs to the mapping layer, and
+     * a registry that renamed the field would stop matching the copybook line a reader checks it
+     * against.</p>
+     */
+    @Test
+    @DisplayName("the authorization detail segment transcribes CIPAUDTY field for field")
+    void detailSegmentTranscribesItsCopybook() {
+        RecordSpec spec = CopybookLayout.layout("PAUTDTL");
+
+        assertThat(spec.fields()).hasSize(28);
+        assertThat(spec.fields()).extracting(FieldSpec::name)
+            .startsWith("PA-AUTH-DATE-9C", "PA-AUTH-TIME-9C", "PA-AUTH-ORIG-DATE",
+                "PA-AUTH-ORIG-TIME", "PA-CARD-NUM")
+            .contains("PA-MERCHANT-CATAGORY-CODE")
+            .endsWith("PA-MATCH-STATUS", "PA-AUTH-FRAUD", "PA-FRAUD-RPT-DATE", "FILLER");
+
+        assertThat(fieldNamed(spec, "PA-AUTH-DATE-9C"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(3, FieldSpec::length);
+        assertThat(fieldNamed(spec, "PA-AUTH-TIME-9C"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(5, FieldSpec::length);
+        assertThat(fieldNamed(spec, "PA-TRANSACTION-AMT"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(7, FieldSpec::length)
+            .returns(74, FieldSpec::start);
+        assertThat(fieldNamed(spec, "PA-APPROVED-AMT"))
+            .returns(Kind.PACKED, FieldSpec::kind)
+            .returns(7, FieldSpec::length)
+            .returns(81, FieldSpec::start);
+    }
+
+    /**
+     * Confirms the detail segment marks the primary account number sensitive and nothing else.
+     *
+     * <p>Assumptions: the assertion is exhaustive rather than positive-only. A test that merely checked
+     * the card number is marked would pass equally well on a layout that marked every field, and
+     * over-marking is a real failure here: the merchant name, city, state and postal code are the fields
+     * a fraud reviewer reads to recognise a merchant, so redacting them would defeat the very screen
+     * this segment feeds.</p>
+     */
+    @Test
+    @DisplayName("the detail segment marks exactly the primary account number as sensitive")
+    void detailSegmentMarksOnlyTheCardNumberSensitive() {
+        assertThat(CopybookLayout.layout("PAUTDTL").fields())
+            .filteredOn(FieldSpec::sensitive)
+            .extracting(FieldSpec::name)
+            .containsExactly("PA-CARD-NUM");
+    }
+
+    /**
+     * Confirms neither IMS segment claims a parity-oracle round trip.
+     *
+     * <p>Assumptions: this is asserted as a negative because the flag decides whether a byte-identical
+     * round-trip test against a shipped extract is possible, and no extract ships for either segment.
+     * A layout claiming an oracle it does not have would invite a test written against a file that does
+     * not exist.</p>
+     */
+    @Test
+    @DisplayName("neither IMS segment claims a parity-oracle round trip")
+    void imsSegmentsClaimNoOracleRoundTrip() {
+        for (String name : CopybookLayout.imsSegmentNames()) {
+            assertThat(CopybookLayout.hasOracleRoundTrip(name)).isFalse();
+            assertThat(CopybookLayout.provenanceOf(name)).isEqualTo(Provenance.IMS_SEGMENT);
+        }
+    }
+
+    /**
+     * Returns one named field of a layout, failing the test when the layout has no such field.
+     *
+     * <p>Assumptions: the lookup fails rather than returning an empty optional, because every call
+     * below names a field the layout is asserted to declare, and an optional would let a typo in the
+     * name turn a real assertion into a vacuous one.</p>
+     *
+     * @param spec the layout to search
+     * @param fieldName the field name to find
+     * @return the field declared under that name
+     */
+    private static FieldSpec fieldNamed(RecordSpec spec, String fieldName) {
+        return spec.fields().stream()
+            .filter(field -> fieldName.equals(field.name()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(
+                "layout " + spec.name() + " declares no field named " + fieldName));
     }
 
     /**

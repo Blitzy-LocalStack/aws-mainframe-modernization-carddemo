@@ -19,10 +19,34 @@
  * optional: it demands a {@code package-info.java} in any directory holding an audited source file,
  * so the charter and the classes it governs stand or fall together.
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every class name and count below states this package's <b>target contract</b> as
+ * the migration plan assigns it, not an inventory of the files beside this one. The charter is
+ * authored ahead of the tests it governs, so at the checkpoint that wrote this section the
+ * directory holds this file alone: all three of {@code AccountControllerTest},
+ * {@code CustomerControllerTest} and {@code CardXrefControllerTest} are <b>planned</b>, not
+ * missing, and each is authored at a later index of the same plan. Declaring that once, here, is
+ * what lets the rest of this document be read as a contract rather than as a claim about the file
+ * system.
+ *
+ * <p>Assumptions: the three production adapters these tests cover -- {@code AccountController},
+ * {@code CustomerController} and {@code CardXrefController} in
+ * {@code com.carddemo.account.api} -- are planned on the same footing. A test cannot precede its
+ * subject, so the ordering is a consequence of the plan rather than a gap in it, and the reference
+ * programs cited below are what both halves are written against.
+ *
+ * <p>Trade-offs: authoring the charter first means its roster reads as present tense unless the
+ * distinction is declared, which is the cost this section pays. The alternative -- withholding the
+ * charter until the tests exist -- was rejected because the charter is what an author of those
+ * tests works from: which test belongs here, which does not, and what the closed set is. Writing
+ * it last would leave the package with no stated contract during exactly the interval in which one
+ * is needed.
+ *
  * <h2>The three classes, and the reference programs that specify them</h2>
  *
- * <p>Three classes execute here and no fourth does. The lengths given are the physical lengths of
- * the reference sources, counted rather than recalled. Those sources are the behavioural
+ * <p>Three classes are assigned here and no fourth is. The lengths given are the physical lengths
+ * of the reference sources, counted rather than recalled. Those sources are the behavioural
  * specification for this package: they are read, and they are never modified.
  *
  * <ul>
@@ -163,7 +187,7 @@
  * line 378 of the same file, only ever inspects a {@code package-info.java} that already exists.
  * Neither check therefore asks for a descriptor at those depths, and the project Explainability rule
  * has no entry point to attach one to either, because a directory that declares no package is not a
- * module entry point. Two already-landed trees corroborate this at the identical relative depth:
+ * module entry point. Two sibling trees corroborate this at the identical relative depth:
  * {@code services/auth-service/src/test/java} carries a descriptor at
  * {@code .../auth/api} and at {@code .../auth/repository} and at no shallower level, holding zero
  * files of its own at each of its four upper depths; and
@@ -194,7 +218,7 @@
  * rather than a compilation error. The threshold of warning means there is no tolerated middle band:
  * a warning is a failure. And because {@code validate} is the first phase of the lifecycle, a build
  * that skips tests still runs this gate -- skipping tests suppresses Surefire, which is bound far
- * later, and cannot suppress {@code validate}, so the image build that this module's planned
+ * later, and cannot suppress {@code validate}, so the image build that this module's
  * {@code Dockerfile} performs over the jar described at
  * {@code services/account-service/pom.xml} lines 64 to 65 is still audited against this file even
  * though it never executes a single test in it. The compromise accepted is a slower inner loop for a

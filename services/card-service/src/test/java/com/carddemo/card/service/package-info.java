@@ -4,24 +4,23 @@
  * writes. Each behaviour is asserted against the COBOL paragraphs it was transcribed
  * from, so a failure here names a business rule rather than merely a layer.
  *
- * <h2>What this charter describes, and the tree state that authored it</h2>
+ * <h2>What this charter describes: a target contract, not a directory listing</h2>
  *
  * <p>Assumptions: every class name, sibling file and count below states the <b>target
- * contract</b> assigned to this package, not an inventory of what sits beside this file.
- * The charter is authored ahead of the classes it governs, so at the checkpoint that wrote
- * it this directory holds this file alone. Anything named below that has no file yet is
- * therefore <b>planned</b> rather than missing, and every count is a target total rather
- * than a measurement. Declaring that once, here, is what lets the rest of this document be
- * read as a contract instead of as a claim about the file system.</p>
+ * contract</b> assigned to this package as the migration plan assigns it, not an inventory
+ * of what sits beside this file. It is read against the plan, and it says as much about what
+ * this package may never hold as about what it does.</p>
  *
- * <p>Six names below are targets of exactly that kind, listed so the distinction can be
- * checked rather than taken on trust: {@code CardListServiceTest} and
+ * <p>Alternatives Considered: deriving the roster from the directory instead of from the
+ * plan. Rejected, because a roster that describes whatever is present cannot say what may
+ * <em>not</em> be added, which is the half of the contract a reader cannot reconstruct from
+ * the files. The names the plan assigns are {@code CardListServiceTest} and
  * {@code CardUpdateServiceTest} in this package, {@code CardControllerTest} in
  * {@code com.carddemo.card.api}, {@code CardRepositoryIT} in
  * {@code com.carddemo.card.repository}, {@code LayeringRulesTest} in
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture}, and
- * {@code services/card-service/src/test/resources/fixtures/README.md}. Each is assigned by
- * the migration plan and none had been authored when this file was written.</p>
+ * {@code services/card-service/src/test/resources/fixtures/README.md}; a test class in this
+ * package that is none of those is outside the contract rather than merely new.</p>
  *
  * <h2>The two behaviours and their baseline provenance</h2>
  *

@@ -108,8 +108,8 @@ import com.carddemo.common.money.Money;
  * downstream mappers, while this boundary remains faithful to copybook names
  * and declaration order.</p>
  *
- * <p>Trade-offs: a final blank padding field is omitted on decode and restored
- * on encode. Carrying it through every map would expose up to 178 meaningless
+ * <p>Trade-offs: a blank padding field is omitted on decode and restored on
+ * encode. Carrying it through every map would expose up to 178 meaningless
  * blank characters to each consumer; omitting it without restoring it would
  * produce a short physical record. An explicitly supplied or nonblank filler
  * remains content, which preserves the {@code VALUE} case proven by
@@ -117,7 +117,18 @@ import com.carddemo.common.money.Money;
  * A {@code FILLER REDEFINES} item is an overlay alias and is absent from the
  * non-overlapping {@link CopybookLayout.FieldSpec} list, so it advances no
  * offset. The named {@code SEC-USR-FILLER} at {@code CSUSR01Y.cpy} line 23 is
- * still padding because it is final and blank.</p>
+ * padding because it is a registered blank text filler, not because of where it
+ * sits.</p>
+ *
+ * <p>Assumptions: the test is on CONTENT and registration, never on position, and
+ * the distinction is load-bearing rather than pedantic. {@code REJECT} declares its
+ * {@code FILLER} at index 13 of 15, because the 430-byte reject record is the
+ * 350-byte daily-transaction record — whose padding is interior to it — followed by
+ * a reason code and its description. A positional rule reading "final field only"
+ * would retain 20 blank bytes there while dropping them from the other fifteen
+ * layouts. Every registered layout except {@code REJECT} does declare its filler
+ * last, which is precisely why such a rule would pass fifteen checks and still be
+ * wrong.</p>
  *
  * <p>Assumptions: the registry distinguishes eleven base masters from three
  * derived records. The reference registry in
@@ -159,9 +170,10 @@ public final class FixedWidthCodec {
 
     private static final Charset DEFAULT_CHARSET = StandardCharsets.US_ASCII;
     private static final String IBM037_CANONICAL_NAME = "IBM037";
-    private static final int EXPECTED_LAYOUT_COUNT = 14;
+    private static final int EXPECTED_LAYOUT_COUNT = 16;
     private static final int EXPECTED_BASE_MASTER_COUNT = 11;
     private static final int EXPECTED_DERIVED_COUNT = 3;
+    private static final int EXPECTED_IMS_SEGMENT_COUNT = 2;
     private static final int TIMESTAMP_LENGTH = 26;
 
     static {
@@ -893,7 +905,9 @@ public final class FixedWidthCodec {
      * @param field the candidate padding field
      * @param index the field's declaration index
      * @param value the decoded field value
-     * @return {@code true} only for a terminal filler descriptor whose text is blank
+     * @return {@code true} only for a registered text filler descriptor whose decoded text is blank;
+     *     the declaration position is deliberately not part of the test, because {@code REJECT}
+     *     declares its filler at index 13 of 15
      */
     private static boolean isDroppablePadding(CopybookLayout.RecordSpec spec,
             CopybookLayout.FieldSpec field, int index, Object value) {
@@ -1038,9 +1052,15 @@ public final class FixedWidthCodec {
     /**
      * Proves field, record, and key geometry for one supplied layout.
      *
+     * <p>Assumptions: a layout may legitimately declare NO retrieval key, which
+     * {@link CopybookLayout.RecordSpec#NO_RETRIEVAL_KEY} denotes, so key geometry is proven only when a
+     * key is present. The print-line layouts in {@code reporting-service} are the case: a report band and
+     * a statement band are written sequentially and nothing indexes them, so there is no key to prove.</p>
+     *
      * @param spec the layout to validate
      * @throws CopybookLayout.LayoutException if the layout is null, gapped, overlapping,
-     *     non-closing, duplicated by field name, or contains an out-of-record field or key
+     *     non-closing, duplicated by field name, or contains an out-of-record field, or declares a key
+     *     that is negative, out of record, or positioned on a keyless record
      */
     private static void validateRecordSpec(CopybookLayout.RecordSpec spec) {
         if (spec == null) {
@@ -1084,10 +1104,20 @@ public final class FixedWidthCodec {
             throw new CopybookLayout.LayoutException("record " + spec.name()
                     + " field lengths sum to " + cursor + " but reclen is " + spec.reclen());
         }
-        long keyEnd = (long) spec.keyOffset() + spec.keyLength();
-        if (spec.keyOffset() < 0 || spec.keyLength() < 1 || keyEnd > spec.reclen()) {
-            throw new CopybookLayout.LayoutException("record " + spec.name() + " key interval ["
-                    + spec.keyOffset() + "," + keyEnd + ") exceeds reclen " + spec.reclen());
+        // WHY : Refactoring Rationale: this check formerly required keyLength >= 1 of EVERY layout,
+        //       which is the same "every record has a key" invariant the record descriptor used to
+        //       carry. Two independent places encoding one wrong invariant is why the print-line
+        //       layouts each declared a fabricated one-byte key: a caller could then ask for the key
+        //       of a report band and be handed the first byte of a heading. The descriptor now admits
+        //       a keyless form, so this validator must too -- otherwise the honest declaration would
+        //       construct successfully and then fail on first use, which is a worse failure than the
+        //       one being removed.
+        if (spec.hasRetrievalKey()) {
+            long keyEnd = (long) spec.keyOffset() + spec.keyLength();
+            if (spec.keyOffset() < 0 || keyEnd > spec.reclen()) {
+                throw new CopybookLayout.LayoutException("record " + spec.name() + " key interval ["
+                        + spec.keyOffset() + "," + keyEnd + ") exceeds reclen " + spec.reclen());
+            }
         }
     }
 
@@ -1101,14 +1131,18 @@ public final class FixedWidthCodec {
         List<String> names = CopybookLayout.names();
         List<String> baseMasters = CopybookLayout.baseMasterNames();
         List<String> derived = CopybookLayout.derivedNames();
+        List<String> imsSegments = CopybookLayout.imsSegmentNames();
         if (names.size() != EXPECTED_LAYOUT_COUNT
                 || baseMasters.size() != EXPECTED_BASE_MASTER_COUNT
-                || derived.size() != EXPECTED_DERIVED_COUNT) {
+                || derived.size() != EXPECTED_DERIVED_COUNT
+                || imsSegments.size() != EXPECTED_IMS_SEGMENT_COUNT) {
             throw new CopybookLayout.LayoutException("layout registry expected "
                     + EXPECTED_LAYOUT_COUNT + " total entries split into "
-                    + EXPECTED_BASE_MASTER_COUNT + " base masters and "
-                    + EXPECTED_DERIVED_COUNT + " derived records, but found "
-                    + names.size() + ", " + baseMasters.size() + " and " + derived.size());
+                    + EXPECTED_BASE_MASTER_COUNT + " base masters, "
+                    + EXPECTED_DERIVED_COUNT + " derived records and "
+                    + EXPECTED_IMS_SEGMENT_COUNT + " IMS segments, but found "
+                    + names.size() + ", " + baseMasters.size() + ", " + derived.size() + " and "
+                    + imsSegments.size());
         }
 
         // WHY : Assumptions: the registry's eleven entries and the eleven base masters are different
@@ -1119,13 +1153,14 @@ public final class FixedWidthCodec {
             CopybookLayout.RecordSpec spec = CopybookLayout.layout(name);
             validateRecordSpec(spec);
 
-            boolean expectedDerived = isExpectedDerived(name);
-            CopybookLayout.Provenance expectedProvenance = expectedDerived
-                    ? CopybookLayout.Provenance.DERIVED
-                    : CopybookLayout.Provenance.BASE_MASTER;
+            CopybookLayout.Provenance expectedProvenance = expectedProvenance(name);
             if (CopybookLayout.provenanceOf(name) != expectedProvenance
-                    || baseMasters.contains(name) == expectedDerived
-                    || derived.contains(name) != expectedDerived) {
+                    || baseMasters.contains(name)
+                        != (expectedProvenance == CopybookLayout.Provenance.BASE_MASTER)
+                    || derived.contains(name)
+                        != (expectedProvenance == CopybookLayout.Provenance.DERIVED)
+                    || imsSegments.contains(name)
+                        != (expectedProvenance == CopybookLayout.Provenance.IMS_SEGMENT)) {
                 throw new CopybookLayout.LayoutException("layout " + name
                         + " is registered under the wrong provenance population");
             }
@@ -1150,28 +1185,52 @@ public final class FixedWidthCodec {
     }
 
     /**
-     * Identifies the three layouts derived from base-master geometry.
+     * Returns the provenance population a registry name independently belongs to.
+     *
+     * <p>Refactoring Rationale: this replaces a boolean that answered only "is it derived", and the
+     * widening is what the third population forced. A two-valued answer could express derived versus
+     * everything-else, so once a layout existed that was neither a base master nor a derivation it
+     * would have been silently classified as a base master -- and a base master is precisely the group
+     * whose members are expected to have a shipped extract with a byte count to agree with. Naming the
+     * population directly makes the check total over the enum instead of over a boolean.</p>
      *
      * @param name the registered layout name
-     * @return {@code true} for TRNX, REJECT and INTTRAN
+     * @return the population the name is expected to be registered under
+     * @throws CopybookLayout.LayoutException if the name is outside the closed registry
      */
-    private static boolean isExpectedDerived(String name) {
+    private static CopybookLayout.Provenance expectedProvenance(String name) {
         // WHY : Alternatives Considered: REJECT and INTTRAN are classified as derivations rather than
         //       second literal copies of their 350-byte prefixes. CopybookLayout.extendWith and
         //       withFieldFlags keep the shared geometry single-sourced, matching tests/README.md
         //       lines 540-542 and preventing a prefix correction from reaching only one copy.
-        return "TRNX".equals(name) || "REJECT".equals(name) || "INTTRAN".equals(name);
+        // WHY : Assumptions: the two authorization segments are their own population and not base
+        //       masters, because no flat extract ships for either -- they are loaded from a generation
+        //       data set by the extension's own load program. Classifying them as base masters would
+        //       have put two records with no extract into the group defined by having one.
+        return switch (name) {
+            case "TRNX", "REJECT", "INTTRAN" -> CopybookLayout.Provenance.DERIVED;
+            case "PAUTSUM0", "PAUTDTL" -> CopybookLayout.Provenance.IMS_SEGMENT;
+            case "SECUSER", "ACCOUNT", "CARD", "CUSTOMER", "XREF", "DALYTRAN", "TRAN", "DISGROUP",
+                 "TCATBAL", "TRANCAT", "TRANTYPE" -> CopybookLayout.Provenance.BASE_MASTER;
+            default -> throw new CopybookLayout.LayoutException(
+                    "unexpected layout name in provenance self-check: " + name);
+        };
     }
 
     /**
      * Returns whether the Python parity registry contains the named layout.
      *
      * @param name the registered layout name
-     * @return {@code false} only for SECUSER, TRANCAT and TRANTYPE
+     * @return {@code false} for SECUSER, TRANCAT, TRANTYPE and the two IMS segments
      */
     private static boolean expectedOracleRoundTrip(String name) {
+        // WHY : Assumptions: the two IMS segments join the three VSAM masters the oracle's codec does
+        //       not register. The oracle DECLARES both segment layouts but leaves them out of its own
+        //       registry, so there is no second registered transcription to round-trip a decode
+        //       against, and no shipped extract to round-trip it over either.
         return !"SECUSER".equals(name) && !"TRANCAT".equals(name)
-                && !"TRANTYPE".equals(name);
+                && !"TRANTYPE".equals(name) && !"PAUTSUM0".equals(name)
+                && !"PAUTDTL".equals(name);
     }
 
     /**
@@ -1192,6 +1251,13 @@ public final class FixedWidthCodec {
             case "DISGROUP", "TCATBAL" -> 50;
             case "TRANCAT", "TRANTYPE" -> 60;
             case "REJECT" -> 430;
+            // WHY : Assumptions: these two lengths are read from the database descriptor
+            //       app/app-authorization-ims-db2-mq/ims/DBPAUTP0.dbd, which declares BYTES=100 on
+            //       segment PAUTSUM0 and BYTES=200 on segment PAUTDTL1. That descriptor is a source
+            //       independent of the copybooks the registry transcribes, which is what makes this
+            //       table a second witness rather than a restatement.
+            case "PAUTSUM0" -> 100;
+            case "PAUTDTL" -> 200;
             default -> throw new CopybookLayout.LayoutException(
                     "unexpected layout name in record-length self-check: " + name);
         };
@@ -1214,6 +1280,12 @@ public final class FixedWidthCodec {
             case "TRANTYPE" -> 2;
             case "TCATBAL" -> 17;
             case "TRNX" -> 32;
+            // WHY : Assumptions: these two key lengths are the sequence-field widths the same database
+            //       descriptor declares -- BYTES=6 TYPE=P on the summary segment's ACCNTID field and
+            //       BYTES=8 TYPE=C on the detail segment's PAUT9CTS field. The eight spans the two
+            //       packed components the detail copybook brackets as its authorization key.
+            case "PAUTSUM0" -> 6;
+            case "PAUTDTL" -> 8;
             default -> throw new CopybookLayout.LayoutException(
                     "unexpected layout name in key-length self-check: " + name);
         };

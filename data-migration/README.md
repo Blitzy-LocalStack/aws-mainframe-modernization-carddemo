@@ -72,13 +72,22 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 "no manual mainframe dependency" constraint.
 
 > **Note — delivery state.** This checkout delivers the configuration trust
-> boundary, the normative layout catalogue, the zoned-decimal codec, the S3
+> boundary, the normative layout catalogue, the zoned-decimal codec, the
+> packed-decimal and binary codecs, the per-field EBCDIC decoder, the S3
 > generation writer, the credential-application bootstrap, the schema/role DDL, the
-> masked reporting views, and the command-line entry point carrying the three
-> subcommands whose backing modules are present — `list-datasets`, `stage-dataset`
-> and `apply-credentials`. It does **not** yet deliver the packed and EBCDIC codecs,
-> the readers, the Aurora bulk loader or the three verification passes, so
+> masked reporting views, and the command-line entry point carrying the four
+> subcommands whose backing modules are present — `list-datasets`, `decode-record`,
+> `stage-dataset` and `apply-credentials`. It does **not** yet deliver the readers,
+> the Aurora bulk loader or the three verification passes, so
 > `load-dataset` and the `verify-*` subcommands are **not registered** by the parser.
+>
+> Refactoring Rationale: `decode-record` was added once the codec stack landed, because
+> the three codecs were otherwise reachable only from a test. A codec with no caller is
+> a codec whose offsets have never been walked against a real delivery, and the one
+> operation the stack can perform without the readers or the loader is exactly the one
+> worth exposing: decode a single record and show its fields. It is also the check that
+> belongs BEFORE a load rather than after one -- it proves the delivered bytes match the
+> declared geometry while nothing has been written yet.
 > [§2](#2-directory-layout) marks each item and [§5.2](#52-subcommands-and-their-arguments)
 > marks each subcommand. `python -m carddemo_migration.cli --help` and every
 > registered subcommand run against this checkout; an unregistered one is refused as
@@ -86,11 +95,24 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > not be claimed from this checkout, because loading and verifying records is
 > precisely what it does not yet do.
 >
+> Refactoring Rationale: this note previously listed the packed and EBCDIC codecs as
+> undelivered after both had landed, and a delivery inventory that overstates what is
+> missing is as misleading as one that overstates what is present — an integrator
+> reading it would have written a second copy of a codec that already exists, or
+> concluded that a decode path it could see in the tree was not meant to be used. The
+> inventory is now measured rather than remembered: `src/carddemo_migration/` holds
+> **twelve** modules and `ruff check . --show-files` lists **nineteen** governed files,
+> and [`pyproject.toml`](pyproject.toml) states the same two numbers so a disagreement
+> between the two files is visible.
+>
 > Assumptions: an unimplemented subcommand is left OUT of the parser rather than
 > registered and made to fail. A registered command that cannot work would be
 > advertised by `--help`, an orchestrator author would wire a batch state to it, and
 > the failure would then arrive in a deployment instead of at the point where the
-> command was chosen.
+> command was chosen. That is also why the `--encoding` selector described in
+> [§6.2](#62-what-the-shipped-seed-data-actually-contains) is a **future** contract
+> rather than a usable flag today: it belongs to `load-dataset`, which is not
+> registered, so no operator can reach it from this checkout.
 
 ---
 
@@ -117,13 +139,13 @@ data-migration/
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
 │   ├── credentials.py            delivered -- applies each generated credential to its role
 │   ├── role_credentials.py       delivered -- SCRAM verifier derivation and role bootstrap
-│   ├── cli.py                    delivered -- the three registered subcommands in section 5
+│   ├── cli.py                    delivered -- the four registered subcommands in section 5
 │   ├── copybook/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
 │   │   ├── zoned.py              delivered -- sign-overpunch decode and encode
-│   │   ├── packed.py             contracted -- COMP-3 decode and encode
-│   │   └── ebcdic_codec.py       contracted -- cp037 decode, applied PER FIELD
+│   │   ├── packed.py             delivered -- COMP-3 and COMP decode and encode
+│   │   └── ebcdic_codec.py       delivered -- cp037 decode, applied PER FIELD
 │   ├── readers/                  contracted -- one reader per record layout
 │   ├── loaders/
 │   │   ├── s3_stage.py           delivered -- generation staging and LIMIT/SCRATCH retention
@@ -133,9 +155,14 @@ data-migration/
     ├── test_cli.py                     delivered
     ├── test_config_name_contract.py    delivered
     ├── test_database_trust.py          delivered
+    ├── test_docstring_gate.py          delivered -- Rule 1 presence gate, all visibilities
+    ├── test_ebcdic_code_page_allow_list.py
+    │                                   delivered -- the measured code-page allow-list
+    ├── test_ebcdic_codec.py            delivered
+    ├── test_packed.py                  delivered
     ├── test_reporting_views.py         delivered
     ├── test_s3_stage.py                delivered
-    └── conftest.py, test_zoned.py, test_readers.py, test_loaders.py, test_verify.py
+    └── conftest.py, test_readers.py, test_loaders.py, test_verify.py
                                         contracted
 ```
 
@@ -212,7 +239,7 @@ unrelated project from PyPI rather than this directory.
 ## 5. Command-line interface
 
 **This section is the contract.** [`src/carddemo_migration/cli.py`](src/carddemo_migration/cli.py)
-implements the three subcommands marked **registered** in
+implements the four subcommands marked **registered** in
 [§5.2](#52-subcommands-and-their-arguments) below, and
 [`MIGRATION_README.md`](../MIGRATION_README.md) publishes the invocation. Nothing here
 describes a flag that should not be implemented, and no two subcommands do the same
@@ -221,12 +248,12 @@ work.
 Assumptions: the five subcommands marked **contracted** are stated here but are
 deliberately **not registered** by the parser, because their backing modules —
 `readers/`, `loaders/aurora.py` and `verify/` — are not in this distribution. So
-`python -m carddemo_migration.cli --help` lists three subcommands, not eight, and
+`python -m carddemo_migration.cli --help` lists four subcommands, not nine, and
 naming a contracted one is refused as a usage error (exit 2). They remain documented
 because the batch state machine and this package's `Dockerfile` are written against
 the whole set, and filling an interface in later is a smaller change than renaming one.
 
-Trade-offs: the alternative was to register all eight and have the five unbacked ones
+Trade-offs: the alternative was to register all nine and have the five unbacked ones
 fail when invoked. That was rejected: `--help` would advertise a command that cannot
 run, an orchestrator author would wire a batch state to it on that evidence, and the
 failure would surface in a deployment rather than at the point where the command was
@@ -261,6 +288,7 @@ carddemo-migrate <subcommand> [options]
 | Subcommand | State | Purpose | Required arguments | Optional arguments |
 |---|---|---|---|---|
 | `list-datasets` | **registered** | Print the record-layout contract — identifier, copybook, record length, key length and provenance — for every registered layout, so a caller can enumerate the set instead of hard-coding it | none | `--format {table,json}` |
+| `decode-record` | **registered** | Decode **one** record of a fixed-length extract through the per-field codec stack and print its fields, so a delivery can be proved against its declared geometry before anything is loaded. Sensitive fields are redacted ([§8.2](#82-sensitive-fields-in-diagnostic-output)) | `--dataset`, `--source` | `--record` (default 1), `--code-page` (default `cp037`) |
 | `stage-dataset` | **registered** | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation`, `--domain` | `--object-name`, `--retain` (default 5) |
 | `apply-credentials` | **registered** | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
 | `load-dataset` | contracted | Decode **one** dataset per field and bulk-load it into the schema that owns it | `--dataset`, `--source` | `--encoding {ascii,ebcdic}`, `--dry-run` |
@@ -288,6 +316,7 @@ becomes optional when the mapping has an authoritative home in code.
 | Subcommand | What it writes | Non-zero exit when |
 |---|---|---|
 | `list-datasets` | The contract table on standard output. Touches no database, no object store and no credential | the requested format is unknown |
+| `decode-record` | One record's field map as JSON on standard output, every value rendered as a string and every sensitive field redacted. Touches no database, no object store and no credential | the layout name is unknown, the ordinal is below one or past the end of the dataset, the source is unreadable, the dataset does not divide into whole records, or a field fails to decode |
 | `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write | the source is unreadable, the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
 | `load-dataset` | Rows in the owning schema's table, inside one transaction; a per-dataset summary on standard output | a record fails the width contract, a field fails to decode, or the load transaction cannot commit |
 | `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
@@ -378,18 +407,58 @@ No non-zero value is ever a pass.
 No connection string, endpoint, account identifier or credential appears anywhere in
 this repository. Every runtime value is resolved when a command runs, from AWS
 Systems Manager Parameter Store and AWS Secrets Manager, by
-[`config.py`](src/carddemo_migration/config.py). The environment supplies only the
-**names** below — never values.
+[`config.py`](src/carddemo_migration/config.py). Six of the seven variables below carry
+only **names and modes** — never values. **The seventh, `CARDDEMO_MASK_HMAC_KEY`, is the
+one exception and it carries secret VALUE material**; §5.7.1 states what that obliges.
 
-| Variable | Meaning | Default |
-|---|---|---|
-| `CARDDEMO_ENVIRONMENT` | Selects which environment's parameters and secrets are read | **none — required** |
-| `CARDDEMO_PARAMETER_PREFIX` | Root of the Parameter Store path the lookups are built from | `/carddemo` |
-| `CARDDEMO_DB_SSL_MODE` | TLS verification mode | `verify-full`, and no other value is accepted |
-| `CARDDEMO_DB_SSL_ROOT_CERT` | Trust anchor for the database connection | the CA bundle the image installs |
-| `CARDDEMO_DB_MASTER_SECRET` | Name of the cluster's administrative secret, used only by `apply-credentials` | none |
-| `CARDDEMO_DB_ALTERNATE_USERS` | Additional database user names permitted to act for a schema's role | none |
-| `CARDDEMO_MASK_HMAC_KEY` | Keys the masking of sensitive fields in diagnostic output | none |
+| Variable | Carries | Meaning | Default |
+|---|---|---|---|
+| `CARDDEMO_ENVIRONMENT` | name | Selects which environment's parameters and secrets are read | **none — required** |
+| `CARDDEMO_PARAMETER_PREFIX` | name | Root of the Parameter Store path the lookups are built from | `/carddemo` |
+| `CARDDEMO_DB_SSL_MODE` | mode | TLS verification mode | `verify-full`, and no other value is accepted |
+| `CARDDEMO_DB_SSL_ROOT_CERT` | path | Trust anchor for the database connection | the CA bundle the image installs |
+| `CARDDEMO_DB_MASTER_SECRET` | name | Name of the cluster's administrative secret, used only by `apply-credentials` | none |
+| `CARDDEMO_DB_ALTERNATE_USERS` | names | Additional database user names permitted to act for a schema's role | none |
+| `CARDDEMO_MASK_HMAC_KEY` | ⚠ **secret value** | The HMAC-SHA256 **key** that the redaction tag in [`copybook/layouts.py`](src/carddemo_migration/copybook/layouts.py) is derived with | none — a process-scoped random key is used instead |
+
+#### 5.7.1 `CARDDEMO_MASK_HMAC_KEY` is key material, not a name
+
+This variable is described separately because describing it in the table alone would
+mislead. Every other row names something the process then looks up; this one **is** the
+secret. `layouts.py` reads it and passes the bytes straight into
+`hmac.new(key, message, hashlib.sha256)`, so the variable's value is the key, and
+disclosing it is disclosing the ability to confirm a redacted field by guessing its
+plaintext and re-deriving the tag.
+
+Four obligations follow, and each is enforced somewhere rather than merely advised:
+
+- **It arrives as a secret reference, never as a plain task or environment value.**
+  [`infra/envs/dev/main.tf`](../infra/envs/dev/main.tf) and
+  [`infra/envs/prod/main.tf`](../infra/envs/prod/main.tf) place it in
+  `mask_hmac_secret_sources`, so the task definition carries a Secrets Manager ARN under
+  `secrets` and the platform resolves the value into the process at start.
+  [`infra/modules/ecs-service/main.tf`](../infra/modules/ecs-service/main.tf) asserts that
+  pairing: the `data-migration` workload is the only one permitted to receive this name,
+  and it must receive it as a secret. Putting the literal key in `environment`, in a
+  `.tfvars` file, in a shell profile, in a `docker run -e`, or in CI variables is
+  **prohibited** — all five are readable by anyone who can describe the task or read the
+  build, which is a wider audience than the redaction is protecting the data from.
+- **It is never logged, echoed or included in a diagnostic.** `layouts.py` renders only
+  the derived tag and never the key; no message in this package quotes the variable's
+  value; and the same prohibition applies to a shell that sets it — `env`, `set -x` and a
+  crash dump each disclose it in full. Redaction tags themselves are safe to log, which is
+  the entire point of deriving them.
+- **Entropy.** Supply **at least 32 bytes (256 bits)** of cryptographically random data,
+  which matches the output width of the hash it keys; a shorter key reduces the work of
+  confirming a guessed plaintext, and a human-chosen string reduces it further.
+  `openssl rand -base64 32` produces a conforming value.
+- **Rotation invalidates comparability, so rotate deliberately.** The tag is a function of
+  the key, so a rotated key re-derives every tag: a verification pass that compares a
+  rendering produced before rotation against one produced after will report differences
+  that are not differences in the data. Rotate between load campaigns rather than during
+  one, and supply the same key to both sides of any comparison. Absent the variable
+  entirely, `layouts.py` falls back to a **process-scoped random key**, which makes tags
+  comparable within one run and not across runs — the same hazard, permanently.
 
 Assumptions: `CARDDEMO_ENVIRONMENT` deliberately has **no** default. A default would
 let a command intended for one environment resolve successfully against another,
@@ -561,10 +630,51 @@ form by default because it is the easier path and needs no codec, which was reje
 exactly that reasoning; and reconciling the two by editing one file, which is
 forbidden outright — `app/**` is REFERENCE-only, so the divergence is recorded here and
 resolved by the choice of source, never by changing a byte of either extract.
-Trade-offs: `load-dataset`'s optional `--encoding {ascii,ebcdic}` still lets an
-operator deliberately load the ASCII twin of any dataset that ships both, so the
-capability is not removed; what this fact buys is that using it is an informed decision
-with a known consequence rather than an accident. Note that
+
+**The same authority governs the other route into the same table.** `reference.disclosure_groups`
+is reachable two ways — this package's loaders and the Flyway migration
+[`V2__seed_reference.sql`](../services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql)
+— and until this checkpoint the two disagreed: the loaders read the EBCDIC extract and
+stored 15.00 while the migration seeded 0.00 from the ASCII twin, so an identical account
+on the `DEFAULT` fallback accrued a different amount of money depending on which route had
+populated the row, with no error either way. That migration now seeds **15.00** for
+`('DEFAULT   ','07','0001')` and states this authority at its own `disclosure_groups`
+insert, so both routes agree. Assumptions: `disclosure_groups` is the only table where
+the choice has an effect at all — the transaction-type and transaction-category twins are
+byte-identical across the encodings, so the six other inserts in that migration are
+unaffected by it and continue to cite the ASCII file they were read from. The divergence
+between the two extracts is registered as `D-SEED-ENCODING-AUTHORITY` in
+[`cobol-to-service-traceability.md`](../docs/architecture/cobol-to-service-traceability.md).
+
+**What settles the authority is the baseline's own load job.**
+[`app/jcl/DISCGRP.jcl`](../app/jcl/DISCGRP.jcl) L56-L61 defines the VSAM cluster and then
+`REPRO INFILE(DISCGRP)`, and the `DISCGRP` DD at L57 names
+`DSN=AWS.M2.CARDDEMO.DISCGRP.PS` -- the `.PS` dataset, which is the EBCDIC extract. No JCL
+in the repository loads the `.txt` form at all. So 15.00 is not merely the value in the
+better-preserved file; it is the value the reference system itself loads into the file
+`CBACT04C` reads.
+
+Assumptions: the parity oracle is unaffected by this choice, and that is worth stating
+because three REFERENCE artefacts read 0.00 for this row and a reader who finds them will
+ask. Those three are `app/data/ASCII/discgrp.txt` row 34,
+[`tests/fixtures/interest/default_fallback/discgrp.txt`](../tests/fixtures/interest/default_fallback/discgrp.txt)
+line 17 and [`tests/mocks/mock_discgrp.txt`](../tests/mocks/mock_discgrp.txt) line 33. The
+last two are INPUTS the suite supplies to the program under test, so a golden-master
+comparison feeds the same 0.00 to the reference program and to its migrated equivalent and
+is indifferent to what any seed holds; and the reference-service fixture tree copies the
+ASCII form deliberately, because in the EBCDIC form the `DEFAULT` group prices `07|0001`
+identically to group `A000000000` and a fallback fixture built from it could not
+discriminate a fallback from a direct hit at all.
+
+Trade-offs: a per-dataset `--encoding {ascii,ebcdic}` selector is **contracted for
+`load-dataset` but not yet reachable**, because that subcommand is itself contracted rather
+than registered — see the inventory in [§5.2](#52-subcommands-and-their-arguments), which
+marks it `contracted`, and [§5.1](#51-invocation) which states that naming a contracted
+subcommand is refused as a usage error. When it is authored, the
+selector is what will let an operator deliberately load the ASCII twin of a dataset that
+ships both, so the capability is designed in rather than designed out; what the fact above
+buys in the meantime is that this package has ONE default and it is the authoritative one,
+so no accident can select the other. Note that
 neither divergence is a codec defect: the per-field cp037 path re-encodes all 626
 EBCDIC seed records byte-identically, so both differences are genuinely present in the
 shipped files.
@@ -735,15 +845,42 @@ one extra call per field. What it buys is that there is a single place to review
 single place to test against the known-answer vectors, and no second implementation to
 drift.
 
+**Only vetted single-byte EBCDIC pages are admitted, and an admitted one is proved.**
+The module publishes the set as `SUPPORTED_CODE_PAGES`: `cp037`, the page the extracts
+are in and the default; `cp1140`, cp037 with the euro sign, differing from it at exactly
+one byte value; `cp500`, the international page, differing from cp037 at seven byte
+values, every one a punctuation or symbol character; and `cp1047`, Latin-1 / Open
+Systems, differing at eight. Any other page is refused before a byte of a dataset is
+read, and an admitted page is proved once per process: all 256 byte values decode without
+substitution, the decode consumes every byte and yields exactly one character per byte,
+those 256 characters are distinct, re-encoding them returns the original 256 bytes
+exactly, and the EBCDIC digit, sign-overpunch, letter, blank and low-value positions
+carry the characters this package's own contracts read. Every field decode then repeats
+the per-field half of that proof on the span itself — full consumption, one character per
+byte, exact re-encode — so a codec whose two tables disagree is caught on the field that
+exposes it.
+
+Assumptions: the known-answer half is not redundant, and `latin-1` is the measurement
+that shows why. It decodes all 256 byte values, maps them to 256 distinct characters and
+re-encodes them byte for byte, so every structural test passes — and it places the digits
+at 0x30 and the letters at 0x41, where EBCDIC places neither. A field decoded through it
+keeps its declared width, so every later offset still looks valid and only the content is
+wrong. Refusing a byte the page leaves undefined is necessary and nowhere near
+sufficient. The euro-updated national family `cp1141` through `cp1149` is refused for the
+converse reason: it maps **both** 0x15 and 0x25 to one character, so its 256 byte values
+decode to 255 distinct characters and no exact byte-for-byte round trip exists for it at
+all.
+
 `ebcdic==2.0.1` is in the runtime closure for a reason that looks removable and is
 not. Assumptions: nothing imports a symbol from it — it registers codecs as an import
 side effect, so both a linter and a person tidying unused imports will read it as
 dead. What it registers is the wider EBCDIC code-page family around cp037, which
 CPython does not ship. Note what that means precisely: cp037 itself *is* a standard
-library codec, so this pin is not what makes today's extracts decode; it is what lets
-an extract in a sibling code page decode through the identical per-field path by
-configuration alone, with no edit to the codec module. Dropping it breaks nothing
-visible until the first non-cp037 dataset arrives.
+library codec, so this pin is not what makes today's extracts decode; it is what lets an
+extract in a **vetted** sibling page decode through the identical per-field path by
+configuration alone, with no edit to the codec module, and `cp1047` is the vetted page
+this pin alone provides. Dropping it breaks nothing visible until the first cp1047
+dataset arrives.
 
 ---
 
@@ -827,9 +964,25 @@ national identifier, government-issued identifier, date of birth, telephone numb
 and the electronic-funds account identifier. Assumptions: a verification failure has
 to show *where* two records differ in order to be actionable, and it must do that
 without emitting a complete cardholder identity or payment number — so the masking is
-field-aware rather than all-or-nothing, and it is keyed by `CARDDEMO_MASK_HMAC_KEY`
-so the same value masks consistently within a run and is not reversible across runs.
+field-aware rather than all-or-nothing, and it is keyed by `CARDDEMO_MASK_HMAC_KEY` —
+which is itself secret key material and is handled as such
+([§5.7.1](#571-carddemo_mask_hmac_key-is-key-material-not-a-name)) — so the same value
+masks consistently wherever that key is supplied, and consistently within one run only
+where it is not.
 The ETL's own output follows the same discipline the reference codec already models.
+
+`decode-record` ([§5.2](#52-subcommands-and-their-arguments)) is the first command to
+print record content, and it applies exactly that discipline: each flagged field goes
+through the layout module's field-aware masking, so a card number shows its trailing
+four digits and every other flagged field shows a keyed tag carrying none of the value.
+
+Alternatives Considered: a `--reveal` flag that printed the cleartext was considered and
+rejected. The command exists to prove a delivery decodes at its declared geometry, and
+the redactions prove exactly that -- a last-four reveal shows the card number's own
+trailing digits, and a keyed tag is stable within a run, so a maintainer can still tell
+two records apart field by field. A reveal flag would put a cardholder's name and a
+stored password into a container log for a check that never needed either, and a flag
+defaulting to safe is still a flag an operator can pass.
 
 ---
 
@@ -1050,15 +1203,42 @@ python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.x
 The delivered modules are [`test_cli.py`](tests/test_cli.py),
 [`test_config_name_contract.py`](tests/test_config_name_contract.py),
 [`test_database_trust.py`](tests/test_database_trust.py),
+[`test_docstring_gate.py`](tests/test_docstring_gate.py),
+[`test_ebcdic_code_page_allow_list.py`](tests/test_ebcdic_code_page_allow_list.py),
+[`test_ebcdic_codec.py`](tests/test_ebcdic_codec.py),
+[`test_packed.py`](tests/test_packed.py),
 [`test_reporting_views.py`](tests/test_reporting_views.py) and
-[`test_s3_stage.py`](tests/test_s3_stage.py) — ninety-nine tests in total. The
+[`test_s3_stage.py`](tests/test_s3_stage.py) — 225 tests in total. The
 contracted modules are `conftest.py`, `test_zoned.py`, `test_readers.py`,
 `test_loaders.py` and `test_verify.py`.
 
+Assumptions: `test_ebcdic_code_page_allow_list.py` is a separate module from
+`test_ebcdic_codec.py` even though both exercise one source file, because the two ask
+different questions. The codec module asserts what a decode PRODUCES from the shipped
+extracts; the allow-list module asserts which code pages are admitted to produce it at
+all, and it registers and unregisters a deliberately lossy codec to reach the
+one-byte-per-character post-condition that no real page can violate. Keeping that
+registry manipulation in its own module is what stops a failure there being read as a
+failure of the corpus assertions next door.
+
 Assumptions: `test_cli.py` asserts the ABSENCE of each contracted subcommand as well as
-the presence of each registered one. A test that only checked the three that work would
-pass equally well if a fourth were added that could not, which is the regression the
+the presence of each registered one. A test that only checked the ones that work would
+pass equally well if another were added that could not, which is the regression the
 absence assertions exist to catch.
+
+Assumptions: the two codec modules assert their vectors as LITERAL BYTES rather than by
+round-tripping each codec through its own inverse. A round trip agrees with itself
+whatever it does, so it cannot tell a correct nibble order from a reversed one or a
+big-endian read from a little-endian one; a literal span can, and the spans used are the
+ones a COBOL compiler emits. Where a shipped extract carries the value, the extract is
+read directly instead -- `test_ebcdic_codec.py` decodes `app/data/EBCDIC` images, so a
+pass is evidence about this corpus and not about an invented one.
+
+Trade-offs: `test_packed.py` asserts the DECLARED digit capacity rather than the
+representable range of the underlying halfword or fullword. A four-digit `COMP` field can
+physically hold 65535, and the codec refuses it; asserting the physical range instead
+would have been laxer and would have let a five-digit quantity flow into a column sized
+for four.
 
 ### 12.1 Test vectors are reused, not authored
 
@@ -1096,7 +1276,7 @@ matter to a reader:
   is still rejected.
 - **Every fixture copy of the cross-reference record is the full 50 bytes**, unlike the
   36-byte shipped seed. Both shapes must therefore load, which is why the padding rule
-  in [§6.2](#62-six-facts-a-reader-would-otherwise-rediscover-the-hard-way) exists
+  in [§6.2](#62-seven-facts-a-reader-would-otherwise-rediscover-the-hard-way) exists
   rather than one shape being declared canonical.
 
 Three layouts have **no** ready fixture round-trip vector — `CVTRA03Y`, `CVTRA04Y` and
@@ -1126,17 +1306,38 @@ ruff check data-migration
 ```
 
 [`pyproject.toml`](pyproject.toml) selects `["D", "E", "W", "F", "I", "TID252"]` with
-an empty `ignore` list. The **`D`** entry is the pydocstyle family, and it is Rule 1's
-mechanical enforcement for Python in this repository: it requires that every module,
-class and function carries a docstring, and it checks that docstring's formatting.
+an empty `ignore` list. The **`D`** entry is the pydocstyle family, and it is the primary
+half of Rule 1's mechanical enforcement for Python in this repository: it checks the
+formatting of every docstring it finds, and it requires a docstring on every **public**
+module, class and function.
 
-**What the gate cannot decide, stated because the gap is wide.** Assumptions: no `D`
+**Presence on private and nested declarations is a second gate, not this one.**
+[`tests/test_docstring_gate.py`](tests/test_docstring_gate.py) walks the same two trees
+with the standard library's `ast` and asserts a non-blank docstring on every module,
+class and function at **every** visibility and **every** nesting depth. It exists
+because `D101`, `D102`, `D103` and `D106` are public-declaration checks, so — measured
+against the pinned ruff rather than inferred — a declaration is invisible to them when
+its own name carries a single leading underscore, when any enclosing class is privately
+named, or when it is declared inside a function body at any depth and any visibility. A
+module follows the same single-underscore convention, so `_x.py` raises no `D100` while
+`__init__.py` is public and does raise `D104`. Measured **when the gate was added**, and
+deliberately not restated as a standing figure: **90 of the 221** declarations in
+`src/carddemo_migration` were invisible to those checks, and **32 of the 107** in
+`tests`. The live figures are whatever the gate reports, which is where they belong — a
+count written into prose goes stale on the next authored function and the staleness is
+invisible. The formatting rules (`D400`, `D403`, `D205` and the rest) were measured to
+reach every docstring regardless of visibility or nesting, so the second gate
+deliberately checks presence only and duplicates nothing. Both gates are load-bearing;
+removing either leaves an unenforced half.
+
+**What neither gate can decide, stated because the gap is wide.** Assumptions: no `D`
 rule cross-checks a docstring against the signature it documents, so a one-line
 docstring on a five-parameter function passes every `D` rule while still failing the
-obligation. Completeness of the purpose, parameter, return and raised-exception
-content is therefore a **required human-review check** on every change here, not
-something the gate covers. A green `ruff check` is evidence about the gate's coverage
-and is not evidence of documentation compliance.
+obligation, and a docstring that says nothing satisfies the presence gate for the same
+reason. Completeness of the purpose, parameter, return and raised-exception content, and
+the quality of the `WHY` rationale, are therefore a **required human-review check** on
+every change here. A green `ruff check` plus a green `pytest` run is evidence about the
+gates' coverage and is not evidence of documentation compliance.
 
 The authoritative, per-language convention with a worked example for each language is
 [`docs/CODE_DOCUMENTATION_STANDARD.md`](../docs/CODE_DOCUMENTATION_STANDARD.md), and
@@ -1311,7 +1512,7 @@ is what the reference codec's `_validated_record` does and which would make the 
 bytes a short ASCII row omits are exactly the trailing `FILLER`, which is dropped
 anyway, so padding on the right cannot move a field that exists — whereas an over-long
 row means the offsets have already moved and no amount of trimming puts them back
-([§6.2](#62-six-facts-a-reader-would-otherwise-rediscover-the-hard-way)).
+([§6.2](#62-seven-facts-a-reader-would-otherwise-rediscover-the-hard-way)).
 
 **11. The processing timestamp is excluded from record checksums; the originating
 timestamp is not.** Rejected alternative: checksumming the whole record unmodified.
@@ -1356,7 +1557,10 @@ argument twice at full length is how two copies of one rule come to disagree.
    provisioning six loses four retention contracts without failing anything.
 8. **No secret, credential, account identifier, endpoint or connection string in
    source.** Every runtime value is resolved from Parameter Store and Secrets Manager
-   when a command runs; the environment carries names only.
+   when a command runs. The environment carries names and modes, with exactly one
+   documented exception — `CARDDEMO_MASK_HMAC_KEY` holds the redaction key itself and is
+   injected from Secrets Manager as a task secret, never as a plain value
+   ([§5.7.1](#571-carddemo_mask_hmac_key-is-key-material-not-a-name)).
 9. **No temporal estimate and no schedule language.** This document states what is
    delivered and what is contracted, and nothing about when.
 10. **None of the three verification passes may be skipped or weakened.** A load

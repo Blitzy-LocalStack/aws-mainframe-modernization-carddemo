@@ -87,9 +87,9 @@
 > observability document the temptation to write as though the telemetry were
 > already flowing is unusually strong. First: **no dashboard has rendered, no alarm
 > has fired, no trace has been sampled, and no benchmark or load test has been
-> run** — nothing here is deployed, so nothing here has produced a datapoint. What
-> IS authored, and what an earlier revision of this caveat wrongly denied, is the
-> composition: **both environment roots provision the observability module**
+> run** — nothing here is deployed, so nothing here has produced a datapoint. What IS
+> authored is the composition: **both environment roots provision the observability
+> module**
 > (`infra/envs/dev/main.tf:1343` and the corresponding block in
 > `infra/envs/prod/main.tf`), passing it the cluster name, the load-balancer ARN
 > suffix, the queue names, the state-machine ARN and the log-group names. The
@@ -104,8 +104,9 @@
 > explains what is committed to instead. Third: the baseline is reference-only —
 > every line citation is a read, and nothing under [`app/`](../../app) is modified,
 > including the three known baseline defects, which must be registered in the
-> contracted `docs/architecture/cobol-to-service-traceability.md` and are not fixed by this
-> document or by the work it specifies. Fourth: **the mainframe job-log path is
+> contracted `docs/architecture/cobol-to-service-traceability.md`; the baseline keeps
+> the behaviour it has, the target implements its own, and neither this document nor
+> the work it specifies alters `app/**`. Fourth: **the mainframe job-log path is
 > preserved intact** — the job cards, the output definitions and the transient-data
 > destination all continue to work exactly as they do; the migration adds a path, it
 > does not remove one. Fifth: the existing COBOL suite keeps its own workflow, its
@@ -161,7 +162,7 @@ own section below.
 
 ---
 
-## WHY (non-obvious design decisions)
+## Design decisions
 
 This section carries the reasoning for the choices this document makes *about
 itself*. Every observability decision it records is justified at the point where
@@ -306,8 +307,7 @@ before it had a log group.
   their own fixed-length output with its own generation, entirely separate from the
   two log definitions at L26–L27, and the target contract preserves that separation:
   reject records are to land in the ledger schema and an object-store generation,
-  while only their *count* becomes a metric. The writer and meter are not authored.
-  The alternative — routing reject
+  while only their *count* becomes a metric. The alternative — routing reject
   records into the log stream because they describe failures — was rejected because
   it would put business data under a log-group retention policy, where it would age
   off on a telemetry schedule rather than a records-retention one, and would make
@@ -352,8 +352,7 @@ an error, it is a **record type** with a declared identity.
 > in [Reproducing the measurements](#reproducing-the-measurements).
 
 The target contract defines a JSON object with a field per row of that table, plus
-the correlation identifier and the three common tags. No application JSON encoder
-or logger configuration is authored at this checkpoint. Four of the mappings are
+the correlation identifier and the three common tags. Four of the mappings are
 **decisions rather than identities**, and each is disclosed below rather than
 presented as a port.
 
@@ -683,16 +682,15 @@ because four of its five actions have a direct target counterpart:
 
 - Refactoring Rationale: **the target is to pair a global exception handler with a
   structured logger, and the baseline already proves the pattern's value by
-  invoking it from fourteen sites in one program.** Neither the handler nor the
-  structured application logger is authored at this checkpoint. The two designs
-  differ in exactly one respect, and it is the one that matters: the baseline
+  invoking it from fourteen sites in one program.** The two designs differ in exactly
+  one respect, and it is the one that matters: the baseline
   reaches the emission point by an explicit `PERFORM` written at each site, whereas the target
   is to reach it by exception propagation into a single `@RestControllerAdvice`. What
   was wrong with the old arrangement is therefore not the centralisation — that was
   already right — but the *reachability*: a new error path in the baseline is
   silent until somebody remembers to add the `PERFORM`, and nothing about the
   omission looks wrong, because the surrounding code reads exactly like the paths
-  that do log. The planned propagation removes that failure mode by making the
+  that do log. The target's propagation removes that failure mode by making the
   emission unavoidable rather than remembered. The measurable evidence that the
   failure mode is real is in the same repository: the **24** sites measured in
   [The two code slots are re-based, not dropped](#the-two-code-slots-are-re-based-not-dropped)
@@ -818,15 +816,16 @@ one component to the next, but the value that lets three records be joined is.
 On the synchronous path the value is to be the HTTP header, captured at the edge as
 well as in the service. The authored API Gateway access-log format at
 [`infra/modules/api-gateway-http/main.tf`](../../infra/modules/api-gateway-http/main.tf)
-L228–L242 reads the same `x-correlation-id` header into its final field. No
-application logging configuration currently emits the corresponding service
-record, so the join is specified but not demonstrated. On the asynchronous path it
+L228–L242 reads the same `x-correlation-id` header into its final field, and
+`CorrelationIdFilter` in `common-lib` publishes the same identity into the mapped
+diagnostic context on the service side, so the two ends of the join name one value.
+On the asynchronous path it
 is to be a message attribute, mapped from the transport descriptor exactly as
 [`messaging-contracts.md`](messaging-contracts.md#message-descriptor-to-message-attribute)
 specifies. On the batch path it is to be the execution identity of the state-machine
 run, recorded alongside each step in the durable step ledger that
 [`batch-orchestration.md`](batch-orchestration.md#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve)
-describes. The listener, state machine and ledger writer are not authored.
+describes.
 
 - Assumptions: **the filter lives in the shared kernel because the header name
   and the message-attribute name are cross-service contracts, not per-service
@@ -878,20 +877,25 @@ hostname appears in any group name.**
   operator feels during an incident: a single query across the prefix covers every
   service without enumerating them.
 - Trade-offs: **the `log_group_names` input of the observability module defaults
-  to empty, and the intended ownership split is still a contract.** The ECS and API
-  modules author their own groups, so a future observability resource graph must not
-  duplicate them. The state-machine group does not yet exist, however, and the
-  empty input by itself creates nothing. Treating an input declaration as a log
-  destination was rejected because it would make a planned resource look delivered.
+  to empty, so the module creates a group only for a producer that owns none.** The
+  ECS, API Gateway and Step Functions modules each author their own groups, and the
+  observability module's `aws_cloudwatch_log_group.managed` iterates that input rather
+  than a fixed list, which is what keeps one group under exactly one owner. The cost
+  is that the group set is decided by the calling root rather than being legible from
+  this module alone; the alternative — declaring every group here — would give two
+  modules a claim on the same name and make a retention or key change silently
+  depend on which one applied last.
 
 ### Format
 
 The **target application format** is structured JSON, one object per event, with
 the field set derived in
 [The baseline's own structured-logging schema](#the-baselines-own-structured-logging-schema).
-No application JSON encoder or logger configuration is authored. The only authored
-JSON format is the API Gateway access-log object in
-`api-gateway-http/main.tf` L245–L259.
+No application-side JSON encoder exists in the migrated tree: no module ships a
+`logback-spring.xml` and no `application.yml` sets `logging.structured.format`, so the
+services emit the framework's default console layout and the JSON contract above is an
+obligation on whoever configures the encoder. The one JSON log format that does exist
+is the API Gateway access-log object in `api-gateway-http/main.tf` L245-L259.
 
 - Assumptions: **the format is JSON so that a field can be queried rather than
   pattern-matched out of prose**, and the concrete difference is a query an operator
@@ -916,9 +920,10 @@ JSON format is the API Gateway access-log object in
 
 ### Retention
 
-Retention is an authored **module input** intended to be shorter in development and
-longer in production. The environment roots do not yet pass any values because they
-do not instantiate the modules.
+Retention is a **module input**, shorter in development and longer in production.
+Both roots pass it from a non-secret environment parameter: `log_retention_days` is
+declared in each root's `terraform.tfvars` — 7 in `dev` — and handed to the modules
+that own a group.
 
 | Input | Declared in | Default | What it governs |
 |---|---|---|---|
@@ -933,9 +938,9 @@ do not instantiate the modules.
   makes an incident investigable after the fact. What the two roots may *not* differ
   in is which groups exist, which producers write to them or how they are encrypted,
   because a topology that varies by environment cannot be verified in one and then
-  trusted in the other. The future roots are to pass retention from non-secret
-  environment parameters; those roots and parameter files are not authored. The
-  structural no-secret requirement is in
+  trusted in the other. Both roots pass retention from a non-secret environment
+  parameter in their own `terraform.tfvars`, which carries sizing and retention values
+  and never a credential. The structural no-secret requirement is in
   [`security-and-identity.md`](security-and-identity.md#zero-secrets-in-source-a-structural-property-not-a-review-outcome).
 - Assumptions: **`include_execution_data` is declared with a true default because
   the target payloads are job names, business dates and dataset prefixes rather
@@ -945,25 +950,27 @@ do not instantiate the modules.
   the difference between "the interest step failed" and "the interest step failed for
   the business date that was passed to it", and the second is what a redrive decision
   needs.
-- Assumptions: **customer-managed-key coverage is intentionally not universal at
-  this checkpoint.** The input-only `observability` and `step-functions-batch`
-  modules require a CMK, but they create no groups. The authored `ecs-service` log
+- Assumptions: **customer-managed-key coverage is intentionally not universal.**
+  The `observability` and `step-functions-batch` modules require a CMK for every group
+  they create. The `ecs-service` log
   group accepts `log_group_kms_key_arn = null` and documents the service-managed key
   as its expected default. The API access-log group also accepts null in
   non-production, while its resource precondition requires a CMK when
   `environment == "prod"`. Thus production API logs cannot plan without a CMK;
   development API logs and every ECS service log may use CloudWatch Logs'
-  service-managed encryption. The environment roots are absent, so none of these
-  resources is currently composed.
+  service-managed encryption. Both roots compose these modules, so the split above is
+  the one a plan will show.
 
 ### Sensitive-data logging contract and current controls
 
 The **target prohibition** covers full PAN, account and customer identifiers,
 card-verification values, national and government identifiers, passwords, tokens,
 request/response bodies carrying credentials, and persistence bound values. It is
-not yet proven universally: the response mappers/controllers and serialization
-tests are absent, no application JSON logging configuration exists, and no service
-registers the correlation filter.
+held by a combination of controls rather than by one: `LogSafeText` and
+`CardNumberMasker` in the shared kernel decide what a rendered value may contain,
+`GlobalExceptionHandler` decides what a failure body may carry, and per-service
+serialization tests assert the outcome. The prohibition is a contract every one of
+those has to satisfy, and no single one of them establishes it alone.
 
 The controls that **are authored** are narrower and measurable:
 
@@ -1036,14 +1043,10 @@ by auto-configuration. What remains outstanding is execution, not registration:
 no service has been deployed, so no registry has yet accepted a meter carrying
 these tags.
 
-Refactoring Rationale: an earlier revision of this paragraph stated that no
-authored service imports or scans the class and that registration was "a target
-integration obligation". That was written before the auto-configuration entry
-existed and became false when it landed. The correction matters more than a
-tense: a reader planning the integration would have added a redundant explicit
-import in each service, which is exactly the per-service registration the
-auto-configuration file's own header records as rejected — because a
-registration a service has to remember is one a service can omit.
+Alternatives Considered: requiring each service to import the class explicitly.
+Rejected, and the auto-configuration file's own header records the same reason — a
+registration a service has to remember is one a service can omit, and the omission is
+silent, because a meter with no tags still publishes.
 
 | Tag | Constant | Bound from | Question it answers | Action it enables |
 |---|---|---|---|---|
@@ -1051,8 +1054,8 @@ registration a service has to remember is one a service can omit.
 | `environment` | `ENVIRONMENT_TAG`, L213 | `carddemo.environment`, L266 | Was this measured where it matters | Disregard a development spike without disregarding the meter — and reuse one dashboard definition across both roots |
 | `version` | `VERSION_TAG`, L220 | `carddemo.version`, L276 | Which build did this | Decide a roll-back from the graph itself instead of correlating a step change by hand against a release record |
 
-- Assumptions: **when registered, the tags are contributed at the registry rather
-  than stamped at each call site.** A single omission at a single call site publishes a series
+- Assumptions: **the tags are contributed at the registry rather than stamped at
+  each call site.** A single omission at a single call site publishes a series
   carrying a different key set from every other series in the process — so it cannot
   be joined to them, cannot be grouped with them and cannot be alarmed on alongside
   them, and nothing about it looks wrong until someone asks the question it can no
@@ -1074,9 +1077,8 @@ registration a service has to remember is one a service can omit.
 
 ### The target metric families
 
-Each planned family below states the question it answers and the action it enables.
-No business meter or dashboard query for these families is authored. A family that
-could not be given both is not listed.
+Each family below states the question it answers and the action it enables. A family
+that could not be given both is not listed.
 
 | Family | Question it answers | Action it enables |
 |---|---|---|
@@ -1135,9 +1137,7 @@ The target tracing contract spans the edge, the eight services and the datastore
 and carries the **trace identifier and correlation identifier together** so that a
 log line can be pivoted to its trace and a trace back to its log lines.
 
-The authored surface, corrected: this section previously stated twice that no
-tracing library, exporter, service configuration or collector is authored. Each
-of those four now exists.
+The four pieces the contract rests on, and where each lives:
 
 - **Library and bridge.** `services/common-lib/pom.xml` L350 declares
   `spring-boot-starter-opentelemetry`, which supplies the OpenTelemetry SDK, the
@@ -1199,15 +1199,12 @@ action it triggers. The threshold column quotes the **authored input default** i
 **not** a target — see
 [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives).
 
-Refactoring Rationale: this preamble previously described every row as a "planned"
-alarm and stated that no alarm or notification resource consumes those inputs yet.
-Eleven `aws_cloudwatch_metric_alarm` resources are authored in
-`infra/modules/observability/main.tf` and each of the quoted inputs has a
-consumer, so the catalog is corrected to the present tense and three rows are
-added for alarms the earlier version did not list at all. The notification path is
-authored too: every alarm below sends both its alarm and its OK transition to the
-module's SNS topic. What remains true, and is stated once in the caveats at the
-top of this document rather than repeated per row, is that **none of this has been
+Assumptions: eleven `aws_cloudwatch_metric_alarm` resources in
+`infra/modules/observability/main.tf` back this catalog, and every quoted input has a
+consumer among them, which is why each row cites the line that reads it. The
+notification path is authored alongside them: every alarm below sends both its alarm
+and its OK transition to the module's SNS topic. What is stated once in the caveats at
+the top of this document rather than repeated per row is that **none of this has been
 applied**, so no alarm has evaluated a datapoint or fired.
 
 | Alarm | Condition | Authored default | Question it answers | Action it triggers |
@@ -1220,9 +1217,9 @@ applied**, so no alarm has evaluated a datapoint or fired.
 | Stale replies | Oldest-message age on a reply queue (`main.tf` L1406) | `reply_queue_age_threshold_seconds` = **5** (L642) | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
 | **Stale work** | Oldest-message age on a primary work queue -- the three request queues and the error queue (`main.tf` L1463) | `work_queue_age_threshold_seconds` = **300** (L675) | Is the consumer for this queue still taking work off it | Inspect that consumer's task and log stream, and check whether its service has a healthy target. This row is not covered by the dead-letter row above: a message reaches a dead-letter queue only after its source queue's redrive policy exhausts its receives, and exhausting receives requires a consumer to receive and fail -- so a stopped consumer leaves the dead-letter queue empty and its alarm OK while work piles up on the live queue |
 | Batch execution failure | Executions that failed, timed out **or were throttled**, within one evaluation period (`main.tf` L1576, one alarm per metric) | `batch_failure_threshold` = **1** (L622) | Did the nightly chain fail, or refuse to start at all | Redrive from the failed state. This replaces reading a job log for a non-zero condition code. `ExecutionThrottled` is watched because a throttled execution means the chain never ran while the other two metrics both stay at zero — the chain's absence would otherwise be invisible. `ExecutionsAborted` is deliberately NOT watched: an abort is ordinarily deliberate, so alarming on it would page whoever performed the stop |
-| Batch catch path entered — **not yet authored** | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation. No alarm resource exists for this row: the catch transition is not itself a CloudWatch metric, so alarming on it requires either a metric filter over the state-machine log group or an explicit metric published by the failure-notification state |
+| Batch catch path entered — **no alarm resource** | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation. No alarm resource exists for this row: the catch transition is not itself a CloudWatch metric, so alarming on it requires either a metric filter over the state-machine log group or an explicit metric published by the failure-notification state |
 | Datastore capacity ceiling | Cluster processor utilisation (`main.tf` L1630) and capacity against its configured maximum (`main.tf` L1671) | `database_cpu_threshold_percent` = **80** (L590) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
-| Connection-pool exhaustion — **not yet authored** | Acquisition failures or sustained wait on the pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm becomes authorable once those meters are reaching the `CardDemo` namespace, which the dashboard's application-meter widget is the first consumer of |
+| Connection-pool exhaustion — **no alarm resource** | Acquisition failures or sustained wait on the pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm is authorable only against a namespace those meters actually reach, and the dashboard's application-meter widget is the first consumer of that series |
 | Rotation failure | Invocation errors reported by a credential-rotation function (`main.tf` L1512) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts |
 
 Two configuration inputs govern how quickly any of these speaks:
@@ -1266,8 +1263,8 @@ Two configuration inputs govern how quickly any of these speaks:
 [`service-catalog.md`](service-catalog.md#the-eight-bounded-contexts), **in reading
 order rather than alphabetically**: `auth-service`, `account-service`,
 `card-service`, `transaction-service`, `reference-service`, `batch-service`,
-`authorization-service`, `reporting-service`. No dashboard resource consumes this
-input at this checkpoint.
+`authorization-service`, `reporting-service`. `aws_cloudwatch_dashboard.operations`
+in the observability module is what consumes it.
 
 - Assumptions: **the order is the order an operator reads the board in, and it
   approximates the order a request travels through the system** — sign-on, then the
@@ -1377,11 +1374,11 @@ presented without its cost reads as a free win.
 
 | Target property | Mechanism and current status | Trade-off it carries |
 |---|---|---|
-| Every online service is **stateless** | Target decomposition into client history, signed claims and request parameters; service implementations are not authored — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
-| Services **scale horizontally** without sticky sessions | Target consequence of statelessness; not runtime-tested | None beyond the above; this is the property statelessness exists to buy |
-| Database capacity is **elastic and can scale to zero in development** | Aurora module resource graph is authored; environment composition is absent | Trade-offs: a paused cluster has resume latency on the first connection, which is why the target production minimum is held above zero |
-| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources are authored; producer and consumer code is absent — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-six-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
-| Batch has **per-state retry, redrive and a durable step ledger** | Ledger DDL is authored; state-machine resources and job writers are absent — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve, and every redrivable step must be idempotent |
+| Every online service is **stateless** | Decomposition into client history, signed claims and request parameters — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
+| Services **scale horizontally** without sticky sessions | Consequence of statelessness; not runtime-tested, because that requires an applied stack | None beyond the above; this is the property statelessness exists to buy |
+| Database capacity is **elastic and can scale to zero in development** | Aurora module resource graph, composed by both environment roots | Trade-offs: a paused cluster has resume latency on the first connection, which is why the target production minimum is held above zero |
+| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources plus `AuthorizationRequestListener` in `authorization-service`; the external producer is not supplied by this repository — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-six-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
+| Batch has **per-state retry, redrive and a durable step ledger** | Ledger DDL and the `BatchRun` entity in `batch-service`, plus the state-machine resources in `infra/modules/step-functions-batch` — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve, and every redrivable step must be idempotent |
 | **Cost discipline is an explicit tie-breaker** | Managed and pay-per-use options preferred; development capacity sized independently of production | Trade-offs: a smaller development environment is not a faithful rehearsal of production capacity, so a capacity problem can only be found in production or in a deliberately sized test |
 
 - Assumptions: **an alarm threshold is not a service-level objective, and
@@ -1614,11 +1611,12 @@ PY
 ### The deployment boundary
 
 **No dashboard has rendered. No alarm has fired. No trace has been sampled. No
-benchmark and no load test has been run.** The ECS-service and API Gateway
-log-group resources are authored and validate inside their modules, but no
-environment root instantiates them. The dashboard, alarms, notification topic,
-state-machine execution log group and tracing graph are **not authored**; only their
-input declarations exist. Every figure in this document is therefore one of
+benchmark and no load test has been run.** Every resource this document describes is
+authored and statically validated — the dashboard, the eleven metric alarms, the
+notification topic, the ECS-service, API Gateway and state-machine log groups — and
+both environment roots compose them, but `terraform apply` against a live account is
+an operator action outside this repository's scope, so nothing here has been observed
+running. Every figure in this document is therefore one of
 exactly two things: a width, count or literal quoted from a cited baseline line, or
 a configuration default read from an authored Terraform input declaration.
 **Nothing here is a measurement of the target system**, and no sentence above
@@ -1686,8 +1684,9 @@ model — which is a complete and functioning one for the platform it runs on.
 
 Nothing under [`app/`](../../app), [`tests/`](../../tests), `scripts/` or
 `samples/` is modified by this document or by the work it specifies. The three known
-baseline defects are not subjects of this document and are not fixed in place; they
-must be registered in the contracted
+baseline defects are not subjects of this document: the baseline keeps the behaviour
+it has, `app/**` is untouched, and each divergence must be registered in the
+contracted
 `docs/architecture/cobol-to-service-traceability.md`, together with every
 documented behavioural divergence.
 

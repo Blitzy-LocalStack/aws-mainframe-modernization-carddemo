@@ -563,16 +563,15 @@ variable "secret_recovery_window_in_days" {
   }
 }
 
-variable "rotation_automatically_after_days" {
-  description = "Days between scheduled rotations of each service database credential after its immediate bootstrap rotation."
-  type        = number
-  default     = 30
-
-  validation {
-    condition     = var.rotation_automatically_after_days >= 1 && var.rotation_automatically_after_days <= 1000
-    error_message = "rotation_automatically_after_days must be between 1 and 1000."
-  }
-}
+# WHY : Refactoring Rationale: `rotation_automatically_after_days` used to stand
+#       here and was forwarded to infra/modules/secrets. It was removed with the
+#       module-owned rotation function it configured: that module implements no
+#       rotation and creates no function, and the only rotation this package owns
+#       is KMS KEY rotation in the kms module. An interval with no function to
+#       run it configures nothing, and tflint's terraform_unused_declarations
+#       rule would report the declaration once main.tf stopped passing it. A
+#       deployment that brings its own rotation function reintroduces this input
+#       alongside a `rotation_lambda_arn`, which the module accepts as a pair.
 
 variable "alarm_email_endpoints" {
   description = "Email addresses subscribed to the production observability topic."
@@ -650,48 +649,29 @@ variable "cloudfront_api_connect_src_origins" {
   }
 }
 
-# WHY : Alternatives Considered: generating a self-signed key pair in Terraform.
-#       Rejected because the service clients would not trust a new authority and
-#       the AAP provider set does not include a TLS provider. The imported pair
-#       must come from the environment's existing trust authority.
-#       Assumptions: `sensitive` redacts these values from ordinary CLI output but
-#       does not remove them from state. They must be supplied through an
-#       operator secret channel, and the encrypted remote-state backend remains
-#       part of the security boundary.
-variable "service_tls_certificate" {
-  description = "PEM certificate or certificate chain presented by the CardDemo services' internal HTTPS listeners. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
-  type        = string
-  sensitive   = true
-  nullable    = false
-
-  validation {
-    condition = (
-      strcontains(var.service_tls_certificate, "-----BEGIN CERTIFICATE-----") &&
-      strcontains(var.service_tls_certificate, "-----END CERTIFICATE-----") &&
-      !strcontains(var.service_tls_certificate, "PRIVATE KEY")
-    )
-    error_message = "service_tls_certificate must contain PEM BEGIN/END CERTIFICATE markers and must not contain private-key material."
-  }
-}
-
-variable "service_tls_private_key" {
-  description = "PEM private key paired with service_tls_certificate. Forwarded to the secrets module for scalar storage and ECS injection; supply it through an operator secret channel, never terraform.tfvars."
-  type        = string
-  sensitive   = true
-  nullable    = false
-
-  validation {
-    condition = anytrue([
-      strcontains(var.service_tls_private_key, "-----BEGIN PRIVATE KEY-----") &&
-      strcontains(var.service_tls_private_key, "-----END PRIVATE KEY-----"),
-      strcontains(var.service_tls_private_key, "-----BEGIN RSA PRIVATE KEY-----") &&
-      strcontains(var.service_tls_private_key, "-----END RSA PRIVATE KEY-----"),
-      strcontains(var.service_tls_private_key, "-----BEGIN EC PRIVATE KEY-----") &&
-      strcontains(var.service_tls_private_key, "-----END EC PRIVATE KEY-----"),
-    ])
-    error_message = "service_tls_private_key must contain matching PEM private-key markers such as BEGIN/END PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY."
-  }
-}
+# WHY : Refactoring Rationale: two required inputs -- `service_tls_certificate`
+#       and `service_tls_private_key` -- used to stand here, each a PEM scalar
+#       this root forwarded to infra/modules/secrets so that module could store
+#       it. Both were removed. A Terraform variable can only be given a value
+#       from a committed tfvars file, a committed default or a CI-carried
+#       environment variable, so a variable that accepts key material is a
+#       channel for committing key material however carefully it is used;
+#       `sensitive = true` changed only how a plan RENDERED the value, never
+#       whether a tfvars or state file could hold it. main.tf now GENERATES the
+#       pair with tls_private_key/tls_self_signed_cert and writes it straight
+#       into two root-owned Secrets Manager entries and into
+#       aws_acm_certificate, so the material has no input to arrive through.
+#       Alternatives Considered: keeping the inputs nullable and letting a
+#       supplied pair win over the generated one. Rejected: an optional channel
+#       for key material is still a channel, and the operator-issued case is
+#       served instead by importing the certificate into ACM out of band, which
+#       is the service built to custody a private key and never re-export it.
+#       Trade-offs: an environment that requires a certificate from its own
+#       authority now needs that out-of-band ACM import rather than a variable.
+#       Accepted, because the listeners this pair serves are internal to the
+#       VPC and fronted by the load balancer, so the trust decision is the
+#       ALB's -- which is why a generated self-signed leaf is acceptable here
+#       and would not be at the edge.
 
 # -----------------------------------------------------------------------------
 # The account's deployment permissions boundary

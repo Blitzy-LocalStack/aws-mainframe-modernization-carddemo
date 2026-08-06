@@ -226,7 +226,7 @@
     </dependency>
 
     <!-- ====================================================================
-         WHY THIS MODULE DECLARES NO SECURITY STARTER
+         DESIGN DECISION: THIS MODULE DECLARES NO SECURITY STARTER
          ==================================================================== -->
 
     <!-- WHY : Alternatives Considered: security and resource-server starters
@@ -259,24 +259,44 @@
                them; this module reaches them through grants, so pointing a
                migration location at any of them would make two modules
                authoritative for one table.
-         WHY : Assumptions: the coordinate is the STARTER, and naming it rather
-               than flyway-core is what actually activates migration. Spring Boot
-               4 split its autoconfiguration into one module per technology, and
-               FlywayAutoConfiguration now ships in spring-boot-flyway, which
-               only this starter puts on the classpath. flyway-core alone
-               resolves, compiles and starts, and then applies no migration: the
+         WHY : Refactoring Rationale: the migration engine is declared HERE as a
+               direct dependency rather than absorbed as a transitive of a Boot
+               starter. A starter previously stood in this position, which left
+               the engine this module configures through its own spring.flyway.*
+               keys and its own db/migration/V1__batch.sql resource reachable
+               only by inheritance. A library a module configures is a library
+               that module depends on, and stating it directly is what makes the
+               dependency graph match the configuration; the version still comes
+               from the parent's flyway.version property, so nothing is pinned
+               twice. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+
+    <!-- WHY : Assumptions: flyway-core above is the engine, and this coordinate
+               is what makes Spring Boot DRIVE it. Spring Boot 4 split its
+               autoconfiguration into one module per technology, so
+               FlywayAutoConfiguration no longer ships inside
+               spring-boot-autoconfigure and instead lives here. Without this
+               module on the classpath the build resolves, compiles, packages and
+               passes every test, and then applies no migration at run time: the
                spring.flyway.* keys bind to nothing and batch.batch_run, the
-               durable step ledger the whole redrive contract rests on, is
-               never created, so the first nightly run fails on a missing
-               relation.
-         WHY : Refactoring Rationale: flyway-core is no longer declared directly.
-               The starter brings it transitively at the version the parent's
-               flyway.version property pins, so a direct declaration would add a
-               second editable version site and contribute nothing to the
-               classpath. -->
+               durable step ledger the whole redrive contract rests on, is never
+               created, so the first nightly run fails on a missing relation.
+         WHY : Alternatives Considered: spring-boot-starter-flyway carries this
+               same autoconfiguration module and was evaluated first. It is
+               rejected because it additionally aggregates spring-boot-starter,
+               spring-boot-starter-jdbc and spring-boot-jdbc, every one of which
+               spring-boot-starter-data-jpa above already places on the
+               classpath, and it re-supplies flyway-core transitively so the
+               direct declaration above would read as redundant. Naming the
+               autoconfiguration module alone is the smallest addition that
+               closes the run-time gap, and it leaves the engine dependency
+               stated exactly once. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-flyway</artifactId>
+      <artifactId>spring-boot-flyway</artifactId>
     </dependency>
 
     <!-- WHY : Assumptions: from Flyway 10 onward, per-database support was
@@ -394,11 +414,25 @@
                against a substitute would prove nothing about the property that
                actually matters here.
          WHY : Assumptions: the parent imports the Testcontainers bill of
-               materials at a 2.x version, in which every module artifact was
-               renamed to carry the testcontainers- prefix. The pre-2.x
-               artifactIds (postgresql, junit-jupiter) are managed only by the
-               1.x bill of materials, so using them here would leave the version
-               unmanaged and break resolution outright. -->
+               materials at 2.0.5, the exact version the dependency inventory
+               pins after verifying it against the publishing registry. Every
+               module artifact was renamed in the 2.x line to carry the
+               testcontainers prefix, so at 2.0.5 the coordinates
+               org.testcontainers:postgresql and org.testcontainers:junit-jupiter
+               DO NOT EXIST: they are published only up to the 1.x line and are
+               managed only by the 1.x bill of materials. Declaring them beside a
+               2.0.5 import therefore leaves the version unmanaged and fails
+               resolution outright rather than merely warning.
+         WHY : Trade-offs: the pinned bill-of-materials version and the older
+               artifactId spelling cannot both be honoured, and the version pin
+               wins because it is the value that was verified against the
+               registry and is shared by every module in the reactor. The
+               accepted cost is that these two coordinates read differently from
+               the pre-2.x spelling a reader may remember; the compensating
+               benefit is that one bill of materials governs every
+               Testcontainers artifact in the build. The same two coordinates in
+               this renamed form appear in every sibling module POM that uses
+               Testcontainers, so the reactor is internally consistent. -->
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-postgresql</artifactId>
@@ -471,9 +505,13 @@
            to data-transfer mapping in this repository is not mechanical. It
            drops FILLER padding, masks the primary account number to its last
            four digits, suppresses the card verification value entirely,
-           encrypts identifiers and corrects three misspelled baseline field
-           names. Each of those needs a justification at the mapping site, and
-           a generated mapper has nowhere to put one.
+           encrypts identifiers, and gives a target name to three fields the
+           baseline spells differently - the baseline spellings stay exactly as
+           app/** declares them and app/** is untouched, with the naming
+           divergence registered in
+           docs/architecture/data-model-and-schema-mapping.md. Each of those
+           needs a justification at the mapping site, and a generated mapper has
+           nowhere to put one.
 
          No external resilience library (resilience4j, spring-retry) and no
          circuit breaker.

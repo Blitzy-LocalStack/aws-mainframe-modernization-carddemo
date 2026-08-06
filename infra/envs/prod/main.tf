@@ -100,11 +100,34 @@ locals {
       priority   = 20
       paths      = ["/api/v1/accounts", "/api/v1/accounts/*"]
     }
+    # WHY : Refactoring Rationale: this service is forwarded on FOUR patterns rather
+    #       than two, because its contract of record publishes an administrative
+    #       card-detail operation under its own `/api/v1/admin/cards` prefix rather
+    #       than as a segment beneath the card subtree. The prefix is what removes the
+    #       rule-ordering dependency that the suffix spelling placed on the service's
+    #       own authority table -- a subtree pattern also matches a suffix beneath it,
+    #       so only the table's order kept an ordinary user out of the one operation
+    #       that renders a full account number. Forwarding the prefix here is the
+    #       first of the two hops that has to know about it; the gateway route keys in
+    #       infra/modules/api-gateway-http are the second, and the two lists have to
+    #       name the same paths or one of them describes a topology that does not
+    #       exist.
+    # WHY : Assumptions: four values still fit one path-pattern condition, which
+    #       accepts five, so this needs no second rule and no second priority. Each
+    #       prefix is listed as a bare pattern beside its wildcard for the same reason
+    #       the auth entry above is -- `/api/v1/admin/cards/*` does not match
+    #       `/api/v1/admin/cards` itself -- and the bare admin pattern is carried even
+    #       though no operation sits on it, so that a request to it reports as an
+    #       unimplemented operation from this service rather than as a misrouted one
+    #       from the load balancer.
     card = {
       repository = "card-service"
       role       = "carddemo_card"
       priority   = 30
-      paths      = ["/api/v1/cards", "/api/v1/cards/*"]
+      paths = [
+        "/api/v1/cards", "/api/v1/cards/*",
+        "/api/v1/admin/cards", "/api/v1/admin/cards/*"
+      ]
     }
     transaction = {
       repository = "transaction-service"
@@ -470,6 +493,74 @@ resource "aws_acm_certificate" "internal_service" {
   }
 }
 
+# =============================================================================
+# The internal listener material, stored where the containers can read it.
+# -----------------------------------------------------------------------------
+# WHY : Refactoring Rationale: these two entries used to be created by
+#       infra/modules/secrets, from a PEM certificate and a PEM private key it
+#       accepted as input variables. That made a reusable module a custodian of
+#       private-key material and, worse, put key material in its INPUT contract --
+#       where the only places a Terraform root can supply a value from are a
+#       committed tfvars file, a committed default or a CI-carried environment
+#       variable. Marking those inputs `sensitive` changed only how a plan
+#       RENDERED the value, never whether a tfvars file or a state file could hold
+#       it. The entries are declared here instead, directly over the material this
+#       root GENERATES at apply time, so the value has no input to arrive through
+#       and cannot be committed. That is the same mechanism the database
+#       credentials use, applied to the same problem.
+# WHY : Alternatives Considered: (a) keeping the module inputs and relying on both
+#       roots leaving them null and letting the module fall back -- rejected,
+#       because that is a convention rather than a control and the roots were in
+#       fact passing them; (b) dropping the Secrets Manager entries altogether and
+#       giving the containers only the ACM certificate -- rejected, because
+#       infra/modules/ecs-service refuses a load-balanced service that omits
+#       either CARDDEMO_SERVER_TLS_CERTIFICATE or
+#       CARDDEMO_SERVER_TLS_PRIVATE_KEY, and ACM never re-exports a private key,
+#       so there would be nothing for the task to read.
+# WHY : Assumptions: two SCALAR entries rather than one JSON document. ECS injects
+#       a scalar from the base ARN with no key selector, so `value_from` and the
+#       execution role's IAM Resource are the same string; a document would need a
+#       `<base-arn>:<key>::` selector for one and the bare ARN for the other.
+# =============================================================================
+resource "aws_secretsmanager_secret" "internal_tls_certificate" {
+  #checkov:skip=CKV2_AWS_57:A rotation function cannot mint a certificate. This entry follows tls_self_signed_cert.internal_service, whose early_renewal_hours already re-issues the leaf ahead of expiry, so renewal is an ordinary apply of this root rather than a scheduled Lambda. A schedule here would name a function whose only possible action is to re-write the value it was handed.
+  name        = "${var.name_prefix}/${var.environment}/tls/certificate"
+  description = "PEM certificate presented by the CardDemo service HTTPS listeners in the ${var.environment} environment. Generated by this root and injected into ECS tasks as a scalar secret."
+
+  kms_key_id              = module.kms.secrets_key_arn
+  recovery_window_in_days = var.secret_recovery_window_in_days
+}
+
+resource "aws_secretsmanager_secret" "internal_tls_private_key" {
+  #checkov:skip=CKV2_AWS_57:This entry is the private key paired with the certificate above and shares its lifecycle, so it is re-issued by the same apply rather than by a rotation function. Rotating the key independently of its certificate would produce a pair that no longer matches and a listener that cannot complete a handshake.
+  name        = "${var.name_prefix}/${var.environment}/tls/private-key"
+  description = "PEM private key paired with the CardDemo service HTTPS certificate in the ${var.environment} environment. Generated by this root and injected into ECS tasks as a scalar secret."
+
+  kms_key_id              = module.kms.secrets_key_arn
+  recovery_window_in_days = var.secret_recovery_window_in_days
+}
+
+resource "aws_secretsmanager_secret_version" "internal_tls_certificate" {
+  secret_id = aws_secretsmanager_secret.internal_tls_certificate.id
+
+  # WHY : Trade-offs: no ignore_changes rule appears here. Unlike a rotated
+  #       database password, whose authority passes to a rotation function, the
+  #       authority for this material stays with the tls_self_signed_cert resource
+  #       above -- so an early renewal must produce a new secret version rather
+  #       than preserve stale material a listener would go on presenting.
+  secret_string = tls_self_signed_cert.internal_service.cert_pem
+}
+
+resource "aws_secretsmanager_secret_version" "internal_tls_private_key" {
+  secret_id = aws_secretsmanager_secret.internal_tls_private_key.id
+
+  # WHY : Assumptions: the key follows its certificate for the same reason and in
+  #       the same apply. Adding ignore_changes to one and not the other would
+  #       leave a renewed certificate paired with the previous key and every
+  #       listener failing at startup.
+  secret_string = tls_private_key.internal_service.private_key_pem
+}
+
 module "ecs_cluster" {
   source = "../../modules/ecs-cluster"
 
@@ -543,9 +634,18 @@ data "aws_iam_policy_document" "lambda_logs" {
 data "aws_iam_policy_document" "online_write_lambda" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_logs["online_write"].json]
 
+  # WHY : Assumptions: the handler READS the flag before it writes it, so the grant
+  #       needs GetParameter as well as PutParameter. The read is what makes the
+  #       quiesce call a lease acquisition rather than a blind overwrite -- it is how
+  #       the function learns whether another execution already owns the write window
+  #       -- so the two actions are one capability and are granted together.
+  # WHY : Trade-offs: both actions are scoped to this ONE parameter ARN rather than to
+  #       a path prefix. A prefix would survive renaming the parameter without an IAM
+  #       edit; naming the ARN means a rename fails the plan instead, which is the
+  #       preferred failure for a resource this role exists solely to toggle.
   statement {
     sid       = "UpdateOnlineWriteGate"
-    actions   = ["ssm:PutParameter"]
+    actions   = ["ssm:GetParameter", "ssm:PutParameter"]
     resources = [aws_ssm_parameter.online_writes_enabled.arn]
   }
 }
@@ -698,37 +798,43 @@ module "secrets" {
   kms_key_arn             = module.kms.secrets_key_arn
   recovery_window_in_days = var.secret_recovery_window_in_days
 
-  # WHY : Assumptions: the module owns the rotation function, so it needs the four
-  #       coordinates that function uses to reach the database plus the master
-  #       secret it authenticates with. It is deliberately NOT given a password:
-  #       V0__schemas_and_roles.sql creates the eight service roles with no password
-  #       clause, and the first rotation is what applies one, through the RDS Data
-  #       API so no credential ever reaches Terraform state, a process argument or a
-  #       log. That is also why the cluster exposes an HTTP endpoint.
-  #       Alternatives Considered: one of the AWS-published PostgreSQL rotation
-  #       functions. Rejected because single-user rotation authenticates with the
-  #       credential it is replacing, which a role created without a password does
-  #       not have, so it cannot perform the FIRST application at all.
-  aurora_cluster_arn       = module.aurora.cluster_arn
-  aurora_master_secret_arn = module.aurora.master_user_secret_arn
-  aurora_host              = module.aurora.writer_endpoint
-  aurora_port              = module.aurora.port
-  aurora_database_name     = module.aurora.database_name
+  # WHY : Assumptions: the module is given the master role's NAME and no other
+  #       cluster coordinate. It records the name in each credential document as
+  #       the escalation identity, and it needs nothing else: the writer endpoint,
+  #       the listener port and the database name are non-secret and are already
+  #       published to Parameter Store by module.aurora under the same
+  #       <prefix>/<environment>/aurora path the credential names are composed
+  #       from, so a consumer reads the coordinates there and only the credential
+  #       from Secrets Manager. Passing them to the secrets module as well would
+  #       make it a second copy of values module.aurora owns.
+  #       Alternatives Considered: passing the RDS-managed master secret ARN, as
+  #       this root previously did. Rejected with the module-owned rotation
+  #       function it existed to serve: a reusable credential-store module has no
+  #       remit to hold a reference to the master credential of the cluster its
+  #       consumers connect to.
+  #       Assumptions: `database_master_username` is deliberately NOT passed. This
+  #       root does not set module.aurora's `master_username` either, so both
+  #       modules take their own default and those defaults are the same value by
+  #       construction -- each states that it must match the other. Wiring the two
+  #       together would mean publishing a `master_username` output from the aurora
+  #       module, which has a deliberately closed output contract; widening it to
+  #       restate a value neither module's caller overrides would buy nothing.
+  #       Trade-offs: a root that ever does override the cluster's master role name
+  #       must set this input to the same value in the same change, which is why
+  #       both variables' descriptions name each other.
 
-  rotation_automatically_after_days = var.rotation_automatically_after_days
-  rotation_log_kms_key_arn          = module.kms.s3_key_arn
-  rotation_log_retention_in_days    = var.log_retention_days
-  rotation_permissions_boundary_arn = var.permissions_boundary_arn
-
-  # WHY : Assumptions: the TLS pair is supplied by the caller rather than generated
-  #       in the module, and this root prefers an operator-issued certificate when
-  #       one is configured. The self-signed fallback keeps a fresh environment able
-  #       to bring its internal HTTPS listeners up before any certificate authority
-  #       is involved -- the listeners are internal to the VPC and fronted by the
-  #       load balancer, so the trust decision is the ALB's, which is why a
-  #       self-signed leaf is acceptable here and would not be at the edge.
-  service_tls_certificate = coalesce(var.service_tls_certificate, tls_self_signed_cert.internal_service.cert_pem)
-  service_tls_private_key = coalesce(var.service_tls_private_key, tls_private_key.internal_service.private_key_pem)
+  # WHY : Assumptions: neither rotation input is supplied, so no rotation schedule
+  #       is created. infra/modules/secrets deliberately implements no rotation and
+  #       creates no rotation function -- the only rotation this package owns is KMS
+  #       KEY rotation, in module.kms -- and its two rotation inputs are a
+  #       pass-through hook for a root that brings a function of its own. This root
+  #       brings none, so binding a stored credential to its PostgreSQL role remains
+  #       the schema-bootstrap step's responsibility, which is why the dependency
+  #       edge below is stated.
+  #       Trade-offs: the accepted cost is that a credential is not re-issued on a
+  #       schedule until an operator supplies a rotation function and its interval.
+  #       Inventing one here instead would recreate, at the root, the same
+  #       out-of-scope function that was removed from the module.
 
   depends_on = [
     aws_lambda_invocation.database_bootstrap,
@@ -788,12 +894,19 @@ module "sqs" {
 module "s3_datasets" {
   source = "../../modules/s3-datasets"
 
-  name_prefix               = var.name_prefix
-  environment               = var.environment
-  kms_key_arn               = module.kms.s3_key_arn
-  object_created_lambda_arn = aws_lambda_function.dataset_retention.arn
-  access_log_bucket_name    = module.observability.access_log_bucket_name
-  force_destroy             = !var.deletion_protection
+  name_prefix = var.name_prefix
+  environment = var.environment
+  kms_key_arn = module.kms.s3_key_arn
+  # WHY : Refactoring Rationale: this call used to pass
+  #       `object_created_lambda_arn = aws_lambda_function.dataset_retention.arn`,
+  #       and the module declared the bucket notification and the invoke permission
+  #       that wired it up. Both moved here, because an aws_s3_bucket_notification
+  #       is a whole-bucket resource and a reusable module that claims it takes the
+  #       bucket's only notification slot away from every consumer. The resources
+  #       are declared below over module.s3_datasets.bucket_name, so the behaviour
+  #       is unchanged and the ownership is where the function is.
+  access_log_bucket_name = module.observability.access_log_bucket_name
+  force_destroy          = !var.deletion_protection
 }
 
 data "aws_iam_policy_document" "dataset_retention_s3" {
@@ -814,6 +927,51 @@ resource "aws_iam_role_policy" "dataset_retention_s3" {
   name   = "${var.name_prefix}-${var.environment}-dataset-retention-s3"
   role   = aws_iam_role.lambda["dataset_retention"].id
   policy = data.aws_iam_policy_document.dataset_retention_s3.json
+}
+
+# WHY : Refactoring Rationale: these two resources were previously declared inside
+#       infra/modules/s3-datasets, from an `object_created_lambda_arn` input. They
+#       are declared here now because an aws_s3_bucket_notification is a
+#       WHOLE-BUCKET resource: a reusable module that declares one claims the
+#       bucket's only notification slot for every consumer, and the function being
+#       wired up belongs to this root, not to the module. The behaviour is
+#       unchanged -- the same function, on the same event, over the same bucket.
+# WHY : Assumptions: this hook and the module's own noncurrent-version lifecycle
+#       rule are complementary rather than alternative. A lifecycle rule bounds the
+#       VERSIONS of one object key, whereas each dataset generation is written under
+#       a distinct `<family>/dt=.../gen=.../` key, so S3 cannot see generation six as
+#       a version of generation five. Enforcing the five-generation limit
+#       (the LIMIT(5) SCRATCH analogue of app/jcl/DEFGDGB.jcl) therefore needs a
+#       function that lists prefixes, and it is invoked on object creation rather
+#       than from a batch state so that ad-hoc and retry writers are covered too.
+resource "aws_lambda_permission" "dataset_retention_from_s3" {
+  statement_id  = "AllowDatasetGenerationRetentionFromS3"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.dataset_retention.function_name
+  principal     = "s3.amazonaws.com"
+
+  # WHY : Assumptions: both SourceArn and SourceAccount are stated. The bucket ARN
+  #       binds invocation to this bucket, and the account condition blocks a
+  #       confused-deputy request from a same-named bucket in another account --
+  #       neither is redundant, because a bucket name is globally unique but an ARN
+  #       alone does not prove which account asked.
+  source_arn     = module.s3_datasets.bucket_arn
+  source_account = data.aws_caller_identity.current.account_id
+}
+
+resource "aws_s3_bucket_notification" "dataset_generations" {
+  bucket = module.s3_datasets.bucket_name
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.dataset_retention.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+
+  # WHY : Assumptions: the invoke permission must exist before S3 will validate and
+  #       store a notification configuration, so this edge is required even though
+  #       neither resource references the other. Without it a first apply fails
+  #       although both the function and the bucket already exist.
+  depends_on = [aws_lambda_permission.dataset_retention_from_s3]
 }
 
 # -----------------------------------------------------------------------------
@@ -957,19 +1115,18 @@ locals {
   #       -- and infra/modules/ecs-service refuses a load-balanced service that
   #       omits either, so the names are a contract rather than a convention.
   #       Refactoring Rationale: the material is read from the two SCALAR secrets
-  #       infra/modules/secrets creates, not from a root-owned JSON document. One
-  #       owner for the secret's name, key, recovery window and tags means those
-  #       four decisions cannot drift between the credential secrets and the TLS
-  #       secrets, and a scalar needs no JSON-key selector, so `value_from` is the
+  #       this root creates over its own generated certificate and key, rather than
+  #       from a reusable module that had to accept the PEM values as inputs to
+  #       create them. A scalar needs no JSON-key selector, so `value_from` is the
   #       base ARN and IAM authorizes exactly the ARN the container reads.
   tls_secret_sources = {
     CARDDEMO_SERVER_TLS_CERTIFICATE = {
-      value_from   = module.secrets.service_tls_secrets["certificate"].value_reference
-      resource_arn = module.secrets.service_tls_secrets["certificate"].arn
+      value_from   = aws_secretsmanager_secret.internal_tls_certificate.arn
+      resource_arn = aws_secretsmanager_secret.internal_tls_certificate.arn
     }
     CARDDEMO_SERVER_TLS_PRIVATE_KEY = {
-      value_from   = module.secrets.service_tls_secrets["private_key"].value_reference
-      resource_arn = module.secrets.service_tls_secrets["private_key"].arn
+      value_from   = aws_secretsmanager_secret.internal_tls_private_key.arn
+      resource_arn = aws_secretsmanager_secret.internal_tls_private_key.arn
     }
   }
 
@@ -1331,8 +1488,15 @@ module "step_functions" {
   data_migration_container_name      = module.ecs_service["data-migration"].container_name
   reporting_container_name           = module.ecs_service["reporting"].container_name
   private_app_subnet_ids             = module.network.private_app_subnet_ids
-  security_group_ids                 = [module.network.app_security_group_id]
-  task_role_arns = [
+  task_security_group_id             = module.network.app_security_group_id
+
+  # WHY : Assumptions: every role the state machine may run a task AS is
+  #       enumerated -- the task role and the task EXECUTION role of each of the
+  #       three task definitions above, six entries for three images. The module
+  #       turns the list into the Resource of one iam:PassRole statement, so an
+  #       omitted entry is not a narrower grant but a run-task that fails with an
+  #       access-denied error naming iam:PassRole rather than the missing role.
+  pass_role_arns = [
     module.ecs_service["batch"].task_role_arn,
     module.ecs_service["batch"].execution_role_arn,
     module.ecs_service["data-migration"].task_role_arn,
@@ -1350,12 +1514,27 @@ module "step_functions" {
   #       toggles instead of leaving that discoverable only from the function
   #       resources above. One owner, referenced twice, rather than two
   #       independently maintained spellings.
+  # WHY : Assumptions: the value the module puts in each invocation payload is a
+  #       CROSS-CHECK and not a redirect. The handler writes the parameter its own
+  #       environment names and REFUSES an invocation naming any other, so the two
+  #       references above cannot silently disagree -- a root that wired a
+  #       different parameter here than into the functions fails the invocation
+  #       instead of reporting a resume it never performed. It is therefore not a
+  #       second flag and there is no multi-flag capability to configure.
   read_only_flag_parameter_name = aws_ssm_parameter.online_writes_enabled.name
 
   notification_topic_arn = module.observability.notification_topic_arn
   dataset_bucket_name    = module.s3_datasets.bucket_name
   log_retention_days     = var.log_retention_days
-  kms_key_arn            = module.kms.s3_key_arn
+
+  # WHY : Assumptions: the S3 customer-managed key is the one this stack uses for
+  #       CloudWatch log groups as well, so the state machines' two execution log
+  #       groups are encrypted under a project-owned key rather than CloudWatch's
+  #       service-managed one. The module's input is nullable and defaults to null
+  #       precisely so a module can be applied without a key; this root supplies
+  #       one, because encryption at rest is one of the properties the migration
+  #       adds over a baseline whose every CICS file ran RECOVERY(NONE) JOURNAL(NO).
+  log_group_kms_key_arn = module.kms.s3_key_arn
 }
 
 module "eventbridge_scheduler" {
@@ -1398,12 +1577,14 @@ module "observability" {
   alarm_email_endpoints           = var.alarm_email_endpoints
   access_log_bucket_force_destroy = !var.deletion_protection
 
-  # WHY : Assumptions: a failed credential rotation is silent -- the secret stays
-  #       on its previous version and the system keeps working -- so the rotation
-  #       function's Errors metric is the only signal that the control stopped
-  #       running. The name comes from the secrets module because that module owns
-  #       the function.
-  rotation_lambda_function_names = [module.secrets.rotation_lambda_name]
+  # WHY : Assumptions: rotation_lambda_function_names is deliberately left at its
+  #       empty default, so no rotation-Errors alarm is created. There is no
+  #       rotation function in this stack to alarm on: infra/modules/secrets
+  #       implements no rotation and this root supplies none, and the observability
+  #       module's own input contract states that an empty set is the correct value
+  #       when rotation is not provisioned in the composed root. Naming a function
+  #       that does not exist would create an alarm permanently in INSUFFICIENT_DATA,
+  #       which is indistinguishable from a control that is running cleanly.
 }
 
 # WHY : Assumptions: this assertion is the guard on the one deterministically

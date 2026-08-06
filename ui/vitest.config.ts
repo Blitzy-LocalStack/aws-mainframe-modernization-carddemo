@@ -5,10 +5,11 @@
  * patterns, and isolation rules used by the UI component suite.
  *
  * Two commands declared in `ui/package.json` load it: `npm test` (`vitest
- * run`, a single pass) and `npm run test:watch` (`vitest`, watching). The
- * later-index CI workflow is required to load it a third way, adding
- * `--reporter=junit --outputFile=<path>` so the run also produces an
- * ingestible report.
+ * run`, a single pass) and `npm run test:watch` (`vitest`, watching).
+ * `.github/workflows/ui-ci.yml` loads it a third way, in its "Run component tests
+ * once and emit JUnit XML" step, which appends `--reporter=junit
+ * --outputFile=../ui-reports/vitest.xml` so the run also produces an ingestible
+ * report.
  *
  * Why this suite carries the whole online migration
  * -------------------------------------------------
@@ -54,27 +55,33 @@
  * - `.github/workflows/ui-ci.yml` selects the reporter on the command line, so
  *   no `reporters` option appears here either.
  *
- * State at this checkpoint
- * ------------------------
- * Every artifact named above exists, and `npm test` passes: Vitest loads
- * `ui/src/test/setup.ts`, collects `ui/src/routes/cards.test.ts` and runs its
- * three tests. `ui/.prettierrc` is the one file named anywhere in this package's
- * configuration that remains absent, so `npm run format` runs Prettier on its
- * defaults rather than on a committed profile.
+ * Measured state
+ * --------------
+ * Every artifact named above exists, `ui/.prettierrc` included, and `npm test`
+ * passes: Vitest loads `ui/src/test/setup.ts` and collects three files --
+ * `ui/src/routes/cards.test.ts`, `ui/src/api/client.test.ts` and
+ * `ui/src/screens/cardScreens.test.tsx` -- for twelve tests in total.
+ * `npm run format` runs against the committed Prettier profile and reports no
+ * drift.
  *
- * Refactoring Rationale: an earlier revision of this block described the setup
- * module, the test tree and the CI workflow as later-index artifacts and warned
- * that `npm test` could not pass. All three have landed, so the warning had
- * become the opposite of the truth -- the shape of stale claim that survives
- * unnoticed because nothing compiles a comment.
+ * Refactoring Rationale: two successive revisions of this block went stale, which
+ * is why it is now written as a measurement rather than as a checkpoint note. The
+ * first described the setup module, the test tree and the CI workflow as
+ * later-index artifacts and warned that `npm test` could not pass; the second
+ * corrected that but recorded one test file with three tests and `ui/.prettierrc`
+ * as absent, both of which the tree had already overtaken. A comment that counts
+ * tests is a comment that goes stale on the next test, so the counts here are
+ * stated as what was measured and the authority is the suite itself -- nothing
+ * compiles a comment, and that is exactly why it must be re-read rather than
+ * trusted.
  */
 
 // Assumptions: importing from vitest/config adds the typed test block to Vite's
 // configuration surface, so misspelled runner options fail type checking.
-import { defineConfig, mergeConfig } from "vitest/config";
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 // Assumptions: bundler resolution matches the esbuild loader used by Vitest.
-import viteConfig from "./vite.config";
+import viteConfig from './vite.config';
 
 /**
  * Resolved Vitest configuration for the CardDemo single-page application.
@@ -91,26 +98,37 @@ export default mergeConfig(
       // Assumptions: field attributes, keyboard events, and rendered messages
       // require a DOM implementation. Node cannot render components, while
       // Happy DOM would add an otherwise unnecessary dependency.
-      environment: "jsdom",
+      environment: 'jsdom',
 
-      // Refactoring Rationale: injecting `describe`, `it` and `expect` as
-      // ambient globals is refused, and the reason is a boundary rather than a
-      // style preference. Ambient test globals are declared per PROJECT, not per
-      // directory, so the `"vitest/globals"` types entry that used to accompany
-      // this option handed those names to every file `ui/tsconfig.json` covers --
-      // all 21 screens, the theme bridge, the API clients and the message
-      // catalog included. A screen could then call `expect` or `vi` and compile
-      // cleanly, having imported a runner that is absent from a deployed browser
-      // bundle. Turning the injection off is what lets that types list be empty,
-      // which is what closes the hole; the two settings move together or not at
-      // all.
-      // Trade-offs: every test file now imports what it uses by name, for
-      // instance `import { describe, it, expect } from 'vitest'`. That is a line
-      // per file across 21 screen tests, accepted because an explicit import is
-      // also what makes a test's dependencies visible to the same lint rules that
-      // govern the rest of the tree, where an ambient global is invisible to
-      // them.
-      globals: false,
+      // Refactoring Rationale: the runner injects `describe`, `it` and `expect`,
+      // and the boundary that matters is enforced ONCE, in the type layer, rather
+      // than twice. The hazard is real and worth stating: ambient test globals are
+      // declared per PROJECT, not per directory, so declaring them would hand those
+      // names to every file `ui/tsconfig.json` covers -- all 21 screens, the theme
+      // bridge, the API clients and the message catalog -- and a screen could then
+      // call `expect` or `vi` and compile cleanly against a runner that is absent
+      // from a deployed browser bundle. What closes that hole is `ui/tsconfig.json`
+      // keeping `"types": []`, which is the half of the pair that can actually
+      // discriminate, because it governs what the COMPILER believes. This option
+      // governs only what exists at run time inside the runner, where no screen is
+      // ever loaded, so switching it off added no protection the empty types list
+      // was not already providing -- it duplicated a guard at the one layer unable
+      // to tell a test from a screen.
+      // Trade-offs: the two settings are therefore deliberately on OPPOSITE sides,
+      // injected at run time and undeclared at compile time, which is the
+      // combination that makes a stray `expect` in a screen a named typecheck
+      // failure -- `Cannot find name 'expect'` -- rather than something the runner
+      // has an opinion about. The cost is that this pairing looks inconsistent read
+      // one line at a time, which is why it is written out here.
+      // Assumptions: every test file continues to import what it uses by name, for
+      // instance `import { describe, it, expect } from "vitest"`, and that is not
+      // made redundant by the injection. The imports are what satisfy the compiler
+      // under the empty types list, and they keep a test's dependencies visible to
+      // the same lint rules that govern the rest of the tree, where an ambient
+      // global is invisible to them. The injection's role is narrower: a file that
+      // omits an import fails at typecheck on a named symbol instead of surviving
+      // to throw a bare ReferenceError inside a worker mid-suite.
+      globals: true,
 
       // Assumptions: `ui/src/test/setup.ts` imports
       // `@testing-library/jest-dom/vitest`, and the `/vitest` subpath is the
@@ -124,11 +142,11 @@ export default mergeConfig(
       // reads as a broken assertion and sends the reader to the test file instead
       // of to this line. The augmentation reaches every test without a tsconfig
       // entry because this file lives under `ui/src` and is part of that project.
-      setupFiles: ["./src/test/setup.ts"],
+      setupFiles: ['./src/test/setup.ts'],
 
       // Trade-offs: collection is restricted to TypeScript tests under src so
       // package-root scratch files cannot join the suite accidentally.
-      include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
 
       // Trade-offs: jsdom has no layout engine, so tests assert semantics and
       // attributes rather than computed styling or the retired 24x80 geometry.
@@ -140,12 +158,15 @@ export default mergeConfig(
       restoreMocks: true,
 
       // Assumptions: no `reporters` entry appears here, and that omission leaves
-      // the later-index CI workflow free to choose one. The planned invocation
-      // is `vitest run --reporter=junit --outputFile=<path>`, while a developer
-      // at a terminal wants the default human-readable output. A list set here
-      // would be the thing that flag has to override, so leaving it unset serves
-      // both callers from one configuration instead of pitting them against
-      // each other.
+      // the choice to the caller. `.github/workflows/ui-ci.yml` takes it, running
+      // `npm test -- --reporter=junit --outputFile=../ui-reports/vitest.xml`,
+      // while a developer at a terminal wants the default human-readable output. A
+      // list set here would be the thing that flag has to override, so leaving it
+      // unset serves both callers from one configuration instead of pitting them
+      // against each other. Refactoring Rationale: this note called that
+      // invocation "planned" and the workflow "later-index"; both have landed, and
+      // a comment that describes a live gate as pending invites someone to satisfy
+      // it differently.
 
       // Alternatives Considered: coverage is omitted because package.json pins
       // no provider; enabling it is a manifest and gate decision, not a local

@@ -138,48 +138,116 @@ class CardNumberMaskerTest {
     }
 
     /**
-     * Pins the separator boundary: a card number written with separators is not detected as one.
+     * Confirms a card number written with any accepted separator is masked, with the separators kept.
      *
-     * <p>Assumptions: this asserts a LIMITATION rather than a desirable behaviour, and it is asserted
-     * deliberately so the boundary is a build-enforced fact instead of something a reader has to infer
-     * from the scan. Each separated form below is four runs of four digits, no run reaches the
-     * sixteen-digit threshold, and the text is returned unchanged. The limitation is harmless for this
-     * migration because every value that reaches this class comes from a sixteen-character display
-     * field that cannot hold a separator within its declared width, which the class documentation
-     * records with the copybook reference.</p>
+     * <p>Refactoring Rationale: an earlier revision of this test asserted the OPPOSITE -- that a
+     * separated card number passed through unchanged -- and described that as a documented limitation
+     * whose cost was bounded because every value reaching the masker came from a sixteen-character
+     * display field too narrow to hold a separator. That bound does not hold. The masker's second
+     * operation exists for text a caller assembled, and both of its real callers admit separators: an
+     * error body echoes the path a caller invented, and {@code com.carddemo.common.web.CorrelationIdFilter}
+     * publishes an identity that may contain a hyphen, a dot or an underscore. So the pass-through was
+     * a disclosure path, not a bounded limitation, and the assertion is inverted rather than kept.</p>
      *
-     * <p>Trade-offs: pinning a limitation costs a failing test if someone later widens the rule, and
-     * that cost is the point. Widening it is a behavioural change with a regression risk the class
-     * documentation names -- a timestamp is a separated digit sequence this migration renders in full
-     * -- so it should be an explicit decision that updates this test, not an unremarked improvement.</p>
+     * <p>Assumptions: masking preserves the separators and the character width, so the rendering still
+     * reads as the value it stands for; only digits are replaced. All four accepted separators are
+     * asserted rather than one, because the rule admits a set and a rule that admits a set is only
+     * pinned by exercising the set.</p>
      */
     @Test
-    @DisplayName("a separated card number is not detected, which is the documented limitation")
-    void separatedCardNumberIsNotDetected() {
-        String hyphenated = "4111-1111-1111-1111";
-        String spaced = "4111 1111 1111 1111";
-
-        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(hyphenated)).isSameAs(hyphenated);
-        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(spaced)).isSameAs(spaced);
+    @DisplayName("a separated card number is masked and its separators are preserved")
+    void separatedCardNumberIsMasked() {
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers("4111-1111-1111-1111"))
+                .isEqualTo("****-****-****-1111");
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers("4111 1111 1111 1111"))
+                .isEqualTo("**** **** **** 1111");
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers("4111.1111.1111.1111"))
+                .isEqualTo("****.****.****.1111");
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers("4111_1111_1111_1111"))
+                .isEqualTo("****_****_****_1111");
     }
 
     /**
-     * Confirms the contiguous form this system actually carries is masked, next to the separated form.
+     * Confirms the contiguous and the separated form of one number are both masked to the same tail.
      *
-     * <p>Assumptions: pairing the two in one test is what makes the limitation readable. The separated
-     * value passes through and the contiguous value does not, so the boundary is the presence of a
-     * separator and nothing else -- not the digits, not the length in characters, not the position.</p>
+     * <p>Assumptions: pairing the two in one test is what makes the rule readable. Neither form
+     * survives, both reveal the same final four digits, and each keeps its own character width -- so
+     * the presence of a separator changes the rendering's punctuation and nothing about its safety.</p>
      */
     @Test
-    @DisplayName("the contiguous form the baseline carries is masked while the separated form is not")
-    void contiguousFormIsMaskedWhereSeparatedFormIsNot() {
+    @DisplayName("the contiguous and separated forms of one number are both masked")
+    void bothContiguousAndSeparatedFormsAreMasked() {
         String separated = "4111-1111-1111-1111";
         String contiguous = separated.replace("-", "");
 
-        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(separated)).isSameAs(separated);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(separated))
+                .isNotEqualTo(separated)
+                .endsWith("1111")
+                .hasSameSizeAs(separated);
         assertThat(CardNumberMasker.maskEmbeddedCardNumbers(contiguous))
-            .isNotEqualTo(contiguous)
-            .endsWith("1111")
-            .hasSameSizeAs(contiguous);
+                .isNotEqualTo(contiguous)
+                .endsWith("1111")
+                .hasSameSizeAs(contiguous);
+    }
+
+    /**
+     * Confirms a separated candidate embedded in a request route is masked without disturbing the route.
+     *
+     * <p>Assumptions: this is the site the widened rule was added for. A caller that types a separated
+     * card number into a path gets that path echoed in the refusal body and written to the accompanying
+     * log line, so the run has to be masked in place while the route segments around it survive.</p>
+     */
+    @Test
+    @DisplayName("a separated candidate inside a route is masked and the route is preserved")
+    void separatedRunInPathIsMasked() {
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers("/api/v1/cards/4111-1111-1111-1111/detail"))
+                .isEqualTo("/api/v1/cards/****-****-****-1111/detail");
+    }
+
+    /**
+     * Confirms the separated rule does not fire on the shapes the migration renders in full.
+     *
+     * <p>Assumptions: the regression risk the widened rule carries is a false positive on a separated
+     * digit sequence that is not a card number, and the migration has one such sequence everywhere --
+     * the twenty-six-character processing timestamp
+     * {@code 'YYYY-MM-DD HH:MM:SS.mmmmmm'} that {@code com.carddemo.common.time.TimestampFormatter}
+     * emits. Its groups are four, two, two, two, two, two and six characters, so no group after the
+     * first is four digits long and the candidate ends at the first mismatch. An ISO date and a
+     * dotted version string are asserted alongside because both appear in log lines this masker sees.</p>
+     *
+     * <p>Trade-offs: the rule measures group widths rather than validating a card number, so a
+     * separated run of four four-digit groups that is not a card number is masked anyway -- the same
+     * positional trade-off the contiguous rule already accepts, and it fails toward withholding.</p>
+     */
+    @Test
+    @DisplayName("timestamps, dates and version strings are not treated as separated card numbers")
+    void separatedNonCardShapesAreUntouched() {
+        String processingTimestamp = "2022-07-18 09:30:00.123456";
+        String isoDate = "2022-07-18";
+        String versionString = "1.11.21";
+
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(processingTimestamp))
+                .isSameAs(processingTimestamp);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(isoDate)).isSameAs(isoDate);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(versionString)).isSameAs(versionString);
+    }
+
+    /**
+     * Confirms a candidate whose separators are not uniform is refused, as is a group of the wrong width.
+     *
+     * <p>Assumptions: uniformity is what keeps the rule narrow, so it is asserted directly. A value
+     * that mixes a hyphen and a space is not a written card number in any convention, and a leading
+     * group of five digits is not one either. Both are returned unchanged, and the second is the
+     * off-by-one assertion for the group-width test.</p>
+     */
+    @Test
+    @DisplayName("mixed separators and mis-sized groups are refused by the separated rule")
+    void nonUniformSeparatedCandidatesAreRefused() {
+        String mixedSeparators = "4111-1111 1111-1111";
+        String oversizedFirstGroup = "41111-1111-1111-1111";
+
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(mixedSeparators)).isSameAs(mixedSeparators);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(oversizedFirstGroup))
+                .isSameAs(oversizedFirstGroup);
     }
 }

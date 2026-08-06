@@ -93,15 +93,23 @@ exactly as they are — the migration adds a path, it does not remove one.
 | Aurora | The relational record tier: account, customer, card, ledger, reference and authorization rows, the cluster's automated backups and its managed master-credential secret. The source contracts include exact money at `app/cpy/CVACT01Y.cpy:7` (`ACCT-CURR-BAL PIC S9(10)V99`), the card verification value at `app/cpy/CVACT02Y.cpy:7` (`CARD-CVV-CD PIC 9(03)`), which no endpoint returns, and the national and government identifiers at `app/cpy/CVCUS01Y.cpy:17-18` (`CUST-SSN PIC 9(09)` and `CUST-GOVT-ISSUED-ID PIC X(20)`), which are stored encrypted and returned masked. | `aurora-postgresql`, via its `storage_encrypted` cluster and `kms_key_id` |
 | S3 | The ten dataset-generation families that replace the baseline generation data groups, the single-page application origin, CloudFront log delivery, the explicitly named CloudWatch log groups and the encrypted alert topic. | `s3-datasets`, `cloudfront-spa`, and the log-group consumers `network`, `ecs-service`, `api-gateway-http`, `step-functions-batch`, `observability` |
 | Secrets Manager | The generated database credential and the seed-user bootstrap values, all created at provisioning time rather than committed. This is the key that answers `app/cpy/CSUSR01Y.cpy:21`, where the baseline declares `SEC-USR-PWD PIC X(08)`, an eight-character password held in plain text: the target carries no password field forward at all. | `secrets`, `cognito` |
-| SQS | Queue message payloads at rest, across all six queues and their six dead-letter queues. | `sqs` |
+| SQS | Queue message payloads at rest, on every queue the `sqs` module creates and on every one of their dead-letter queues. The target messaging design names **five** queues -- authorization request and reply, inquiry request and reply, and the error sink -- each with a DLQ. The implemented module creates **six** pairs, because the one inquiry request queue is split at the ownership boundary; see the note below. | `sqs` |
 
-Assumptions: The queue count is six rather than the five the target messaging
-design names, because the implemented queue module splits the inquiry request by
-owning service — account inquiry and date conversion each get their own request
-queue while sharing one reply queue. Six is therefore the number this module's
-`sqs_key_arn` description publishes, and the count is stated here to match the
-module it actually encrypts rather than the summary design. The split itself is
-owned by the `sqs` module, not by this one.
+Assumptions: The contract is **five queues and five dead-letter queues** --
+authorization request, authorization reply, inquiry request, inquiry reply and the
+error sink, each with a DLQ. The implemented `sqs` module creates **six** pairs, and
+the sixth is a registered divergence rather than an oversight: both inquiry programs
+are driven from one request queue in the baseline, but they answer different
+questions and belong to different owners, so `COACCT01`'s account inquiry and
+`CODATE01`'s date conversion are routed to separate request queues before either
+consumer receives a message. Two competing consumers on one queue cannot safely peek
+at a sibling's message and put it back, so a shared request queue would have each
+service consuming and mishandling the other's traffic. The divergence, its rationale
+and its rejected alternatives are owned by
+[`docs/architecture/messaging-contracts.md`](../../../docs/architecture/messaging-contracts.md);
+the split itself is owned by the `sqs` module. This module encrypts whatever that
+module creates, so both numbers are stated here rather than only the one that
+happens to match a summary.
 
 Assumptions: Each consuming module receives the key ARN it needs from an
 environment root, never by calling this module itself. That is what allows key
@@ -400,7 +408,7 @@ no second table competes with it.
 | <a name="output_secrets_key_arn"></a> [secrets\_key\_arn](#output\_secrets\_key\_arn) | ARN of the customer-managed key that encrypts the Secrets Manager entries holding the generated database credential and the seed-user passwords -- values the stack generates at provisioning time rather than committing, which is the mechanism that lets no password field be carried into any target schema. A calling environment root passes this into the secrets module's `kms_key_arn` input and into the cognito module's `secrets_kms_key_arn` input, each of which sets it as the `kms_key_id` of the entries that module creates. |
 | <a name="output_secrets_key_id"></a> [secrets\_key\_id](#output\_secrets\_key\_id) | Bare identifier -- not the ARN -- of the key that encrypts the stored credentials, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN. |
 | <a name="output_sqs_key_alias_name"></a> [sqs\_key\_alias\_name](#output\_sqs\_key\_alias\_name) | Alias name this module assigns to the SQS key, carrying the module's name prefix and the environment. It survives replacement of the key behind it, so a procedure that inspects or redrives a queue should identify the key by this name rather than by its identifier. |
-| <a name="output_sqs_key_arn"></a> [sqs\_key\_arn](#output\_sqs\_key\_arn) | ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply, the split account/date inquiry requests, the shared inquiry reply and the error sink. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on all six queues and their six dead-letter queues. |
+| <a name="output_sqs_key_arn"></a> [sqs\_key\_arn](#output\_sqs\_key\_arn) | ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply, the split account/date inquiry requests, the shared inquiry reply and the error sink. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on every queue that module creates. That is five request, reply and error queues per the target messaging design, plus a sixth because the single inquiry request queue is split at the ownership boundary into an account-inquiry and a date-conversion request queue -- a divergence registered in docs/architecture/messaging-contracts.md, not an extra key. Each of the six has its own dead-letter queue, and the key covers those too. |
 | <a name="output_sqs_key_id"></a> [sqs\_key\_id](#output\_sqs\_key\_id) | Bare identifier -- not the ARN -- of the key that encrypts the queue payloads, for a consumer whose resource argument or IAM policy condition key is written against a key identifier rather than a full ARN. |
 <!-- END_TF_DOCS -->
 

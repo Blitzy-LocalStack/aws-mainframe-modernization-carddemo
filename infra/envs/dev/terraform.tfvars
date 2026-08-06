@@ -36,8 +36,7 @@ log_retention_days        = 7
 cloudfront_price_class    = "PriceClass_100"
 batch_schedule_expression = "cron(0 2 * * ? *)"
 
-deletion_protection               = false
-skip_final_snapshot               = true
-secret_recovery_window_in_days    = 0
-rotation_automatically_after_days = 30
-alarm_email_endpoints             = []
+deletion_protection            = false
+skip_final_snapshot            = true
+secret_recovery_window_in_days = 0
+alarm_email_endpoints          = []

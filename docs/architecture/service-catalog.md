@@ -190,7 +190,7 @@ matching the README's breadth.
 | `app/app-vsam-mq/csd/CRDDEMOM.csd` | 41 | 2 | 2 | **0** | `CDRA`, `CDRD` |
 | **Repository-wide** | — | **25** | **26** | **21** | — |
 
-**Assumptions — the counting convention for the Lines column, and why two rows carry
+Assumptions: **the counting convention for the Lines column, and why two rows carry
 a dagger.** Every figure in that column is a **newline count**, as reported by
 `wc -l`. Two of the four files — the two marked † — have **no terminal newline**, so
 each holds one further *logical* line that a newline count does not see:
@@ -713,7 +713,7 @@ a Flyway migration nor non-`package-info.java` main-source Java. None of the fou
 tables, the listener, the transactional writer, the publisher or the purge logic is
 therefore delivered by that module yet.
 
-> **Alternatives Considered: one schema rather than two, for data that arrived
+> Alternatives Considered: **one schema rather than two, for data that arrived
 > from two stores.** Keeping the pending-authorization data and the fraud data in
 > separate schemas — mirroring the baseline's split across a hierarchical store and
 > a relational one — was the alternative, and it was rejected. That split exists in
@@ -809,7 +809,7 @@ against a disposable PostgreSQL validation database. It is not evidence of a
 deployed environment, and the repository-wide migration sequence still requires the
 absent account and card source-table migrations before the view artifact can run.
 
-> **Trade-offs — read-only views on the writer rather than a separate reporting
+> Trade-offs: **read-only views on the writer rather than a separate reporting
 > store.** The alternatives were a read replica or a dedicated reporting datastore
 > fed by replication. Both were rejected for the same two specific reasons: each
 > adds a standing cost for a workload the baseline satisfies with direct file
@@ -850,7 +850,7 @@ database role that holds **narrowly-scoped cross-schema write grants on
 database-per-service purity in the whole design, and it exists for one specific
 reason.
 
-> **Trade-offs: a scoped grant, rather than a saga, for the posting unit of
+> Trade-offs: **a scoped grant, rather than a saga, for the posting unit of
 > work.** Transaction posting commits **three** writes as a single unit of work:
 > the transaction itself, the transaction-category balance, and the account. Those
 > three rows live in two schemas, so preserving one atomic commit requires that
@@ -1006,7 +1006,7 @@ decomposes into four different target mechanisms, none of them server-side state
 | `CDEMO-CUST-ID` L33, `CDEMO-ACCT-ID` L38, `CDEMO-ACCT-STATUS` L39, `CDEMO-CARD-NUM` L41 | What record is selected | Request path and query parameters |
 | `CDEMO-PGM-CONTEXT` L29 with `CDEMO-PGM-ENTER` and `CDEMO-PGM-REENTER` at L30–L31 | First entry versus re-entry | **Eliminated.** A stateless handler returning a field-error array has no turn to remember |
 
-> **Refactoring Rationale: moving identity out of the passed structure is a
+> Refactoring Rationale: **moving identity out of the passed structure is a
 > correctness fix, not a transport change.** In the baseline the session structure
 > is storage the client receives and echoes back, so the user-type field that
 > decides administrative access arrives from the client. In the target the client
@@ -1030,7 +1030,7 @@ commands for provisioning and teardown belong to
 [`docs/runbooks/deploy.md`](../runbooks/deploy.md) and
 [`docs/runbooks/teardown.md`](../runbooks/teardown.md).
 
-**Assumptions — "statically validated" is a measurable claim.** All sixteen
+Assumptions: **"statically validated" is a measurable claim.** All sixteen
 modules, both environment roots, and the bootstrap root have implementation
 files. The module/environment READMEs and bootstrap README carry generated
 contracts. The measured checks are:

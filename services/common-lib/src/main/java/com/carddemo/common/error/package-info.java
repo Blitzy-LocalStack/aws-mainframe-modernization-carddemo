@@ -515,25 +515,21 @@
  * identifier, which is what makes it possible to answer a client with a short
  * sentence and still investigate the failure.
  *
- * <h2>The count canon</h2>
+ * <h2>The closed inventory of this directory</h2>
  *
- * <p>Assumptions: the shared kernel's target inventory is 21 production classes and 9 package
- * charter files, for 30 compilation units in total. This package contributes 3
- * of those production classes and 1 of those charters, so the directory holds
- * 3 + 1 = 4 compilation units. The arithmetic is recorded so that a class absent
- * from the module stays distinguishable from one the contract never admitted, and
- * so that a stale total cannot survive next to a breakdown that re-derives it:
+ * <p>Assumptions: this package's contract is exactly three production classes --
+ * {@code ApiError}, {@code AbendDetail} and {@code GlobalExceptionHandler} -- plus
+ * this charter, so the directory holds 3 + 1 = 4 compilation units. The set is
+ * recorded as closed so that a type the contract never admitted stays
+ * distinguishable from one that belongs here: a fourth error type proposed for this
+ * package has to be argued against the three roles above rather than simply added
+ * beside them.
  *
- * <pre>
- * root 1 + money 2 + codec 5 + error 3 + web 3 + security 3 + observability 1 + time 1 + validation 2 = 21
- * </pre>
- *
- * <p>Cross-check by compilation unit, counting one charter per package plus
- * that package's production classes: 2 + 3 + 6 + 4 + 4 + 4 + 2 + 2 + 3 = 30,
- * the root package contributing its charter and the one auto-configuration class. And 21 production classes
- * plus 9 charters is 30. All three paths agree, this file is one of the nine
- * charters, and the 4 in the fourth position of that second sum is this
- * directory.
+ * <p>Alternatives Considered: restating the whole module's per-subpackage totals
+ * here as a cross-check. Rejected -- the module-wide figures belong to the root
+ * charter at {@code com.carddemo.common}, and a second copy of them in a
+ * subpackage is a figure that can disagree with its own source. This charter states
+ * only the count it owns, and {@code com.carddemo.common} states the module's.
  *
  * <h2>The dependency arrow, and why the shared kernel exists</h2>
  *

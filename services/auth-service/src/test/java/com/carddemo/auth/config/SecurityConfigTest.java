@@ -146,6 +146,27 @@ class SecurityConfigTest {
     }
 
     /**
+     * Confirms a blank app client id stops the service at startup rather than silently dropping a check.
+     *
+     * <p>Assumptions: the assertion covers {@code null}, the empty string and a whitespace-only value.
+     * Those last two are the values a property left unset in one profile and inherited from another
+     * actually takes, and the shared validator collapses all three to "skip the client check" while
+     * reporting nothing about having skipped it. A refusal at context build is therefore the only signal
+     * an operator can act on.</p>
+     */
+    @Test
+    @DisplayName("a blank app client id fails fast while the context is built")
+    void blankAppClientIdFailsFastWhileTheContextIsBuilt() {
+        for (String unset : java.util.Arrays.asList(null, "", "   ")) {
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .as("a client id of [%s] must not be accepted as a configured value", unset)
+                    .isThrownBy(() -> new SecurityConfig().jwtDecoder("https://issuer.example.invalid",
+                            CognitoAccessTokenValidator.ACCESS_TOKEN_USE, unset, "scope"))
+                    .withMessageContaining("expected-client-id");
+        }
+    }
+
+    /**
      * Confirms the administrator group in the token becomes the authority the gates test for.
      */
     @Test

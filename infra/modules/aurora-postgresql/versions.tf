@@ -48,12 +48,23 @@
 #     here would collide with the caller's own configuration and leave the
 #     module usable by only one environment, defeating the reason it is
 #     shared.
-#   - Refactoring Rationale: the random provider is now required for one
-#     non-credential value: the stable suffix on a final-snapshot identifier.
-#     The master password is still generated and managed inside AWS by RDS;
-#     adding this provider does not move credential ownership into Terraform.
-#     A generated suffix is preferred to `timestamp()` or `uuid()` because
-#     those functions change on every plan and would produce perpetual drift.
+#   - Alternatives Considered: `hashicorp/random` was rejected here, and the
+#     rejection is worth recording because the module does need a stable
+#     generated value -- the suffix that keeps one incarnation's final-snapshot
+#     identifier from colliding with the next one's. A `random_id` carries
+#     exactly the right semantics, so the reason it is absent is not that it
+#     would not work: it is that credential GENERATION is not this module's
+#     concern. infra/modules/secrets owns every generated credential in this
+#     package, and it is the module that declares the random provider;
+#     declaring a second copy here for a non-credential value would make this
+#     module look like a second generator and would put a provider in its
+#     contract for a single string. main.tf takes the suffix from the built-in
+#     `terraform_data` resource instead, whose generated `id` is created once,
+#     kept in state and replaced only when `triggers_replace` changes -- the
+#     same property, with no provider. `timestamp()` and `uuid()` were rejected
+#     at that resource for a different reason: both re-evaluate on every plan,
+#     so the cluster would show a perpetual in-place update for a name that
+#     only matters at deletion.
 # =============================================================================
 
 terraform {
@@ -79,23 +90,5 @@ terraform {
       version = "~> 6.56"
     }
 
-    # WHY : Assumptions: this is one of the two providers the whole package
-    #       admits, and it is already present in both environment roots' lock
-    #       files because infra/modules/secrets generates its credentials with
-    #       it -- so declaring it here adds a dependency edge inside this module
-    #       and no new provider to any deployment. The major is held for the same
-    #       reason as the AWS one: an unreviewed 4.x could change how a generated
-    #       value is kept, and this value's stability across applies is the whole
-    #       point of using a resource rather than a function.
-    # WHY : Alternatives Considered: composing the suffix from `timestamp()` or
-    #       from `uuid()` instead, which would need no provider at all. Both are
-    #       rejected at `local.final_snapshot_identifier`, where the argument is
-    #       recorded: each is re-evaluated on every plan, so the cluster would
-    #       show a perpetual in-place update for a value that only matters at
-    #       deletion.
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.9"
-    }
   }
 }

@@ -15,6 +15,21 @@ import jakarta.validation.constraints.Size;
  * record is the outcome half of that area and carries two components and nothing else: the
  * success-or-failure flag and the operator-facing text that accompanies it.
  *
+ * <h2>Which edge this record serves</h2>
+ *
+ * <p>Refactoring Rationale: this record is both the projection of what the 3270 fraud-marking subprogram
+ * reported AND the body the HTTP edge returns, and it is one type rather than two because
+ * {@code src/main/resources/openapi/authorization-api.yaml} -- the contract of record for this context's
+ * HTTP edge -- was aligned to it component for component. An earlier state of this package published the
+ * same payload under a second schema name with four further members, which left the document and the
+ * record disagreeing on how many components a reply has and left one operation described under two names.
+ * Alternatives Considered: declaring a separate HTTP realisation beside this record, which is the shape
+ * the two symbolic-map projections in this package genuinely need. Rejected here because this record
+ * carries no screen chrome to strip and no page envelope to add -- it is the two-field response direction
+ * of {@code cbl/COPAUS2C.cbl} L83 and L86 and nothing else -- so a second type would have added a name
+ * without adding a distinction. Trade-offs: the insert-versus-update outcome is therefore not a member of
+ * this body; it is carried on the status code, 201 against 200.</p>
+ *
  * <p>Assumptions: the baseline sets both components on every path it can take, so an outcome is
  * always composed rather than sometimes omitted. There are four such paths and each is checkable.
  * An insert that succeeds sets the success condition and the text {@code 'ADD SUCCESS'} at L200 to
@@ -132,9 +147,10 @@ import jakarta.validation.constraints.Size;
  *
  * <h2>What the test channel has to assert</h2>
  *
- * <p>Assumptions: the test tree for this module holds nothing at the checkpoint that authored this
- * record, so the obligations that fall on it are written down here rather than left to be inferred
- * from this file later. Three assertions are required. First, that {@code updateStatus} admits
+ * <p>Assumptions: the obligations that fall on this record's tests are written down here rather than
+ * left to be inferred from the component declarations, because two of the three are about what must
+ * be REJECTED and a reader cannot derive a rejection set from an annotation alone. Three assertions
+ * are required. First, that {@code updateStatus} admits
  * {@code 'S'} and {@code 'F'} and nothing else, which means a null, an empty string, a blank, a
  * lowercase {@code 's'} and the two characters together are each rejected. Second, that a message
  * of exactly 50 characters is accepted while one of 51 is rejected, which pins the bound at the

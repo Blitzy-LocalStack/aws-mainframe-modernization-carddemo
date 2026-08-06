@@ -35,13 +35,24 @@
 #   rationale and for the explicitly local way to iterate without installing.
 #
 # State at this checkpoint:
-#   `src/carddemo_migration/` currently holds ten Python modules: `__init__.py`,
-#   `cli.py`, `config.py`, `copybook/__init__.py`, `copybook/layouts.py`,
-#   `copybook/zoned.py`, `credentials.py`, `role_credentials.py`,
-#   `loaders/__init__.py` and `loaders/s3_stage.py`. The `readers/` and `verify/`
-#   packages remain later-index artifacts, and so do `copybook/packed.py`,
-#   `copybook/ebcdic_codec.py` and `loaders/aurora.py`; `cli.py` registers only the
-#   three subcommands those absent modules are not needed for.
+#   `src/carddemo_migration/` currently holds TWELVE Python modules: `__init__.py`,
+#   `cli.py`, `config.py`, `copybook/__init__.py`, `copybook/ebcdic_codec.py`,
+#   `copybook/layouts.py`, `copybook/packed.py`, `copybook/zoned.py`,
+#   `credentials.py`, `role_credentials.py`, `loaders/__init__.py` and
+#   `loaders/s3_stage.py`. All three copybook codecs are therefore present. The
+#   `readers/` and `verify/` packages remain later-index artifacts, and so does
+#   `loaders/aurora.py`; `cli.py` registers only the three subcommands those absent
+#   modules are not needed for.
+#   Refactoring Rationale: this list previously said ten modules and named
+#   `copybook/packed.py` and `copybook/ebcdic_codec.py` among the absent ones AFTER both
+#   had landed, and the governed-file count below said sixteen where
+#   `ruff check . --show-files` listed eighteen. A stale inventory in the file that
+#   CONFIGURES the gate is worse than a stale inventory in prose: a contributor
+#   checking whether a codec exists reads this block, and one that understates the
+#   tree invites a second implementation of a module that is already there. Both
+#   figures are now measured with
+#   `find src -name '*.py' | wc -l` and `ruff check . --show-files | wc -l`, and the two
+#   commands quoted below are how they are re-measured rather than remembered.
 #   Refactoring Rationale: `copybook` previously had no `__init__.py` where
 #   `loaders` did, and that asymmetry was left in place on the measured evidence
 #   that the built wheel included `carddemo_migration/copybook/layouts.py` as an
@@ -51,12 +62,17 @@
 #   `packages` or `exclude` entry would have dropped the directory from the
 #   distribution with every test still passing. It is now a regular package.
 #   Measured consequences:
-#     - `ruff check .` and `ruff format --check .` both pass over all sixteen files
-#       this configuration governs, so the docstring gate is live for the code
-#       that exists.
-#     - `python -m pytest data-migration/tests` collects five test modules --
-#       test_cli, test_config_name_contract, test_database_trust,
-#       test_reporting_views and test_s3_stage -- and all ninety-nine tests pass.
+#     - `ruff check .` and `ruff format --check .` both pass over all NINETEEN files
+#       this configuration governs -- the twelve source modules above, the six test
+#       modules below, and this file, which `ruff check --show-files` lists because it
+#       lints the configuration itself -- so the docstring gate is live for the code
+#       that exists. The figure is that command's own output and is deliberately not a
+#       count of `.py` files, which is eighteen: quoting the smaller number would make
+#       the two disagree for a reason a reader could not see.
+#     - `python -m pytest data-migration/tests` collects six test modules --
+#       test_cli, test_config_name_contract, test_database_trust, test_ebcdic_codec,
+#       test_reporting_views and test_s3_stage -- and all ONE HUNDRED AND NINETEEN
+#       tests pass with none skipped.
 #     - The distribution builds cleanly and its wheel contains every module above,
 #       so `import carddemo_migration`, `import carddemo_migration.copybook` and
 #       `import carddemo_migration.copybook.layouts` all work, and the generated
@@ -289,20 +305,62 @@ target-version = "py313"
 # -----------------------------------------------------------------------------
 # THE RULE 1 GATE - read this before narrowing `select` below.
 # -----------------------------------------------------------------------------
-# WHY : Assumptions: this single list entry is the entire mechanical
+# WHY : Assumptions: this single list entry is the primary mechanical
 #   enforcement of Rule 1 "Explainability" for the Python language in this
 #   repository. This file is in scope for no other reason: the migration plan
-#   lists it among the rule-mandated artifacts precisely so that "every module,
-#   class and function carries a docstring" is verified by the build rather than
-#   by a reviewer's memory, and the repository's contribution guide states in
-#   published prose that the Python documentation gate IS the pydocstyle (D)
-#   rule family selected under `[tool.ruff.lint]` in this file. Deleting "D",
-#   replacing it with a narrower subset of individual codes, or allowing a
-#   `convention` to switch off its presence checks does not tidy a lint
-#   configuration - it switches off a review gate for an entire language and
-#   makes a published statement in that guide false. Nothing else in this
-#   repository re-checks it, so there is no second line of defence to fall back
-#   on. The rest of `select` could be argued about; this entry cannot.
+#   lists it among the rule-mandated artifacts precisely so that the docstring
+#   obligation is verified by the build rather than by a reviewer's memory, and
+#   the repository's contribution guide states in published prose that the
+#   pydocstyle (D) rule family selected under `[tool.ruff.lint]` in this file is
+#   one of the Python documentation gates. Deleting "D", replacing it with a
+#   narrower subset of individual codes, or allowing a `convention` to switch off
+#   its presence checks does not tidy a lint configuration - it switches off a
+#   review gate for an entire language and makes a published statement in that
+#   guide false. The rest of `select` could be argued about; this entry cannot.
+#
+# WHY : Trade-offs: "D" is the primary gate, NOT the whole of it, and the
+#   difference is measurable rather than theoretical. The presence checks D101,
+#   D102, D103 and D106 are *public*-declaration checks, so a declaration is
+#   invisible to them in three distinct situations, each verified against the
+#   pinned ruff rather than inferred from its rule table:
+#     - its own name carries a single leading underscore - `def _helper()` raises
+#       no D103, and `class _Layout` raises no D101;
+#     - any enclosing class is privately named - a plainly public
+#       `_Layout.decode()` raises no D102, because pydocstyle treats every member
+#       of a private class as private too;
+#     - it is declared inside a function body, at any depth and ANY visibility -
+#       a `def` or `class` in a closure raises nothing at all.
+#   Note that a module follows the same single-underscore convention, so `_x.py`
+#   raises no D100 while `__init__.py` is public and does raise D104.
+#   Scale, measured WHEN THIS GATE WAS ADDED rather than stated as a standing
+#   figure: 90 of the 221 declarations in `src/carddemo_migration` were invisible to
+#   those checks, and 32 of the 107 in `tests`. Delegating presence to "D" and
+#   stopping there would therefore have left more than a third of the tree on a
+#   reviewer's diligence while this file claimed the build checked it. The live
+#   figures are whatever the second gate below reports; that is deliberately where
+#   they live, because a count written into a comment goes stale on the next
+#   authored function and the staleness is invisible.
+#   Note also that the SHAPE rules - D400, D403, D205 and the rest - were measured
+#   to apply to every docstring ruff finds regardless of visibility or nesting, so
+#   only presence is affected; that asymmetry is why the second gate below checks
+#   presence only and does not duplicate formatting.
+#
+# WHY : Alternatives Considered: no `ignore`, `per-file-ignores` or `convention`
+#   setting can close the gap, because it is upstream visibility semantics rather
+#   than a suppression this file could withdraw - there is no configuration under
+#   which D103 becomes a private-function check. Invoking `pydocstyle` directly
+#   was rejected as the same semantics with the same blind spot plus another
+#   pinned dependency, and adding a CI-only lint script was rejected because the
+#   published gate already runs this package's pytest suite fail-closed. The gap
+#   is therefore closed by `tests/test_docstring_gate.py`, which walks the same
+#   two trees with the standard library's `ast` and asserts a non-blank docstring
+#   on every module, class and function at every visibility and every nesting
+#   depth. It self-tests its own walk against a fixture covering each declaration
+#   shape, so a walker narrowed back to what ruff already sees fails loudly
+#   instead of reporting nothing missing. The two gates are complementary and
+#   BOTH are load-bearing: ruff owns docstring shape everywhere and presence on
+#   public declarations, that test owns presence on every declaration ruff cannot
+#   see. Removing either one leaves an unenforced half.
 # -----------------------------------------------------------------------------
 # The remaining families are deliberately few. Each earns its place by catching
 # a defect class this ETL can actually produce, not by being conventional:
@@ -357,28 +415,28 @@ ignore = []
 #     first, and it is where the package's own purpose is stated - the docstring
 #     a reader reaches for before any other. An exemption there would be the
 #     single least defensible one available.
-# A THIRD route past the GATE exists that no setting in this file controls, and it
-# is recorded here so that it is never discovered by accident: pydocstyle treats a
-# module whose filename begins with an underscore as private, so a `_helper.py`
-# raises neither D100 nor D103 - verified against the pinned ruff version, not
-# assumed. Read that for exactly what it is. It is an ENFORCEMENT LIMITATION of
-# the tool, not an exemption from the rule, and it grants nothing:
+# A THIRD route past ruff's presence checks exists that no setting in this file
+# controls, and it is recorded here so that it is never discovered by accident:
+# pydocstyle treats a module whose filename begins with an underscore as private,
+# so a `_helper.py` raises neither D100 nor D103 - verified against the pinned ruff
+# version, not assumed. Read that for exactly what it is. It is an ENFORCEMENT
+# LIMITATION of the tool, not an exemption from the rule, and it grants nothing:
 #   - Rule 1 still requires the module docstring and still requires a docstring on
 #     every function in that module, underscore prefix or not. The requirement is
 #     unchanged; only ruff's ability to see the breach is lost.
-#   - Because the tool goes quiet, REVIEW carries this case in full. A reviewer
-#     reading any `_`-prefixed module checks the Rule 1 docstrings by hand and
-#     rejects the change if they are missing, exactly as CI would have.
-#   - Omitting a docstring from such a module is therefore a Rule 1 violation that
-#     happens to build green. It is never legitimate, and nothing about the
-#     filename makes it so. Naming a module with a leading underscore in order to
-#     avoid documenting it is the specific misuse this note exists to forestall.
+#   - Omitting a docstring from such a module is therefore a Rule 1 violation. It
+#     is never legitimate, and nothing about the filename makes it so. Naming a
+#     module with a leading underscore in order to avoid documenting it is the
+#     specific misuse this note exists to forestall.
 # WHY : Assumptions: no `per-file-ignores` entry and no rule selection can repair
-#   this, because the behaviour is upstream visibility semantics rather than a
-#   suppression this file could withdraw. Stating the limitation plainly is the
-#   only honest option available: a gap a reader knows about is one review can
-#   close, whereas an unrecorded gap is one that is discovered by finding
-#   undocumented code that CI reported as clean.
+#   this within ruff, because the behaviour is upstream visibility semantics rather
+#   than a suppression this file could withdraw. What closes it is the second gate
+#   named in the GATE block above: `tests/test_docstring_gate.py` selects source
+#   files by extension and never by name, so an underscore-prefixed module is
+#   walked exactly like any other and its missing docstring fails the build. This
+#   route is therefore no longer green-on-breach, and the note stays because the
+#   limitation in ruff itself is unchanged - a reader who sees `ruff check` pass on
+#   a `_`-prefixed module must know that silence is not a verdict.
 
 [tool.ruff.lint.pydocstyle]
 # WHY : Alternatives Considered: `numpy` and `google` were both evaluated

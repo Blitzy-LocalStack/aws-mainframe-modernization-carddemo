@@ -1,14 +1,18 @@
 package com.carddemo.auth.config;
 
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
+import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.server.PathContainer;
+import org.springframework.security.authorization.AuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -18,6 +22,8 @@ import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.IpAddressAuthorizationManager;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 
@@ -49,10 +55,48 @@ import org.springframework.web.util.pattern.PathPatternParser;
  * rather than restated, so all eight contexts agree about what an administrator is. Restating it per
  * service would let two services disagree about one claim, and the disagreement would surface as an
  * authorization gap rather than as a compile error.</p>
+ *
+ * <h2>Why the correlation filter is NOT registered here</h2>
+ *
+ * <p>Refactoring Rationale: this class previously declared the shared correlation filter as a bare
+ * {@code @Bean} of the filter type, and that declaration is withdrawn. The shared kernel's
+ * {@code CardDemoCommonAutoConfiguration} already contributes a registration bean for it over every
+ * request path at a fixed order, and its condition tests for the NAME of its own registration bean --
+ * which a differently named bean here did not satisfy -- so both registrations survived and the filter
+ * sat in the chain twice.</p>
+ *
+ * <p>Assumptions: the duplicate was harmless and is withdrawn anyway, and both halves of that are
+ * worth stating because the harmlessness is not obvious.
+ * {@code com.carddemo.common.web.CorrelationIdFilter} carries its own once-per-request guard -- a
+ * request attribute keyed on the class name, set on entry and removed only by the pass that set it --
+ * so its second pass delegates and returns without reading a header, minting an identity, touching the
+ * logging context or writing a response header. One identity is minted per request however many times
+ * the filter is registered. What the duplicate did cost is ownership and legibility: two beans
+ * describing one filter, a second ordering position decided in a per-service file, and a redundant
+ * filter in the chain of every request. Withdrawing it leaves one mechanism, one order and one file to
+ * read, which is the arrangement the card context already relies on.</p>
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
 public class SecurityConfig {
+
+    /**
+     * Builds the authorization decision that admits only the task-local loopback addresses.
+     *
+     * <p>Assumptions: the ranges are combined with {@code anyOf} rather than tested in sequence, so a
+     * stack presenting either address family satisfies the rule and neither has to be guessed at
+     * configuration time.</p>
+     *
+     * @return a manager granting access from any address in {@link #LOOPBACK_RANGES}; never {@code null}
+     */
+    private static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
+        @SuppressWarnings("unchecked")
+        AuthorizationManager<RequestAuthorizationContext>[] byRange = LOOPBACK_RANGES.stream()
+                .map(IpAddressAuthorizationManager::hasIpAddress)
+                .toArray(AuthorizationManager[]::new);
+
+        return AuthorizationManagers.anyOf(byRange);
+    }
 
     /**
      * The path the load balancer's health check and the container's own probe read.
@@ -63,6 +107,90 @@ public class SecurityConfig {
      * health group is opened; the remaining actuator endpoints stay behind the chain.</p>
      */
     public static final String HEALTH_PATH = "/actuator/health/**";
+
+    /**
+     * The management namespace, which is reachable only by an operator.
+     *
+     * <p>Assumptions: this pattern is declared AFTER {@link #HEALTH_PATH} in the rule set below, so the
+     * health group keeps its own more specific rule and stays open. Everything else this service exposes
+     * under {@code /actuator} -- {@code info}, {@code metrics} and {@code prometheus}, per the {@code management}
+     * block of {@code application.yml} -- describes the deployment rather than answering a business
+     * question, so it belongs to the operator rather than to every holder of a valid token.</p>
+     *
+     * <p>Refactoring Rationale: the rule table below covers every path this contract publishes, so the
+     * catch-all only ever saw the management namespace and paths that reach no handler. That made the
+     * management endpoints the one published surface authorized by the catch-all alone, which required
+     * merely a valid token; naming them explicitly is what moves them behind the operator authority
+     * without weakening the catch-all's own deliberate 404-preserving behaviour.</p>
+     *
+     * <p>Assumptions: this constant NAMES the namespace and no rule below grants the namespace as a
+     * whole. The endpoints the module actually publishes are each named and granted by network
+     * position; what remains under this pattern reaches no handler, so it is left to the catch-all
+     * rather than given a rule that would only ever answer for a path that does not exist.</p>
+     */
+    public static final String MANAGEMENT_PATH = "/actuator/**";
+
+    /**
+     * The build-identity management path, reachable only from inside the task.
+     *
+     * <p>Assumptions: this endpoint is named EXPLICITLY rather than covered by the
+     * {@link #MANAGEMENT_PATH} namespace pattern, because it is one of the endpoints this
+     * module's exposure list publishes beyond health and it describes the deployment to
+     * whatever reaches the port. Naming it is what lets the chain state a rule for it instead
+     * of letting it inherit one.</p>
+     */
+    public static final String BUILD_IDENTITY_PATH = "/actuator/info";
+
+    /**
+     * The metric registry path, reachable only from inside the task.
+     *
+     * <p>Assumptions: this endpoint is named EXPLICITLY rather than covered by the
+     * {@link #MANAGEMENT_PATH} namespace pattern, because it is one of the endpoints this
+     * module's exposure list publishes beyond health and it describes the deployment to
+     * whatever reaches the port. Naming it is what lets the chain state a rule for it instead
+     * of letting it inherit one.</p>
+     */
+    public static final String METRICS_PATH = "/actuator/metrics";
+
+    /**
+     * The metric scrape path, reachable only from inside the task.
+     *
+     * <p>Assumptions: this endpoint is named EXPLICITLY rather than covered by the
+     * {@link #MANAGEMENT_PATH} namespace pattern, because it is one of the endpoints this
+     * module's exposure list publishes beyond health and it describes the deployment to
+     * whatever reaches the port. Naming it is what lets the chain state a rule for it instead
+     * of letting it inherit one.</p>
+     */
+    public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
+
+    /**
+     * The loopback addresses the task-local collector can reach this service from.
+     *
+     * <p>Assumptions: the only configured consumer of the endpoints above is TASK-LOCAL. The
+     * collector sidecar scrapes {@code https://127.0.0.1:<container-port>} at
+     * {@code metrics_path: /actuator/prometheus} every sixty seconds --
+     * {@code infra/modules/ecs-service/main.tf} -- and that scrape configuration carries no
+     * authorization header at all, so it can present no token.</p>
+     *
+     * <p>Refactoring Rationale: an earlier revision covered the whole {@link #MANAGEMENT_PATH}
+     * namespace with one rule requiring the administrator authority, on the ground that a metrics
+     * scraper should present an operator token. It was corrected because the configured scraper
+     * sends no header: that rule would not have narrowed who may read metrics, it would have stopped
+     * the only consumer that exists, and silently, since a failed scrape is not a failed request
+     * anybody sees. The alternative is recorded rather than dropped because the instinct behind it
+     * was right -- before either revision this namespace was authorized by the catch-all alone.</p>
+     *
+     * <p>Trade-offs: a range rather than an authority is what grants telemetry, so this one rule
+     * cannot be audited from a token. Both alternatives are worse: requiring a token breaks the only
+     * consumer that exists, and admitting any authenticated principal grants these endpoints to every
+     * token the identity provider will issue, including one carrying no CardDemo group at all.</p>
+     *
+     * <p>Assumptions: both address families are listed because the address a container resolves
+     * loopback to is a property of its network stack. IPv4 is what Fargate presents under
+     * {@code awsvpc}; the IPv6 form is included so a stack presenting {@code ::1} does not silently
+     * lose its metrics.</p>
+     */
+    private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
 
     /**
      * The sign-on path, reachable without a token.
@@ -291,22 +419,37 @@ public class SecurityConfig {
      * @param http the chain builder; must not be {@code null}
      * @param authenticationConverter the token-to-authentication translation; must not be
      *     {@code null}
+     * @param clock the clock the rendered refusal bodies read their failure instant from; must not be
+     *     {@code null}
      * @return the configured chain, never {@code null}
      * @throws Exception when the chain cannot be built, which the builder declares
      */
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
-            JwtAuthenticationConverter authenticationConverter) throws Exception {
+            JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
                     requests.requestMatchers(HEALTH_PATH).permitAll();
+                    // WHY : Assumptions: the management namespace is named right after the health group
+                    //       and before every other rule, so the more specific health pattern keeps its
+                    //       own permit and the rest of the namespace reaches the operator rule rather
+                    //       than the catch-all. It is placed here rather than left to the catch-all
+                    //       because the catch-all deliberately requires only authentication, which for
+                    //       this namespace would mean any valid token could read deployment internals.
+                    // WHY : Assumptions: the management endpoints this module publishes beyond
+                    //       health are granted by NETWORK POSITION and not by authority, because
+                    //       their only configured consumer is the task-local collector sidecar,
+                    //       which presents no token. See LOOPBACK_RANGES.
+                    requests.requestMatchers(BUILD_IDENTITY_PATH, METRICS_PATH, METRIC_SCRAPE_PATH)
+                            .access(loopbackOnly());
                     // WHY : Assumptions: the open paths are applied BEFORE the authority rules, so
                     //       that an exact open path cannot be shadowed by a broader rule declared
-                    //       above it. Neither open path lies under the user collection, so no
-                    //       shadowing is possible today; ordering it this way keeps that true if a
-                    //       rule is ever widened.
+                    //       above it. Two broader rules are declared above and neither can shadow
+                    //       one: the management pattern covers only /actuator, and no open path
+                    //       lies under the user collection. Ordering it this way keeps that true if
+                    //       a rule is ever widened.
                     for (String openPath : UNAUTHENTICATED_PATHS) {
                         requests.requestMatchers(openPath).permitAll();
                     }
@@ -317,7 +460,23 @@ public class SecurityConfig {
                     requests.anyRequest().authenticated();
                 })
                 .oauth2ResourceServer(server -> server
-                        .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)));
+                        // WHY : Assumptions: the bearer-token filter answers a request whose token was
+                        //       absent, expired or malformed BEFORE the exception stage below is reached,
+                        //       and it resolves neither handler from the application context, so both must
+                        //       be set here as well. Setting only the exception stage would leave the more
+                        //       common of the two refusals -- a missing token -- rendered as a bodyless
+                        //       status, which every published contract of this service contradicts.
+                        .authenticationEntryPoint(ApiErrorSecurityHandlers.entryPoint(clock))
+                        .accessDeniedHandler(ApiErrorSecurityHandlers.accessDeniedHandler(clock))
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter)))
+                // WHY : Refactoring Rationale: the shared handlers render the ApiError body that this
+                //       service's OpenAPI document declares for 401 and 403. Without them the framework
+                //       default answers with a status and a WWW-Authenticate header and no body at all,
+                //       because a refusal decided by the filter chain never reaches a controller and so
+                //       never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
+                //       the framework's bearer-token entry point first, so the challenge header the OAuth
+                //       2.0 contract requires is composed exactly as before and only the body is added.
+                .exceptionHandling(ApiErrorSecurityHandlers.renderingRefusals(clock));
         return http.build();
     }
 
@@ -381,13 +540,16 @@ public class SecurityConfig {
      *     have used so that one value configures both key resolution and the issuer check
      * @param expectedTokenUse the token kind a presented token must declare; the configured value is
      *     {@code access}
-     * @param expectedClientId the app client identity a presented token must name
+     * @param expectedClientId the app client identity a presented token must name; must not be
+     *     {@code null} or blank, because the shared validator reads a blank value as an instruction to
+     *     skip the client check entirely
      * @param requiredScope the scope a presented token must carry
      * @return the decoder, carrying the framework's issuer and time validation plus this migration's
      *     token-kind, client and scope validation; never {@code null}
      * @throws IllegalStateException if the configured token kind is not the one the shared validator
      *     enforces, because a deployment that asked for a different kind would be silently given the
-     *     access-token check instead of the one it configured
+     *     access-token check instead of the one it configured, or if the configured client id is blank,
+     *     because the shared validator would then skip the client check with nothing saying so
      */
     @Bean
     public JwtDecoder jwtDecoder(
@@ -406,25 +568,23 @@ public class SecurityConfig {
                             + "\"; the shared token validator enforces that kind and no other,"
                             + " so a different value here would not be honoured");
         }
+        // WHY : Assumptions: a blank or absent client id is REFUSED rather than tolerated. The shared
+        //       validator reads a blank value as "skip the client check", which is a correct contract
+        //       only for a caller that has decided some other validator pins the client instead. No
+        //       context in this repository has decided that -- the alternative would be the framework's
+        //       audiences property, which the paragraph above rules out for this provider -- so a blank
+        //       value here would drop the check silently, with the property still present in
+        //       configuration and appearing to be in force. Failing at context build is the only outcome
+        //       an operator can see. Alternatives Considered: defaulting to a compiled client id, which
+        //       is worse: it would authorize tokens minted for a pool this deployment does not own.
+        if (expectedClientId == null || expectedClientId.isBlank()) {
+            throw new IllegalStateException(
+                    "carddemo.security.jwt.expected-client-id must name the app client");
+        }
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withIssuerLocation(issuerUri).build();
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
                 JwtValidators.createDefaultWithIssuer(issuerUri),
                 new CognitoAccessTokenValidator(expectedClientId, List.of(requiredScope))));
         return decoder;
-    }
-
-    /**
-     * Registers the shared correlation filter, which the component scan cannot reach.
-     *
-     * <p>Assumptions: the shared kernel sits under {@code com.carddemo.common}, outside the scan root
-     * of this context, so every shared component is registered deliberately rather than discovered.
-     * The filter is registered here because its position in the request pipeline is part of its
-     * contract, and this class is what defines that pipeline.</p>
-     *
-     * @return the correlation filter, never {@code null}
-     */
-    @Bean
-    public CorrelationIdFilter correlationIdFilter() {
-        return new CorrelationIdFilter();
     }
 }

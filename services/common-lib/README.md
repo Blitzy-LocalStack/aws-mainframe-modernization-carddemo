@@ -155,12 +155,25 @@ mvn -f services/pom.xml -pl common-lib -am clean verify
 mvn -f services/common-lib/pom.xml test -Dtest=LayeringRulesTest
 ```
 
-Until `LayeringRulesTest` is authored (§7), that last command fails with
-`No tests matching pattern "LayeringRulesTest" were executed!` — Surefire treats
-an explicit selector that matches nothing as an error. That is the correct
-outcome and a useful signal: it proves the class is genuinely absent rather than
-silently skipped, and it is the same guarantee that makes the pinned filename in
-§7 load-bearing.
+That last command runs `LayeringRulesTest` (§7) and reports **9** executions --
+measured, not assumed: the class is present at the location §7 pins, and it declares
+five boundary assertions, three guards that stop them passing vacuously, and one
+negative probe that proves the floating-point rule can still fail.
+
+Assumptions: the same selector is what makes a *missing* rule class visible
+rather than silent. Surefire treats an explicit `-Dtest=` selector matching
+nothing as an error — `No tests matching pattern "LayeringRulesTest" were
+executed!` — so a class that was renamed or relocated fails the command instead of
+passing it vacuously. That is the guarantee which makes the pinned filename in §7
+load-bearing, and it is why §7 says not to rename the file. The failure mode is
+recorded here even though the class is present, because it is the mechanism the
+pin relies on rather than a state this tree is in.
+
+Assumptions: that guarantee is obtained PERMANENTLY, and not only when somebody runs
+the command above, by the `architecture-rules-fail-if-absent` profile in
+[`services/pom.xml`](../pom.xml), which adds `failIfNoTests` to the inherited
+`architecture-rules` execution in every module that has it. An empty selection is a
+build failure there rather than a silent success.
 
 ### 2.3 Where reports land — do not relocate them
 
@@ -183,7 +196,7 @@ None of the following may appear in any command, POM, configuration or workflow
 that touches this module:
 
 - `-Dcheckstyle.skip`
-- `<skip>true</skip>`
+- `<skip>true</skip>` — with the one narrow, documented exception below
 - `failOnViolation=false`
 - `|| true`
 - `continue-on-error: true`
@@ -192,6 +205,30 @@ that touches this module:
 The documentation gate is the machine-checkable half of this project's
 Explainability rule (§9). A skipped gate does not report a passing build; it
 reports nothing at all, while looking identical to a passing build.
+
+> **The one exception, and why it is not tampering.**
+> `services/common-lib/pom.xml` refines the **inherited** Surefire execution
+> whose id is `architecture-rules` with `<skip>true</skip>`. That execution
+> exists to unpack this module's `architecture` test artifact into a *consumer*
+> module and run the layering gate there. In the module that **owns** the gate,
+> the same class is already on the ordinary test classpath and is already run by
+> the default Surefire execution, so leaving the inherited execution active would
+> run the identical gate a second time against the identical classes.
+>
+> **Assumptions:** nothing is skipped by that element. The rules still execute
+> here, once, in the default execution — `mvn -f services/common-lib/pom.xml test
+> -Dtest=LayeringRulesTest` is how you see them, and the count it reports is the
+> full set of cases. The element refines the inherited execution rather than
+> adding one, which requires the id to match character for character; the POM
+> comment beside it states the same thing at greater length.
+>
+> **Trade-offs:** documenting a narrow exception costs the prohibition some of
+> its bluntness, and an unqualified prohibition beside a POM that visibly
+> contradicts it costs more — a reader who finds the contradiction has to decide
+> for themselves which of the two to trust, and the safest-looking resolution is
+> to delete the element and silently double the gate's run time. Any other
+> `<skip>true</skip>`, including one on Checkstyle or on the default Surefire
+> execution, remains prohibited outright.
 
 ### 2.5 ⚠ The graded return-code rubric belongs to the COBOL oracle — never to a Java gate
 
@@ -239,7 +276,9 @@ src/main/java/com/carddemo/common/
   codec/          package-info.java · CopybookLayout.java · FixedWidthCodec.java
                   ZonedDecimalCodec.java · PackedDecimalCodec.java · CsvAuthCodec.java
   error/          package-info.java · ApiError.java · GlobalExceptionHandler.java
-                  AbendDetail.java
+                  AbendDetail.java · ApiErrorSecurityHandlers.java
+                  ClientInputException.java · RecordConflictException.java
+                  FieldOrdering.java
   web/            package-info.java · CorrelationIdFilter.java · PageResponse.java
                   CursorToken.java
   security/       package-info.java · JwtRoleConverter.java · CardNumberMasker.java
@@ -255,40 +294,90 @@ src/main/resources/
 
 src/test/java/com/carddemo/common/
   package-info.java · CardDemoCommonAutoConfigurationIT.java
-  architecture/   package-info.java   ← LayeringRulesTest.java is pinned here, §7
+  architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
   money/          package-info.java · MoneyTest.java · MoneyModuleTest.java
-  codec/          package-info.java · FixedWidthCodecTest.java
-                  ZonedDecimalCodecTest.java · PackedDecimalCodecTest.java
-                  CsvAuthCodecTest.java
-  error/          package-info.java · GlobalExceptionHandlerTest.java
+  codec/          package-info.java · CopybookLayoutTest.java
+                  FixedWidthCodecTest.java · ZonedDecimalCodecTest.java
+                  PackedDecimalCodecTest.java · CsvAuthCodecTest.java
+  error/          package-info.java · AbendDetailTest.java · ApiErrorTest.java
+                  ApiErrorSecurityHandlersTest.java
+                  GlobalExceptionHandlerTest.java
                   GlobalExceptionHandlerPathMaskingTest.java
-  web/            package-info.java · CorrelationIdFilterTest.java · CursorTokenTest.java
+  web/            package-info.java · CorrelationIdFilterTest.java
+                  CursorTokenTest.java · PageResponseTest.java
   security/       package-info.java · JwtRoleConverterTest.java
                   CognitoAccessTokenValidatorTest.java · CardNumberMaskerTest.java
-  observability/  package-info.java · LogSafeTextTest.java
+                  OpaqueIdentifierTest.java
+  observability/  package-info.java · LogSafeTextTest.java · MetricsConfigTest.java
   time/           package-info.java · TimestampFormatterTest.java
+  validation/     package-info.java · DateEditValidatorTest.java
+                  FieldValidationFlagTest.java
 ```
 
 Two facts about that tree are worth stating rather than leaving to be inferred.
 The module publishes **two** artifacts — its jar of main classes and a
 **test artifact** carrying the `architecture` package alone, which is how the
-eight services receive the one shared layering rule class. And the `validation`
-package currently has no matching test package; a class author adding tests
-there creates the package and its `package-info.java` together, because §8
-requires both.
+eight services receive the one shared layering rule class. And **every** test
+package carries a `package-info.java` beside its classes, because §8's
+documentation gate audits test sources and requires both; a new test package is
+created together with its descriptor, never before it. Every main package now has
+a matching test package, `validation` included, so a class author adding a new
+package creates both.
 
-> **Assumptions:** the tree above is the tree on disk, enumerated from it, not a
-> target copied from a plan. `LayeringRulesTest` is named in §7 because its
-> filename is already a build contract, and it is marked as pinned rather than
-> listed as present because it has not been authored — the `architecture` package
-> exists and holds only its `package-info.java`.
-> **Trade-offs:** describing the tree as it is means this table needs an edit
-> whenever a class lands, which a copied target list would not. That cost is
-> accepted because the alternative fails in the worse direction: a README that
-> lists classes which do not exist sends a reader hunting for them, and one that
-> omits classes which do exist invites a duplicate. `mvn -f services/pom.xml test`
-> is the authority that cannot go stale; this table is a map, and §2 is how you
-> check the territory.
+**Measured suite sizes.** These are execution counts read from a
+`mvn -f services/pom.xml -pl common-lib test` run, not estimates, and they sum to
+the module total:
+
+| Package | Classes | Executions |
+|---|---|---|
+| `codec` | `CopybookLayoutTest` 149 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 118 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 | **584** |
+| `validation` | `DateEditValidatorTest` 90 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **119** |
+| `error` | `ApiErrorTest` 28 · `GlobalExceptionHandlerTest` 22 · `AbendDetailTest` 20 · `GlobalExceptionHandlerPathMaskingTest` 15 · `ApiErrorSecurityHandlersTest` 5 | **90** |
+| `security` | `OpaqueIdentifierTest` 30 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 9 · `JwtRoleConverterTest` 5 | **57** |
+| `money` | `MoneyTest` 29 · `MoneyModuleTest` 10 | **39** |
+| `web` | `PageResponseTest` 15 · `CursorTokenTest` 13 · `CorrelationIdFilterTest` 7 | **35** |
+| `time` | `TimestampFormatterTest` 24 | **24** |
+| `observability` | `MetricsConfigTest` 12 · `LogSafeTextTest` 5 | **17** |
+| `architecture` | `LayeringRulesTest` 9 | **9** |
+| | **module total** | **974** |
+
+Three reconciliation notes, because each looks like a discrepancy until named.
+`DateEditValidatorTest` reports `Tests run: 0` against its own class name and
+reports its 90 executions under its eight `@Nested` display names instead, so a
+reader grepping for the class name finds a zero.
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 974: it is an
+`*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
+(§2.3). And a full `mvn -f services/pom.xml clean test` reports
+`LayeringRulesTest` **nine** times rather than once — once through this module's own
+`default-test` execution, and once in each of the eight service modules through the
+inherited `architecture-rules` execution that scans this module's test artifact. Only
+the first of those nine is counted in the table above, which measures this module.
+
+> Assumptions: the tree and the counts above are read from disk and from a build,
+> not copied from a plan. Both trees are complete as listed — nine main packages
+> with nine charters, ten test directories with ten charters, and
+> `LayeringRulesTest` present in the `architecture` package under the filename §7
+> pins. It is annotated with a pointer to §7 because its filename is a build
+> contract that a later move would break silently. The counts will drift as tests
+> are added, and the drift is visible rather than hidden — §2's commands are the
+> authority that cannot go stale, and this section is a map of the territory
+> they measure.
+> Refactoring Rationale: three earlier revisions of this section were wrong in the
+> same direction and are corrected here. One marked `LayeringRulesTest` as
+> pinned-but-unauthored and told a reader in §2.2 that selecting it would fail;
+> one said the `validation` package had no test package; and one counted eight
+> executions for the gate and 973 for the module, both of which predate the
+> resilience-library rule. Each statement outlived the files it described, so a
+> reader following this README would have concluded the gate was not running, that
+> two validators were untested, and that a rule which exists does not. Six further
+> test classes — `CopybookLayoutTest`, `ApiErrorTest`, `AbendDetailTest`,
+> `PageResponseTest`, `OpaqueIdentifierTest` and `MetricsConfigTest` — were missing
+> from the listing for the same reason.
+> Trade-offs: describing the tree as it is means this section needs an edit
+> whenever a class lands, which a target list copied from a plan would not. That
+> cost is accepted because the alternative fails in the worse direction: a README
+> naming classes that do not exist sends a reader hunting for them, and one
+> omitting classes that do exist invites a duplicate of work already done.
 
 ### 3.2 Responsibility and source authority, one line each
 
@@ -308,6 +397,10 @@ repeats in the type's own Javadoc.
 | `ApiError` | The problem shape, carrying a per-field error array | `app/cpy/CSMSG01Y.cpy`; migration rules T7 and T8 |
 | `GlobalExceptionHandler` | The `@RestControllerAdvice` mapping exceptions to that shape | §6.3 |
 | `AbendDetail` | The structured `ABEND-DATA` equivalent, four components | `app/cpy/CSMSG02Y.cpy` lines 21 to 29 |
+| `ApiErrorSecurityHandlers` | The 401 entry point and 403 denial handler that render that shape for a request the filter chain refuses before it reaches a handler | §6.3; `app/cbl/COSGN00C.cbl` sign-on gate |
+| `ClientInputException` | The refusal a service raises for a value the CALLER supplied, so caller input answers 400 and an internal invariant answers 500 | migration rule T7 |
+| `RecordConflictException` | The contention a service raises itself, carrying the contended row's current version | `app/cbl/COACTUPC.cbl` lines 521 and 669 to 696 |
+| `FieldOrdering` | A request body's declared check order, so the aggregate message is the FIRST declared failure and not whichever the provider reported first | `app/cbl/COSGN00C.cbl` lines 118 to 126 |
 | `CorrelationIdFilter` | Correlation id in, MDC and response header out — the message-queue correlation-id analogue for HTTP | `COPAUA0C.cbl` message-descriptor handling |
 | `PageResponse<T>` | The keyset envelope: `items`, `firstKey`, `lastKey`, `hasNext` | `app/cbl/COCRDLIC.cbl` lines 229 to 248 |
 | `CursorToken` | Opaque encoding of a composite browse key, so a cursor is not a client-forgeable field | `app/cbl/COCRDLIC.cbl` lines 230 to 235 |
@@ -361,17 +454,29 @@ every entry below is a boundary that has already been reasoned about.
   entirely, encrypts the national and government-issued identifiers, and renames
   three misspelled baseline fields (§6.8). Every one of those needs an inline
   justification at the mapping site, which a generated mapper has nowhere to put.
-- **No resilience library and no circuit breaker.** Spring Framework 7, which
-  arrives inside the Boot 4.1.0 parent, relocated retry into the framework core.
-  Two API facts are easy to get wrong and must be commented at any use site: the
-  annotation attribute is **`maxRetries`** — total attempts are one *more* than
-  that value — and the enabling annotation is **`@EnableResilientMethods`**, not
-  the older `@EnableRetry`, so a service that copies a Boot 3 example will not
-  compile. A breaker is omitted on purpose: the only synchronous hops run inside
-  the private network behind an internal load balancer with explicit connect and
-  read timeouts, so a breaker would add a failure mode of its own — an open
-  circuit rejecting calls a healthy dependency could have served — without
-  removing one.
+- **No *declared* resilience library, no CardDemo *use* of one, and no circuit
+  breaker.** Spring Framework 7, which arrives inside the Boot 4.1.0 parent,
+  relocated retry into the framework core. Two API facts are easy to get wrong
+  and must be commented at any use site: the annotation attribute is
+  **`maxRetries`** — total attempts are one *more* than that value — and the
+  enabling annotation is **`@EnableResilientMethods`**, not the older
+  `@EnableRetry`, so a service that copies a Boot 3 example will not compile.
+  **The wording is precise on purpose**, because an earlier revision of this
+  bullet claimed the flat absence of a resilience library and that is measurably
+  untrue: `spring-cloud-aws-starter-sqs` 4.1.0 → `spring-cloud-aws-sqs` 4.1.0 →
+  `org.springframework.retry:spring-retry` 2.0.13 resolves at **compile** scope in
+  four of the nine modules — account, reference, batch and authorization services
+  — and that artifact references it from six of its own classes for the listener
+  container's polling back-off. `mvn -f services/pom.xml dependency:tree
+  -Dincludes=org.springframework.retry:spring-retry` shows every path. Excluding it was evaluated and rejected — it
+  would delete a type the integration loads at run time — so what is guaranteed
+  instead is that **no `com.carddemo` class depends on it**, and that guarantee is
+  enforced by rule **A5** of the layering gate rather than asserted here (§7,
+  [ADR-002](../../docs/adr/ADR-002-compute-platform.md)). A breaker is omitted on
+  purpose: the only synchronous hops run inside the private network behind an
+  internal load balancer with explicit connect and read timeouts, so a breaker
+  would add a failure mode of its own — an open circuit rejecting calls a healthy
+  dependency could have served — without removing one.
 - **No Redis, ElastiCache, Kafka or Kinesis, and no read replicas.** The
   baseline has no cache tier and the messaging requirement is request/reply.
 - **No AWS SDK, no JPA, no Flyway and no JDBC driver in this module.** A codec
@@ -491,9 +596,12 @@ the first money field in that record.
 
 ### 5.3 Multiply before divide
 
-`Money` exposes the multiply-then-divide helpers — `monthlyInterest` and
-`monthlyInterestTruncated` — so that no caller has to reconstruct the ordering.
-The formula they implement is, verbatim from the baseline
+`Money` exposes three multiply-then-divide entry points, so that no caller has to
+reconstruct the ordering: `monthlyInterest(rate, mode)`, which takes the rounding
+mode as a mandatory parameter, and the two named forms `monthlyInterestTruncated`
+and `monthlyInterestHalfUp` that fix it. There is deliberately **no overload
+taking no mode** — see §5.3.1 for why the choice is forced on every caller. The
+formula all three implement is, verbatim from the baseline
 [`app/cbl/CBACT04C.cbl` lines 464 to 465]:
 
 ```text
@@ -503,9 +611,14 @@ COMPUTE WS-MONTHLY-INT
 
 **The COBOL source itself parenthesises the multiplication.** The ordering is
 explicit in the baseline; it is not inferred from a convention. Multiply at
-**full precision first**, then divide with an explicit scale and
-`RoundingMode.HALF_UP`. *"Dividing first and multiplying second yields different
-cents on many inputs"* — re-ordering is forbidden.
+**full precision first**, then divide with an explicit scale and an explicit
+rounding mode. *"Dividing first and multiplying second yields different cents on
+many inputs"* — re-ordering is forbidden.
+
+**The rounding mode is a separate decision from the ordering, and it is not
+`HALF_UP` on the parity path.** These two are easy to conflate, so they are stated
+apart: the ordering above is fixed and has one right answer, whereas the mode has
+**two** documented contracts and the caller picks.
 
 Two worked cases make the failure concrete rather than theoretical, both
 computed on a balance of `1000.00`:
@@ -526,6 +639,61 @@ anywhere.
 not a rounded sum. Accumulating at full precision and rounding once at the end
 produces a different total, and it is the wrong one for parity purposes. Round
 each term, then add.
+
+#### 5.3.1 Two rounding contracts — which to call, and why there is no default
+
+The baseline **truncates toward zero**; the migration plan specifies **half up**
+for money generally. Both behaviours are therefore implemented, both are named,
+and the difference between them is a documented divergence rather than a defect on
+either side.
+
+| Contract | Constant | Named entry point | Call it when |
+|---|---|---|---|
+| Baseline accrual | `BASELINE_INTEREST_ROUNDING` = `RoundingMode.DOWN` | `monthlyInterestTruncated(rate)` | **The result must agree with the reference goldens.** This is the parity path. |
+| General money | `GENERAL_ROUNDING` = `RoundingMode.HALF_UP` | `monthlyInterestHalfUp(rate)` | A new target-side calculation with no golden to match, following plan rule T3. |
+
+`GENERAL_ROUNDING` also governs `Money.of(BigDecimal)` and the ordinary
+arithmetic, so half up remains the module's default **everywhere except this one
+reduction**. Accrual is the exception because it is the one calculation with a
+byte-comparable reference output.
+
+**How the baseline behaviour was established, so it reads as derived rather than
+assumed.** The accrual statement at
+[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field
+declared with two decimal places at line 168 and carries **no `ROUNDED` phrase** —
+and no statement anywhere in that program's 652 lines carries one either. A COBOL
+store into a fixed-scale item without `ROUNDED` discards the surplus digits, which
+is truncation toward zero.
+
+`RoundingMode.FLOOR` is **not** the truncating mode to use, and the distinction is
+not academic. `DOWN` and `FLOOR` agree on a positive value and disagree on a
+negative one, and a negative value is reachable here: the receiving field at line
+168 is `PIC S9(09)V99`, the balance at
+[`app/cpy/CVACT01Y.cpy` line 7] is `PIC S9(10)V99`, and the rate itself at
+[`app/cpy/CVTRA02Y.cpy` line 9] is `PIC S9(04)V99` — all three **signed**.
+
+**Where the two modes actually part company.** On every vector the reference
+fixtures carry, they agree, which is precisely why a test that used only those
+vectors would not detect a wrong mode:
+
+| Balance | Annual rate | Quotient | `…Truncated` | `…HalfUp` | Discriminating? |
+|---|---|---|---|---|---|
+| `1000.00` | `25.00` | `20.8333…` | `20.83` | `20.83` | no |
+| `1000.00` | `2.50` | `2.0833…` | `2.08` | `2.08` | no |
+| `1000.80` | `2.50` | `2.0850` exactly | **`2.08`** | **`2.09`** | **yes** |
+
+The third row is the one to remember: the modes differ by **at most one cent**, and
+only where the quotient lands **exactly** on a half cent. `MoneyTest` asserts both
+modes on both kinds of vector, so a mode changed by accident fails on the third row
+rather than passing on the first two.
+
+**Why the mode-taking form has no no-argument overload.** An overload defaulting
+the mode was evaluated and rejected: whichever default it chose would be silently
+wrong for half the callers, and the wrongness would surface as a one-cent golden
+diff with nothing at the call site to explain it. Forcing the choice makes the
+decision visible where it is made. The divergence is registered as **`C-ROUNDING`**
+in
+[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md).
 
 ---
 
@@ -691,9 +859,55 @@ a record; it has no `01` level and no fields.
 
 This is the Factory pattern doing real work: record-layout knowledge is declared
 once per record and imported by every reader, so a layout cannot drift between
-two consumers. Per migration rule **T1**, `FILLER` is dropped and **the drop is
+two consumers. Migration rule **T1** says `FILLER` is dropped and **the drop is
 recorded per record** — a dropped field that is not recorded is indistinguishable
-from a field that was missed.
+from a field that was missed. That rule describes the **domain and database
+projection**, and it is *not* what `FixedWidthCodec` implements. The two are
+different contracts at different layers, and conflating them is the mistake §6.6.1
+exists to prevent.
+
+#### 6.6.1 The FILLER rule is content-based, not positional — and the codec is not the projection
+
+**Two layers, two behaviours.** Read them together or neither makes sense:
+
+| Layer | What happens to `FILLER` | Why |
+|---|---|---|
+| `FixedWidthCodec` — the raw byte boundary | A `FILLER` field is omitted from the decoded map **only when its decoded text is blank**, and the omitted bytes are **rebuilt on encode**. A `FILLER` carrying content is kept in the map as an ordinary field. | The codec's obligation is a byte-exact round trip. Dropping a value-bearing span would make encode reproduce different bytes. |
+| The domain entities and the Flyway schema | `FILLER` becomes no property and no column at all, and the drop is recorded per record in [`docs/architecture/data-model-and-schema-mapping.md`](../../docs/architecture/data-model-and-schema-mapping.md). | This is rule T1. Padding to a declared record length is not data, so it has nothing to be a column of. |
+
+**The exact codec rule.** A decoded field is omitted when **all** of these hold —
+`isDroppablePadding` in `FixedWidthCodec`:
+
+1. the field's kind is `TEXT`;
+2. its name is exactly `FILLER`, **or** ends with `-FILLER` (the named
+   `SEC-USR-FILLER` at [`app/cpy/CSUSR01Y.cpy` line 23] is why the suffix form is
+   needed);
+3. the descriptor is the **registered** one — the same `FieldSpec` instance the
+   registry holds at that declaration index, in a `RecordSpec` that is the
+   registry's own object for that name, so a caller-fabricated look-alike layout
+   cannot induce a silent drop;
+4. and **the decoded text is blank**.
+
+**Condition 4 is the whole point, and position is not a condition at all.** Two
+consequences follow that a positional reading would get wrong:
+
+- **A nonblank `FILLER` is content and is retained.** The report record
+  [`app/cpy/CVTRA07Y.cpy`] is the proof rather than the hypothetical: **all 22** of
+  its `FILLER` declarations carry a `VALUE` clause, so their bytes are the band's
+  literal spacing and punctuation. Dropping them would destroy the 133-column
+  output.
+- **An interior `FILLER` is dropped too, when blank.** The `REJECT` layout is the
+  case that disproves "terminal only": its `FILLER` sits at declaration index
+  **13 of 15**, because the 430-byte reject record is the 350-byte daily-transaction
+  record — whose padding is interior to it — followed by the reason code and its
+  description. Decoding a `REJECT` image with a blank pad yields **15 of 16**
+  declared fields; the same image with that span made nonblank yields all 16, the
+  pad carrying its value; and re-encoding the 15-key map restores 430 bytes
+  **byte-identically**.
+
+**A `FILLER REDEFINES` item is a third case and is not any of the above.** It is an
+overlay alias, so it has no `FieldSpec` at all, is absent from the non-overlapping
+field list, and **advances no offset** — see §6.7.
 
 The eleven canonical dataset layouts and their verified record lengths:
 
@@ -784,11 +998,38 @@ The baseline misspells three field names. The target corrects them, and each
 correction carries a `Refactoring Rationale:` comment at the mapping site so the
 lineage is never ambiguous:
 
-| Baseline name | Target name |
-|---|---|
-| `ACCT-EXPIRAION-DATE` [`app/cpy/CVACT01Y.cpy` line 11] | `expiration_date` |
-| `CARD-EXPIRAION-DATE` | `expiration_date` |
-| `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line 28] | `merchant_category_code` |
+| Baseline name | Target name | Where the baseline declares it |
+|---|---|---|
+| `ACCT-EXPIRAION-DATE` | `expiration_date` | [`app/cpy/CVACT01Y.cpy` line 11] |
+| `CARD-EXPIRAION-DATE` | `expiration_date` | [`app/cpy/CVACT02Y.cpy` line 9] |
+| `PA-MERCHANT-CATAGORY-CODE` | `merchant_category_code` | [`CIPAUDTY.cpy` line 36] — see the note below |
+
+> **Assumptions:** the third row names the **persisted** declaration, and that is
+> the one the target column is derived from, so it is the one the register cites.
+> **Refactoring Rationale:** an earlier revision of this row cited
+> `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line 28] instead. That is a real
+> declaration and it carries the same misspelling, but it is the **request
+> message** field, not the persisted one, so a register presenting itself as an
+> exact three-field inventory pointed at the wrong side of the lineage. Naming
+> the persisted declaration is what makes the "→ `merchant_category_code`" arrow
+> follow from the row rather than merely sit beside it.
+>
+> **The misspelling is the baseline's NAME, not a slip in one place**, which is
+> why one correction covers every surface. It appears **three** times: the
+> persisted segment field `PA-MERCHANT-CATAGORY-CODE` [`CIPAUDTY.cpy` line 36],
+> the request message field `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line
+> 28] with the request infix added, and the relational column
+> `MERCHANT_CATAGORY_CODE` [`ddl/AUTHFRDS.ddl` line 14]. All three denote one
+> value, and every target-side surface spells it `merchantCategoryCode` — the
+> Java component, the PostgreSQL column, the detail resource and the JSON
+> envelope schema of the queue payload alike.
+>
+> **Trade-offs:** the baseline spelling still appears verbatim in exactly one
+> place, `REQUEST_FIELD_NAMES` in `CsvAuthCodec`, and that is deliberate: every
+> wire-order assertion and every codec failure message reads its field names from
+> there, so a reader diffing a failure against `CCPAURQY.cpy` sees the same
+> characters in both. That is provenance, not a second name — the delimited wire
+> transmits no field name at all, so no wire agreement fixes one.
 
 A rename is exactly the kind of change that looks like a typo to the next reader,
 so the comment is not optional — it is what distinguishes a deliberate correction
@@ -804,17 +1045,42 @@ rot."* A documented boundary decays quietly; a failing build does not.
 
 This **single** test file is inherited by all eight services — it is published in
 this module's **test artifact** and scanned into every module, so the rules are
-evaluated against each module's own compiled classes. It must assert at minimum:
+evaluated against each module's own compiled classes. It asserts five invariants,
+named **A1** through **A5** in the source and in the failure output so a CI log
+identifies the boundary without anyone reading the test:
 
-1. **`..domain..` may not import cloud-SDK types or web types** — no AWS SDK,
-   no `org.springframework.web..`, no `jakarta.servlet..`. A domain object that
-   knows how it is transported is no longer a domain object.
-2. **No service may import another service's `..domain..` package.** The nine
-   package roots are `com.carddemo.common`, `.auth`, `.account`, `.card`,
+1. **A1 — `..domain..` may not import cloud-SDK types or web types** — no AWS
+   SDK, no `org.springframework.web..`, no `jakarta.servlet..`. A domain object
+   that knows how it is transported is no longer a domain object.
+2. **A2 — no service may import another service's `..domain..` package.** The
+   nine package roots are `com.carddemo.common`, `.auth`, `.account`, `.card`,
    `.transaction`, `.reference`, `.batch`, `.authorization` and `.reporting`.
    This is the rule that keeps one database table under one owner.
-3. **Money is never `double` or `float`** — no field, parameter or return type in
-   the money path may use them. This is the architecture-tested half of §5.1.
+3. **A3 — money is never `double` or `float` in the money path** — no field,
+   parameter or return type under `com.carddemo.common.money..` may use them.
+   This is the architecture-tested half of §5.1.
+4. **A4 — money is never `double` or `float` on a money-NAMED member, anywhere
+   under `com.carddemo`.** Refactoring Rationale: A3 alone could not see the
+   failure it was written to prevent. An inexact amount enters this system
+   through a service's entity member, transfer-object component or mapper
+   argument, none of which lives in the money package, so a rule scoped to that
+   package would report success while a `private double balance` sat in a JPA
+   entity. A4 selects members by a vocabulary drawn from the reference record
+   layouts — `amount`, `amt`, `balance`, `limit`, `fee`, `interest`, `payment`,
+   `price`, `total`, `debit`, `credit`, `money`, `cash`, `currency` — and exempts
+   names carrying `rate`, `ratio`, `percent`, `score`, `duration`, `millis` or
+   `seconds`, because a percentage the baseline multiplies a balance by is not an
+   amount and a gate that fails on correct code gets switched off. Trade-offs: a
+   name-driven rule is only as complete as its vocabulary, which is why the
+   vocabulary has a guard assertion of its own — emptying it, or adding the
+   offending member's own name to the exemptions, would silence A4 while leaving
+   it in the build as a test that passes.
+5. **A5 — no `com.carddemo` class may depend on `org.springframework.retry..` or
+   `io.github.resilience4j..`.** This is the enforced form of the
+   no-resilience-library decision recorded in §4 and
+   [ADR-002](../../docs/adr/ADR-002-compute-platform.md). It constrains use, not
+   presence: Spring Retry is a compile-scoped transitive of the SQS starter and
+   cannot be excluded without breaking that integration's polling back-off.
 
 **The location is pinned character-for-character**, because the Surefire
 `architecture-rules` execution selects it by filename
@@ -826,11 +1092,11 @@ services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRules
     class    LayeringRulesTest
 ```
 
-**Do not relocate, rename or split it.** The `architecture` test package already
-exists and reserves that location with its `package-info.java`. Because the
-include pattern matches by name, a rule class under any other name is not
-selected by that execution — it would simply never run, and the build would stay
-green while asserting nothing.
+**Do not relocate, rename or split it.** The class is at that exact path, beside
+its `package-info.java`, and it reports **9** executions in every module's
+`architecture-rules` run. Because the include pattern matches by name, a rule class
+under any other name is not selected by that execution — it would simply never run,
+and the build would stay green while asserting nothing.
 
 **The dependency** is `com.tngtech.archunit:archunit-junit5` at **1.4.2**,
 test-scoped, with the **version managed by `services/pom.xml`**
@@ -838,11 +1104,30 @@ test-scoped, with the **version managed by `services/pom.xml`**
 would silently diverge this module from the other eight, which is precisely the
 failure the single copybook include path exists to prevent on the COBOL side.
 
-**Prove the gate.** After authoring the rules, introduce a deliberate violation —
-a `double` in a money signature, or a cross-service domain import — confirm that
-`LayeringRulesTest` **fails**, then remove the violation. *A gate that cannot
-fail is not a gate*, and an ArchUnit rule whose package selector matches nothing
-passes vacuously.
+**Prove the gate whenever a rule changes, and note that one proof is now
+permanent.** *A gate that cannot fail is not a gate*, and an ArchUnit rule whose
+package selector matches nothing passes vacuously, which is a way a green run can
+assert nothing at all — so the class carries three guards of its own. One asserts
+that the imported production graph is non-vacuous, that it excludes the gate's own
+package, and that the money package really declares types for A3 to inspect;
+another asserts the ownership contract is exactly the nine fixed CardDemo roots,
+ordered, unduplicated and led by the shared kernel; a third asserts that the
+prohibition lists A1 and A3 are built from still name the constructs they claim to.
+The permanent proof is the A3 negative: a service-shaped fixture declaring binary
+floating point is asserted to be REPORTED, which is what keeps A3 honest given that
+no production type in this reactor declares a `double` at all — without it, A3
+would pass over a graph holding nothing for it to find, indistinguishable from a
+rule that cannot find anything.
+
+For A1, A2, A4 and A5, prove them the manual way when you change them: introduce a
+cross-service domain import, remove a refusal renderer from one security chain, or
+add a `spring-retry` import, confirm that `LayeringRulesTest` **fails**, then remove
+the violation. A3 is the one to re-prove most carefully by hand as well, because its
+selector spans the whole migrated tree (`com.carddemo..`) rather than the money
+package alone: scoping it narrowly would let a money-bearing field on a service
+transfer object escape it, and inspecting only raw types would let a
+`java.util.List<Double>` escape it, so the rule recurses through generic type
+arguments and both boundaries need a violation to stay honest.
 
 ---
 
@@ -928,7 +1213,10 @@ suppressions*.** `config/checkstyle/suppressions.xml` contains exactly two
 And to restate §2.4 because this is where the temptation actually arises:
 `-Dcheckstyle.skip`, `<skip>true</skip>`, `failOnViolation=false`, `|| true` and
 `continue-on-error: true` must never appear in any command, POM, configuration or
-workflow touching this module.
+workflow touching this module — **subject only to the single documented exception
+recorded in §2.4**, which refines the inherited `architecture-rules` Surefire
+execution in the module that owns the gate and skips nothing. Never on
+Checkstyle, and never on the default Surefire execution.
 
 ---
 
@@ -1004,19 +1292,40 @@ form"* (see its section "The four labels, and their one permitted written form")
 in the pre-existing reference tooling, and **never mix forms within one file**. A
 mixed file defeats the point of a greppable label.
 
-Alongside the labels, use the house comment idiom adapted to Java, placed
-immediately above the code it explains. The spacing is deliberate — `WHAT` has
-**no** space before its colon and `WHY` has **exactly one**, so the two colons
-align:
+⚠ **An inline comment in Java carries a WHY rationale and nothing else. Never
+write a `WHAT:` line above a statement.** A `WHAT:` line restates what the
+statement already says, which is Rule 1's *first* forbidden pattern — "writing
+comments that restate what the code does". Purpose belongs in the Javadoc, which
+every method here has; the inline comment is for the reason.
+
+The rationale line is labelled, and its continuation is indented to align under
+the text — `//` followed by seven spaces, which is the width of `WHY :`:
 
 ```java
-// WHAT: multiply at full precision, then divide with an explicit scale.
 // WHY : Assumptions: app/cbl/CBACT04C.cbl lines 464 to 465 parenthesise the
 //       multiplication, so the baseline's own ordering is explicit rather than
 //       inferred. Trade-offs: an intermediate of wider scale is carried for one
 //       step in exchange for cent-exact parity; dividing first yields different
 //       cents on many inputs, and at a 2.50 annual rate it yields 0.00.
 ```
+
+Assumptions: the aligned `# WHAT:` / `# WHY :` **pair** does exist in this
+repository and is correct — but only in **fenced command blocks in prose**, which
+is what §2's blocks above are. A shell pipeline has no docstring construct to carry
+its purpose and its effect is often genuinely not evident from its tokens, which is
+what earns the twin form there. That is the single exception;
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../docs/CODE_DOCUMENTATION_STANDARD.md)
+states the scope before the form for exactly this reason, and lists `.java`, `.ts`,
+`.py`, `.tf`, `.sql`, `.yaml`, `Dockerfile` and `pom.xml` among the files that may
+**not** carry a statement-level `WHAT:`. A file-header or module-level `WHAT:`
+inside a header block is a different thing again and remains correct.
+
+Refactoring Rationale: an earlier revision of this section presented the twin pair
+as "the house comment idiom adapted to Java" and showed a `// WHAT:` line in a Java
+example. That was wrong in the one place it does the most damage — an example in a
+shared-kernel README is copied — and it is recorded here rather than silently
+replaced, because a reader who learned the idiom from it needs to know it changed
+and why.
 
 ### 9.3 `@throws` coverage is mandatory, not situational
 
@@ -1040,19 +1349,20 @@ need justifying.
 
 | Decision | Category or categories | What the comment must say |
 |---|---|---|
-| `Money` scale 2 with `HALF_UP`, and the multiply-then-divide helper | **Assumptions** + **Trade-offs** | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
-| Money serialised as a JSON string | **Alternatives Considered** | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
-| `ZonedDecimalCodec`'s explicit EBCDIC sign mode | **Assumptions** | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
-| `PackedDecimalCodec` existing at all | **Assumptions** | The ten base masters are zoned, not packed — two regimes, two codecs; packed appears only in `CVEXPORT.cpy` and the two authorization segments |
-| `PageResponse` keyset over offset | **Alternatives Considered** | Name offset pagination and state what it breaks: skipped and repeated rows under concurrent inserts |
-| `CsvAuthCodec` preserving field order and delimiter | **Assumptions** | With a string-format payload, field order and delimiter **are** the contract; a JSON envelope is additive, never a replacement |
-| `CsvAuthCodec`'s 13-character request money field | **Assumptions** + **Trade-offs** | The consumer's receiver is `PIC X(13)` at `COPAUA0C.cbl` line 63, one narrower than the copybook's 14 — see §10.2 |
-| `JwtRoleConverter` replacing `CDEMO-USER-TYPE` | **Refactoring Rationale** | The communication area was client-echoed storage; the group claim is signed |
-| `FieldValidationFlag` dropping the re-entry gate | **Refactoring Rationale** | `CDEMO-PGM-CONTEXT` has no stateless analogue, so presentation is driven by the response body |
-| `TimestampFormatter`'s fixed 26-character form | **Assumptions** | The `PIC X(26)` width is the contract; the commentary mask at `CBTRN02C.cbl` line 149 must not be transliterated |
-| The three misspelling corrections (§6.8) | **Refactoring Rationale** | Name the baseline spelling so the rename reads as deliberate |
-| Every hand-written accessor, given Lombok's absence | **Alternatives Considered** | *"Generated accessors cannot carry the Javadoc the explainability rule requires"*; Java 21 `record` types plus explicit constructors give the same brevity with documentable members |
-| Any use of core retry | **Assumptions** | The attribute is `maxRetries` (attempts = 1 + value) and the enabling annotation is `@EnableResilientMethods`, not `@EnableRetry` |
+| `Money` scale 2 with `HALF_UP`, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
+| The accrual rounding mode being a required parameter | `Alternatives Considered:` + `Trade-offs:` | Name the defaulting overload and reject it: the baseline truncates (`DOWN`) while plan rule T3 specifies `HALF_UP`, so either default is silently wrong for half the callers — see §5.3.1 and divergence `C-ROUNDING` |
+| Money serialised as a JSON string | `Alternatives Considered:` | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
+| `ZonedDecimalCodec`'s explicit EBCDIC sign mode | `Assumptions:` | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
+| `PackedDecimalCodec` existing at all | `Assumptions:` | The ten base masters are zoned, not packed — two regimes, two codecs; packed appears only in `CVEXPORT.cpy` and the two authorization segments |
+| `PageResponse` keyset over offset | `Alternatives Considered:` | Name offset pagination and state what it breaks: skipped and repeated rows under concurrent inserts |
+| `CsvAuthCodec` preserving field order and delimiter | `Assumptions:` | With a string-format payload, field order and delimiter **are** the contract; a JSON envelope is additive, never a replacement |
+| `CsvAuthCodec`'s 13-character request money field | `Assumptions:` + `Trade-offs:` | The consumer's receiver is `PIC X(13)` at `COPAUA0C.cbl` line 63, one narrower than the copybook's 14 — see §10.2 |
+| `JwtRoleConverter` replacing `CDEMO-USER-TYPE` | `Refactoring Rationale:` | The communication area was client-echoed storage; the group claim is signed |
+| `FieldValidationFlag` dropping the re-entry gate | `Refactoring Rationale:` | `CDEMO-PGM-CONTEXT` has no stateless analogue, so presentation is driven by the response body |
+| `TimestampFormatter`'s fixed 26-character form | `Assumptions:` | The `PIC X(26)` width is the contract; the commentary mask at `CBTRN02C.cbl` line 149 must not be transliterated |
+| The three misspelling corrections (§6.8) | `Refactoring Rationale:` | Name the baseline spelling so the rename reads as deliberate |
+| Every hand-written accessor, given Lombok's absence | `Alternatives Considered:` | *"Generated accessors cannot carry the Javadoc the explainability rule requires"*; Java 21 `record` types plus explicit constructors give the same brevity with documentable members |
+| Any use of core retry | `Assumptions:` | The attribute is `maxRetries` (attempts = 1 + value) and the enabling annotation is `@EnableResilientMethods`, not `@EnableRetry` |
 
 ---
 
@@ -1066,24 +1376,28 @@ its unit suites, which is why they are fast enough to run on every build.
 
 | Suite | Must cover |
 |---|---|
-| `MoneyTest` | scale and rounding behaviour, and multiply-before-divide including the `0.00` failure case that divide-first produces |
+| `MoneyTest` | scale and rounding behaviour, multiply-before-divide including the `0.00` failure case that divide-first produces, and **both** rounding contracts on the half-cent vectors of §5.3.1 |
 | `MoneyModuleTest` | money round-trips as a JSON **string**, and a JSON number is not silently accepted |
 | `ZonedDecimalCodecTest` | round-trip including **negative** values, unsigned fields, and rejection of invalid overpunch characters |
 | `PackedDecimalCodecTest` | round-trip including negative values and rejection of invalid nibbles |
-| `FixedWidthCodecTest` | offset and length handling, `FILLER` drops, and record-length mismatch rejection |
+| `CopybookLayoutTest` | the closed registry — every layout name, its record length, its provenance, and that an unregistered name is refused |
+| `FixedWidthCodecTest` | offset and length handling, record-length mismatch rejection, and the content-based `FILLER` rule of §6.6.1 in both directions: a blank pad dropped and rebuilt, a nonblank one retained |
 | `CsvAuthCodecTest` | the exact 18-field and 6-field shapes, field order, delimiter placement — see §10.2 |
 | `TimestampFormatterTest` | the 26-character form, and that the commentary mask is never used as a pattern |
-| `GlobalExceptionHandlerTest`, `GlobalExceptionHandlerPathMaskingTest` | the 409 mappings, the per-field error array, and that no raw database text escapes |
+| `GlobalExceptionHandlerTest`, `GlobalExceptionHandlerPathMaskingTest` | the 409 mappings, the per-field error array, that no raw database text escapes, and that a card number in a request path is masked before it reaches a log line |
+| `ApiErrorTest`, `AbendDetailTest` | the three message widths and two sentinels, and the four abend components — see §6.3 |
+| `DateEditValidatorTest`, `FieldValidationFlagTest` | the century, leap-year, date-of-birth and month/day rules, the result envelope, the Language-Environment path, and the **three** validation states of §6.5 |
 | `JwtRoleConverterTest`, `CognitoAccessTokenValidatorTest` | the `'A'`/`'U'` group mapping, and that issuer and audience are checked before groups are trusted |
-| `CardNumberMaskerTest`, `LogSafeTextTest` | masking to the last four digits; control-character stripping and truncation |
-| `CorrelationIdFilterTest`, `CursorTokenTest` | correlation id propagation; composite-key round-trip and tamper rejection |
-| `LayeringRulesTest` | the three assertions in §7 |
+| `CardNumberMaskerTest`, `LogSafeTextTest`, `OpaqueIdentifierTest` | masking to the last four digits; control-character stripping and truncation; opaque identifier derivation and that it is not reversible |
+| `CorrelationIdFilterTest`, `CursorTokenTest`, `PageResponseTest` | correlation id propagation; composite-key round-trip and tamper rejection; the keyset envelope of §6.1 including a final page and an empty one |
+| `MetricsConfigTest` | the common tags — service, environment and version — are applied to every meter |
+| `LayeringRulesTest` | the three minimum rules of §7, plus the guards that stop them passing vacuously — that the imported production graph is non-empty, that the ownership contract is exactly the nine roots, that each prohibition list still names a construct that exists, that a security chain renders its refusals, and a negative control proving the money rule rejects a planted `double` |
 
 ### 10.2 The wire shapes, so no test author re-derives them
 
-⚠ **The copybook arithmetic and the emitted contract differ, in two places, for
-two documented reasons.** Both numbers are given because a test that asserts the
-naive figure will fail against a correct implementation.
+⚠ **A declared width sum is not a wire length**, because the delimiters are
+themselves bytes. Both numbers are given for each payload so that a test author
+does not assert one where the other applies.
 
 **Authorization request** — 18 fields, `CCPAURQY.cpy` lines 19 to 36:
 
@@ -1122,7 +1436,8 @@ files.
 | leading `ACCT-ID` of an `acctdata.txt` record | plain digits | `PIC 9(11)` unsigned, **no** overpunch — a guard against over-eager sign parsing. One record reads `00000000007` then status `Y` then `00000001930{`, so unsigned sits directly beside signed |
 | `2022-06-10 19:27:53.000000` | — | exactly **26** characters; the final four fractional digits are structurally always `0000` (§6.2) |
 | balance `1000.00` × rate `15.00` ÷ 1200 | **`12.50`** | exact; divide-first gives `10.00` |
-| balance `1000.00` × rate `2.50` ÷ 1200 | **`2.08`** | `2.0833…` under `HALF_UP`; **divide-first gives `0.00`** — the failure multiply-before-divide prevents |
+| balance `1000.00` × rate `2.50` ÷ 1200 | **`2.08`** | quotient `2.0833…`, and **both** rounding modes give `2.08`, so this vector does **not** discriminate them; **divide-first gives `0.00`** — the failure multiply-before-divide prevents |
+| balance `1000.80` × rate `2.50` ÷ 1200 | **`2.08`** truncated / **`2.09`** half up | quotient `2.0850` **exactly** — the only kind of vector that discriminates the two contracts of §5.3.1, and therefore the one a rounding-regression test must carry |
 | `'DEFAULT   '` | `DEFAULT` | a disclosure-group id arrives space-padded; **trailing blanks are padding, not data** |
 
 ⚠ **A false-positive class to avoid when hunting for negative overpunch.**

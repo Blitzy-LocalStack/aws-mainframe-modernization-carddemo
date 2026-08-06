@@ -267,11 +267,13 @@ import java.util.Objects;
  * card-break total for the last group, which is why {@link #encodeAccountTotal(Money)} is available
  * unconditionally rather than being suppressed at the end of the run. The compromise accepted is
  * that two byte comparisons against a captured baseline artifact will differ in those two places
- * and must be read against the register rather than treated as a defect: both divergences are
- * entered in {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register,
- * and neither is an edit to anything under {@code app/}. AAP Rule T9 (structure changes, behaviour
- * does not) requires exactly this -- that a behavioural difference be a deliberate, recorded
- * decision rather than a silent one.</p>
+ * and must be read against the register rather than treated as a defect: the two divergences are
+ * entered as <b>D-REPORT-CLOSING-TOTAL</b> and <b>D-REPORT-GRAND-TOTAL</b> in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register, and neither
+ * is an edit to anything under {@code app/}. AAP Rule T9 (structure changes, behaviour does not)
+ * requires exactly this -- that a behavioural difference be a deliberate, recorded decision rather
+ * than a silent one -- and the register's own discipline requires the identifier rather than the
+ * path, so that the claim here and the entry there can be reconciled by search.</p>
  *
  * <h2>Alternatives Considered: method names the baseline's paragraph numbering cannot supply</h2>
  *
@@ -397,20 +399,6 @@ public final class TransactionReportMapper {
     //       otherwise have been reused.
     private static final String BLANK_LINE_ITEM_NAME = "WS-BLANK-LINE";
 
-    // WHY : Assumptions: RecordSpec requires a key of at least one byte because every layout it was
-    //       shaped for is a keyed data set, whereas line 78 of app/jcl/TRANREPT.jcl declares this
-    //       report with a record format of FB and no key operand, so no band has a retrieval key at
-    //       all. One byte at offset zero is the smallest declaration the descriptor accepts, and it
-    //       is named so that a reader meets this explanation rather than inferring intent from a
-    //       bare digit.
-    private static final int NO_RETRIEVAL_KEY_LENGTH = 1;
-
-    // WHY : Assumptions: the companion offset for the nominal key above. It is a separate constant
-    //       rather than a reused zero because the descriptor takes length and offset as two
-    //       arguments in sequence, and two same-valued literals in adjacent argument positions are
-    //       exactly the pair a later edit transposes without the compiler objecting.
-    private static final int NO_RETRIEVAL_KEY_OFFSET = 0;
-
     // WHY : Assumptions: an empty value is expanded by the codec into a field of blanks, because it
     //       places what it is given from the left and blank-fills the remainder, and the blank byte
     //       it fills with is the target charset's own. Writing 133 spaces out here was rejected
@@ -425,9 +413,14 @@ public final class TransactionReportMapper {
     //       modelled as one field spanning all 133 bytes, which is the faithful reading of an
     //       elementary level-01 item, and validateGeometry() is chained so a mis-stated width fails
     //       at class load rather than emitting a short line.
-    private static final CopybookLayout.RecordSpec BLANK_LINE = new CopybookLayout.RecordSpec(
+    // WHY : Assumptions: the descriptor is declared KEYLESS, because line 78 of
+    //       app/jcl/TRANREPT.jcl gives this report a record format of FB and no key operand, so no
+    //       band of it -- this one included -- has a retrieval key. An earlier revision declared one
+    //       nominal byte at offset zero here because the descriptor required a key length of at least
+    //       one; the factory now states the absence, and it states it the same way the two band
+    //       holders do.
+    private static final CopybookLayout.RecordSpec BLANK_LINE = CopybookLayout.RecordSpec.keyless(
             BLANK_LINE_ITEM_NAME, ReportBandLayouts.REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(CopybookLayout.text(BLANK_LINE_ITEM_NAME, 0,
                     ReportBandLayouts.REPORT_RECORD_LENGTH))).validateGeometry();
 
@@ -817,17 +810,20 @@ public final class TransactionReportMapper {
      * Because that lookup fires once per break, one account identifier is stable across a card's
      * run of transactions -- which is why the two readings produce the same identifier on the
      * detail lines and a different NUMBER of total bands. The literal is carried across unchanged
-     * under AAP Rule T8 (user-visible strings are verbatim) and the divergence between the wording
-     * and the break key is recorded rather than reconciled.</p>
+     * under AAP Rule T8 (user-visible strings are verbatim). The mismatch between that wording and
+     * the break key is the REFERENCE's own and is reproduced exactly rather than reconciled, so it
+     * is not a divergence and has no register entry: the reference labels the band for the account
+     * while breaking on the card, and so does this.</p>
      *
      * <p>Trade-offs: this band is available unconditionally, including for the last card group of a
      * run. The reference emits no such closing band, because its end-of-file branch at lines 198 to
      * 203 of {@code app/cbl/CBTRN03C.cbl} performs the page totals at line 202 and the grand totals
      * at line 203 and never the card-break paragraph. The target emits it, so the last group is
      * closed like every other; the compromise accepted is that a byte comparison against a captured
-     * baseline artifact will show one additional band at the end, which is entered in
-     * {@code docs/architecture/cobol-to-service-traceability.md} rather than treated as a
-     * defect.</p>
+     * baseline artifact will show one additional band at the end. That difference is registered as
+     * {@code D-REPORT-CLOSING-TOTAL} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} section 7.4 rather than treated as
+     * a defect.</p>
      *
      * @param accountTotal the accumulated total for the card group being closed, declared
      *     {@code PIC S9(09)V99} at line 135 of {@code app/cbl/CBTRN03C.cbl}, rendered through the
@@ -870,9 +866,11 @@ public final class TransactionReportMapper {
      * successful read, and then performs the page totals at line 202, which carries that amount
      * into the grand total at line 297 for a second time. The target counts each amount once, so
      * its grand total is the sum of its page totals with no repetition; the compromise accepted is
-     * that a byte comparison against a captured baseline artifact will differ in this field, which
-     * is entered in {@code docs/architecture/cobol-to-service-traceability.md} rather than treated
-     * as a defect.</p>
+     * that a byte comparison against a captured baseline artifact will differ in this field and in
+     * the final page-total field, by exactly the last transaction's amount. That difference is
+     * registered as {@code D-REPORT-GRAND-TOTAL} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} section 7.4 rather than treated as
+     * a defect.</p>
      *
      * @param grandTotal the accumulated total for the whole report, declared {@code PIC S9(09)V99}
      *     at line 136 of {@code app/cbl/CBTRN03C.cbl}, rendered through the always-signed mask of

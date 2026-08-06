@@ -2,6 +2,8 @@ package com.carddemo.reporting.config;
 
 import com.zaxxer.hikari.HikariDataSource;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
@@ -94,11 +96,14 @@ import org.springframework.context.annotation.Configuration;
  * <p>Trade-offs: the database's default read-committed isolation is stricter than the baseline's
  * declared read integrity, and the difference is accepted rather than tuned away. The CICS resource
  * definitions, 505 lines of reference material that is never modified, declare
- * {@code READINTEG(UNCOMMITTED)} on the first file stanza at {@code app/csd/CARDDEMO.CSD} L90, so
- * the baseline permitted a report to read a value a concurrent task had not yet committed. Nothing
+ * {@code READINTEG(UNCOMMITTED)} on <strong>every one</strong> of their eight file stanzas -- at
+ * {@code app/csd/CARDDEMO.CSD} L3 for the first, {@code ACCTDAT}, through L90 for the last,
+ * {@code USRSEC} -- so the baseline permitted a report to read a value a concurrent task had not yet
+ * committed, on any file it read. Nothing
  * here reproduces that, so a dirty read the baseline allowed cannot occur; what is given up is any
  * report that depended on seeing uncommitted work, and no report does. The tightening is
- * deliberate and is recorded as a divergence rather than presented as equivalence.
+ * deliberate and is registered as {@code D-REPORTING-ISOLATION} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than presented as equivalence.
  *
  * <p>Trade-offs: pool sizing is a genuinely new degree of freedom rather than a ported setting, and
  * it is bound from configuration here rather than chosen. The same stanza declares
@@ -115,8 +120,9 @@ import org.springframework.context.annotation.Configuration;
  * {@code RECOVERY(NONE)} alongside {@code JNLSYNCWRITE(YES)}, so the accurate description of the
  * baseline is that it kept no forward recovery log and no data-change journalling, and not that it
  * journalled nothing at all. This context writes nothing, so neither setting has an analogue to
- * carry across; the store it reads is encrypted and backed up, and that divergence is recorded in
- * the migration's divergence register.
+ * carry across; the store it reads is encrypted and backed up, and that divergence is registered as
+ * {@code D-REPORTING-DATA-AT-REST} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.
  *
  * <h2>What is deliberately absent</h2>
  *
@@ -176,14 +182,42 @@ public class DataSourceConfig {
     /** The key that declares the pool read-only, named so a failure can cite it. */
     private static final String READ_ONLY_PROPERTY = HIKARI_PROPERTY_PREFIX + ".read-only";
 
-    // Assumptions: the check below matches on this opening alone and never on a whole statement,
-    // because the schema list is the configuration's to own and restating it here would give one
-    // value two owners that could then disagree. The bootstrap migration takes the same position at
-    // V0__schemas_and_roles.sql L592 to L600, where it declines to set a role-level search path so
-    // that resolution is left wholly to the connecting service. What is asserted here is therefore
-    // that the pinning mechanism is present, not which schemas it names.
+    // Refactoring Rationale: the check below previously matched on this opening ALONE, on the
+    // stated ground that "the schema list is the configuration's to own and restating it here
+    // would give one value two owners that could then disagree". That position is reversed here,
+    // because its consequence was that the guard admitted every statement it existed to refuse:
+    // `SET search_path TO card` passed, `SET search_path TO reporting, ledger` passed, and
+    // `SET search_path TO reporting; DROP VIEW reporting.transactions` passed -- the last of which
+    // the pool would then run on every physical connection it opened. A guard that accepts a
+    // statement pinning a DIFFERENT context's schema is not a weaker guard, it is not a guard.
+    // Assumptions: the reversal is safe because the schema a bounded context owns is an
+    // ARCHITECTURAL invariant rather than a deployment parameter. It is the same in every
+    // environment, which was verified rather than assumed: neither application-dev.yml nor
+    // application-prod.yml declares connection-init-sql at all, and the test profile declares the
+    // identical statement. So the two owners cannot legitimately differ, and a difference between
+    // them is exactly the edit that should stop the service.
     /** The normalised opening of any statement that pins a search path. */
     private static final String SEARCH_PATH_PREFIX = "set search_path";
+
+    // Assumptions: this names the ONE schema this context's connections may resolve against. It is
+    // the schema the bootstrap migration creates to hold nothing but read-only cross-schema views,
+    // at V0__schemas_and_roles.sql L542 to L549, and the one the login role receives USAGE on at
+    // L582. Naming a second schema here would be a change of architecture, not of configuration.
+    /** The single schema this context's search path may name, lower-cased for comparison. */
+    private static final String ALLOWED_SEARCH_PATH_SCHEMA = "reporting";
+
+    // Assumptions: the accepted form is fixed rather than merely prefix-matched. Group one is the
+    // schema quoted, group two the schema bare, and the pattern anchors at both ends so nothing may
+    // follow it. A trailing semicolon is tolerated, with or without a space before it, because a
+    // statement written either way is the same statement and refusing one spelling would reject a
+    // correct configuration; an INTERIOR semicolon is not tolerated, and that is the point -- the
+    // pool runs this text verbatim on every physical connection, so a second statement smuggled in
+    // here would be a second statement executed on every connection for the life of the service.
+    // Assumptions: the pattern is applied to the case-folded, whitespace-collapsed copy built below,
+    // which is why it is written in lower case with single spaces and admits no other spacing.
+    /** The exact accepted form of the pinning statement, with the schema in group one or two. */
+    private static final Pattern SEARCH_PATH_STATEMENT =
+            Pattern.compile("^set search_path (?:to|=) (?:\"([^\"]+)\"|([a-z0-9_$]+))(?: ?;)?$");
 
     /** Matches the default schema as a whole word, so it can be refused from the path. */
     private static final String PUBLIC_SCHEMA_PATTERN = ".*\\bpublic\\b.*";
@@ -263,9 +297,19 @@ public class DataSourceConfig {
      * name merely contains those characters is not rejected by accident. The narrower match costs a
      * pattern evaluation once per startup and avoids refusing a valid configuration.
      *
+     * <p>Trade-offs: the statement is required to take one exact form naming one exact schema, which
+     * refuses several statements a database would have accepted -- a path listing this schema plus
+     * another, a path naming a different context's schema, and a pinning statement with a second
+     * statement appended after a semicolon. All three are refused deliberately: the pool executes
+     * this text verbatim on every physical connection it opens, so anything this check tolerates is
+     * something that runs on every connection for the life of the service. The cost is that a future
+     * path legitimately needing a second schema fails at startup until this constant and this
+     * rationale are edited together, which is the intended friction.
+     *
      * @param initSql the declared statement to check, as bound from the configuration key
-     * @throws IllegalStateException if the statement is {@code null}, blank, does not begin by
-     *     pinning a search path, or names the default schema
+     * @throws IllegalStateException if the statement is {@code null} or blank, does not begin by
+     *     pinning a search path, is not exactly one statement of the accepted form, names any schema
+     *     other than the single one this context may resolve against, or names the default schema
      */
     private static void requireSearchPathPin(String initSql) {
         if (initSql == null || initSql.isBlank()) {
@@ -281,9 +325,30 @@ public class DataSourceConfig {
                     INIT_SQL_PROPERTY + " must begin by pinning the schema search path");
         }
 
+        // Assumptions: the default schema is refused before the exact-form check rather than after,
+        // so the more specific diagnostic wins. A statement naming `public` fails both checks, and
+        // the message naming the default schema tells an operator what to remove; the exact-form
+        // message would only tell them the statement was not accepted.
         if (normalised.matches(PUBLIC_SCHEMA_PATTERN)) {
             throw new IllegalStateException(
                     INIT_SQL_PROPERTY + " must not admit the default schema to the search path");
+        }
+
+        Matcher matched = SEARCH_PATH_STATEMENT.matcher(normalised);
+        if (!matched.matches()) {
+            throw new IllegalStateException(INIT_SQL_PROPERTY + " must be exactly one statement of"
+                    + " the form SET search_path TO <schema>, naming one schema and nothing after"
+                    + " it; a second statement here would run on every connection the pool opens");
+        }
+
+        // Assumptions: either alternative may have matched -- the quoted form or the bare form --
+        // and exactly one of the two groups is therefore non-null. Reading them in that order keeps
+        // the quoted spelling and the bare spelling equivalent, which they are to the server.
+        String pinnedSchema = matched.group(1) != null ? matched.group(1) : matched.group(2);
+        if (!ALLOWED_SEARCH_PATH_SCHEMA.equals(pinnedSchema)) {
+            throw new IllegalStateException(INIT_SQL_PROPERTY + " must pin the search path to \""
+                    + ALLOWED_SEARCH_PATH_SCHEMA + "\" and to no other schema; this context holds"
+                    + " read privileges on that schema alone");
         }
     }
 

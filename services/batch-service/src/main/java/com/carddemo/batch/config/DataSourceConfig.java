@@ -25,16 +25,27 @@ import org.springframework.context.annotation.Configuration;
  * <p>Assumptions: the verification below matters more in this module than in any sibling. Every
  * other service initialises its connections with a single-schema search path, so an ordering
  * mistake has nothing to resolve against and fails loudly at the first unqualified statement. This
- * module's path is {@code batch, ledger, account, card, reference} — five schemas, because the
+ * module's path is {@code batch, ledger, account, reference} — four schemas, because the
  * posting unit of work commits the transaction, the category balance and the account together and
  * is kept a single ACID commit rather than fragmented into a saga. An unqualified write under a
  * reordered path would therefore still resolve, against a real table in the wrong schema, and the
  * failure would be a plausible row rather than an error.
  * </p>
  *
+ * <p>Refactoring Rationale: the path carried a fifth entry, {@code card}, on the reading that
+ * {@code app/cbl/CBTRN01C.cbl} validates the daily feed against the card master. That reading is
+ * wrong. The program opens {@code CARD-FILE} at {@code app/cbl/CBTRN01C.cbl:309} and never issues a
+ * {@code READ} against it; its only three reads are the daily feed at {@code :203}, the
+ * cross-reference at {@code :229} and the account at {@code :243}. The cross-reference it does read
+ * is {@code CVACT03Y}, mapped by this module to {@code account.card_xref} rather than to the
+ * {@code card} schema, and no entity here declares {@code @Table(schema = "card")}. The entry was
+ * therefore withdrawn: a resolution candidate no statement can reach adds nothing but the ability to
+ * shadow a future name.
+ * </p>
+ *
  * <p>Assumptions: {@code spring.jpa.hibernate.ddl-auto} is {@code validate} here where the
  * siblings use {@code none}, and that difference is deliberate rather than accidental. This module
- * maps four FOREIGN schemas through explicit {@code @Table(schema = ...)} declarations that its own
+ * maps three FOREIGN schemas through explicit {@code @Table(schema = ...)} declarations that its own
  * {@code V1__batch.sql} does not create, so validation is what proves at startup that the tables
  * those owning services migrated still match what this module reads. It never emits DDL: Flyway
  * alone applies table DDL, and the deployment bootstrap creates the schemas, roles and grants.

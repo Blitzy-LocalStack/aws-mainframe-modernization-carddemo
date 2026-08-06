@@ -29,7 +29,7 @@ Purpose:
   directories one level deeper.
 
   This file MUST exist. It is not a placeholder and it is not optional; see the
-  fail-closed note under WHY below for what happens if it is deleted.
+  fail-closed note under Design decisions below for what happens if it is deleted.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Scope (the whole permitted charter):
@@ -55,7 +55,7 @@ How to add an entry:
   Four requirements, all mandatory.
     1. Put the justification in an XML comment IMMEDIATELY ABOVE the element.
        Do not reach for a reason attribute: the DTD has none, and the file
-       stops parsing. See the DTD note under WHY below.
+       stops parsing. See the DTD note under Design decisions below.
     2. Tag that justification with at least one of Rule 1's four categories,
        written in the ONE accepted spelling, plural and colon-terminated:
        "Alternatives Considered:", "Refactoring Rationale:", "Assumptions:" or

@@ -47,28 +47,40 @@ package com.carddemo.common.security;
  * one class whose whole purpose is to avoid handling card numbers, and it fails in the wrong direction --
  * a real number that failed the test would be echoed in full.</p>
  *
- * <p>Assumptions: a run is a run of digits and nothing else, so a card number written with separators is
- * NOT detected. {@code 4111-1111-1111-1111} and {@code 4111 1111 1111 1111} are each four runs of four
- * digits, no run reaches sixteen, and {@link #maskEmbeddedCardNumbers(String)} returns them unchanged. This
- * is stated explicitly because the omission is invisible from the method's own contract, and a reader who
- * assumes otherwise would apply this class to the wrong kind of input. It is harmless for every path this
- * migration actually masks: the baseline carries a card number in exactly one shape, the sixteen contiguous
- * characters of {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy}, and every value that
- * reaches this class comes from that field, from a request path segment bound to it, or from the
- * {@code PA-RQ-CARD-NUM PIC X(16)} of the authorization wire contract. None of the three can hold a
- * separator: the copybook field has no room for one within its declared width, and a separated form fails
- * the digits-only validation on the way in long before anything renders it.</p>
+ * <p>Refactoring Rationale: separated card numbers ARE detected, and an earlier revision of this class
+ * argued at length that they need not be. That argument turned on a claim about ordering that does not
+ * hold: it asserted that "a separated form fails the digits-only validation on the way in long before
+ * anything renders it". A rejected path member is rendered precisely BECAUSE validation failed -- the
+ * refusal echoes the path a caller invented, and the shared advice logs it alongside -- so validation
+ * running first is the reason the value reaches a log line rather than a reason it cannot. The same is
+ * true of the correlation header: {@code com.carddemo.common.web.CorrelationIdFilter} admits a hyphen,
+ * a dot and an underscore inside an identity it publishes to the mapped diagnostic context, so
+ * {@code 4111-1111-1111-1111} conformed and was echoed. The contiguous rule is unchanged and the
+ * separated rule is ADDED beside it, exactly as the earlier revision said the correction should be
+ * made.</p>
  *
- * <p>Trade-offs: widening the rule to skip embedded separators was rejected for this migration. It would
- * begin masking values that are legitimately separated and not card numbers at all -- a timestamp
- * {@code 2022-07-18 09:30:00.123456} is a separated digit sequence of more than sixteen digits, and the
- * migration renders those in full by contract -- so the change would trade a hazard this system cannot
- * reach for a regression it demonstrably can. The condition under which the wider rule becomes necessary is
- * a free-text ingress: a comment, a note or an operator-supplied description that a user can type a card
- * number into in whatever shape they please. No such field exists in the baseline record layouts. Should one
- * be added, the correct change is a separator-tolerant scan that requires the separators to be uniform and
- * the digit count to be exactly sixteen or more, ADDED beside the run rule rather than replacing it, so the
- * contiguous case keeps the behaviour the current callers and their tests rely on.</p>
+ * <p>Assumptions: a separated candidate is a sequence of digit groups of ONE uniform length, joined by
+ * a single occurrence of ONE uniform separator drawn from {@value #SEPARATOR_CHARACTERS}, carrying at
+ * least {@value #CARD_NUMBER_LENGTH} digits in total. Uniformity is what keeps the rule from firing on
+ * a timestamp: {@code 2022-07-18 09:30:00.123456} has twenty digits, but its groups run 4, 2, 2, 2, 2,
+ * 2, 6 and no two consecutive ones agree, so it is left exactly as it arrived -- which the migration
+ * requires, because it renders timestamps in full by contract. A date {@code 2022-07-18} and a version
+ * {@code 1.11.21} fail for the same reason. The forms that DO match are the two a human writes a card
+ * number in, four groups of four joined by hyphens or by spaces, and their longer relatives.</p>
+ *
+ * <p>Trade-offs: the rule can fire on a value that is not a card number at all -- four hyphen-separated
+ * four-digit groups such as {@code 2022-2023-2024-2025} match it. That is accepted on the same ground
+ * the contiguous rule already accepts it: this class is positional and not a check-digit test, and it
+ * fails in the safe direction. The alternative -- requiring a Luhn check before masking -- was rejected
+ * twice over: it would put a card-number validity rule in the one class whose purpose is to avoid
+ * handling card numbers, and a real number that failed the test would then be echoed in full.</p>
+ *
+ * <p>Assumptions: the separator characters are exactly the three the correlation filter admits inside an
+ * identity, plus the space. The three are what make a smuggled PAN reachable through that header at all;
+ * the space is included because it cannot appear in that header but can appear in a path segment, a
+ * request parameter and a message a caller supplied. Widening the set further -- to a slash, say --
+ * was rejected because a slash separates PATH SEGMENTS, so admitting it would let two unrelated
+ * four-digit segments of one route be read as a single separated number.</p>
  *
  * <p>Assumptions: this class does not sanitise control characters, and does not need to for the paths it is
  * applied to. A request line cannot carry a raw carriage return or line feed and remain a request line, so
@@ -107,6 +119,38 @@ public final class CardNumberMasker {
      * the exact width rather than a shorter threshold is on the class.</p>
      */
     private static final int CARD_NUMBER_LENGTH = 16;
+
+    /**
+     * The characters a separated card number may be written with.
+     *
+     * <p>Assumptions: the three punctuation marks are exactly the set
+     * {@code com.carddemo.common.web.CorrelationIdFilter} admits inside an identity it publishes to the
+     * mapped diagnostic context, which is what made a separated primary account number reachable through
+     * that header. The space is added because it cannot occur there but can occur in a path segment or a
+     * caller-supplied message. The rationale for not widening the set further is on the class.</p>
+     */
+    private static final String SEPARATOR_CHARACTERS = "-._ ";
+
+    /**
+     * The number of digits in one group of a separated card number.
+     *
+     * <p>Assumptions: four, which is how a card number is grouped everywhere it is written by hand and on
+     * the card itself. Requiring the groups to be uniformly this width is the whole of what distinguishes
+     * a separated card number from a timestamp, a date or a dotted version, each of which has groups of
+     * differing widths. A rule that accepted any uniform width would match {@code 1.11.21} at width two
+     * once it reached sixteen digits, and would match nothing useful that this width misses.</p>
+     */
+    private static final int SEPARATED_GROUP_LENGTH = 4;
+
+    /**
+     * The fewest groups a separated candidate must carry, derived rather than chosen.
+     *
+     * <p>Assumptions: {@value #CARD_NUMBER_LENGTH} digits in groups of
+     * {@value #SEPARATED_GROUP_LENGTH} is four groups, so the threshold is the quotient and moves with
+     * either constant instead of being restated. Writing the literal four here would let the two rules
+     * disagree after a change to the card width.</p>
+     */
+    private static final int SEPARATED_MIN_GROUPS = CARD_NUMBER_LENGTH / SEPARATED_GROUP_LENGTH;
 
     /**
      * Prevents instantiation of this utility holder.
@@ -166,9 +210,10 @@ public final class CardNumberMasker {
      * route for, so the cost of applying this on an error path is a single pass over a short string.</p>
      *
      * @param text the text to scan, which may be {@code null}
-     * @return {@code null} when {@code text} is {@code null}; the same instance when it contains no run of
-     *     {@value #CARD_NUMBER_LENGTH} or more digits; otherwise a copy in which every such run is masked
-     *     to its last four digits
+     * @return {@code null} when {@code text} is {@code null}; the same instance when it contains neither a
+     *     run of {@value #CARD_NUMBER_LENGTH} or more digits nor a uniformly separated candidate;
+     *     otherwise a copy in which every such value is masked to its last four digits, with any
+     *     separators left in place so the surrounding text stays readable
      */
     public static String maskEmbeddedCardNumbers(String text) {
         if (text == null) {
@@ -203,12 +248,131 @@ public final class CardNumberMasker {
                 for (int position = index; position < maskUntil; position++) {
                     masked.setCharAt(position, MASK_CHARACTER);
                 }
+                index = runEnd;
+                continue;
+            }
+
+            // WHY : Assumptions: the separated test is reached only when the contiguous test did not fire,
+            //       and it starts at the same position, so the two rules never both act on one value and the
+            //       contiguous behaviour every existing caller relies on is bit-for-bit unchanged. Ordering
+            //       them this way rather than the reverse matters: a contiguous run of sixteen digits is
+            //       also a "uniformly separated" sequence of four groups with an empty separator under a
+            //       looser reading, and letting the separated rule see it first would make one value
+            //       maskable by two code paths with two different tail calculations.
+            int separatedEnd = separatedCandidateEnd(text, index, runEnd);
+            if (separatedEnd > index) {
+                if (masked == null) {
+                    masked = new StringBuilder(text);
+                }
+                maskSeparatedDigits(masked, index, separatedEnd);
+                index = separatedEnd;
+                continue;
             }
 
             index = runEnd;
         }
 
         return masked == null ? text : masked.toString();
+    }
+
+    /**
+     * Finds the end of a uniformly separated card-number candidate beginning at a digit run.
+     *
+     * <p>Assumptions: the candidate must open with a group of exactly {@value #SEPARATED_GROUP_LENGTH}
+     * digits, and every subsequent group must be that same width and be introduced by one occurrence of
+     * the SAME separator character as the first join. The first join is what fixes the separator for the
+     * whole candidate, so {@code 4111-1111 1111-1111} is not one candidate but a shorter one that stops
+     * at the space -- and stopping there leaves it below the digit threshold, so nothing is masked. That
+     * strictness is deliberate: a mixed-separator sequence is not a shape anybody writes a card number
+     * in, and admitting it would let two adjacent unrelated values be joined into one match.</p>
+     *
+     * <p>Assumptions: a group whose digit run is not exactly {@value #SEPARATED_GROUP_LENGTH} long ends
+     * the candidate WITHOUT being counted, so a trailing group of five digits leaves only the three
+     * groups before it and the candidate then falls below the group threshold and matches nothing.
+     * Measuring each group's whole run before comparing -- rather than reading four digits and moving
+     * on -- is what makes that true: reading a fixed four would accept the first four digits of a wider
+     * group and report a match inside a value that is not of this shape at all.</p>
+     *
+     * <p>Trade-offs: the scan returns an end offset rather than a boolean plus a second pass, so the
+     * caller masks exactly the span this method measured. Returning a boolean would leave the caller to
+     * re-derive the extent, which is the kind of duplicated arithmetic that lets a masking rule disagree
+     * with its own detector.</p>
+     *
+     * @param text the text being scanned
+     * @param start the index of the first digit of the opening group
+     * @param firstRunEnd the exclusive end of the opening digit run, already measured by the caller
+     * @return the exclusive end offset of the candidate when one is present and carries at least
+     *     {@value #CARD_NUMBER_LENGTH} digits, otherwise {@code start} to report no match
+     */
+    private static int separatedCandidateEnd(String text, int start, int firstRunEnd) {
+        if (firstRunEnd - start != SEPARATED_GROUP_LENGTH) {
+            return start;
+        }
+
+        char separator = 0;
+        int groups = 1;
+        int position = firstRunEnd;
+        int length = text.length();
+
+        while (position + 1 + SEPARATED_GROUP_LENGTH <= length) {
+            char candidateSeparator = text.charAt(position);
+            if (SEPARATOR_CHARACTERS.indexOf(candidateSeparator) < 0) {
+                break;
+            }
+            if (separator != 0 && candidateSeparator != separator) {
+                break;
+            }
+
+            int groupStart = position + 1;
+            int groupEnd = groupStart;
+            while (groupEnd < length && isDigit(text.charAt(groupEnd))) {
+                groupEnd++;
+            }
+            if (groupEnd - groupStart != SEPARATED_GROUP_LENGTH) {
+                break;
+            }
+
+            separator = candidateSeparator;
+            groups++;
+            position = groupEnd;
+        }
+
+        return groups >= SEPARATED_MIN_GROUPS ? position : start;
+    }
+
+    /**
+     * Masks every digit of a separated candidate except its last four, leaving the separators in place.
+     *
+     * <p>Assumptions: the tail exposed is four DIGITS rather than four characters, counted from the end
+     * of the span, so a candidate ending in a separator could not shift the boundary. Counting characters
+     * instead would expose only three digits of {@code 4111-1111-1111-1111} and would expose a separator
+     * as though it were data.</p>
+     *
+     * <p>Trade-offs: the separators survive the masking, so {@code 4111-1111-1111-1111} renders as
+     * {@code ****-****-****-1111} rather than as an unbroken run of mask characters. Keeping them is
+     * what preserves the width and the shape of the surrounding text, which is the same property
+     * {@link #mask(String)} preserves for a bare number, and it makes a masked value recognisable as the
+     * separated form it arrived in.</p>
+     *
+     * @param masked the buffer holding a copy of the scanned text, modified in place
+     * @param start the inclusive start offset of the candidate
+     * @param end the exclusive end offset of the candidate
+     */
+    private static void maskSeparatedDigits(StringBuilder masked, int start, int end) {
+        int digitsRemaining = 0;
+        for (int position = start; position < end; position++) {
+            if (isDigit(masked.charAt(position))) {
+                digitsRemaining++;
+            }
+        }
+
+        int digitsToMask = digitsRemaining - VISIBLE_TAIL_LENGTH;
+        for (int position = start; position < end && digitsToMask > 0; position++) {
+            if (isDigit(masked.charAt(position))) {
+                masked.setCharAt(position, MASK_CHARACTER);
+                digitsToMask--;
+            }
+        }
     }
 
     /**

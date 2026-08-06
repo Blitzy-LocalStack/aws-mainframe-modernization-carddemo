@@ -188,22 +188,25 @@ import java.util.List;
  * read by the program and reach no {@code ST-LINE} field, so this artifact has nothing for the
  * parity comparison to blank before comparing.</p>
  *
- * <h2>Assumptions: the statement file has no key, and the descriptor cannot say so</h2>
+ * <h2>Assumptions: the statement file has no key, and every band says so</h2>
  *
  * <p>{@code SELECT STMT-FILE ASSIGN TO STMTFILE.} at line 39 of {@code app/cbl/CBSTM03A.CBL}
  * declares neither an organisation nor a record key, and the data set it is assigned to is
  * sequential, {@code RECFM=FB} at line 89 of {@code app/jcl/CREASTMT.JCL}. A statement band has no
- * key field of any kind. {@link CopybookLayout.RecordSpec} cannot express that, because its
- * constructor requires a key of at least one byte, so each band below declares its key as the
- * whole 80 characters at offset zero: the band's identity is its entire content.</p>
+ * key field of any kind, and every band below states exactly that: it is declared through
+ * {@link CopybookLayout.RecordSpec#keyless(String, int, java.util.List)} and carries
+ * {@link CopybookLayout.RecordSpec#NO_RETRIEVAL_KEY} as its key length.</p>
  *
- * <p>Alternatives Considered: declaring a one-byte key at offset zero as a placeholder. Rejected
- * because it would nominate a byte that is not distinguishing. The first character of six of the
- * seventeen bands is a literal shared with other bands -- an asterisk in {@code ST-LINE0} and
+ * <p>Refactoring Rationale: an earlier revision declared the key as the WHOLE 80 characters at
+ * offset zero, because the descriptor then required a key length of at least one and no shorter
+ * declaration could avoid nominating a byte that is not distinguishing -- the first character of six
+ * of the seventeen bands is a literal shared with other bands, an asterisk in {@code ST-LINE0} and
  * {@code ST-LINE15}, a hyphen in {@code ST-LINE5}, {@code ST-LINE10} and {@code ST-LINE12}, and a
- * blank in several more -- so a reader or a tool taking that component at face value would treat
- * an identical value across distinct bands as a key. Declaring the whole extent states the absence
- * of a key subfield instead of disguising it.</p>
+ * blank in several more. Choosing the whole extent was the least misleading invention available, and
+ * it was still an invention: it asserted a retrieval contract the file does not have, and it
+ * asserted a different one from the report bands, which are keyless for the identical reason and had
+ * invented a single byte instead. The descriptor now expresses the absence, so nothing is disguised
+ * and the two record families agree.</p>
  *
  * <h2>Assumptions: the geometry check is fail-closed and every band passes it unaided</h2>
  *
@@ -408,14 +411,6 @@ public final class StatementBandLayouts {
 
     public static final String HYPHEN_RULE = "-".repeat(HYPHEN_RULE_LENGTH);
 
-    // WHY : Assumptions: zero is the only offset a whole-record key can start at, and it is named
-    //       so that the keyless declaration below reads as a deliberate statement rather than as
-    //       two unexplained numbers. The statement file has no key at all -- line 39 of
-    //       app/cbl/CBSTM03A.CBL declares neither an organisation nor a record key, and line 89 of
-    //       app/jcl/CREASTMT.JCL gives the data set a sequential record format -- so see the class
-    //       documentation for why the descriptor nonetheless names the whole band as its key.
-    private static final int BAND_KEY_OFFSET = 0;
-
     // WHY : Trade-offs: every offset below, and every width that is a plain declared character
     //       count, is written as an integer literal rather than through a named constant. That is
     //       the same compromise the shared kernel's field factories were shaped for: a declaration
@@ -462,10 +457,21 @@ public final class StatementBandLayouts {
     //       address bands above, which are 50 plus 30. The reason is arithmetic rather than
     //       stylistic: lines 472 to 481 assemble it from four source items, CUST-ADDR-LINE-3
     //       PIC X(50), CUST-ADDR-STATE-CD PIC X(02), CUST-ADDR-COUNTRY-CD PIC X(03) and
-    //       CUST-ADDR-ZIP PIC X(10) at lines 11 to 14 of app/cpy/CVCUS01Y.cpy, separated by three
-    //       single blanks, which is 68 characters at full occupancy. That does not fit the 50 the
-    //       two bands above declare, so the item is declared full width. Adding a FILLER here to
-    //       make the band resemble its neighbours would push the total past 80.
+    //       CUST-ADDR-ZIP PIC X(10) at lines 11 to 14 of app/cpy/CVCUS01Y.cpy, each part followed
+    //       by one blank literal. That is FOUR separators, not three: the STRING statement spells
+    //       out ' ' DELIMITED BY SIZE after every one of the four items, including a TRAILING
+    //       blank after the postal code, so full occupancy is 50 plus 1, plus 2 plus 1, plus 3
+    //       plus 1, plus 10 plus 1 -- 69 characters, not 68.
+    // WHY : Refactoring Rationale: an earlier revision of this comment said "three single blanks"
+    //       and "68 characters", having assumed the separators merely joined the four parts. The
+    //       baseline puts one after each part, so both numbers were wrong by exactly one. The
+    //       single authority for the figure is StatementTextMapper.ADDRESS_ASSEMBLY_CAPACITY,
+    //       which is 69 and is what the assembly actually appends; cite that constant rather
+    //       than restating the arithmetic if this needs repeating again.
+    //       Neither correction weakens the conclusion drawn below -- it strengthens it, because 69
+    //       overruns the 50 the two bands above declare by more than 68 did. That is why the item
+    //       is declared full width, and why adding a FILLER here to make the band resemble its
+    //       neighbours would push the total past 80: 69 plus 30 is 99.
     public static final CopybookLayout.RecordSpec ST_LINE4 = declareBand("ST-LINE4",
             CopybookLayout.text("ST-ADD3", 0, STATEMENT_LINE_LENGTH));
 
@@ -721,13 +727,20 @@ public final class StatementBandLayouts {
     /**
      * Declares one statement band at the record geometry all seventeen bands share.
      *
-     * <p>Assumptions: three of the five components of {@link CopybookLayout.RecordSpec} are the
-     * same for every band, so they are applied here once instead of being restated seventeen
-     * times. The record length is the declared 80 of line 45 of {@code app/cbl/CBSTM03A.CBL}. The
-     * key is the whole 80 characters at offset zero, because the statement file has no key at all
-     * -- {@code SELECT STMT-FILE ASSIGN TO STMTFILE.} at line 39 declares neither an organisation
-     * nor a record key -- and the descriptor cannot express a key of zero bytes, as the class
-     * documentation sets out at length.</p>
+     * <p>Assumptions: the record length is the same for every band, so it is applied here once
+     * instead of being restated seventeen times: the declared 80 of line 45 of
+     * {@code app/cbl/CBSTM03A.CBL}. The bands are declared through
+     * {@link CopybookLayout.RecordSpec#keyless(String, int, java.util.List)} because the statement
+     * file has no key at all -- {@code SELECT STMT-FILE ASSIGN TO STMTFILE.} at line 39 declares
+     * neither an organisation nor a record key.</p>
+     *
+     * <p>Refactoring Rationale: an earlier revision declared the WHOLE 80-character line as the key
+     * at offset zero, because the descriptor then required a key length of at least one and 80 was
+     * the only length that could not be mistaken for a real key. No output byte depended on it, but
+     * the metadata claimed a retrieval contract the file does not have, and it claimed a different
+     * one from the report bands, which are keyless for the identical reason and had invented a single
+     * byte instead. The descriptor now expresses the absence directly, so both families state the
+     * same fact the same way and nothing has to be inferred from an implausible width.</p>
      *
      * <p>Assumptions: {@link CopybookLayout.RecordSpec#validateGeometry()} is called on every band
      * as it is declared, so a wrong offset or width is reported when this class loads rather than
@@ -737,12 +750,11 @@ public final class StatementBandLayouts {
      * passed in are wrong; the declared length is a property of the data set and is never the
      * thing to change in response.</p>
      *
-     * <p>Alternatives Considered: writing the constructor call out at each of the seventeen
-     * declaration sites, as the shared kernel's own registry does. Rejected here for a reason that
-     * does not apply there: its fourteen layouts each carry a genuinely different record length,
-     * key length and key offset, so restating them is informative, whereas seventeen repetitions
-     * of one identical triple would bury the one component that differs and would give the keyless
-     * declaration seventeen places to be explained instead of one.</p>
+     * <p>Alternatives Considered: writing the factory call out at each of the seventeen declaration
+     * sites, as the shared kernel's own registry does for its constructor calls. Rejected here for a
+     * reason that does not apply there: its fourteen layouts each carry a genuinely different record
+     * length, key length and key offset, so restating them is informative, whereas seventeen
+     * repetitions of one identical length would bury the one argument that differs.</p>
      *
      * @param bandName the declared group name of the band, used as the descriptor name and in the
      *     message of any geometry rejection
@@ -757,7 +769,7 @@ public final class StatementBandLayouts {
      */
     private static CopybookLayout.RecordSpec declareBand(String bandName,
             CopybookLayout.FieldSpec... fields) {
-        return new CopybookLayout.RecordSpec(bandName, STATEMENT_LINE_LENGTH,
-                STATEMENT_LINE_LENGTH, BAND_KEY_OFFSET, List.of(fields)).validateGeometry();
+        return CopybookLayout.RecordSpec.keyless(bandName, STATEMENT_LINE_LENGTH, List.of(fields))
+                .validateGeometry();
     }
 }

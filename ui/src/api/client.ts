@@ -1,11 +1,11 @@
-import axios from "axios";
-import type { AxiosInstance, InternalAxiosRequestConfig } from "axios";
+import axios from 'axios';
+import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 
-const ACCESS_TOKEN_STORAGE_KEY = "carddemo.access-token";
+const ACCESS_TOKEN_STORAGE_KEY = 'carddemo.access-token';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 60_000;
-const DEFAULT_CORRELATION_HEADER = "X-Correlation-Id";
+const DEFAULT_CORRELATION_HEADER = 'X-Correlation-Id';
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 
 /**
@@ -29,10 +29,10 @@ let client: AxiosInstance | undefined;
  * @throws {Error} If the build omitted the URL or supplied an unsafe value.
  */
 function apiBaseUrl(): string {
-  const configured = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim() ?? '';
   if (configured.length === 0) {
     throw new Error(
-      "CardDemo API configuration is unavailable; VITE_API_BASE_URL was not supplied for this build.",
+      'CardDemo API configuration is unavailable; VITE_API_BASE_URL was not supplied for this build.',
     );
   }
 
@@ -41,17 +41,17 @@ function apiBaseUrl(): string {
     parsed = new URL(configured);
   } catch {
     throw new Error(
-      "CardDemo API configuration is invalid; VITE_API_BASE_URL must be an absolute URL.",
+      'CardDemo API configuration is invalid; VITE_API_BASE_URL must be an absolute URL.',
     );
   }
 
   const localDevelopment =
     import.meta.env.DEV &&
-    parsed.protocol === "http:" &&
-    (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
-  if (parsed.protocol !== "https:" && !localDevelopment) {
+    parsed.protocol === 'http:' &&
+    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
+  if (parsed.protocol !== 'https:' && !localDevelopment) {
     throw new Error(
-      "CardDemo API configuration is invalid; only HTTPS is accepted outside local development.",
+      'CardDemo API configuration is invalid; only HTTPS is accepted outside local development.',
     );
   }
   if (
@@ -61,11 +61,11 @@ function apiBaseUrl(): string {
     parsed.hash.length > 0
   ) {
     throw new Error(
-      "CardDemo API configuration is invalid; user information, queries and fragments are not permitted.",
+      'CardDemo API configuration is invalid; user information, queries and fragments are not permitted.',
     );
   }
 
-  return configured.replace(/\/+$/u, "");
+  return configured.replace(/\/+$/u, '');
 }
 
 /**
@@ -80,11 +80,7 @@ function apiTimeoutMs(): number {
   }
 
   const timeout = Number(configured);
-  if (
-    !Number.isInteger(timeout) ||
-    timeout < MIN_TIMEOUT_MS ||
-    timeout > MAX_TIMEOUT_MS
-  ) {
+  if (!Number.isInteger(timeout) || timeout < MIN_TIMEOUT_MS || timeout > MAX_TIMEOUT_MS) {
     throw new Error(
       `CardDemo API timeout must be a whole number from ${String(MIN_TIMEOUT_MS)} through ${String(MAX_TIMEOUT_MS)} milliseconds.`,
     );
@@ -99,11 +95,10 @@ function apiTimeoutMs(): number {
  */
 function correlationHeaderName(): string {
   const configured =
-    import.meta.env.VITE_CORRELATION_ID_HEADER?.trim() ??
-    DEFAULT_CORRELATION_HEADER;
+    import.meta.env.VITE_CORRELATION_ID_HEADER?.trim() ?? DEFAULT_CORRELATION_HEADER;
   if (!HTTP_TOKEN_PATTERN.test(configured)) {
     throw new Error(
-      "CardDemo correlation-header configuration is invalid; the value must be an HTTP token.",
+      'CardDemo correlation-header configuration is invalid; the value must be an HTTP token.',
     );
   }
   return configured;
@@ -142,8 +137,8 @@ function newCorrelationId(): string {
      * @returns {string} Its two-character upper-case hexadecimal rendering, zero-padded so that
      *   every byte contributes exactly two characters and the total length is fixed.
      */
-    (byte: number): string => byte.toString(16).toUpperCase().padStart(2, "0"),
-  ).join("");
+    (byte: number): string => byte.toString(16).toUpperCase().padStart(2, '0'),
+  ).join('');
 }
 
 /**
@@ -152,12 +147,10 @@ function newCorrelationId(): string {
  * @returns {InternalAxiosRequestConfig} The same configuration with bounded security headers
  *   applied.
  */
-function applyRequestHeaders(
-  config: InternalAxiosRequestConfig,
-): InternalAxiosRequestConfig {
+function applyRequestHeaders(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig {
   const token = sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
   if (token !== null && token.length > 0) {
-    config.headers.set("Authorization", `Bearer ${token}`);
+    config.headers.set('Authorization', `Bearer ${token}`);
   }
   config.headers.set(correlationHeaderName(), newCorrelationId());
   return config;
@@ -173,7 +166,7 @@ export function getApiClient(): AxiosInstance {
     client = axios.create({
       baseURL: apiBaseUrl(),
       timeout: apiTimeoutMs(),
-      headers: { Accept: "application/json" },
+      headers: { Accept: 'application/json' },
     });
     client.interceptors.request.use(applyRequestHeaders);
   }
@@ -191,9 +184,7 @@ export function setAccessToken(token: string | null): void {
     return;
   }
   if (token.length === 0 || /[\u0000-\u001F\u007F]/u.test(token)) {
-    throw new RangeError(
-      "Access token must be non-empty and contain no control characters.",
-    );
+    throw new RangeError('Access token must be non-empty and contain no control characters.');
   }
   sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
 }

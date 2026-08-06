@@ -264,21 +264,37 @@ import java.util.Objects;
  * <p>Assumptions: the reference declares two unchecked working-storage tables, at lines 225 to 233
  * of {@code app/cbl/CBSTM03A.CBL}, whose declared arities are 51 cards and 10 transactions per
  * card. This class holds no table and imposes no arity: a caller emits as many transaction lines as
- * it has transactions, one call each. That divergence is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which another agent owns and which is
- * cited here by path alone.</p>
+ * it has transactions, one call each. That divergence is registered as <b>D-2</b> in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section 7.1. It is cited by identifier
+ * rather than by path alone because that register's own discipline requires it: a claim of
+ * registration that names nothing cannot be checked against the register, and the two sides are
+ * meant to be reconcilable by search.</p>
  *
- * <h2>Assumptions: no member here overrides an inherited method</h2>
+ * <h2>Trade-offs: each nested record overrides {@code toString} and nothing else</h2>
  *
- * <p>No member of this class or of its three nested records is an override, so the generated
- * {@code equals}, {@code hashCode} and {@code toString} of each record are the canonical ones.
- * Alternatives Considered: hand-writing a {@code toString} on the prepared-field records for
- * diagnostics. Rejected on two independent grounds. Such a method would carry an account identifier
- * into whatever string a log statement built, widening exposure at a boundary this class
- * deliberately keeps narrow; and user-specified Rule 1 (Explainability) attaches its docstring
- * obligation at line 15 to every method with no visibility or annotation carve-out, so an override
- * would need real prose stating what this implementation does with the inherited contract, which an
- * inherited-documentation reference alone cannot supply.</p>
+ * <p>The generated {@code equals} and {@code hashCode} of all three nested records are the
+ * canonical ones, because each record is a set of values with no identity of its own and
+ * component-wise comparison is exactly right for that. The generated {@code toString} is
+ * <b>replaced</b> in all three, and that is the only override in this file.</p>
+ *
+ * <p>Refactoring Rationale: the generated rendering of a record prints every component. For these
+ * three records that means an account holder's assembled name, both address lines, the assembled
+ * address, the edited balance, the credit score, the transaction description and two monetary
+ * amounts -- reached by any string concatenation, log template, assertion message or debugger that
+ * touches an instance, with no call site having asked for it. An earlier revision of this paragraph
+ * declined to write a {@code toString} on the stated grounds that one would carry an account
+ * identifier into a log line; that reasoning was inverted, because declining an override does not
+ * suppress a rendering, it leaves the generated one in place and discloses strictly more. Each
+ * replacement therefore names at most the one component that locates the row -- the account
+ * identifier on the header record, the transaction identifier on the per-transaction record, and
+ * nothing at all on the trailer record, whose single component is a monetary total -- and each
+ * carries the prose that user-specified Rule 1 (Explainability) requires of any method, stating
+ * what it withholds and why.</p>
+ *
+ * <p>Assumptions: none of the three renderings is a parity artifact. The bytes this class emits are
+ * produced only by the three emission methods through the shared codec, so a comparison against a
+ * golden statement must never be built from a rendering here; the renderings drop declared trailing
+ * blanks, which alone would break a byte comparison.</p>
  *
  * @see StatementBandLayouts
  * @see CobolEditMask
@@ -500,15 +516,29 @@ public final class StatementTextMapper {
     private static final String DECLARED_BLANK = "";
 
     /**
+     * Marker a diagnostic rendering emits in place of a value it declines to disclose.
+     *
+     * <p>Assumptions: an explicit marker is emitted rather than an empty position, because an empty
+     * position reads as an absent value and would send a reader looking for a hydration fault that
+     * did not happen. Alternatives Considered: omitting the component name as well, so the
+     * rendering named only the type. Rejected because the component name is the part a reader needs
+     * in order to know which value was withheld, and it discloses nothing by itself.</p>
+     */
+    private static final String WITHHELD = "<withheld>";
+
+    /**
      * Carries the once-per-card values that the header bands and the markup rendering both read.
      *
      * <p>Assumptions: every component is a character item at its <b>exact declared width, trailing
      * blanks included</b>, and nothing in it has been trimmed. That is not tidiness but a
-     * requirement of the consumer: the markup rendering transfers four of these values up to their
-     * first PAIRED blank and then re-appends exactly two blanks, at lines 563, 571, 579 and 587 of
-     * {@code app/cbl/CBSTM03A.CBL}, and it transfers three more as whole items including their
-     * blanks, at lines 614, 621 and 628. A value handed over already trimmed would make the first
-     * of those regimes meaningless and would shorten the second.</p>
+     * requirement of the consumer: the markup rendering transfers four values reached through this
+     * record up to their first PAIRED blank and then re-appends exactly two blanks, at lines 563,
+     * 571, 579 and 587 of {@code app/cbl/CBSTM03A.CBL}, and it transfers three more as whole items
+     * including their blanks, at lines 614, 621 and 628. A value handed over already trimmed would
+     * make the first of those regimes meaningless and would shorten the second. The first of the
+     * four is the narrowed name that {@link #markupName()} derives, and the narrowing keeps the
+     * trailing blanks of its leftmost {@value StatementTextMapper#MARKUP_NAME_WIDTH} characters for
+     * exactly that reason.</p>
      *
      * <p>Assumptions: the two amount-shaped components are already edited strings rather than
      * numbers, because the reference edits once and both artifacts read the edited item. Line 484
@@ -522,10 +552,8 @@ public final class StatementTextMapper {
      *
      * @param assembledName the assembled customer name at its declared width of
      *     {@value StatementTextMapper#ASSEMBLED_NAME_WIDTH} characters, as the first band carries
-     *     it
-     * @param markupName the same name narrowed to the declared width of
-     *     {@value StatementTextMapper#MARKUP_NAME_WIDTH} characters that the markup rendering
-     *     receives, retained separately because the narrowing happens once and both widths are read
+     *     it; the narrower width the markup rendering receives is derived from it by
+     *     {@link PreparedHeaderFields#markupName()} rather than stored beside it
      * @param addressLine1 the first address line at its declared width of
      *     {@value StatementTextMapper#ADDRESS_LINE_WIDTH} characters
      * @param addressLine2 the second address line at its declared width of
@@ -544,7 +572,6 @@ public final class StatementTextMapper {
      */
     public record PreparedHeaderFields(
             String assembledName,
-            String markupName,
             String addressLine1,
             String addressLine2,
             String assembledAddress,
@@ -563,8 +590,6 @@ public final class StatementTextMapper {
          *
          * @param assembledName the assembled name, exactly
          *     {@value StatementTextMapper#ASSEMBLED_NAME_WIDTH} characters
-         * @param markupName the narrowed name, exactly
-         *     {@value StatementTextMapper#MARKUP_NAME_WIDTH} characters
          * @param addressLine1 the first address line, exactly
          *     {@value StatementTextMapper#ADDRESS_LINE_WIDTH} characters
          * @param addressLine2 the second address line, exactly
@@ -583,7 +608,6 @@ public final class StatementTextMapper {
          */
         public PreparedHeaderFields {
             requireExactWidth(assembledName, ASSEMBLED_NAME_WIDTH, "assembledName");
-            requireExactWidth(markupName, MARKUP_NAME_WIDTH, "markupName");
             requireExactWidth(addressLine1, ADDRESS_LINE_WIDTH, "addressLine1");
             requireExactWidth(addressLine2, ADDRESS_LINE_WIDTH, "addressLine2");
             requireExactWidth(assembledAddress, ASSEMBLED_ADDRESS_WIDTH, "assembledAddress");
@@ -598,6 +622,71 @@ public final class StatementTextMapper {
             requireExactWidth(currentBalance, StatementBandLayouts.STATEMENT_AMOUNT_LENGTH,
                     "currentBalance");
             requireExactWidth(creditScore, CREDIT_SCORE_ITEM_WIDTH, "creditScore");
+        }
+
+        /**
+         * Returns the assembled name narrowed to the declared width the markup rendering receives.
+         *
+         * <p>Assumptions: line 560 of {@code app/cbl/CBSTM03A.CBL} moves the assembled name into a
+         * narrower item inside the markup group, and line 563 then reads that narrower item. This
+         * accessor performs the same narrowing on demand, so the markup rendering reads the value
+         * through the same set of prepared fields the plain-text rendering reads, exactly as the
+         * package charter describes.</p>
+         *
+         * <p>Alternatives Considered: three placements were weighed. <b>Storing the narrowed name
+         * as an eighth component</b> was the original shape and is rejected: the value is a pure
+         * function of {@code assembledName}, the compact constructor checked only its width and
+         * never its agreement with the name it is supposed to narrow, so the record admitted an
+         * instance whose two name widths disagreed about the same customer, and nothing in the type
+         * could detect it. <b>Leaving the narrowing entirely to the markup rendering</b> was
+         * rejected because the derivation would then live outside the type that owns the assembled
+         * name, and two renderings of one name could drift apart without either being wrong on its
+         * own terms. <b>Deriving it here</b> keeps one derivation, makes disagreement structurally
+         * impossible, and keeps the member name the markup rendering reads.</p>
+         *
+         * <p>Trade-offs: the narrowing is recomputed on every call rather than computed once. That
+         * cost is a bounded substring of a 75-character string with no allocation beyond the
+         * result, and it buys the invariant above; caching it would reintroduce exactly the
+         * stored-and-unchecked state this accessor replaces.</p>
+         *
+         * @return the leftmost {@value StatementTextMapper#MARKUP_NAME_WIDTH} characters of
+         *     {@link #assembledName()}, trailing blanks included, never {@code null}
+         */
+        public String markupName() {
+            return narrowNameForMarkup(assembledName);
+        }
+
+        /**
+         * Renders this record for a log line or an assertion message, naming only the account
+         * identifier.
+         *
+         * <p>Trade-offs: six of the seven components are omitted outright rather than abbreviated,
+         * and the omission is unconditional because a rendering reached through string
+         * concatenation, a log template or a debugger cannot be asked to remember to withhold
+         * anything. Four of the six -- the assembled name, both address lines and the assembled
+         * address -- are the account holder's name and postal address, which the migration plan
+         * treats as data to be narrowed at a mapping boundary and never widened at a diagnostic
+         * one. The remaining two are the current balance and the credit score, which the sibling
+         * view types of this module also omit from their own renderings, so omitting them here
+         * keeps one rule across the module rather than two that differ. The cost accepted is that a
+         * reader cannot reconstruct a statement header from a log line, and the compensation is
+         * that no log line written from this record can carry a name, an address, a balance or a
+         * credit score at all.</p>
+         *
+         * <p>Alternatives Considered: reporting each withheld component's length instead of its
+         * content, so that a width fault could be diagnosed from a log line. Rejected because every
+         * component is checked for its exact declared width by the compact constructor above, so an
+         * instance that exists has only one possible length per component and the report would
+         * restate seven constants.</p>
+         *
+         * @return a single-line rendering naming the type and the account identifier, with the
+         *     identifier's declared trailing blanks dropped so the line reads cleanly; this is a
+         *     diagnostic form and is never the band rendering, which
+         *     {@link StatementTextMapper#emitHeaderBlock(PreparedHeaderFields)} alone produces
+         */
+        @Override
+        public String toString() {
+            return "PreparedHeaderFields[accountId=" + accountId.strip() + ']';
         }
     }
 
@@ -648,6 +737,31 @@ public final class StatementTextMapper {
             requireExactWidth(description, DESCRIPTION_ITEM_WIDTH, "description");
             requireExactWidth(amount, StatementBandLayouts.STATEMENT_AMOUNT_LENGTH, "amount");
         }
+
+        /**
+         * Renders this record for a log line or an assertion message, naming only the transaction
+         * identifier.
+         *
+         * <p>Trade-offs: the description and the amount are omitted and the identifier is kept. The
+         * identifier is kept because it locates the row exactly and carries no account holder
+         * information of its own, which is the same reason the sibling view types of this module
+         * keep theirs. The amount is omitted because it is a monetary figure and those view types
+         * omit theirs. The description is omitted because its source is 100 characters of free text
+         * transcribed from the transaction record, so what it contains is decided by whoever
+         * originated the transaction rather than by this module, and a rendering cannot know
+         * whether a given value names a merchant, a person or neither. The cost accepted is that a reader
+         * cannot tell from a log line what a transaction was for or what it was worth.</p>
+         *
+         * @return a single-line rendering naming the type and the transaction identifier, with the
+         *     identifier's declared trailing blanks dropped so the line reads cleanly; this is a
+         *     diagnostic form and is never the band rendering, which
+         *     {@link StatementTextMapper#emitTransactionLine(PreparedTransactionFields)} alone
+         *     produces
+         */
+        @Override
+        public String toString() {
+            return "PreparedTransactionFields[transactionId=" + transactionId.strip() + ']';
+        }
     }
 
     /**
@@ -685,6 +799,26 @@ public final class StatementTextMapper {
          */
         public PreparedTrailerFields {
             requireExactWidth(cardTotal, StatementBandLayouts.STATEMENT_AMOUNT_LENGTH, "cardTotal");
+        }
+
+        /**
+         * Renders this record for a log line or an assertion message, naming no component.
+         *
+         * <p>Trade-offs: the single component is a monetary total, so a rendering that named it
+         * would be a rendering of nothing but money, and the sibling view types of this module omit
+         * their monetary members from their own renderings. The type name and an explicit
+         * withheld marker are emitted instead of the total, so that a log line still says which
+         * value reached that point without saying what it was. The alternative of leaving the
+         * generated rendering in place was rejected outright: it prints the edited total verbatim,
+         * which is the one thing this record must not put into a log line.</p>
+         *
+         * @return a single-line rendering naming the type and marking its component withheld; this
+         *     is a diagnostic form and is never the band rendering, which
+         *     {@link StatementTextMapper#emitCardTrailer(PreparedTrailerFields)} alone produces
+         */
+        @Override
+        public String toString() {
+            return "PreparedTrailerFields[cardTotal=" + WITHHELD + ']';
         }
     }
 
@@ -764,9 +898,15 @@ public final class StatementTextMapper {
         //       empty middle part therefore yields two consecutive blanks, and that PAIRED blank is
         //       load-bearing downstream: the markup regime at line 563 truncates at the first
         //       paired blank, so the markup name cell shows the first name alone while this
-        //       artifact's first band still shows the whole paired-blank name. That observation
-        //       is registered in docs/architecture/cobol-to-service-traceability.md, which another
-        //       agent owns and which is cited here by path alone.
+        //       artifact's first band still shows the whole paired-blank name.
+        // WHY : Assumptions: that asymmetry is the REFERENCE's own and is reproduced here exactly,
+        //       so it is an observation about the baseline rather than a departure from it. It is
+        //       nevertheless recorded, as D-STMT-PAIRED-BLANK-NAME in
+        //       docs/architecture/cobol-to-service-traceability.md, and the entry's own category
+        //       line says it is reproduced rather than diverged. Recording it is what makes a later
+        //       collapse of the paired blank visibly a CHANGE: an artifact this odd is otherwise
+        //       repaired on sight, and the repair would then differ from the golden statement in
+        //       the bytes of its first band with nothing to point at.
         // WHY : Trade-offs: the blanks are emitted as the reference emits them rather than
         //       collapsed, so this class does not attempt to make the two artifacts agree on a name
         //       whose middle part is empty. Collapsing them would change the bytes of the first
@@ -1023,13 +1163,13 @@ public final class StatementTextMapper {
 
         String assembledName = assembleName(firstName, middleName, lastName);
 
-        // WHY : Assumptions: the narrowed markup name is derived here, from the assembled name, and
-        //       is carried alongside it rather than being left to the markup mapper. Line 560 of
-        //       app/cbl/CBSTM03A.CBL performs that move inside the markup paragraph, but its input
-        //       is the item this preparation produced, so deriving it here keeps both widths
-        //       traceable to one assembly. A markup mapper that narrowed independently could be
-        //       handed a name it had not assembled and would have no way to know it.
-        String markupName = narrowNameForMarkup(assembledName);
+        // WHY : Refactoring Rationale: the narrowed markup name is NOT computed here and NOT
+        //       carried as a component. Line 560 of app/cbl/CBSTM03A.CBL performs that narrowing inside the
+        //       markup paragraph, and its input is the assembled name this method produces, so the
+        //       returned record derives it on demand through PreparedHeaderFields.markupName()
+        //       instead. Storing it here made the record hold two widths of one name with no check
+        //       that they agreed, and a caller reaching the canonical constructor directly could
+        //       pair the narrowing of one name with another name entirely.
 
         // WHY : Assumptions: lines 470 and 471 are plain moves and not concatenations, so no
         //       blank-delimiter rule applies to the first two address lines. Source and target are
@@ -1044,9 +1184,10 @@ public final class StatementTextMapper {
         //       ACCT-CURR-BAL, declared PIC S9(10)V99 with TEN integer digits at line 7 of
         //       app/cpy/CVACT01Y.cpy, into ST-CURR-BAL, declared PIC 9(9).99- with NINE at line
         //       113, and silently discards one high-order digit for any balance of a thousand
-        //       million or more. The Java raises instead, and the divergence is registered in
-        //       docs/architecture/cobol-to-service-traceability.md, which another agent owns and
-        //       which is cited here by path alone. The compromise accepted is that such a balance
+        //       million or more. The Java raises instead, and the divergence is registered as
+        //       D-EDIT-MASK-OVERFLOW in docs/architecture/cobol-to-service-traceability.md section
+        //       7.4, cited by identifier because a registration claim naming only a path cannot be
+        //       checked against the register. The compromise accepted is that such a balance
         //       produces no statement at all rather than a plausible one: a nine-digit string that
         //       silently dropped the leading digit would understate a balance by at least a
         //       thousand million while filling the item and parsing cleanly, and no downstream
@@ -1055,7 +1196,6 @@ public final class StatementTextMapper {
 
         return new PreparedHeaderFields(
                 assembledName,
-                markupName,
                 atDeclaredWidth(addressLine1, ADDRESS_LINE_WIDTH),
                 atDeclaredWidth(addressLine2, ADDRESS_LINE_WIDTH),
                 assembleAddressLine3(addressLine3, stateCode, countryCode, postalCode),

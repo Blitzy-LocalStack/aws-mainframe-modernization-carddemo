@@ -461,8 +461,8 @@ transaction definition anywhere ([§4.1](#41-copaus2c-present-in-neither-transac
 | Program | Type | Source | Target artifact | Notes |
 |---|---|---|---|---|
 | `CORPT00C` | online | [`app/cbl/CORPT00C.cbl`](../../app/cbl/CORPT00C.cbl) | `ReportController` | The transient-data-queue submission becomes an orchestration start; see [`batch-orchestration.md`](batch-orchestration.md) |
-| `CBTRN03C` | batch | [`app/cbl/CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl) | `TransactionReportService` | 133-column output with its exact edit masks |
-| `CBSTM03A` | batch | [`app/cbl/CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) | `StatementService` grouping | Registered divergence: [D-2](#d-2--the-two-unchecked-statement-tables) |
+| `CBTRN03C` | batch | [`app/cbl/CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl) | `TransactionReportService`, `TransactionReportMapper` | 133-column output with its exact edit masks. Registered divergences: [D-REPORT-EOF-DOUBLE-COUNT](#d-report-eof-double-count--the-last-transactions-amount-is-counted-once-not-twice), [D-REPORT-FINAL-CARD-BREAK](#d-report-final-card-break--the-last-card-group-is-closed-with-a-total-band-like-every-other) |
+| `CBSTM03A` | batch | [`app/cbl/CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) | `StatementService` grouping, `StatementTextMapper` | Registered divergences: [D-2](#d-2--the-two-unchecked-statement-tables), [D-STMT-PAIRED-BLANK-NAME](#d-stmt-paired-blank-name--an-empty-middle-name-leaves-the-two-statement-artifacts-disagreeing) |
 | `CBSTM03B` | batch | [`app/cbl/CBSTM03B.CBL`](../../app/cbl/CBSTM03B.CBL) | `StatementService` rendering | Plain-text and HTML rendering |
 
 ### 2.9 Realised as user-interface routes rather than as a service
@@ -1272,11 +1272,38 @@ batch chain.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source. Six of them are cited **by identifier** and the identifier here is the
-identifier used there, character for character; the remaining ten were cited
-generically as "registered" or "documented" without an identifier, so an identifier
-is assigned here and added at each citing site, because a claim of registration that
-names nothing cannot be checked.
+source, and all **thirty-three** are cited **by identifier**, the identifier here being the
+identifier used there character for character. They reached that state by three routes,
+recorded because the routes explain the difference in tone between them. Some were cited
+by identifier from the outset. Others were cited generically as "registered" or
+"documented" without naming anything, or asserted the divergent behaviour while claiming
+nothing at all, so an identifier was assigned here and added at each citing site, because
+a claim of registration that names nothing cannot be checked, and a difference that claims
+nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
+the other way round — identifier first, then cited from the published reference contract —
+which is the discipline this section asks of everything added after them. Assumptions:
+thirty-three is a measured count of the `####` headings in this section and not a running
+tally kept by hand, so a reader adding an entry updates one number here and nothing else.
+
+Refactoring Rationale: a `D-REFDATA-CATEGORY-BATCH` entry stood here and has been
+withdrawn. It registered the maintenance-action batch as additionally addressing
+transaction categories, which the published contract does not do: the baseline's three
+statements all name `CARDDEMO.TRANSACTION_TYPE` and its fifty-three-byte input record has
+no field able to carry a category, so the `catCd` member was removed from
+`MaintenanceAction` rather than registered — category writes already reach the category
+operations on the same contract, so nothing was lost by removing it. A register entry for
+a capability the contract does not publish is worse than no entry, because it is the one
+document a reader consults to learn what the target does differently.
+
+Assumptions: not every reference to this document from shipped source is a claim of the kind
+above, and the difference matters when auditing them. Most name the register as the place
+divergences live, or state that a file claims none; those correctly carry no identifier. So do
+the ones that point at [§7.3](#73-structural-divergences-that-are-not-defects), whose entries
+lead with a bolded sentence rather than an identified heading — the eliminated re-entry
+discriminator and the response-driven field-error highlight are both cited that way. A
+reference with no identifier beside it is therefore not by itself evidence of an unhonoured
+claim; what has to be honoured is a reference asserting that **a specific difference** is
+registered, and each of those names its entry.
 
 Refactoring Rationale: these entries are authored because their absence made the
 register's own opening sentence false. A file that says a difference "is registered
@@ -1555,7 +1582,8 @@ a register of this size stays true.
   5 at **L326**, and moves the description from position 6 onward at **L327**, writing a
   `'9999'` and `'ERROR'` pair at **L321-L323** when the table lookup finds no entry. The
   receiving field is `AUTHRSNO PIC X(20)` at **L248** of
-  [`app/cpy-bms/COPAU01.cpy`](../../app/cpy-bms/COPAU01.cpy), corroborated by
+  [`app/app-authorization-ims-db2-mq/cpy-bms/COPAU01.cpy`](../../app/app-authorization-ims-db2-mq/cpy-bms/COPAU01.cpy),
+  corroborated by
   `AUTHRSNI PIC X(20)` at **L84**, and the move at L327 targets `AUTHRSNO(6:)` — a
   reference-modified receiver of exactly fifteen positions — so COBOL **truncates the
   sixteenth character** of the description on the way in.
@@ -1689,7 +1717,652 @@ a register of this size stays true.
 * **Files.** `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
   `services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java`.
 
+#### D-SEED-ENCODING-AUTHORITY — the EBCDIC extract decides the DEFAULT interest rate
 
+* **Baseline behaviour.** The disclosure-group seed ships **twice**, and the two
+  copies disagree about money. Nine datasets exist in both encodings, and across all
+  fifty-one records of this one they are identical except at a single field of a single
+  record: record 34, the `DEFAULT` group's `('07','0001')` combination, holds
+  `DIS-INT-RATE` as `00150{` in
+  [`app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS`](../../app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS)
+  and as `00000{` in [`app/data/ASCII/discgrp.txt`](../../app/data/ASCII/discgrp.txt).
+  Under `DIS-INT-RATE PIC S9(04)V99` at [`CVTRA02Y.cpy`](../../app/cpy/CVTRA02Y.cpy)
+  those decode to **15.00** and **0.00**. Measured rate multiplicities differ with it:
+  29/16/6 versus 30/15/6 for 0.00/15.00/25.00. That row is the one
+  [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L415-L441** falls back to when an
+  account's own group key is absent, so the disagreement is not cosmetic — it is the
+  rate a fallback account accrues at.
+* **Target behaviour.** Where a dataset ships in both encodings the **EBCDIC `.PS`
+  extract is authoritative**, so this row is 15.00 on every route into
+  `reference.disclosure_groups`: the Flyway seed and the ETL loaders now agree.
+* **Category.** Documented divergence — seed-source authority, resolving a
+  contradiction internal to the baseline rather than departing from it.
+* **Why the difference is accepted.** There is no reading under which both values can
+  be kept, so the only question is which extract to trust, and the extracts are not
+  peers. The `.PS` files are the mainframe extracts the baseline programs read —
+  fixed-length blocked records carrying sign overpunch and packed fields — while the
+  `.txt` files are conversions of them whose fidelity is already known to be imperfect
+  from two independent shape findings: `cardxref.txt` has lost its trailing `FILLER`,
+  and three of the nine have acquired CRLF terminators. Neither is a property of the
+  source data. A conversion that dropped fourteen bytes from one file is not the form
+  to trust when it disagrees about a rate. Alternatives Considered: seeding the ASCII
+  value for uniformity with the six other reference inserts, which is the cheaper edit.
+  Rejected because uniformity of provenance is worth nothing beside uniformity of
+  RESULT — two routes into one table must not disagree about an operand **L464-L465**
+  multiplies a balance by. What makes the choice more than a preference is the baseline's
+  own load job: [`DISCGRP.jcl`](../../app/jcl/DISCGRP.jcl) **L56-L61** defines the VSAM
+  cluster and REPROs into it from the DD at **L57**, which names
+  `DSN=AWS.M2.CARDDEMO.DISCGRP.PS` — the EBCDIC extract. No JCL in the repository loads the
+  `.txt` form at all, so 15.00 is the value the reference system itself reads.
+  Alternatives Considered: reconciling the two extracts by
+  editing one. Refused outright, `app/**` being reference-only; the difference is
+  resolved by choosing a source and never by changing a byte of either.
+* **Why the parity oracle is unaffected.** Three reference artefacts read 0.00 for this row
+  — `app/data/ASCII/discgrp.txt` row 34,
+  [`tests/fixtures/interest/default_fallback/discgrp.txt`](../../tests/fixtures/interest/default_fallback/discgrp.txt)
+  line 17 and [`tests/mocks/mock_discgrp.txt`](../../tests/mocks/mock_discgrp.txt) line 33 —
+  and the objection they invite has to be answered rather than left standing. The latter two
+  are INPUTS the suite hands to the program under test: a golden-master comparison supplies
+  the same 0.00 to the reference program and to its migrated equivalent, so it is indifferent
+  to what any seed holds. The reference-service fixture tree copies the ASCII form for a
+  separate and deliberate reason — in the EBCDIC form the `DEFAULT` group prices `07|0001`
+  identically to group `A000000000`, so a fallback fixture built from it could not
+  discriminate a fallback from a direct hit.
+* **Where it is verified.** Applying `V1__reference.sql` and `V2__seed_reference.sql`
+  to an empty schema yields `('DEFAULT   ','07','0001')` at `15.00` and rate
+  multiplicities of 29/16/6, matching the EBCDIC extract's own counts; the two
+  extracts' single differing record is reproducible directly from the raw bytes by the
+  command `data-migration/README.md` carries beside its twin-divergence table.
+* **Files.**
+  `services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql`,
+  `data-migration/README.md`.
+
+#### D-AUTH-DIAGNOSTIC-DISCLOSURE — authorization segment bytes are withheld by default
+
+* **Baseline behaviour.** The two authorization segments,
+  [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) **L19-L31**
+  and [`CIPAUDTY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy)
+  **L19-L54**, classify nothing. A copybook declares widths and usages and carries no
+  notion of a field whose content may not be logged, so the baseline has no disclosure
+  policy to migrate — the question is created by the target's own diagnostics.
+* **Target behaviour.** The ETL layout catalogue resolves both segments through an
+  explicit **disclosable allowlist**: a field's raw bytes may appear in a decode
+  diagnostic only when it is named as a closed-domain code, a date or time, a counter,
+  the account key or the trailing pad. Everything else — the card number, the card
+  expiry, both amounts, the merchant identity, name, city and postal code, the
+  transaction identity, the customer identifier and the four stored balance and limit
+  amounts — is withheld, and a field added to either segment later is withheld until it
+  is deliberately named.
+* **Category.** Documented divergence — diagnostic disclosure policy, additive.
+* **Why the difference is accepted.** The same record content is already classified
+  this way one language over: `CsvAuthCodec.SENSITIVE_FIELD_NAMES` withholds exactly
+  this set over the authorization wire. One record cannot carry two sensitivities, and
+  the wider of the two has to win, because a malformed byte is precisely the case that
+  produces a log line — so the narrower policy disclosed in full, on the requests
+  already going wrong, what the wider one refuses to emit at all. Trade-offs: an
+  allowlist is longer to read than the four extra markers it replaces, and that is the
+  point: with a denylist a newly added field is disclosable until somebody remembers to
+  mark it, so the cost of forgetting is disclosure rather than silence.
+* **Where it is verified.** The two layouts' geometry checks still close at 100 and 200
+  bytes after the policy is applied, and the resulting per-field classification matches
+  `CsvAuthCodec.SENSITIVE_FIELD_NAMES` name for name, merchant STATE excepted in both.
+* **Files.** `data-migration/src/carddemo_migration/copybook/layouts.py`,
+  `data-migration/src/carddemo_migration/copybook/ebcdic_codec.py`.
+
+#### D-AUTH-AMOUNT-TOLERANT-READ — a declared-width amount token is read whole, not truncated
+
+* **Baseline behaviour.**
+  [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) **L27**
+  declares `PA-RQ-TRANSACTION-AMT PIC +9(10).99`, which is **fourteen** characters.
+  The only consumer of that wire,
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl), receives
+  ordinal nine of its `UNSTRING` at **L364** into `WS-TRANSACTION-AMT-AN PIC X(13)`
+  declared at **L63** — **thirteen** — and converts it with `FUNCTION NUMVAL` at
+  **L376-L377**. An alphanumeric move into a shorter item drops the **last** character,
+  and `NUMVAL` accepts one fraction digit as readily as two, so a producer emitting the
+  declared width has its amount received as a different, entirely plausible value: an
+  emitted `+0000000100.99` is acted on as **100.90**. Nothing is raised anywhere.
+* **Target behaviour.** `CsvAuthCodec` is a **tolerant reader and a strict writer**. It
+  accepts a fourteen-character token and parses every character of it, so the producer's
+  intent survives; it **emits** thirteen (`REQUEST_MONEY_WIDTH`), so its canonical wire
+  length is `REQUEST_WIRE_LENGTH` = 169 and the reference receiver is never handed a
+  token it would truncate; and a token that has already been truncated to thirteen
+  characters is **refused by name**, because the parser requires exactly two fraction
+  digits.
+* **Category.** Documented divergence — a silent truncation is not reproduced.
+* **Why the difference is accepted.** Three behaviours were available and only one is
+  defensible. Alternatives Considered: reproducing the truncation, so that a
+  fourteen-character token yields the same amount the reference would act on. Rejected
+  outright — it divides an amount by ten in the cents position with no diagnostic, which
+  is exactly the class of defect the fixed-point rule exists to prevent. Alternatives
+  Considered: refusing the fourteen-character token, on the grounds that the emitted wire
+  is thirteen. Rejected because it would dead-letter a payload whose intent is
+  unambiguous, purely because a third party built to the width this repository publishes
+  as the layout — and no request producer exists here to correct. Reading it whole is the
+  only option that neither loses the value nor loses the message. The asymmetry is
+  deliberate: tolerance is confined to the inbound direction, so nothing this service
+  emits can be truncated by the reference receiver.
+* **Where it is verified.** `AuthRequestWireFixtureTest` reads both committed fixtures
+  from the classpath and asserts that the three 169-byte payloads decode with a
+  thirteen-character amount, that the 170-byte declared-width payload decodes to the full
+  value it spells, that a token truncated to thirteen characters is refused by name, and
+  that re-emitting the decoded declared-width payload produces exactly 169 bytes with a
+  thirteen-character amount.
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java`,
+  `services/authorization-service/src/main/resources/openapi/authorization-api.yaml`,
+  `docs/architecture/messaging-contracts.md`.
+
+#### D-STMT-PAIRED-BLANK-NAME — an empty middle name leaves the two statement artifacts disagreeing
+
+* **Baseline behaviour.** [`CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) assembles the
+  customer name at **L462-L469** by concatenating three 25-character parts, each
+  **delimited by a blank** and each followed by an unconditional one-character blank
+  literal at **L463**, **L465** and **L467**. The literals are separate operands of the
+  concatenation, not separators emitted between non-empty parts, so an **empty or
+  all-blank middle name yields two consecutive blanks** in the 75-character item declared
+  at **L91**. The plain-text artifact prints that item whole at **L488**. The markup
+  artifact does not: **L560** moves the same item into the 50-character item declared at
+  **L220**, and **L563** then transfers it **delimited by two blanks** and re-appends
+  exactly two, so the markup name cell stops at the paired blank and shows the **first
+  name alone**. One customer, one assembly, two artifacts that disagree about the name.
+* **Target behaviour.** Identical. `StatementTextMapper.assembleName` emits all three
+  blank literals unconditionally, and `PreparedHeaderFields.markupName()` narrows without
+  trimming, so the paired blank survives into the value the markup rendering reads.
+* **Category.** Reproduced baseline behaviour — recorded because it looks like a defect.
+* **Why the difference is accepted.** There is no difference, and that is the entry. The
+  paired blank is the kind of artifact a later reader repairs on sight — collapsing it
+  reads as tidying, and the plain-text band would then differ from the golden statement in
+  the bytes of its first line, which transformation rule **T9** forbids. Recording it here
+  is what makes the collapse visibly a change rather than a clean-up. The consequence is
+  stated in full so nobody has to rediscover it: for a customer with no middle name, the
+  two artifacts genuinely show different names, and neither is wrong.
+* **Where it is verified.** `StatementTextMapperTest`
+  `assembleNameEmitsThreeBlankLiteralsUnconditionally` asserts the two blanks at their own
+  offsets and asserts that the narrowing keeps them;
+  `narrowNameForMarkupPreservesTrailingBlanks` asserts the narrowing never trims.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/StatementTextMapper.java`.
+
+#### D-REPORT-CLOSING-TOTAL — the last card group is closed by an account-total band
+
+* **Baseline behaviour.** [`CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl) writes the
+  account-total band from **one place only**: the card-number break at **L181**, whose
+  first-time guard at **L182** performs `1120-WRITE-ACCOUNT-TOTALS` at **L183**. That
+  break fires when the NEXT card arrives, so it closes every group except the last. The
+  end-of-file branch at **L198-L203** performs the page totals at **L202** and the grand
+  totals at **L203** and never the account-total paragraph, so the report ends with the
+  final group's own total never written — the amounts accumulated into
+  `WS-ACCOUNT-TOTAL` at **L288** for that group are reset by nothing and reported by
+  nothing.
+* **Target behaviour.** `TransactionReportMapper.encodeAccountTotal` is available
+  unconditionally, so the caller closes the last group exactly as it closes every other,
+  and the report carries **one more account-total band** than the baseline's for the same
+  input.
+* **Category.** Documented divergence — an omitted closing band supplied.
+* **Why the difference is accepted.** The band the baseline omits is not a band it
+  decided against; the omission follows from the break being driven by the arrival of the
+  next key, which cannot happen at end of file. Every group's total is a value the report
+  is for, and dropping the last one makes the report's own bands fail to sum to its grand
+  total, which a reader checking the arithmetic would read as data loss. Alternatives
+  Considered: suppressing the last band to keep a byte comparison clean. Rejected because
+  it would reproduce an arithmetic inconsistency in order to preserve a diff, which
+  inverts the purpose of the parity check — the check exists to find differences worth
+  explaining, and this one is explained here. Alternatives Considered: emitting it only
+  when the run holds more than one card group. Rejected as a second rule with no
+  reference basis, which would make the band's presence depend on the input's shape.
+* **Where it is verified.** `TransactionReportMapperTest`
+  `theAccountTotalBandEncodesTheFinalCardGroupExactlyAsAnyOther` asserts the band encodes at
+  its declared length for a final group, and
+  `theAccountTotalEncoderExposesNoSuppressionParameter` together with
+  `aCardBreakTotalIsReachableUnconditionally` assert the encoder's signature carries exactly
+  one parameter — the amount — so no end-of-run flag exists by which a caller could
+  reintroduce the suppression. A byte comparison against a captured baseline artifact then
+  shows exactly one additional 112-byte band, at the end, whose amount equals the final
+  group's detail lines; the difference is bounded to that band and appears nowhere earlier in
+  the report. Assumptions: only the mapper half of this divergence is asserted today. The
+  emitting sequence that has to CALL the encoder for the last group belongs to the statement
+  and report emitting service, which is not yet authored, and this entry is the record that
+  the obligation is owed there.
+* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`.
+
+#### D-REPORT-GRAND-TOTAL — the last transaction's amount is counted once, not twice
+
+* **Baseline behaviour.** [`CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl) adds each
+  transaction's amount into both accumulators at **L287-L288** as it writes the detail
+  line. Its end-of-file branch then adds an amount into the SAME two accumulators again
+  at **L200-L201**, reading `TRAN-AMT` from the record area left over from the last
+  successful read — the read having already been reported at **L287-L288** on the previous
+  iteration. **L202** then performs `1110-WRITE-PAGE-TOTALS`, which carries the page total
+  into the grand total at **L297**, so the final transaction's amount reaches both the last
+  page total and the grand total **twice**. The second addition into the card-break
+  accumulator at **L201** is never emitted at all, because the card-break band itself is
+  never written for the final group — see `D-REPORT-CLOSING-TOTAL` above.
+* **Target behaviour.** Each amount is accumulated **once**, so the grand total is exactly
+  the sum of the page totals and the page totals are exactly the sums of their detail
+  lines.
+* **Category.** Documented divergence — a double count in the baseline is not reproduced.
+* **Why the difference is accepted.** The second addition reads a record area whose
+  contents are undefined after end of file is reached; that it holds the last record's
+  amount is an artifact of the runtime rather than a documented behaviour, so reproducing
+  it would mean reproducing an artifact, not a rule. The result is also self-evidently
+  wrong on its own terms: a total that does not equal the sum of the lines above it makes
+  every figure in the report unusable for reconciliation, which is the report's purpose.
+  Alternatives Considered: adding the final amount a second time to match the baseline
+  byte for byte. Rejected because it would publish a figure the report's own detail lines
+  contradict. Alternatives Considered: fixing the baseline. Refused outright, `app/**`
+  being reference-only — which is exactly why the difference is registered here instead.
+* **Where it is verified.** `TransactionReportMapperTest`
+  `theGrandTotalBandCarriesTheSumOfThePageTotalsAndNotTheBaselinesRepetition` and
+  `theTotalEncodersHoldNoAccumulator` assert that no total encoder holds state of any kind —
+  a repeat call with one value is byte-identical, and a second call renders its own value
+  rather than a running sum — so a total renders exactly what it was handed. For any input
+  the emitted grand total then equals the sum of the emitted page totals, and each page total
+  equals the sum of its own detail amounts; a captured baseline artifact differs from the
+  emitted report in the grand-total field and in the final page-total field by exactly the
+  last transaction's amount. Assumptions: as with the entry above, the half that says the
+  emitting sequence adds each row's amount once belongs to the emitting service that is not
+  yet authored, and this entry records that the obligation is owed there.
+* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`.
+
+#### D-AUTH-FRAUD-TARGET-STATE — the fraud write names the state to end in, not a toggle
+
+* **Baseline behaviour.**
+  [`COPAUS1C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl) `MARK-AUTH-FRAUD`
+  at **L230-L243** takes **no** action argument. It re-reads the detail segment at **L234**
+  and then inverts whatever it found: `IF PA-FRAUD-CONFIRMED` at **L236** sets
+  `PA-FRAUD-REMOVED` at **L237**, and the `ELSE` at **L239** sets `PA-FRAUD-CONFIRMED` at
+  **L240**. The two condition names are declared on
+  [`CIPAUDTY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy) **L50-L52** as
+  `PA-AUTH-FRAUD PIC X(01)` with `88 PA-FRAUD-CONFIRMED VALUE 'F'` and
+  `88 PA-FRAUD-REMOVED VALUE 'R'`, so an untagged row — the column is neither `'F'` nor
+  `'R'` — takes the `ELSE` and becomes `'F'`. The terminal reaches this paragraph through
+  one PF key, so the resulting state is a function of the state already stored and of
+  nothing the operator supplied. Pressing the key twice returns the row to where it began.
+* **Target behaviour.** `PUT /api/v1/authorizations/{key}/fraud` carries
+  `FraudMarkRequest.action`, whose closed domain is the same `'F'`/`'R'` pair, and the
+  write sets the column to **the state the body names**. Two identical requests therefore
+  leave the row in the state the first one produced; they do not return it to its original
+  state.
+* **Category.** Documented divergence — the reference toggle is replaced by an idempotent
+  target-state write.
+* **Why the difference is accepted.** The transport, not the rule, forces the choice.
+  Assumptions: a `PUT` is retried by intermediaries, by client libraries and by operators
+  who did not see a response, and none of those retries carries the operator's intent —
+  only the fact that the first attempt's outcome is unknown. Under toggle semantics a
+  retry **reverses** the operation the operator asked for, and the reversal is
+  indistinguishable from success: the response reports a completed write either way, and
+  the row ends up untagged when the operator asked for it to be tagged. That is a
+  correctness failure in the direction that matters, because a fraud tag silently removed
+  by a retry is exactly the state the tag exists to prevent. Alternatives Considered:
+  reproducing the toggle by ignoring the body and inverting the stored column, which is
+  byte-for-byte the reference rule. Rejected because the operation would then not be
+  idempotent, and no status code can tell a caller whether its retry set or cleared the
+  tag. Alternatives Considered: keeping the toggle but making the operation a `POST` on a
+  non-idempotent sub-resource, so the method no longer promises what the semantics cannot
+  deliver. Rejected because the promise is the point — the reference terminal had one
+  operator watching one screen and could rely on the operator seeing the outcome, whereas
+  this operation is reached over a network by clients that retry, so an unsafe-by-design
+  write would move the defect from the contract into every caller. Trade-offs: an operator
+  driving this endpoint cannot invert the stored state without first reading it, which the
+  detail operation supplies in the same round trip the terminal needed to reach its own
+  screen. Nothing observable is lost: the two reachable end states are the two the
+  reference program can produce, the persisted characters are the reference characters, and
+  the insert-versus-update distinction the reference write reports is preserved on the
+  response.
+* **Where it is verified.** `authorization-api.yaml` declares the member as a state rather
+  than a command and cites this entry at the operation, at the request body and at the
+  schema; the schema's closed `'F'`/`'R'` enum is asserted by the authorization contract
+  test, which also asserts that no third character is admitted.
+* **Files.** `services/authorization-service/src/main/resources/openapi/authorization-api.yaml`.
+
+#### D-AUTH-REQUEST-WINDOW — the declared five-hundred-request bound is enforced, not the observed 501
+
+* **Baseline behaviour.**
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) declares
+  `05 WS-REQSTS-PROCESS-LIMIT PIC S9(4) COMP VALUE 500` at **L40**, increments its
+  counter after each request at **L332**, and tests it with `>` rather than `>=` at
+  **L339**. Counts one through five hundred therefore all take the `ELSE` and read
+  another request at **L342**; only count **501** sets the loop-end flag at **L340**.
+  The declared limit is 500 and the observed behaviour is 501, and the difference
+  follows entirely from the order of the increment and the comparison rather than from
+  any rule the program states.
+* **Target behaviour.** `AuthorizationRequestListener` counts every request it takes
+  off the queue and closes its processing window on exactly
+  `DEFAULT_REQUEST_PROCESS_LIMIT` = **500**, overridable by
+  `carddemo.messaging.request-process-limit`. Closing the window means closing
+  **intake**: `ContainerCyclingWindowBoundary` stops the listener container and starts
+  it again, so the request that would have been the 501st of the window is never
+  received and stays on the queue until the next window opens.
+* **Category.** Documented divergence — an off-by-one in the reference implementation
+  is not reproduced.
+* **Why the difference is accepted.** Both the field name and its literal state five
+  hundred, so five hundred is the rule and 501 is what the code happens to do;
+  reproducing 501 would promote an implementation defect into a contract. Alternatives
+  Considered: refusing the 501st request inside the handler rather than closing intake.
+  Rejected because neither outcome available there is correct — throwing sends a
+  legitimate request toward the dead-letter queue over a bound that has nothing to do
+  with the request, and returning without handling deletes a request nobody answered.
+  Only closing intake before the receive keeps the bound and the message both intact,
+  which is exactly what the reference program's test-before-next-read achieves.
+  Alternatives Considered: leaving the bound unimplemented and treating the container's
+  concurrency and poll settings as its replacement. Rejected because those settings
+  bound work **in flight** rather than work **completed**, so they express a different
+  quantity: a consumer configured for ten concurrent messages still handles an
+  unbounded number of them. Trade-offs: cycling a container is heavier than the
+  reference program's run simply ending, and the cost is a brief pause in intake at
+  each boundary. Every failure path in the boundary therefore leaves intake **open** —
+  a window that failed to reopen would halt every authorization in the system, which is
+  strictly worse than a window that ran long. Trade-offs: the counter is per task
+  rather than per queue, so the platform-wide figure is the quota times the task count;
+  that matches the reference system, where the limit bounded one running program and the
+  queue could trigger more than one, and a shared counter would need a coordination
+  round trip on the hot path of every authorization.
+* **Where it is verified.** `AuthorizationRequestListenerTest` asserts that no window
+  closes before the quota, that the window closes on the quota-th message carrying the
+  quota as its reported count, that successive windows each close on their own full
+  quota so the counter resets, that a dropped stale request and a request whose handling
+  threw each occupy their place in the window, that a non-positive window size is refused
+  at construction, and that the compiled default is five hundred rather than 501.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/RequestWindowBoundary.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/ContainerCyclingWindowBoundary.java`,
+  `docs/architecture/messaging-contracts.md`.
+
+#### D-REFERENCE-INTEGRITY-SENTENCE — one integrity branch answers three integrity conditions
+
+* **Baseline behaviour.** The reference programs separate exactly one integrity
+  condition from the rest and answer the remainder generically. A restricted delete is
+  distinguished on its own database code and answered with an instruction to the user —
+  [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) branches at
+  **L1914**, sets its delete-requested state at **L1915**, moves
+  `'Please delete associated child records first:'` at **L1919** and leaves through the
+  normal exit at **L1925**, and
+  [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl) takes the same
+  branch at **L1638** with the same literal at **L1641**. Every other integrity failure
+  falls to a catch-all: the insert paragraph at `COTRTUPC.cbl` **L1596** has only a zero
+  arm at **L1605** and a `WHEN OTHER` at **L1607** that sets `TABLE-UPDATE-FAILED`
+  (`'Update of record failed'`) and strings the SQLCODE and `SQLERRM` into the message,
+  and the batch maintenance program
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) does the same at
+  its insert **L137** with a zero arm at **L152** and a negative arm at **L154**. A
+  duplicate key on create and an absent parent on create therefore have **no
+  distinguished outcome and no sentence of their own** anywhere in the baseline.
+* **Target behaviour.** The reference contract answers a duplicate key on create, an
+  absent parent on create and a restricted delete all with HTTP 409 carrying the
+  restricted-delete sentence. All three arrive as one provider exception family —
+  PostgreSQL raises SQLSTATE 23505 for the first and 23503 for the other two, and Spring
+  surfaces every one of them as `DataIntegrityViolationException` — which
+  `GlobalExceptionHandler` maps in a single branch to `MESSAGE_REFERENCED_ROW`.
+  reference-service declares no advice of its own, so this is the only 409 body its
+  create paths can return.
+* **Category.** Documented divergence — a condition the baseline reports as a failed
+  write is reported as a contention, and three conditions share one sentence.
+* **Why the difference is accepted.** Alternatives Considered: composing a fourth
+  sentence for the duplicate-key condition and selecting it from a
+  `DuplicateKeyException` test placed ahead of the generic integrity test. Rejected on
+  the text, not on the mechanism: the baseline declares no entity-agnostic
+  already-exists literal to carry across. The three it does declare are
+  `'Tran ID already exist...'` at [`COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L738**,
+  the same string at [`COBIL00C.cbl`](../../app/cbl/COBIL00C.cbl) **L536**, and
+  `'User ID already exist...'` at [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) **L263**,
+  each naming its own entity — so a shared, entity-agnostic advice could only invent one,
+  and transformation rule T8 makes every user-visible string baseline text rather than
+  authored text. Alternatives Considered: reporting a duplicate key as HTTP 500 with the
+  abend block, which is the closest literal reading of the baseline, since
+  `'Update of record failed'` is published for exactly the case where a write failed for
+  neither reason a client can act on. Rejected because a duplicate key IS a
+  client-correctable condition — the caller chooses another code and succeeds — and
+  answering it as a server fault would tell every client to retry unchanged and give up.
+  Trade-offs: what is given up is that a caller reading only the sentence cannot tell a
+  duplicate key from a restricted delete; what it buys is that the sentence is baseline
+  text in all three cases and that the status is the one a client can act on. The
+  compensating control is the request itself: the three conditions arise on different
+  operations and, on the one operation where two of them can both arise, the addressed
+  key is in the path, so a caller that reads its own request knows which it hit.
+* **Where it is verified.** `GlobalExceptionHandlerTest` asserts that the referential
+  branch emits the baseline literal character for character, both as a constant and as
+  the message of the composed 409 body, so the sentence these three conditions share
+  cannot drift. The contract states the sharing on each create operation and on the
+  shared `Conflict` response.
+* **Files.**
+  `services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java`,
+  `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+#### D-REFERENCE-ACTION-DOMAIN — an unrecognised maintenance action refuses the request, not the record
+
+* **Baseline behaviour.**
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) reads a stream of action
+  records and dispatches on a single record-type character at **L110** to **L129**. It recognises
+  `'A'` at **L111**, `'U'` at **L114** and `'D'` at **L117**, skips a `'*'` comment line at **L120**,
+  and for anything else takes the `WHEN OTHER` arm at **L122**, moves `'ERROR: TYPE NOT VALID'` at
+  **L124** and performs `9999-ABEND` at **L128**. That paragraph, at **L230**, displays the message,
+  moves 4 to `RETURN-CODE` at **L232** and returns; the read loop at **L94** to **L96** then reads the
+  NEXT record. One unrecognised record therefore costs one record: every other record in the stream is
+  still applied.
+* **Target behaviour.** The submitted action is a closed enumeration of `INSERT`, `UPDATE` and
+  `DELETE`, so a request carrying any other value is refused as a whole with HTTP 400 and **no action
+  is attempted**. The comment line has no counterpart at all: it is a property of a fixed-width input
+  file and has no expression in a JSON array of actions.
+* **Category.** Documented divergence — the granularity of the refusal changes, while every other
+  per-action outcome is preserved exactly.
+* **Why the difference is accepted.** Alternatives Considered: typing the action as an unrestricted
+  bounded string and reporting an unrecognised value as a per-action `FAILED` outcome carrying the
+  baseline's own sentence, which would reproduce the granularity precisely. Rejected because the value
+  is a discriminator the request cannot be interpreted without: a JSON body is validated as a whole
+  before a handler sees it, and admitting any string here would move a structural check out of the
+  schema and into the service on the one member that decides which statement runs — which is exactly
+  the class of defect that made the batch's description requirement unenforceable before it was
+  expressed as a conditional. Alternatives Considered: keeping the enumeration and additionally
+  reporting the position of the offending action in the 400's field-error array, which is what the
+  shared validation path already does. This is what happens, and it is why the divergence costs a
+  caller nothing it cannot act on: the refusal names the position, so the caller corrects that action
+  and resubmits, whereas the baseline operator has to read a job log to find which record was skipped.
+  Trade-offs: what is given up is that a stream with one bad action applies none of the others in a
+  single request, so a caller with a large batch pays a round trip it would not have paid on the
+  mainframe; what it buys is that the request is either interpretable or refused, with no partially
+  interpretable middle state. The baseline's sentence is not lost — it is published verbatim as
+  `maintenanceTypeNotValid` on the `ReferenceMessageCatalogue` schema.
+* **Where it is verified.** `ReferenceApiContractTest` asserts that the action enumeration is closed to
+  the three verbs and that the batch response declares the per-action outcome state and the aggregate
+  condition code, so the one refusal that is coarser than the baseline's cannot silently become the
+  treatment of the other three outcomes as well.
+* **Files.**
+  `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+#### D-REPLY-PUT-LENGTH — the reply is sent at the sixty-three built, not the sixty-four transmitted
+
+* **Baseline behaviour.** [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+  holds one value for two purposes. `WS-RESP-LENGTH` is declared `PIC S9(4) VALUE 1` at
+  **L46**, serves as the `WITH POINTER` cursor of the outbound `STRING` at **L730** — so
+  after the transfer it addresses the position one **past** the last character written — and
+  is then moved into the put's buffer length at **L756** and passed to the call at **L762**.
+  The program therefore transmits **64 bytes for the 63 it built**, the sixty-fourth being a
+  space from the 200-byte put buffer declared at **L108**.
+* **Target behaviour.** `CsvAuthCodec` emits exactly 63 characters, including the trailing
+  comma that **L727** pairs with the sixth value, and its decoder tolerates a payload
+  arriving with the extra byte.
+* **Category.** Documented divergence — transmitted length of the reply.
+* **Why the difference is accepted.** The extra byte carries no information: it is
+  uninitialised buffer, and reproducing it would mean publishing a length this codec would
+  have to compute from a cursor it deliberately does not conflate with a length. Inside this
+  class a payload length and a scan position are always separate, differently named values,
+  precisely because holding them in one is what produced the extra byte. Tolerating it on
+  decode is what keeps the codec able to read the reference program's own traffic, so the
+  divergence is in what is emitted and not in what is accepted.
+* **Where it is verified.** `replyCanonicalLengthIsSixtyThreeNotSixtyTwo`,
+  `replyDelimiterPositionsIncludeTheTrailingComma` and
+  `replyEncoderEmitsExactlySixtyThreeCanonicalBytes`.
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/codec/CsvAuthCodec.java`.
+
+
+#### D-REPORTING-ISOLATION — reporting reads at read-committed, not at the baseline's uncommitted
+
+* **Baseline behaviour.** [`app/csd/CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) declares
+  `READINTEG(UNCOMMITTED)` on **every one of its eight file stanzas** — at **L3** for the
+  first, `ACCTDAT`, and at **L15**, **L27**, **L40**, **L53**, **L66**, **L78** and **L90**
+  for the rest — so a reading task was permitted to see a value a concurrent task had not yet
+  committed, on any file it read.
+* **Target behaviour.** The reporting context declares **no isolation override anywhere**: it
+  reads at the engine's default read-committed, through a pool marked `read-only: true`, so a
+  dirty read the baseline allowed cannot occur.
+* **Category.** Documented divergence — transaction isolation is tightened.
+* **Why the difference is accepted.** The tightening removes a permission, not a capability:
+  no report in the baseline depends on seeing uncommitted work, and a report that did would be
+  reporting numbers that may never exist. Reproducing uncommitted reads would require setting
+  an isolation level explicitly in order to obtain weaker guarantees than the default, which
+  is a choice that would have to be justified rather than inherited. The cost accepted is that
+  a reader blocked behind an uncommitted write waits where the baseline would have read
+  through it, which for a read-only reporting context is latency rather than incorrectness.
+* **Where it is verified.** By the absence the divergence consists of: no
+  `transaction-isolation` property and no `Isolation` reference occurs anywhere in
+  `services/reporting-service/src`, and the read-only pool property is declared at
+  `application.yml` L572 with its own rationale beside it.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/config/DataSourceConfig.java`,
+  `services/reporting-service/src/main/resources/application.yml`.
+
+
+#### D-REPORTING-DATA-AT-REST — the store read is encrypted and backed up where the baseline's was neither
+
+* **Baseline behaviour.** The same eight file stanzas of
+  [`app/csd/CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) declare `JOURNAL(NO)` and
+  `RECOVERY(NONE)` — at **L94** and **L96** for the last stanza, `USRSEC`, and on all eight —
+  so the accurate description of the baseline is that it kept **no forward recovery log and no
+  data-change journalling**, not that it journalled nothing at all: `JNLSYNCWRITE(YES)` sits
+  beside them at **L96**.
+* **Target behaviour.** The store this context reads is encrypted at rest under a
+  customer-managed key and has automated backups: `infra/modules/aurora-postgresql/main.tf`
+  declares `storage_encrypted = true`, `kms_key_id = var.kms_key_arn` and
+  `backup_retention_period`.
+* **Category.** Documented divergence — data-at-rest protection is added.
+* **Why the difference is accepted.** There is nothing to carry across: this context writes
+  nothing, so neither setting has a target analogue, and the protection is a property of the
+  managed store rather than a behaviour of this service. Declining it to match the baseline
+  would mean choosing an unencrypted, unbacked-up store for card and customer data, which the
+  plan forbids outright. The divergence is invisible to every observable output.
+* **Where it is verified.** In shipped infrastructure rather than in a test: the three
+  arguments above are declared in the Aurora module, and the reporting context declares no
+  migration and no writing datasource that could contradict them.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/config/DataSourceConfig.java`,
+  `infra/modules/aurora-postgresql/main.tf`.
+
+
+#### D-CATEGORY-CODE-TEXT — the transaction category code is carried as four characters, not as a number
+
+* **Baseline behaviour.** [`CVTRA04Y.cpy`](../../app/cpy/CVTRA04Y.cpy) declares
+  `TRAN-CAT-CD PIC 9(04)` at **L7** — a **numeric** picture — inside the record's key group.
+  Every other declaration of the same field in the baseline is alphanumeric or character:
+  [`DCLTRCAT.dcl`](../../app/app-transaction-type-db2/dcl/DCLTRCAT.dcl) declares
+  `TRC_TYPE_CATEGORY CHAR(4) NOT NULL` at **L30** and generates its host variable as
+  `PIC X(4)` at **L42-L43**, which is what the programs read and write through, and the seed
+  extract [`app/data/ASCII/trancatg.txt`](../../app/data/ASCII/trancatg.txt) stores the key by
+  positional concatenation — its first row begins `010001`, a two-character type followed by a
+  four-character category.
+* **Target behaviour.** The published contract's `TransactionCategoryCode` is a string of
+  exactly four characters and `reference.transaction_categories.cat_cd` is `CHAR(4)`, so
+  `'0001'` is carried and compared as four characters.
+* **Category.** Documented divergence — the declared type of a key field, not its value.
+* **Why the difference is accepted.** An integer would drop the leading zeros that every other
+  declaration of this field depends on, turning `'0001'` into `1`, and the seed extract would
+  then no longer locate its own rows because it holds the key positionally. The numeric picture
+  is the outlier among the baseline's own declarations rather than the rule, and following it
+  would break the three that agree with each other. No value changes: the four characters
+  carried are the four the record holds.
+* **Where it is verified.** By the seeded rows themselves — `V2__seed_reference.sql` loads the
+  extract's zero-padded codes, and a code that lost its padding would not match the composite
+  primary key the categories table declares — and by the contract's own length bounds, which
+  admit exactly four characters and no shorter form.
+* **Files.**
+  `services/reference-service/src/main/resources/openapi/reference-api.yaml`,
+  `services/reference-service/src/main/resources/db/migration/V1__reference.sql`,
+  `services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql`.
+
+
+#### D-APPLIED-GROUP-VISIBLE — a rate answer names the group that answered, not only the group asked for
+
+* **Baseline behaviour.** On a disclosure-group miss,
+  [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **overwrites its own group-id field** with the
+  literal `'DEFAULT'` at **L437** and re-reads at **L443-L444**, so after the second read the
+  field no longer records which group was asked for and nothing downstream can tell a fallback
+  rate from a specific one.
+* **Target behaviour.** The rate response echoes the requested group unchanged **and** reports
+  `appliedAcctGroupId`, the group that actually answered, as two separate members.
+* **Category.** Documented divergence — information added to a response, with no change of
+  selection.
+* **Why the difference is accepted.** The rate chosen is identical: the fallback rule is
+  reproduced exactly, and this entry concerns only what the caller is told about it. The
+  baseline could afford to lose the distinction because its one consumer was a batch program
+  computing interest and discarding the key; a published endpoint answers callers who reconcile
+  a charge against a rate table, and inferring a substitution from a rate is not something a
+  caller can do. Reporting both values makes the substitution visible without making it
+  optional.
+* **Where it is verified.** By the contract, which declares both members and documents the
+  substitution on the applied one, and by the fallback fixture
+  `disclosure_group/default_fallback/discgrp.txt`, which is built on the one pair that makes a
+  fallback assertion non-vacuous.
+* **Files.**
+  `services/reference-service/src/main/resources/openapi/reference-api.yaml`,
+  `services/reference-service/src/test/resources/fixtures/disclosure_group/default_fallback/discgrp.txt`.
+
+
+#### D-REFDATA-BATCH-CAP — the maintenance-action batch is capped at five hundred actions
+
+* **Baseline behaviour.**
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) is **EOF-driven
+  and uncapped**. Its loop at **L93-L96** reads until `AT END` sets `LASTREC` at
+  **L102**, so a stream of any length is processed and no count is kept, compared or
+  reported anywhere in the program.
+* **Target behaviour.** `MaintenanceActionBatchRequest.actions` declares
+  `minItems: 1` and `maxItems: 500`. A submission above the ceiling is refused with 400
+  before any action is applied.
+* **Category.** Documented divergence — a bound introduced by the transport.
+* **Why the difference is accepted.** The baseline's input is a dataset the operator
+  staged; the target's is a request body an authenticated caller sends, and an unbounded
+  body is a resource-exhaustion surface the baseline simply does not have. The lower
+  bound is there because an empty batch has no outcome to report. **Splitting a longer
+  stream reaches the same end state**, and it does so precisely because the batch is not
+  atomic — each action is applied independently, so successive requests compose. The one
+  rule a caller must observe is ordering: an action that depends on another, such as a
+  category beneath a type created in the same stream, must not be separated into an
+  **earlier** request than the action it depends on, because the foreign key is checked
+  as each action is applied.
+* **Where it is verified.** The `actions` member's description in the published contract
+  states the ceiling, names this entry and records the splitting rule.
+* **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+
+#### D-REFDATA-ACTION-TOKEN — an unrecognised action token is refused, not soft-rejected
+
+* **Baseline behaviour.**
+  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) evaluates the
+  one-character action at **L110-L129**, accepting `'A'`, `'U'` and `'D'`, **ignoring**
+  `'*'` as a commented line at **L120-L121**, and for anything else composing
+  `'ERROR: TYPE NOT VALID'` at **L124** and performing `9999-ABEND`. That paragraph, at
+  **L230-L233**, displays the message and moves 4 to `RETURN-CODE` — it does **not** stop
+  the run, so the loop reads the next record and every other record is still applied.
+* **Target behaviour.** `MaintenanceActionType` is an enumeration of `INSERT`, `UPDATE`
+  and `DELETE`, so an unrecognised token is refused with 400 naming the offending
+  position, and no action of the submission is applied. There is no `COMMENT` value.
+* **Category.** Documented divergence — request validation replaces a per-record
+  outcome.
+* **Why the difference is accepted.** The baseline reads a fixed-width dataset with no
+  schema, so an unusable action byte can only be discovered per record; a JSON request
+  is schema-validated before any handler runs, and transformation rule **T7** places
+  field-level rejection in the response body at 400. Reporting it as a per-record
+  outcome instead would require admitting an arbitrary string into the action member,
+  which would weaken the one part of this request a caller can be told about before it
+  is applied. The `'*'` convention has no analogue for the same reason a comment has no
+  analogue in an array: a caller composing actions omits the ones it does not want.
+  **Every other soft reject is preserved** — an unmatched key, a duplicate key, a
+  category naming an absent type and a refused delete are each reported as one outcome
+  with `applied` false and the baseline's own wording, and the submission's
+  `completionTier` reports `WARN`, which is the migrated form of that return code of 4.
+* **Where it is verified.** The operation's own note in the published contract records
+  the divergence and cites the baseline lines; the `completionTier` member documents the
+  two tiers the baseline reaches.
+* **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
 
 ## 8. Inventory caveats a reader will otherwise contradict
 

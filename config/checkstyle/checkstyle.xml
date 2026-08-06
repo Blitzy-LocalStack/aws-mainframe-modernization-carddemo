@@ -606,17 +606,35 @@ Whole families:
     LayeringRulesTest authored once in common-lib's test tree and re-run by
     each module against its own classes: no AWS SDK or web type inside a
     domain package, no service importing another service's domain package,
-    and no binary floating-point type in the money path. Two facts about that
-    ownership are stated because a reader auditing this exclusion needs both.
-    The rule class lands at a later index of the migration plan and does not
-    exist yet, so at this checkpoint NO engine enforces layering and the
-    boundary is carried by review; and it is not inherited as an artifact -
-    common-lib binds no test-jar goal, so each module declares the ArchUnit
-    engine at test scope and runs its own copy. Configuring ImportControl
-    would stand up a second engine enforcing an overlapping half of one
-    constraint, and a reader could then no longer tell which of the two owned
-    a given boundary, which is why the gap above is closed by landing that
-    class rather than by adding this module here.
+    and no binary floating-point type in the money path. Two facts about how
+    that ownership is delivered are stated because a reader auditing this
+    exclusion needs both. The rule class EXISTS, at
+    services/common-lib/src/test/java/com/carddemo/common/architecture/
+    LayeringRulesTest.java, and it is enforced on every build: common-lib
+    binds a test-jar execution that packages it, and the architecture-rules
+    Surefire execution in services/pom.xml scans that artifact into each of
+    the eight consuming modules and runs it against that module's own compiled
+    classes, reporting five tests - the three assertions above plus two guards
+    that the imported class graph is non-vacuous and that the ownership
+    contract is exactly the nine fixed package roots. And selecting nothing is
+    a build FAILURE rather than a silent pass, because the
+    architecture-rules-fail-if-absent profile in that same POM adds
+    failIfNoTests to the execution wherever a src/main/java directory exists.
+    Configuring ImportControl would stand up a second engine enforcing an
+    overlapping half of one constraint, and a reader could then no longer tell
+    which of the two owned a given boundary. That is the whole reason for the
+    exclusion, and it now rests on a running gate rather than on a promise.
+
+    Refactoring Rationale: this note previously stated that the rule class
+    "lands at a later index of the migration plan and does not exist yet, so
+    at this checkpoint NO engine enforces layering", and that "common-lib
+    binds no test-jar goal, so each module declares the ArchUnit engine at
+    test scope and runs its own copy". Both statements are now false, and the
+    second was the more damaging: a reader who believed each module ran its
+    own copy of the rules would look for a rule class in eight places and find
+    none, and might reasonably conclude the boundary was unenforced and
+    configure ImportControl here after all - which is precisely the second
+    engine this exclusion exists to prevent.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Companion file: config/checkstyle/suppressions.xml.
 

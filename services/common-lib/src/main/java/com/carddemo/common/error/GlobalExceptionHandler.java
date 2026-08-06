@@ -6,6 +6,7 @@ import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -221,17 +222,28 @@ public class GlobalExceptionHandler {
     /**
      * The entity-agnostic sentence emitted when a row could not be locked for update.
      *
-     * <p>Trade-offs: this is the one message in this class that is not a baseline literal, and the
-     * divergence is deliberate. The baseline names the row in the text, at 40 and 41 characters for the
-     * account and customer rows respectively, because the program raising it knows which row it was
-     * writing. This advice is shared by every bounded context and is reached by propagation, so at the
-     * point it renders the response the identity of the row is no longer available to it. Emitting one
-     * of the two entity-specific literals would therefore mean naming the wrong row roughly half the
-     * time, which is worse than naming none. Both literals stay published above for the context that
-     * does know, and it supplies one through {@link ApiError} instead; the baseline names the row, this
-     * default does not, and the divergence is documented rather than silently introduced.</p>
+     * <p>Refactoring Rationale: this value previously read "Could not lock the record for update" and
+     * was documented here as the one message in this class that was not a baseline literal. That was a
+     * paraphrase, and it was an unnecessary one: the baseline already declares an entity-agnostic form
+     * of this sentence, character for character, in two independent programs -- at lines 205 and 206 of
+     * {@code app/cbl/COCRDUPC.cbl} and again at lines 181 and 182 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} -- and neither names the row. Transformation
+     * rule T8 carries a user-visible string across verbatim, so the definite article that had been
+     * inserted made the emitted body differ from the baseline for no gain, and made every published
+     * contract that quoted the baseline wording describe a body this advice would not return. It is now
+     * the baseline literal, measured at 32 characters.</p>
+     *
+     * <p>Trade-offs: the baseline ALSO has two entity-SPECIFIC variants of this sentence, which name the
+     * row at 40 and 41 characters, because the program raising one knows which row it was writing. This
+     * advice is shared by every bounded context and is reached by propagation, so at the point it
+     * renders the response the identity of the row is no longer available to it, and emitting one of the
+     * two specific literals would mean naming the wrong row roughly half the time. Both stay published
+     * above as {@link #MESSAGE_ACCOUNT_LOCK_FAILED} and {@link #MESSAGE_CUSTOMER_LOCK_FAILED} for the
+     * context that does know, which supplies one through {@link ApiError} instead. What is given up is
+     * that a caller reading this default is not told which row was contended; what it buys is that the
+     * three sentences are all baseline text and none of them is invented.</p>
      */
-    public static final String MESSAGE_LOCK_UNAVAILABLE = "Could not lock the record for update";
+    public static final String MESSAGE_LOCK_UNAVAILABLE = "Could not lock record for update";
 
     /**
      * The verbatim message the baseline displays when the rewrite of a locked record failed.
@@ -249,17 +261,30 @@ public class GlobalExceptionHandler {
     public static final String MESSAGE_UPDATE_FAILED = "Update of record failed";
 
     /**
-     * The message returned when a reference row cannot be deleted because rows still point at it.
+     * The verbatim message the baseline displays when a row cannot be deleted because rows point at it.
      *
-     * <p>Assumptions: this describes the business rule rather than the constraint. The reference-data
-     * foreign key carries {@code ON DELETE RESTRICT}, preserving the semantic the baseline's own
-     * {@code XTRNTYCAT} constraint already asserts, so deleting a transaction type is impossible while
-     * categories still reference it. The migrated response names that rule so the caller knows what to
-     * do about it, where the database's own complaint would name the schema, the table and the
-     * constraint and say nothing actionable.</p>
+     * <p>Refactoring Rationale: this value previously read "Cannot delete: other records still refer to
+     * this entry", which described the rule in this migration's own words rather than the baseline's.
+     * Unlike the lock sentence above, no constraint forced a paraphrase here: the baseline's own wording
+     * names no entity, no table and no constraint, so the entity-agnostic sentence this advice needs
+     * already existed. It is declared identically in the two programs that own the relationship -- line
+     * 1919 of {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} and line 1641 of that tree's
+     * {@code COTRTUPC.cbl} -- and transformation rule T8 carries such a string across verbatim. It is
+     * now that literal, measured at 44 characters.</p>
+     *
+     * <p>Assumptions: the trailing colon is retained because the baseline retains it, and NOTHING is
+     * appended after it. The baseline follows the colon with the database's own diagnostic, which is why
+     * the colon is there; appending that diagnostic to a client-facing body would name the schema, the
+     * table and the constraint and would disclose an internal detail on a response the caller reads, so
+     * the sentence ends at the colon and the diagnostic goes to the operational record instead.</p>
+     *
+     * <p>Assumptions: the condition itself is unchanged. The reference-data foreign key carries
+     * {@code ON DELETE RESTRICT}, preserving the semantic the baseline's own {@code XTRNTYCAT}
+     * constraint already asserts, so deleting a transaction type is impossible while categories still
+     * reference it.</p>
      */
     public static final String MESSAGE_REFERENCED_ROW =
-            "Cannot delete: other records still refer to this entry";
+            "Please delete associated child records first:";
 
     /**
      * The message returned for a failure the client cannot correct.
@@ -291,6 +316,22 @@ public class GlobalExceptionHandler {
      * idea.</p>
      */
     public static final String FIELD_REQUEST = "request";
+
+    /**
+     * The field entry a contention refusal reports the contended row's current version under.
+     *
+     * <p>Assumptions: the name is the one the entities' optimistic-lock column is mapped to, so a client
+     * that reads a version from a representation and sends it back finds the refusal keyed by the same
+     * name it used. It is published as a constant rather than written at the one site that emits it,
+     * because the published contracts document the key and a document and a literal are two statements
+     * of one name.</p>
+     *
+     * <p>Alternatives Considered: a dedicated response component named for the version instead of a
+     * field entry. Rejected because the published contracts seal the problem shape against unknown
+     * properties, so a component added for this refusal would have to be admitted on every other
+     * response and then documented as absent there.</p>
+     */
+    public static final String FIELD_VERSION = "version";
 
     /**
      * The message returned when a request body could not be read at all.
@@ -559,9 +600,65 @@ public class GlobalExceptionHandler {
         LOG.warn("event=api.request.rejected code={} status=400 path={} fields={}",
                 ApiError.CODE_VALIDATION, pathOf(request), fieldErrors.size());
 
-        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_VALIDATION_FAILED,
-                HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
+        // WHY : Refactoring Rationale: a body that declares its own check order gets the baseline's
+        //       first-message-wins behaviour, and every other body is untouched. Bean Validation
+        //       evaluates every constraint in no defined order, so a screen whose reference program
+        //       stops at the FIRST failure -- sign-on being the case where the sentence itself is
+        //       observable, at lines 118 to 125 of app/cbl/COSGN00C.cbl -- could not have its sentence
+        //       carried across verbatim as transformation rule T8 requires: the aggregate was a generic
+        //       sentence and the array order was whatever the provider produced. Sorting into the body's
+        //       declared order and latching the first entry's own message reproduces exactly the two
+        //       halves of the baseline's behaviour -- one latched sentence, and per-field markers that
+        //       accumulate.
+        // WHY : Alternatives Considered: doing this unconditionally for every body. Rejected because
+        //       most migrated screens accumulate rather than latch -- the divergence register carries
+        //       D-ERROR-ACCUMULATION for precisely that -- so an unconditional change would alter the
+        //       observable behaviour of every one of them in order to fix one.
+        List<ApiError.FieldError> ordered = fieldErrors;
+        String aggregate = MESSAGE_VALIDATION_FAILED;
+        if (failure.getTarget() instanceof FieldOrdering ordering) {
+            ordered = sortByDeclaredOrder(fieldErrors, ordering.fieldOrder());
+            aggregate = ordered.isEmpty() ? MESSAGE_VALIDATION_FAILED : ordered.get(0).message();
+        }
+
+        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
+                HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), ordered,
                 this.clock));
+    }
+
+    /**
+     * Sorts per-field entries into a body's declared check order, placing unrecognised names last.
+     *
+     * <p>Assumptions: the sort is STABLE, so two entries for one field keep the order the provider
+     * produced them in, and entries whose field the body did not declare keep their encounter order after
+     * the recognised ones. That is what makes a typo in a declared order degrade to encounter order for
+     * one field rather than losing its entry or reordering the rest.</p>
+     *
+     * <p>Trade-offs: the position is resolved by a list lookup per entry rather than by building a map
+     * once. A request body declares a handful of fields and a rejection carries a handful of entries, so
+     * the two are small enough that a map would cost more to allocate than the lookups cost to run, and
+     * the lookup form keeps the method to one readable expression.</p>
+     *
+     * @param fieldErrors the entries in the order the validation provider produced them; never
+     *     {@code null}
+     * @param declaredOrder the field names in the order the body declares they are checked; never
+     *     {@code null}
+     * @return a new list carrying every supplied entry, ordered by declared position with unrecognised
+     *     names last, never {@code null}
+     */
+    private static List<ApiError.FieldError> sortByDeclaredOrder(
+            List<ApiError.FieldError> fieldErrors, List<String> declaredOrder) {
+
+        List<ApiError.FieldError> ordered = new ArrayList<>(fieldErrors);
+        ordered.sort(Comparator.comparingInt(entry -> {
+            int position = declaredOrder.indexOf(entry.field());
+            // WHY : Assumptions: an unrecognised name sorts to the END rather than to the front, because
+            //       the aggregate sentence is taken from the first entry and a name the body does not
+            //       declare cannot be the field its screen checks first. Sorting it to the front would
+            //       let a typo choose the sentence.
+            return position < 0 ? Integer.MAX_VALUE : position;
+        }));
+        return List.copyOf(ordered);
     }
 
     /**
@@ -786,41 +883,56 @@ public class GlobalExceptionHandler {
         //       baseline declares the conditions -- lock acquisition at lines 517 to 520 sits above the
         //       before-image mismatch at 521 and 522 -- inverted so that the mapping a reader is most
         //       likely to be looking for is the first one they meet.
+        // WHY : Refactoring Rationale: all three branches now render through
+        //       ApiError.ofConflict with Subsystem.RELATIONAL, where they previously used ApiError.of
+        //       and therefore emitted Subsystem.APPLICATION. The published contracts declare a
+        //       contention refusal as arising in the relational store and their examples show
+        //       RELATIONAL, so the body a client parsed contradicted the document describing it. Each
+        //       of these three conditions is raised by the persistence provider or by the database
+        //       itself, which is exactly what RELATIONAL names.
         if (isOfType(failure, OPTIMISTIC_LOCK_EXCEPTION_NAME)) {
             LOG.warn("event=api.conflict.optimistic-lock code={} status=409 path={} exception={}",
                     ApiError.CODE_CONFLICT, pathOf(request), failure.getClass().getName());
-            return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.of(ApiError.CODE_CONFLICT,
-                    MESSAGE_RECORD_CHANGED, HttpStatus.CONFLICT.value(), correlationId(),
-                    pathOf(request), this.clock));
+            return conflictResponse(MESSAGE_RECORD_CHANGED, request, null);
         }
 
         if (isOfType(failure, PESSIMISTIC_LOCK_EXCEPTION_NAME)) {
             LOG.warn("event=api.conflict.lock-unavailable code={} status=409 path={} exception={}",
                     ApiError.CODE_CONFLICT, pathOf(request), failure.getClass().getName());
-            return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.of(ApiError.CODE_CONFLICT,
-                    MESSAGE_LOCK_UNAVAILABLE, HttpStatus.CONFLICT.value(), correlationId(),
-                    pathOf(request), this.clock));
+            return conflictResponse(MESSAGE_LOCK_UNAVAILABLE, request, null);
         }
 
         if (isOfType(failure, INTEGRITY_VIOLATION_EXCEPTION_NAME)) {
             LOG.warn("event=api.conflict.integrity code={} status=409 path={} exception={}",
                     ApiError.CODE_CONFLICT, pathOf(request), failure.getClass().getName());
-            return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.of(ApiError.CODE_CONFLICT,
-                    MESSAGE_REFERENCED_ROW, HttpStatus.CONFLICT.value(), correlationId(),
-                    pathOf(request), this.clock));
+            return conflictResponse(MESSAGE_REFERENCED_ROW, request, null);
         }
 
-        // WHY : Assumptions: this branch exists even though the framework would route an
-        //       IllegalArgumentException to onRejectedCallerInput on its own, because the framework's
+        // WHY : Assumptions: this branch exists even though the framework would route a
+        //       ClientInputException to onRejectedCallerInput on its own, because the framework's
         //       dispatch is not the only way into this method. A caller inside the application, and
         //       every test that exercises the mapping directly, calls this method with a
         //       RuntimeException and is entitled to the same answer the framework would produce.
         //       Without the delegation the class would hold two different mappings for one type and
         //       which one applied would depend on how the failure arrived, which is precisely the kind
         //       of divergence a shared kernel must not have. The three conflict tests above run first
-        //       because none of them is an IllegalArgumentException and their answer is more specific.
-        if (failure instanceof IllegalArgumentException rejectedInput) {
+        //       because none of them is a ClientInputException and their answer is more specific.
+        // WHY : Refactoring Rationale: the test is ClientInputException and NOT its supertype
+        //       IllegalArgumentException, which is what it used to be. Widening it to the supertype
+        //       swept up every internal invariant in the migration -- a transfer object refusing a
+        //       component the SERVICE constructed it with, a page envelope refusing a cursor the
+        //       SERVICE built, an edit mask refusing a band the SERVICE composed -- and reported each
+        //       to the caller as a 400 it should correct, with warning severity. Two things were lost
+        //       at once: a client was told to fix a request it had sent correctly, and a genuine server
+        //       defect never reached the 500 channel the alerting watches. A bare
+        //       IllegalArgumentException now falls through to onUnexpectedFailure, which is where an
+        //       invariant failure belongs.
+        if (failure instanceof ClientInputException rejectedInput) {
             return onRejectedCallerInput(rejectedInput, request);
+        }
+
+        if (failure instanceof RecordConflictException contention) {
+            return onRecordConflict(contention, request);
         }
 
         return onUnexpectedFailure(failure, request);
@@ -1014,59 +1126,161 @@ public class GlobalExceptionHandler {
      * so the channel that is supposed to mean a service is broken would carry a steady stream of
      * requests that were merely wrong, which is how an alert channel stops being read.
      *
-     * <p>Assumptions: the whole {@link IllegalArgumentException} family is claimed, which is wider than
-     * it first reads and is the intent. {@link NumberFormatException} extends it, so a money value that
-     * is not a number arrives here; the shared codecs' own format failures extend it, so a malformed
-     * wire payload arrives here; and the shared date validator raises it directly. What does NOT extend
-     * it is the set this class must keep answering differently -- a null dereference, an illegal state,
-     * and the three persistence conflicts, none of which is an
-     * {@link IllegalArgumentException} -- so each of those still reaches its own answer.
+     * <p>Refactoring Rationale: the claimed type is {@link ClientInputException} and NOT its supertype
+     * {@link IllegalArgumentException}, which is what an earlier revision claimed. The wider claim swept
+     * up every internal invariant this migration expresses with that exception -- a transfer object
+     * refusing a component the service constructed it with, a page envelope refusing a cursor the
+     * service built, an edit mask refusing a band the service composed -- and answered each with a 400
+     * at warning severity. That is wrong twice over: a client is told to correct a request it sent
+     * correctly, and a real server defect is kept out of the 500 channel the alerting watches, so the
+     * failure is invisible to exactly the mechanism meant to see it. Narrowing to a type raised only
+     * where the refused value came from OUTSIDE the process restores both, and the members that used to
+     * arrive here legitimately still do: the shared codecs' format failure and the shared date
+     * validator's refusal are both {@link ClientInputException} subclasses.
+     *
+     * <p>Assumptions: a bare {@link IllegalArgumentException}, a {@link NumberFormatException} raised by
+     * a numeric parse the service performed on a value it had already validated, and every other member
+     * of that family now reach {@link #onUnexpectedFailure(Exception, HttpServletRequest)} and are
+     * answered as HTTP 500. That is the intended consequence, not a regression: a service that parses an
+     * unvalidated caller value with a platform parser is missing a validation, and reporting the missing
+     * validation as a server fault is what gets it fixed. A service that WANTS the 400 shape for a
+     * caller value raises {@link ClientInputException}, which also gives it a field key and a stable
+     * code the earlier form could not carry.
      *
      * <p>Alternatives Considered: matching a wrapped cause as well, the way the persistence conflicts
      * are matched by walking the cause chain. It was rejected because the two situations are not alike.
      * A persistence provider deliberately wraps its own failures, so the cause chain is where the
-     * meaning lives; an {@link IllegalArgumentException} discovered somewhere inside an infrastructure
-     * failure is evidence about that infrastructure rather than about the caller, and reporting it as
-     * caller input would tell a client to correct a request it had sent correctly. The test here is
-     * therefore the declared type alone.
+     * meaning lives; a refusal discovered somewhere inside an infrastructure failure is evidence about
+     * that infrastructure rather than about the caller. The test here is therefore the declared type
+     * alone.
      *
-     * @param failure the rejected-input failure that propagated out of a handler method; its message is
-     *     logged and never rendered, and it is never {@code null} on any path the framework reaches
-     *     this method by
+     * @param failure the rejected-input failure that propagated out of a handler method; its stable code
+     *     and its redacted message are logged, its message is never rendered, and it is never
+     *     {@code null} on any path the framework reaches this method by
      * @param request the request that failed, read only for its path
      * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, {@link #MESSAGE_VALIDATION_FAILED},
-     *     warning severity, no abend detail and one field entry attributing the failure to the request;
-     *     never {@code null}
+     *     warning severity, no abend detail and one field entry keyed by the refusal's own field when it
+     *     names one and by the request otherwise; never {@code null}
      */
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<ApiError> onRejectedCallerInput(IllegalArgumentException failure,
+    @ExceptionHandler(ClientInputException.class)
+    public ResponseEntity<ApiError> onRejectedCallerInput(ClientInputException failure,
             HttpServletRequest request) {
 
-        // WHY : Assumptions: the caught message is logged and never rendered, which is the same
-        //       division this class already applies to an unreadable body. A validator or codec in the
-        //       shared kernel writes a diagnostic that is safe by construction -- it names a copybook
-        //       field and a width and withholds the value of any sensitive one -- but this handler
-        //       catches the whole type, including a failure raised by a library it has never seen, and
-        //       there is no way to tell the two apart from here. Sending a fixed sentence to the client
-        //       and the full text to the log is what makes the reply safe for every member of the type
-        //       rather than for the members this repository happens to raise.
-        LOG.warn("event=api.request.rejected code={} status=400 path={} exception={} detail={}",
-                ApiError.CODE_VALIDATION, pathOf(request), failure.getClass().getName(),
-                LogSafeText.sanitize(failure.getMessage()));
+        // WHY : Refactoring Rationale: the log line carries a STABLE CODE, and it carries the message
+        //       only because the claimed type guarantees the message is redacted. The earlier form
+        //       logged getMessage() from the whole IllegalArgumentException family after sanitising
+        //       control characters, which is a defence against forging a log RECORD and no defence at
+        //       all against the CONTENT of one: a library or parser message quotes the token it could
+        //       not read, and when that token is a primary account number the value lands in log
+        //       storage -- the one destination the masking applied at the API edge does not reach.
+        //       ClientInputException's contract is that its own subclasses compose their messages
+        //       through a per-field sensitivity gate, so the detail is safe by construction here and
+        //       only here.
+        // WHY : Assumptions: the code is logged as its own field rather than folded into the message,
+        //       because it exists to be matched on by an alert rule and a log query, and a token inside
+        //       a sentence is matchable only by substring.
+        LOG.warn("event=api.request.rejected code={} status=400 path={} reason={} exception={} detail={}",
+                ApiError.CODE_VALIDATION, pathOf(request), failure.code(),
+                failure.getClass().getName(), LogSafeText.sanitize(failure.getMessage()));
 
-        // WHY : Assumptions: the entry is keyed by a name for the request as a whole because this
-        //       failure carries no field identity to key it by. That is not a new convention: a
-        //       class-level constraint violation reaching onInvalidBody names no member either, and is
-        //       reported there keyed by the object name for exactly this reason. The state is the
-        //       not-acceptable-value one rather than the blank one, because the blank state asks a form
-        //       to draw a marker against a control and no control has been identified. Answering with
-        //       an EMPTY array was rejected: transformation rule T7 makes the per-field array the way a
-        //       rejection is expressed, and an empty one gives a client a 400 with nothing to display.
+        // WHY : Assumptions: the entry is keyed by the refusal's own field when it names one, and by a
+        //       name for the request as a whole when it does not. Keying by the field is what lets a form
+        //       draw its marker against the right control, which transformation rule T7 requires and
+        //       which the earlier form could not do because the exception carried no field identity. The
+        //       fallback is not a new convention: a class-level constraint violation reaching
+        //       onInvalidBody names no member either and is reported there keyed by the object name.
+        // WHY : Assumptions: the state is the not-acceptable-value one rather than the blank one,
+        //       because the blank state asks a form to draw a marker for an empty control and a refused
+        //       value is not empty. Answering with an EMPTY array was rejected: rule T7 makes the array
+        //       the way a rejection is expressed, and an empty one gives a client a 400 with nothing to
+        //       display.
+        String fieldKey = failure.field() == null ? FIELD_REQUEST : failure.field();
         List<ApiError.FieldError> fieldErrors = List.of(new ApiError.FieldError(
-                FIELD_REQUEST, FieldValidationFlag.NOT_OK, MESSAGE_VALIDATION_FAILED));
+                fieldKey, FieldValidationFlag.NOT_OK, MESSAGE_VALIDATION_FAILED));
 
         return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_VALIDATION_FAILED,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
+                this.clock));
+    }
+
+    /**
+     * Renders a contention refusal a service raised deliberately, with its kind and its version.
+     *
+     * <p>Refactoring Rationale: this handler exists because the three provider-name branches of
+     * {@link #onRuntimeFailure(RuntimeException, HttpServletRequest)} cannot express two things the
+     * published contracts promise. They cannot report the CURRENT version of the contended row, because
+     * a provider exception does not carry it, so a caller told only that the record changed has to
+     * re-read it to discover what it changed to. And they only fire when the provider or the database
+     * raised the failure, so a service that compared a version ITSELF -- which is what the baseline's
+     * before-image comparison does at lines 669 and 521 of {@code app/cbl/COACTUPC.cbl} -- had no way to
+     * produce the contention shape at all and would have fallen through to a 500.
+     *
+     * <p>Assumptions: the version is reported as a per-field entry keyed {@link #FIELD_VERSION} rather
+     * than as a new component of the problem shape. The published contracts seal that shape against
+     * unknown properties, so a component added for this one refusal would have to be admitted on every
+     * other response and documented as absent there; one entry inside the array every client already
+     * parses says the same thing and keeps the shape satisfiable. This is the concrete, satisfiable
+     * form the reference contract's conflict schema describes.
+     *
+     * <p>Assumptions: the subsystem is {@link ApiError.Subsystem#RELATIONAL} for all three kinds, which
+     * is what the contracts declare. It is the relational store the contention is over even when this
+     * service, rather than the provider, is what noticed it.
+     *
+     * @param failure the contention a service raised, naming which condition and carrying the current
+     *     version when the condition has one; never {@code null} on any path that reaches here
+     * @param request the request that failed, read only for its path
+     * @return HTTP 409 carrying {@link ApiError#CODE_CONFLICT}, the sentence its kind selects, the
+     *     relational subsystem, and a version entry when one was supplied; never {@code null}
+     */
+    @ExceptionHandler(RecordConflictException.class)
+    public ResponseEntity<ApiError> onRecordConflict(RecordConflictException failure,
+            HttpServletRequest request) {
+
+        // WHY : Assumptions: the sentence is selected here rather than held on the exception, so every
+        //       user-visible string in this layer stays in one place under transformation rule T8. The
+        //       switch is exhaustive over the enum, so a fourth condition cannot be added without this
+        //       method failing to compile -- which is the property that keeps the mapping complete.
+        String message = switch (failure.kind()) {
+            case STALE_VERSION -> MESSAGE_RECORD_CHANGED;
+            case LOCK_UNAVAILABLE -> MESSAGE_LOCK_UNAVAILABLE;
+            case REFERENCED_ROW -> MESSAGE_REFERENCED_ROW;
+        };
+
+        LOG.warn("event=api.conflict.declared code={} status=409 path={} kind={} versionReported={}",
+                ApiError.CODE_CONFLICT, pathOf(request), failure.kind(),
+                failure.currentVersion() != null);
+
+        return conflictResponse(message, request, failure.currentVersion());
+    }
+
+    /**
+     * Builds the one contention response shape every conflict path in this class returns.
+     *
+     * <p>Refactoring Rationale: four call sites used to compose this response separately, and three of
+     * them composed it through a factory that hardcoded the application subsystem. One builder means the
+     * code, the status, the subsystem and the version-entry convention are stated once, so a fifth
+     * conflict condition cannot be added with a different shape.</p>
+     *
+     * @param message the user-visible contention sentence, carried verbatim from its baseline source
+     * @param request the request that failed, read only for its path
+     * @param currentVersion the version the contended row now holds, or {@code null} when the condition
+     *     carries none, in which case the field array is empty
+     * @return the 409 response, never {@code null}
+     */
+    private ResponseEntity<ApiError> conflictResponse(String message, HttpServletRequest request,
+            Long currentVersion) {
+
+        // WHY : Assumptions: the array is EMPTY rather than carrying a placeholder when no version is
+        //       available, because an entry naming a version this response does not know would be a
+        //       value invented for the shape's sake. An empty array is already what a non-validation
+        //       problem shape carries everywhere else in this class.
+        List<ApiError.FieldError> fieldErrors = currentVersion == null
+                ? List.of()
+                : List.of(new ApiError.FieldError(FIELD_VERSION, FieldValidationFlag.NOT_OK,
+                        String.valueOf(currentVersion)));
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.ofConflict(message,
+                ApiError.Subsystem.RELATIONAL, correlationId(), pathOf(request), fieldErrors,
                 this.clock));
     }
 

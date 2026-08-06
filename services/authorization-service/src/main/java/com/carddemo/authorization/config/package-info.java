@@ -138,12 +138,17 @@
  *       consequence of the target topology rather than a setting, and {@code DataSourceConfig}
  *       carries the full rationale; this entry is a pointer so that a reader does not read the
  *       absence as an omission.</li>
- *   <li>There is no resilience library on this module's classpath and no configuration class for
- *       one. Assumptions: retry support lives in the Spring Framework core that arrives inside the
- *       Spring Boot 4.1.0 parent, so an external library would duplicate a capability the platform
- *       already provides. {@code SqsConfig} carries the rationale, together with the durable retry
- *       tier the queues themselves supply through redelivery and a dead-letter queue; this entry is
- *       a pointer.</li>
+ *   <li>No resilience library is declared by this module, no class in it uses one, and there is
+ *       no configuration class for one. Assumptions: retry support lives in the Spring Framework
+ *       core that arrives inside the Spring Boot 4.1.0 parent, so an external library would
+ *       duplicate a capability the platform already provides. The claim is about declaration and
+ *       use rather than about the classpath, because this module is one of four in which
+ *       {@code org.springframework.retry:spring-retry} arrives as a compile-scoped transitive of
+ *       the SQS starter, which uses it for its own listener-container polling back-off and so
+ *       cannot be excluded; rule A5 of the shared layering gate is what forbids reaching for it.
+ *       {@code SqsConfig} carries the rationale, together with the durable retry tier the queues
+ *       themselves supply through redelivery and a dead-letter queue; this entry is a
+ *       pointer.</li>
  * </ul>
  *
  * <h2>The layering contract as it applies to this package</h2>

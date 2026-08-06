@@ -23,10 +23,10 @@
 > authoritative for the module's implemented resources, inputs, and outputs.
 >
 > **Parameters.** The generated Inputs table is the typed input contract. The
-> three required values are `environment`, `kms_key_arn`, and
-> `object_created_lambda_arn`; the two inventory maps have closed default key
-> sets, and retention, transition, audit, logging, destruction, naming, and tag
-> controls have validated defaults.
+> two required values are `environment` and `kms_key_arn`; the two inventory maps
+> have closed default key sets, and the retention, transition, logging,
+> destruction, naming and tag controls have validated defaults. Twelve inputs in
+> total.
 >
 > **Return values.** The module publishes ten outputs: seven data-path values
 > for the dataset bucket, generation and statement locations, and effective
@@ -36,12 +36,13 @@
 >
 > **Exceptions / errors.** This document describes a statically validated
 > module, not evidence of a live deployment. Apply-time failures include a
-> globally occupied bucket name, a KMS key the caller cannot use, an invalid
-> notification target, and destruction of a populated bucket while
-> `force_destroy` is false. Logical-generation cleanup is performed by the
-> function supplied through `object_created_lambda_arn`, so that function's
-> permissions and version-aware deletion behavior are part of the caller
-> contract rather than resources implemented in this directory.
+> globally occupied bucket name, a KMS key the caller cannot use, an
+> unreachable server-access-log target bucket, and destruction of a populated
+> bucket while
+> `force_destroy` is false. Logical-generation cleanup — pruning all but the
+> newest five `dt=`/`gen=` prefixes — is NOT performed by this module. It is the
+> calling root's to wire, over the bucket name this module publishes; see
+> [What this module deliberately does not own](#what-this-module-deliberately-does-not-own).
 
 > [!WARNING]
 > **This is not the Terraform remote-state bucket.** `infra/bootstrap` alone
@@ -156,10 +157,16 @@ The implemented split keeps those concerns separate:
    **same-key recovery**. A retry that writes the same key creates a noncurrent
    version, and `newer_noncurrent_versions` bounds those recoverable revisions.
 
-This central hook avoids seven or more writer-specific copies of deletion
-logic while still preserving the explicit object-key convention. The module
-creates the permission and notification edge; the function implementation and
-its failure handling remain caller-owned.
+One central hook avoids seven or more writer-specific copies of deletion logic
+while still preserving the explicit object-key convention. The hook is wired in
+the calling root, not here: this module publishes `bucket_name`, and each root
+declares its own `aws_lambda_permission` and `aws_s3_bucket_notification` over
+that bucket. Refactoring Rationale: an `aws_s3_bucket_notification` claims a
+bucket's single notification configuration, so declaring one inside a reusable
+module would make the module the sole permitted event publisher for every
+consumer; the function, its permission, its failure handling and its retention
+count are therefore all caller-owned. See
+[What this module deliberately does not own](#what-this-module-deliberately-does-not-own).
 
 ### Why the logical rule is count-based rather than age-based
 
@@ -187,9 +194,41 @@ bucket-wide retention rule, but it preserves an auditable link from every
 `noncurrent_versions` override without changing prefix topology. All ten
 defaults leave that override unset and inherit five.
 
-The audit bucket's `audit_log_retention_days` lifecycle is separate. It is an
-evidence-retention horizon for CloudTrail objects, not a generation count and
-not part of the `LIMIT(5) SCRATCH` mapping.
+## What this module deliberately does not own
+
+**No object-created notification, and no invoke permission.** Refactoring
+Rationale: an `object_created_lambda_arn` input, an `aws_lambda_permission` and an
+`aws_s3_bucket_notification` stood here, invoking a caller-supplied function on
+every completed object write so it could prune all but the newest five generation
+prefixes. All three were removed. An `aws_s3_bucket_notification` is a
+WHOLE-BUCKET resource, so a reusable module that declares one claims the bucket's
+only notification slot for every consumer of the module; and the function being
+wired up belongs to whichever root owns it, not here. Both environment roots now
+declare the permission and the notification themselves, over
+`module.s3_datasets.bucket_name`, so the behaviour is unchanged and the ownership
+sits with the function. Assumptions: that hook and this module's
+noncurrent-version lifecycle rule remain complementary rather than alternative — a
+lifecycle rule bounds the VERSIONS of one object key, while each generation is
+written under a distinct key, so S3 cannot see generation six as a version of
+generation five. Alternatives Considered: keeping the input and making it
+nullable, which was rejected because a conditionally claimed notification slot is
+harder to reason about than an unclaimed one, and the input would still not be one
+this module's contract admits.
+
+**No audit-log retention horizon.** Refactoring Rationale: an
+`audit_log_retention_days` input defaulted to seven years and drove an expiration
+and a noncurrent-version expiration on the audit bucket's lifecycle rule. It was
+removed. A compliance retention horizon is an organisational policy decision
+rather than a property of a dataset bucket module, and this module had no basis for
+the figure it defaulted to. Trade-offs: the audit bucket's lifecycle rule now
+expires nothing, so objects accumulate until an owner sets a horizon. That is the
+safe direction for an audit trail — the objects are versioned, encrypted and
+public-access blocked — and it is preferable to asserting a horizon the module
+cannot justify. The rule keeps its `abort_incomplete_multipart_upload` action,
+which is storage hygiene rather than retention, and its identifier was renamed to
+say so. Note that [`infra/bootstrap`](../../bootstrap/) declares a separate
+variable of the same name for its own state-access audit bucket; that one is
+untouched and is a different bucket with a different owner.
 
 ## Two non-generation statement artifacts
 
@@ -271,12 +310,11 @@ roots own backend and provider configuration and call the same module source:
 module "s3_datasets" {
   source = "../../modules/s3-datasets"
 
-  name_prefix               = var.name_prefix
-  environment               = var.environment
-  kms_key_arn               = module.kms.s3_key_arn
-  object_created_lambda_arn = aws_lambda_function.dataset_retention.arn
-  access_log_bucket_name    = module.observability.access_log_bucket_name
-  force_destroy             = !var.deletion_protection
+  name_prefix            = var.name_prefix
+  environment            = var.environment
+  kms_key_arn            = module.kms.s3_key_arn
+  access_log_bucket_name = module.observability.access_log_bucket_name
+  force_destroy          = !var.deletion_protection
 }
 ```
 
@@ -294,13 +332,12 @@ family:
 - `noncurrent_version_retention`
 - `noncurrent_version_transition_days`
 - `noncurrent_version_transition_storage_class`
-- `audit_log_retention_days`
 - `force_destroy`, where the root's deletion-protection policy permits it
 
 The roots also supply environment-specific resource identities through
-`environment`, `kms_key_arn`, `object_created_lambda_arn`, and
-`access_log_bucket_name`; those values connect the same topology to resources
-owned by that environment. `name_prefix` remains the shared naming stem.
+`environment`, `kms_key_arn` and `access_log_bucket_name`; those values connect
+the same topology to resources owned by that environment. `name_prefix` remains
+the shared naming stem.
 
 Assumptions: `dataset_families` and `non_generation_prefixes` are topology
 contracts and do not vary by environment. If one root changed either key set,
@@ -401,12 +438,14 @@ the dataset bucket's access-logging check fires, the resolution is to supply
   current objects, noncurrent versions, and delete markers through the
   version-aware procedure in the
   [teardown runbook](../../../docs/runbooks/teardown.md).
-- **Caller-owned logical cleanup.** Object creation succeeds before the
-  asynchronous retention function finishes. The supplied function must be able
-  to list family prefixes, delete every retained version and marker beneath a
-  rolled-off prefix, surface partial failures, and use the same count as this
-  module. Notification or function failure does not make the original object
-  write transactional.
+- **Caller-owned logical cleanup.** This module declares neither the retention
+  function, nor its invoke permission, nor the bucket notification that triggers
+  it; all three belong to the calling root. Object creation succeeds before any
+  asynchronous retention function finishes. A root-owned function must be able to
+  list family prefixes, delete every retained version and marker beneath a
+  rolled-off prefix, surface partial failures, and use the same count this module
+  publishes as `noncurrent_version_retention`. Notification or function failure
+  does not make the original object write transactional.
 - **Optional server access logging.** A null `access_log_bucket_name` omits the
   server-logging resource so the module can be instantiated without a
   pre-existing log bucket. Both environment roots are expected to supply a
@@ -424,7 +463,7 @@ the dataset bucket's access-logging check fires, the resolution is to supply
   and datasets remain intact and REFERENCE-only. The migration adds an S3 path;
   it does not remove the mainframe path.
 
-## WHY (non-obvious design decisions)
+## Design decisions
 
 - Assumptions: ten is a closed lineage contract, not a configurable deployment
   size. The validation names all ten keys because a length-only check could
@@ -488,13 +527,11 @@ the markers; use terraform-docs to regenerate after an HCL contract change.
 | Name | Type |
 |------|------|
 | [aws_cloudtrail.dataset_object_access](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudtrail) | resource |
-| [aws_lambda_permission.dataset_generation_retention](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
 | [aws_s3_bucket.audit](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket.datasets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_lifecycle_configuration.audit](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
 | [aws_s3_bucket_lifecycle_configuration.datasets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
 | [aws_s3_bucket_logging.datasets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_logging) | resource |
-| [aws_s3_bucket_notification.datasets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_notification) | resource |
 | [aws_s3_bucket_ownership_controls.audit](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_ownership_controls) | resource |
 | [aws_s3_bucket_ownership_controls.datasets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_ownership_controls) | resource |
 | [aws_s3_bucket_policy.audit](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_policy) | resource |
@@ -517,10 +554,8 @@ the markers; use terraform-docs to regenerate after an HCL contract change.
 |------|-------------|------|---------|:--------:|
 | <a name="input_environment"></a> [environment](#input\_environment) | Deployment environment that owns this bucket, supplied by the calling root: infra/envs/dev passes dev and infra/envs/prod passes prod. It appears verbatim in the composed bucket name, which is what stops two environments in one account resolving to the same bucket, and it is the only axis along which this module's inputs are expected to differ. | `string` | n/a | yes |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of the S3 customer-managed KMS key produced by infra/modules/kms, used as the SSE-KMS key for every object written to this bucket. Required, because the module offers no unencrypted mode. | `string` | n/a | yes |
-| <a name="input_object_created_lambda_arn"></a> [object\_created\_lambda\_arn](#input\_object\_created\_lambda\_arn) | ARN of the Lambda function invoked for S3 ObjectCreated events to enforce five-generation retention across distinct dt=/gen= keys. Required because lifecycle version retention cannot enforce a count across different object keys. | `string` | n/a | yes |
 | <a name="input_abort_incomplete_multipart_upload_days"></a> [abort\_incomplete\_multipart\_upload\_days](#input\_abort\_incomplete\_multipart\_upload\_days) | Age in days after which an incomplete multipart upload is aborted and its already-uploaded parts deleted. Applies to the whole bucket rather than to one prefix. | `number` | `7` | no |
 | <a name="input_access_log_bucket_name"></a> [access\_log\_bucket\_name](#input\_access\_log\_bucket\_name) | Name of an existing bucket that receives S3 server access logs for this bucket. Null disables access logging, which is the module default so that the module can be instantiated without a logging bucket already in place. | `string` | `null` | no |
-| <a name="input_audit_log_retention_days"></a> [audit\_log\_retention\_days](#input\_audit\_log\_retention\_days) | Finite lifecycle horizon for validated CloudTrail dataset object-access logs. | `number` | `2557` | no |
 | <a name="input_dataset_families"></a> [dataset\_families](#input\_dataset\_families) | Generation-dataset families to provision a prefix and a noncurrent-version lifecycle rule for, keyed by the S3-safe family name main.tf uses as the dataset path segment. Each value carries: domain, the bounded context owning the data, which becomes the leading path segment; description, recording the baseline generation-data-group base the family replaces and the JCL line defining it; and noncurrent\_versions, an optional per-family override of noncurrent\_version\_retention that is left unset on every entry in the default. | <pre>map(object({<br/>    domain              = string<br/>    description         = string<br/>    noncurrent_versions = optional(number)<br/>  }))</pre> | <pre>{<br/>  "dalyrejs": {<br/>    "description": "Daily transaction reject-stream generations, carrying the reject record the posting run writes for each of the four documented reject reasons. Replaces GDG base AWS.M2.CARDDEMO.DALYREJS named at app/jcl/DALYREJS.jcl:L25 inside the DEFINE opened at L24, with LIMIT(5) at L26 and SCRATCH at L27.",<br/>    "domain": "ledger"<br/>  },<br/>  "discgrp-bkup": {<br/>    "description": "Disclosure-group reference backup generations, the interest-rate table the interest run reads. Replaces GDG base AWS.M2.CARDDEMO.DISCGRP.BKUP defined at app/jcl/DEFGDGD.jcl:L74 with LIMIT(5) at L75 and SCRATCH at L76; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L86 at LRECL=50.",<br/>    "domain": "reference"<br/>  },<br/>  "systran": {<br/>    "description": "System-generated transaction generations, the interest and fee transactions the interest run emits. Replaces GDG base AWS.M2.CARDDEMO.SYSTRAN defined at app/jcl/DEFGDGB.jcl:L49 with LIMIT(5) at L50 and SCRATCH at L51; read back as (0) by app/jcl/COMBTRAN.jcl:L26.",<br/>    "domain": "ledger"<br/>  },<br/>  "tcatbalf-bkup": {<br/>    "description": "Transaction-category-balance backup generations. Replaces GDG base AWS.M2.CARDDEMO.TCATBALF.BKUP defined at app/jcl/DEFGDGB.jcl:L43 with LIMIT(5) at L44 and SCRATCH at L45.",<br/>    "domain": "ledger"<br/>  },<br/>  "trancatg-bkup": {<br/>    "description": "Transaction-category reference backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANCATG.PS.BKUP defined at app/jcl/DEFGDGD.jcl:L51 with LIMIT(5) at L52 and SCRATCH at L53; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L63 at LRECL=60.",<br/>    "domain": "reference"<br/>  },<br/>  "tranrept": {<br/>    "description": "Transaction report generations, the 133-column fixed-width output. Replaces GDG base AWS.M2.CARDDEMO.TRANREPT defined at app/jcl/DEFGDGB.jcl:L37 with LIMIT(5) at L38 and SCRATCH at L39; written as (+1) by app/jcl/TRANREPT.jcl:L80 at LRECL=133. A second, conflicting definition of the same base exists at app/jcl/REPTFILE.jcl:L25-L28 with LIMIT(10) and no SCRATCH; the LIMIT(5) definition is the one applied.",<br/>    "domain": "reporting"<br/>  },<br/>  "transact-bkup": {<br/>    "description": "Transaction master backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.BKUP defined at app/jcl/DEFGDGB.jcl:L25 with LIMIT(5) at L26 and SCRATCH at L27; written as (+1) by app/jcl/TRANBKP.jcl:L33 at LRECL=350 and read back as (0) by app/jcl/COMBTRAN.jcl:L24.",<br/>    "domain": "ledger"<br/>  },<br/>  "transact-combined": {<br/>    "description": "Combined transaction generations, the merge of the transaction backup and the system transactions. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.COMBINED defined at app/jcl/DEFGDGB.jcl:L55 with LIMIT(5) at L56 and SCRATCH at L57; written as (+1) by app/jcl/COMBTRAN.jcl:L37.",<br/>    "domain": "ledger"<br/>  },<br/>  "transact-daly": {<br/>    "description": "Daily transaction generations staged for posting. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.DALY defined at app/jcl/DEFGDGB.jcl:L31 with LIMIT(5) at L32 and SCRATCH at L33; written as (+1) by app/jcl/TRANREPT.jcl:L55.",<br/>    "domain": "ledger"<br/>  },<br/>  "trantype-bkup": {<br/>    "description": "Transaction-type reference backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANTYPE.BKUP defined at app/jcl/DEFGDGD.jcl:L28 with LIMIT(5) at L29 and SCRATCH at L30; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L40 at LRECL=60.",<br/>    "domain": "reference"<br/>  }<br/>}</pre> | no |
 | <a name="input_force_destroy"></a> [force\_destroy](#input\_force\_destroy) | Whether Terraform may delete this bucket while it still holds objects, including noncurrent versions. False makes a destroy of a non-empty bucket fail rather than discard its contents. | `bool` | `false` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading token of the bucket name, which main.tf composes as <name\_prefix>-datasets-<environment>-<account-id>-<region>. This is what distinguishes the CardDemo dataset bucket from every other bucket in the account, and it is also the stem the module derives its resource names and tags from. | `string` | `"carddemo"` | no |

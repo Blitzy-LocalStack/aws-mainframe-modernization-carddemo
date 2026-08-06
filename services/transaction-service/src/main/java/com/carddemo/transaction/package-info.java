@@ -134,6 +134,28 @@
  * the negative boundary near the foot of this file rests on arithmetic that can
  * be re-checked rather than on an argument that has to be re-made.
  *
+ * <p>Assumptions: that eight is this module's <b>target contract</b> as the migration plan
+ * assigns it, not a measurement of the directory, and the same is true of every class named
+ * in the subpackage map above. Measured at the checkpoint that authored this paragraph, seven
+ * of the eight charters are present -- this root and the charters in {@code service},
+ * {@code repository}, {@code domain}, {@code dto}, {@code mapper} and {@code config} -- and
+ * the eighth is <b>planned</b>, not missing: the {@code api} package does not exist yet, so
+ * neither does its charter. Of the classes named above, twenty have landed; the two
+ * controllers, {@code TransactionController} and {@code BillPaymentController}, and the three
+ * services, {@code TransactionListService}, {@code TransactionAddService} and
+ * {@code BillPaymentService}, arrive with the endpoints they serve.
+ *
+ * <p>Refactoring Rationale: the count canon was stated in the present tense with no
+ * accompanying statement of what exists, so a reader reconciling "exactly eight package
+ * charter files" against the tree would find seven and have no way to tell which
+ * reading was wrong -- the arithmetic, or their own listing. The canon itself is
+ * correct and is left at eight, because the negative boundary at the foot of this file
+ * derives from it and because the sibling {@code dto} charter cites this paragraph by
+ * number when distinguishing its own file count from this one. What was missing is the
+ * distinction between the target and the measurement, so it is added here rather than by
+ * lowering the canon to match today's directory, which would break both dependants and
+ * would have to be raised again with each package that lands.
+ *
  * <h2>Shared kernel: the Java equivalent of one copybook include path</h2>
  *
  * <p>Transformation rule T2 governs imports here: one former {@code COPY}

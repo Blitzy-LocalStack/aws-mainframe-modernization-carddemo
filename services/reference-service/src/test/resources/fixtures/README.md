@@ -64,12 +64,33 @@ This directory holds **fixed-width, positional record files** that stand in for
 the VSAM datasets `reference-service` was migrated from. They are consumed by
 that module's own tests and by the shared fixed-width codecs in `common-lib`.
 
-Everything in this tree is **derived**: each record file is a copy or a subset
+**Most** of this tree is **derived**: a record file is normally a copy or a subset
 of an ASCII seed dataset under `app/data/ASCII/`, reshaped per scenario. The
 seeds are inputs to derivation and are never edited in place. That is the house
 minimal-change principle, stated at `tests/fixtures/README.md` L52-L57, and it
 applies with full force here: `app/**`, `tests/**`, `scripts/**` and
 `samples/**` are REFERENCE-ONLY.
+
+**Two of the five domains have no seed to derive from at all, and their bytes are
+therefore authored.** This is stated here rather than left to the scenario READMEs,
+because a blanket claim that everything is derived is the kind of statement a reader
+relies on without checking:
+
+| Domain | Seed dataset | Derived or authored |
+|---|---|---|
+| `reference_list` | `app/data/ASCII/trantype.txt`, `trancatg.txt` | derived; 0 authored rows |
+| `reference_update` | the same two | derived, **except 2 authored rows** -- one free type code and one unreferenced type code, each named and justified in its scenario README |
+| `disclosure_group` | `app/data/ASCII/discgrp.txt` | derived; 0 authored rows, and no padding change either |
+| `batch_reference_update` | **none exists** | **authored.** The 53-byte `WS-INPUT-REC` is an action-coded maintenance record and `app/data/ASCII/` holds no such file |
+| `date_conversion` | **none exists** | **authored.** The 1000-byte MQ request is a payload, not a dataset record |
+
+Assumptions: the seed rows are **not** uniformly the declared record width, so
+"derived" includes a padding normalisation that is not a content change.
+`app/data/ASCII/trantype.txt` carries rows of both 60 and 61 characters and
+`trancatg.txt` carries 61, while every fixture row here is exactly the declared 60.
+`discgrp.txt` needs no normalisation because its rows are already 50. A reader
+comparing a fixture row against a seed row byte-for-byte will otherwise conclude the
+row was authored when only its padding changed.
 
 ### 1.2 Why a documentation file exists in a fixtures directory
 
@@ -149,9 +170,24 @@ Trade-offs:
 ```
 
 `Assumptions` and `Trade-offs` are **plural**, `Trade-offs` uses the ASCII
-hyphen-minus, and the trailing colon is part of the label. The rules document
-renders these labels in bold; the bold is presentation and is not part of the
-label.
+hyphen-minus, and the trailing colon is part of the label.
+
+**A label carries no emphasis markup, in this file as in every other.** The rules
+document renders the four category names in bold, and that bold is its own
+typography rather than part of the label;
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../../../../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+states the one permitted written form and names `**Assumptions:**` explicitly as
+wrong in Markdown as well as in code. Every rationale in this file is therefore
+written unemphasised, as `Assumptions: ` and not as `**Assumptions:** `.
+
+Refactoring Rationale: this file previously argued only that the bold was "not
+part of the label" and then wrote every one of its fifteen rationales in bold
+anyway. The argument was right and the practice contradicted it, which is worse
+than either alone: a reviewer auditing the tree for Rule 1 compliance finds every
+rationale by literal string search across seven languages, and an emphasised
+label is a rationale that search does not return. All fifteen are now written in
+the one form, so a single search for `Assumptions:` finds this file's rationales
+and the `.sql`, `.tf`, `.java` and `.ts` rationales in the same pass.
 
 The fourth label, `Refactoring Rationale`, is **factually unavailable in this
 tree**. L32 scopes it by its own definition to *replacing existing code*, and
@@ -216,10 +252,29 @@ always written out in full to keep the two distinct.
 - **Rule T4 (Arithmetic order is preserved).** The consumer of these rates
   multiplies at full precision and only then divides. A fixture supplies the
   exact rate bytes; it never pre-computes a rounded product.
-- **Rule T8 (User-visible strings are verbatim).** Every description carried
-  into a fixture keeps its exact capitalisation and hyphenation. Section 7 lists
-  all 25 values and section 6.6 names the derivation source that would break
-  this.
+- **Rule T8 (User-visible strings are verbatim).** Every description **carried
+  across from the seed** keeps its exact capitalisation and hyphenation. Section
+  7 lists all 25 such values -- 7 `trantype` and 18 `trancatg`, measured -- and
+  section 6.6 names the derivation source that would break this.
+
+  Four descriptions in this tree are **authored, not carried**, and Rule T8 has
+  no subject for any of them: each belongs to a type code the seed does not
+  contain, so there is no baseline string to preserve. They are enumerated here
+  rather than left for a reader diffing the fixtures against section 7 to find.
+
+| Fixture | Code | Authored description | Why no seeded value can play the part |
+|---|---|---|---|
+| `batch_reference_update/add_record/trtype-update.txt` | `08` | `Fee Assessment` | The `'A'` action inserts. Codes `01` to `07` are all seeded, so inserting one asserts a duplicate key rather than the add path |
+| `batch_reference_update/add_record/trtype-update.txt` | `09` | `Chargeback` | The second insert needs a second free code, and `09` follows `08` |
+| `reference_update/delete_restricted_by_category/trantype.txt` | `99` | `Unreferenced type for delete fixture` | Needs a type **no** category references. Measured, all seven seeded types are referenced, so none can serve |
+| `reference_update/happy_path/trantype.txt` | `08` | `Fixture Add Path Type` | The same duplicate-key reason as the batch add path, for the online flow |
+
+  Assumptions: the two fixtures that both use code `08` are independent files
+  for independent flows -- one a 53-byte batch input, the other a 60-byte table
+  image -- and neither is a copy of the other, so the differing descriptions are
+  not drift between two copies of one value. Each authored description follows
+  the seed's own Title Case style, so a case-sensitive comparison against a
+  seeded row still fails loudly if a carried value is ever tidied.
 
 ---
 
@@ -278,7 +333,7 @@ Byte-count check: 2 + 4 + 50 + 4 = **60**. `FILLER` dropped: **4 bytes.**
 overpunch**. Its target column is `CHAR(4)`, not an integer type, so the literal
 `0001` form with its leading zeros survives end to end.
 
-> **Assumptions:** the group name `TRAN-CAT-KEY` is **not** globally unique in
+> Assumptions: the group name `TRAN-CAT-KEY` is **not** globally unique in
 > the copybook corpus. `CVTRA04Y` L5 brackets a 6-byte group under that name,
 > while the transaction-category-balance record brackets a **17-byte** group
 > under the same name. `CopybookLayout` records this collision as the reason
@@ -368,14 +423,26 @@ Four facts about this record are easy to get wrong:
 | `'U'` | L114, L116 | performs the update paragraph |
 | `'D'` | L117, L119 | performs the delete paragraph |
 | `'*'` | L120, L121 | displays `'IGNORING COMMENTED LINE'`; **no database action** |
-| anything else | L122, L124, L128 | builds `'ERROR: TYPE NOT VALID'` and performs the abend paragraph |
+| anything else | L122, L124, L128 | builds `'ERROR: TYPE NOT VALID'` and performs `9999-ABEND`, which displays it, moves `RETURN-CODE` to 4 and returns to the loop |
 
 Two consequences follow, and both must be stated so that neither is
 over-generalised:
 
-- **An invalid type byte ABENDS. It does not skip.** A fixture that contains a
-  stray byte in position 0 does not produce a quietly-ignored row; it produces a
-  failed run. The message `'ERROR: TYPE NOT VALID'` is verbatim under Rule T8.
+- **An invalid type byte is reported and warn-tiered, and the run continues.**
+  Despite its name, `9999-ABEND` at L230 to L233 does not abend: its whole body
+  is `DISPLAY WS-RETURN-MSG`, `MOVE 4 TO RETURN-CODE`, `EXIT`, with no
+  `CALL 'CEE3ABD'` and no `STOP RUN` in it. Control returns through
+  `1003-TREAT-RECORD` to the loop at L93 to L96, which reads the next record, so
+  every later row is still processed and the program ends on the warn-tier
+  `RETURN-CODE` 4. A fixture carrying a stray byte in position 0 therefore
+  asserts a soft reject **plus continuation**, not a failed run. It is still not
+  a quietly-ignored row -- unlike a `'*'` row it is reported and it moves the
+  return code -- but the distinction is warn versus silent, not fail versus
+  skip. The message `'ERROR: TYPE NOT VALID'` is verbatim under Rule T8.
+  Assumptions: the paragraph NAME is the only thing here suggesting
+  termination, which is exactly why this is stated; the program's one
+  `STOP RUN` sits at L99, unreachable after the `EXIT` at L98, and is not on
+  this path.
 - **A `'*'` in byte 0 makes the row a program-recognised comment** - the one
   place in this entire tree where anything comment-like sits inside a
   fixed-width record. That row is nonetheless **still exactly 53 bytes and still
@@ -398,7 +465,7 @@ Source: `app/app-vsam-mq/cbl/CODATE01.cbl`, 524 lines. L109 declares
 
 Byte-count check: 4 + 11 + 985 = **1000**. `FILLER` dropped: **985 bytes.**
 
-Four properties of this declaration matter:
+Five properties of this declaration matter:
 
 1. **Non-monotonic level numbering.** L109 is level `01` and its subordinates
    jump straight to level **10** with no intervening `05`. Harmless to the
@@ -416,6 +483,24 @@ Four properties of this declaration matter:
    `PIC 9(11)`. The widths match exactly, so `WS-KEY` is best described as **an
    11-digit ACCTDAT key**, which is all the program itself establishes. This is
    what triggers the attestation obligation in section 8.5.
+5. **Neither `WS-FUNC` nor `WS-KEY` is ever read.** Measured across all 524
+   lines, the two fields appear at exactly three places: their declarations at
+   L110 and L111, the numeric re-initialisation at L294, and the group `MOVE`
+   at L322 that *fills* them. No `IF`, no `EVALUATE` and no `MOVE` ever takes a
+   value **out** of either one. `4000-PROCESS-REQUEST-REPLY` at L360 issues
+   `EXEC CICS ASKTIME`, then `FORMATTIME`, then `STRING`s
+   `'SYSTEM DATE : '` and `'SYSTEM TIME : '` with the formatted clock values
+   into the reply -- so the reply is a function of the clock alone and is
+   **independent of every byte of the request**. Two consequences follow, and
+   both bear on how a scenario in this domain may be named. A fixture that
+   varies `WS-FUNC` or `WS-KEY` can assert exactly one thing: that the reply is
+   produced unchanged regardless of those bytes. It cannot assert a rejection,
+   because there is no branch to reject on -- `CODATE01` validates nothing and
+   has no error path for a malformed request. Assumptions: this is the reason
+   the scenario here is named `request_payload_ignored` rather than for a
+   rejection it cannot reach; a name promising a refusal would describe a
+   branch this program does not contain, which is the naming failure section
+   8.3 warns against for `batch_reference_update`.
 
 Note the contrast with section 3.6: here `PIC` and `VALUE` share one line, while
 `COBTUPDT` splits them across two. Neither style is wrong, and a derivation
@@ -457,7 +542,7 @@ all five lists are 1276. That partition is why `V1__reference.sql` gives
 `CHECK (code_class IN ('G', 'E'))` alongside its `CHAR(3)` primary key: **the
 flag is the partition.**
 
-> **Alternatives Considered:** synthesising a fixed-width lookup dataset so that
+> Alternatives Considered: synthesising a fixed-width lookup dataset so that
 > the lookup tables could be fixture-driven like the other three. Rejected
 > because such a dataset would have **no copybook to be validated against** -
 > `CSLKPCDY` declares edit fields and `88`-level value sets, not a record
@@ -488,7 +573,7 @@ There are no commas, tabs or separators. Every record line is **exactly** the
 record length for its type, and a line one byte short or long shifts every
 subsequent field and silently corrupts the record.
 
-> **Assumptions:** three of the five record lengths in this tree are new to this
+> Assumptions: three of the five record lengths in this tree are new to this
 > repository. The house passage enumerates the lengths it covers as *350, 300,
 > 150, 50, 500, or 80* - **60 is not among them.** This directory introduces the
 > **60-byte, 53-byte and 1000-byte** regimes for the first time. Only the
@@ -518,7 +603,7 @@ The Java side enforces the same contract:
 for exactly this case, so a wrong-length record fails on decode rather than
 decoding into shifted fields.
 
-> **Assumptions:** the deliberate stance behind this, stated at
+> Assumptions: the deliberate stance behind this, stated at
 > `tests/fixtures/README.md` L150 to L151, is that a malformed monetary record
 > must never be silently coerced into a well-formed-looking one. The rejected
 > alternative - treating a blank line as "no record" and tolerating an
@@ -526,11 +611,16 @@ decoding into shifted fields.
 > error, producing a fixture that loads cleanly and asserts the wrong values.
 > A loud failure at load is the only outcome that surfaces the mistake.
 
-This is not hypothetical in this tree. The one scenario already present,
-`date_conversion/empty_input/date-request.txt`, is a **genuinely zero-byte
-file**: 0 bytes, 0 carriage returns, 0 line feeds. That is the correct and only
-encoding of an empty 1000-byte-record input. A file containing a single blank
-line would be a 1-byte file holding one zero-length record, and would fail.
+This is not hypothetical in this tree. **Five** of the fifteen record files here
+are genuinely zero-byte -- one per `empty_input` scenario, of which
+`reference_list/empty_input` carries two because the list screen reads both
+reference datasets -- and each is 0 bytes with 0 carriage returns and 0 line
+feeds. The oldest of them, `date_conversion/empty_input/date-request.txt`, is the
+one that established the convention the other four follow, and it is the case
+worth naming because a zero-byte resource is the one a copy step is most likely to
+drop. That is the correct and only encoding of an empty 1000-byte-record input. A
+file containing a single blank line would be a 1-byte file holding one zero-length
+record, and would fail.
 
 ### 5.3 Padding, and the two opposite `FILLER` regimes
 
@@ -563,7 +653,7 @@ re-initialisation at L294), while `WS-FILLER` is space-filled at bytes 15 to 999
 The distinction is not merely across files; it is across a single byte boundary
 in one record.
 
-> **Alternatives Considered:** applying the generic space-padding rule uniformly
+> Alternatives Considered: applying the generic space-padding rule uniformly
 > to `FILLER` as well as to values, which would be simpler and would need no
 > per-record measurement. Rejected because it produces **twenty-eight spaces
 > where `discgrp` has twenty-eight ASCII zeros** - a different 50 bytes, and
@@ -633,7 +723,7 @@ non-negotiable: the value stays exact fixed point from these bytes through
 `NUMERIC(6,2)` and `BigDecimal` to a JSON string, and never passes through a
 binary floating-point type.
 
-> **Assumptions:** a trailing letter is a sign byte **only** in a signed field.
+> Assumptions: a trailing letter is a sign byte **only** in a signed field.
 > Values such as `3580010001P` look overpunched but are unsigned identifier
 > fields, where the trailing character is data. **Never apply overpunch decoding
 > to a `9(n)` field.** In this tree that means `TRAN-CAT-CD`, `DIS-TRAN-CAT-CD`
@@ -759,7 +849,7 @@ consequence of taking it. Three canonical labels are available here; the
 
 ### 6.1 Every record file is derived to LF only
 
-> **Trade-offs:** the rejected alternative is preserving each seed's original
+> Trade-offs: the rejected alternative is preserving each seed's original
 > line endings, which would be the more literal derivation. It is rejected
 > because the seeds disagree with each other and the disagreement carries no
 > behavioural meaning: `trancatg` is uniformly CRLF, `discgrp` is uniformly LF,
@@ -772,7 +862,7 @@ consequence of taking it. Three canonical labels are available here; the
 
 ### 6.2 `FILLER` is copied byte for byte, not synthesised
 
-> **Alternatives Considered:** applying the generic value-padding rule of section
+> Alternatives Considered: applying the generic value-padding rule of section
 > 5.3 to `FILLER` as well, which needs no per-record measurement. Rejected
 > because the two regimes are opposite: the three seed datasets zero-fill
 > `FILLER` with ASCII `'0'`, while `CODATE01`'s `WS-FILLER` is space-filled per
@@ -812,7 +902,7 @@ Per-group rate distribution, measured:
 | `DEFAULT   ` | `00000{` | 0.00 |
 | `ZEROAPR   ` | `00000{` | 0.00 |
 
-> **Alternatives Considered:** exercising any other (type, category) pair in a
+> Alternatives Considered: exercising any other (type, category) pair in a
 > scenario that asserts the DEFAULT fallback fired while **both** the account's
 > own group and `DEFAULT` are present in the fixture. Rejected because on any of
 > the other sixteen pairs the two groups return byte-identical rates, so the
@@ -866,7 +956,7 @@ any status other than success, the abend chain in section 6.3. It is also
 semantically apt: `01|0005` is the interest program's own generated category,
 which by design should never itself accrue interest.
 
-> **Assumptions:** this document treats the absent pair as an **observed property
+> Assumptions: this document treats the absent pair as an **observed property
 > of the baseline data**, and fixtures depend on it staying absent. The rejected
 > alternative is adding the seventeen-to-eighteen row that would make `discgrp`
 > symmetric with `trancatg`. It is rejected because the asymmetry is the only
@@ -879,7 +969,7 @@ This is a first-class negative-path scenario. It is **not** a defect, and sectio
 
 ### 6.5 "Empty" means a zero-byte file and nothing else
 
-> **Assumptions:** this tree depends on the external contract stated at
+> Assumptions: this tree depends on the external contract stated at
 > `tests/fixtures/README.md` L144 to L151 and mirrored by
 > `FixedWidthCodec.RecordLengthException` - that a row whose length is not
 > exactly the record length is rejected outright, with no padding, no truncation
@@ -888,15 +978,15 @@ This is a first-class negative-path scenario. It is **not** a defect, and sectio
 > to a human. Its concrete consequence is that the file is not empty at all: it
 > is a one-byte file holding one zero-length record, which fails fixed-width
 > parsing instead of exercising the empty-input path the scenario intended. The
-> already-present `date_conversion/empty_input/date-request.txt` is the correct
-> form at 0 bytes.
+> five zero-byte files in this tree are each the correct form at 0 bytes, and
+> `date_conversion/empty_input/date-request.txt` is the oldest of them.
 
 ### 6.6 Descriptions are derived from `app/data/ASCII/`, not from the Db2 control cards
 
 `V2__seed_reference.sql` seeds the reference tables from the VSAM-lineage ASCII
 files, and fixtures in this tree follow the same source so that the two agree.
 
-> **Alternatives Considered:** deriving descriptions from the Db2 control-card
+> Alternatives Considered: deriving descriptions from the Db2 control-card
 > seeds `app/app-transaction-type-db2/ctl/DB2LTTYP.ctl` and `DB2LTCAT.ctl`, which
 > is superficially attractive because they are the reference-data loader for the
 > very extension tree these screens come from. Rejected because those files are
@@ -915,7 +1005,7 @@ mirroring rule, worded `MUST`. Its own rationale at L99 to L103 is that
 output **purely by path**, so if the two trees drift the comparator cannot locate
 the golden master and the test cannot assert.
 
-> **Alternatives Considered:** mirroring this tree under `tests/golden/` to
+> Alternatives Considered: mirroring this tree under `tests/golden/` to
 > follow that rule literally. Rejected because **the rule is conditioned on a
 > consumer this tree does not have.** These fixtures feed Java repository and
 > service assertions and `common-lib` codec round-trips; nothing compares a
@@ -941,7 +1031,7 @@ Two clarifications that must not be blurred:
 
 ### 6.8 Offsets are 0-based rather than the house 1-based tables
 
-> **Alternatives Considered:** tabling offsets 1-based, to match
+> Alternatives Considered: tabling offsets 1-based, to match
 > `tests/fixtures/README.md` section 5.7 (L437 to L450), which describes this
 > same `discgrp` record with `DIS-INT-RATE` at bytes `17-22`. Rejected because
 > the consumers of this tree are 0-based: `CopybookLayout` declares
@@ -1112,7 +1202,7 @@ fixtures/
 | `reference_list` | the `COTRTLIC` transaction-type and category list | `trantype.txt`, `trancatg.txt` |
 | `reference_update` | `COTRTUPC` add, edit and delete, including the foreign-key restrict path that surfaces as HTTP 409 | `trantype.txt`, `trancatg.txt` |
 | `batch_reference_update` | `COBTUPDT` sequential input | a 53-byte input file |
-| `date_conversion` | the `CODATE01` request, and the date-edit rules of `CSUTLDTC` | a 1000-byte request file |
+| `date_conversion` | the `CODATE01` request envelope. **Not** `CSUTLDTC`'s date-edit rules: those take a date and a ten-byte mask as parameters, not a 1000-byte message, so no fixture here carries one | a 1000-byte request file |
 
 `reference_update` and `batch_reference_update` are genuinely distinct flows
 despite the shared prefix - an online screen against the reference tables versus
@@ -1190,9 +1280,13 @@ indistinguishable from oversight:
 | `disclosure_group` | not required | `DIS-ACCT-GROUP-ID` is a **disclosure-group classifier** - `A000000000`, `DEFAULT`, `ZEROAPR` - and **not an account number** |
 | `date_conversion` | **required** | `WS-KEY PIC 9(11)` is an 11-digit ACCTDAT key, and therefore identity-shaped (section 3.7) |
 
-The `date_conversion` scenario READMEs carry the full three-part attestation. The
-other four domains hold no PAN and no identity data at all, so the obligation
-does not attach to them and its absence there is deliberate.
+All three `date_conversion` scenario READMEs carry the attestation obligation
+explicitly, and they discharge it in the two places it attaches: the `happy_path`
+and `request_payload_ignored` READMEs each carry the full three-part statement in
+their own section 4.2, and the `empty_input` README records positively that a
+zero-byte file holds no identity data and so has nothing to attest to. The other
+four domains hold no PAN and no identity data at all, so the obligation does not
+attach to them and its absence there is deliberate.
 
 ---
 
@@ -1207,7 +1301,18 @@ these bytes, and what they assert with them.
   integration tests, which Failsafe runs, and the `*ServiceTest` and
   `*ControllerTest` unit tests, which Surefire runs. `services/pom.xml` records
   `*RepositoryIT` as this project's naming convention for the container-backed
-  integration tests. **See section 10: this directory does not exist yet.**
+  integration tests. **See section 10: the directory now exists, but none of
+  those three test kinds is present in it yet.**
+- **`com.carddemo.reference.fixtures`** - the executable consumers of this tree, both
+  run by Surefire. `ReferenceFixtureContractTest` resolves all fifteen record files
+  from the test classpath and asserts the geometry section 10 measures;
+  `ReferenceFixtureTest` asserts the field-level claims this document makes about
+  them - that an empty file is zero bytes and raises `RecordLengthException`, that
+  the seeded types re-encode byte for byte with their zero filler intact, that the
+  two disclosure groups differ at exactly pair `07|0001`, that the delete fixture
+  pairs a referenced type with an unreferenced one, that every category names a
+  declared type, that no file repeats a key, and that the two
+  program-working-storage records carry their documented fields.
 - **`com.carddemo.common.codec.FixedWidthCodec`** - decodes a record into a field
   map and encodes one back, raising `RecordLengthException` when a record is not
   exactly its declared length and `FieldCodecException` when a field will not
@@ -1223,10 +1328,22 @@ these bytes, and what they assert with them.
 
 Fixtures reach those consumers from the **test classpath**, not by filesystem
 path: Maven copies `src/test/resources/` into `target/test-classes/`, so a record
-file resolves as `fixtures/<domain>/<scenario>/<file>.txt`. This is verified -
-the one scenario already present appears at
-`services/reference-service/target/test-classes/fixtures/date_conversion/empty_input/date-request.txt`
-after a build.
+file resolves as `fixtures/<domain>/<scenario>/<file>.txt`. This is verified twice
+over: every one of the fifteen record files appears under
+`services/reference-service/target/test-classes/fixtures/` after a build -- for
+example the zero-byte
+`services/reference-service/target/test-classes/fixtures/date_conversion/empty_input/date-request.txt`,
+which is the case worth naming because a zero-byte resource is the one a copy step
+is most likely to drop -- and both `ReferenceFixtureContractTest` and
+`ReferenceFixtureTest` resolve them through that same classpath contract with
+`getResourceAsStream`, raising rather than skipping if any one of them is absent, so
+a file that failed to be packaged fails a test instead of being read from source.
+
+Assumptions: a stale `target/test-classes/` can hold a file that no longer exists in
+the source tree, because Maven's resource copy does not delete what has disappeared
+unless the module is cleaned. That is why the consumer asserts the presence of names
+that must exist rather than the absence of names that must not, and why a rename is
+verified by loading the new name rather than by failing to load the old one.
 
 ### 9.2 The direction of the contract
 
@@ -1244,13 +1361,69 @@ This section follows the house precedent at `tests/fixtures/README.md` L24 to
 L45, which carries an availability section headed *"verified against the branch -
 not aspirational"*. Everything below was checked directly rather than assumed.
 
-**Present in this tree now:**
+**Present in this tree now** -- enumerated and measured from the directory, not from a
+plan:
 
 - this file, at tree scope;
-- `date_conversion/empty_input/date-request.txt`, a **zero-byte** file, which is
-  the correct encoding of an empty input (section 5.2). Its scenario directory
-  does not yet carry the `README.md` that section 8.4 requires, so that
-  obligation is outstanding.
+- **15 record files** across **13 scenario directories** in **5 domains**, being
+  `batch_reference_update` (3 scenarios, 3 files), `date_conversion` (3, 3),
+  `disclosure_group` (3, 3), `reference_list` (2, 3 -- `empty_input` carries both
+  reference files) and `reference_update` (2, 3 -- `happy_path` carries both);
+- **13 scenario READMEs**, one per scenario directory, each carrying the four-element
+  contract of section 8.4. The obligation that section records is discharged, not
+  outstanding;
+- **5 of the 15 record files are genuinely zero-byte**, which is the correct encoding
+  of an empty fixed-width input (section 5.2): the two in
+  `reference_list/empty_input`, which is the one `empty_input` scenario carrying two
+  files, and one each in `batch_reference_update/empty_input`,
+  `date_conversion/empty_input` and `disclosure_group/empty_input`. Of these,
+  `date_conversion/empty_input/date-request.txt` is the one file in the tree that
+  pre-dates the others and it is left byte-for-byte as it was.
+
+| Domain | Scenario | Record files | Bytes | Rows x width |
+|---|---|---|---:|---|
+| `reference_list` | `happy_path` | `trantype.txt` | 427 | 7 x 60 |
+| `reference_list` | `empty_input` | `trantype.txt`, `trancatg.txt` | 0, 0 | zero-byte |
+| `reference_update` | `happy_path` | `trantype.txt`, `trancatg.txt` | 488, 1098 | 8 x 60, 18 x 60 |
+| `reference_update` | `delete_restricted_by_category` | `trantype.txt` | 122 | 2 x 60 |
+| `disclosure_group` | `happy_path` | `discgrp.txt` | 51 | 1 x 50 |
+| `disclosure_group` | `default_fallback` | `discgrp.txt` | 1734 | 34 x 50 |
+| `disclosure_group` | `empty_input` | `discgrp.txt` | 0 | zero-byte |
+| `batch_reference_update` | `add_record` | `trtype-update.txt` | 108 | 2 x 53 |
+| `batch_reference_update` | `invalid_type_soft_reject` | `trtype-update.txt` | 108 | 2 x 53 |
+| `batch_reference_update` | `empty_input` | `trtype-update.txt` | 0 | zero-byte |
+| `date_conversion` | `happy_path` | `date-request.txt` | 1001 | 1 x 1000 |
+| `date_conversion` | `request_payload_ignored` | `date-request.txt` | 1001 | 1 x 1000 |
+| `date_conversion` | `empty_input` | `date-request.txt` | 0 | zero-byte |
+
+Every non-empty file is LF only with exactly one trailing newline and zero CR bytes,
+and every byte count above is `rows x (width + 1)`, which is the section 5.7
+acceptance arithmetic.
+
+Refactoring Rationale: this list previously named exactly two present artifacts --
+this file and `date_conversion/empty_input/date-request.txt` -- and recorded that that
+one scenario directory carried no `README.md`, so the section 8.4 obligation was
+outstanding. Both halves of that statement are now false: thirteen more record files
+landed, and all thirteen scenario READMEs were authored. A status section that
+under-reports what exists is worse than one that is merely incomplete, because a
+reader trusts it and stops looking -- and in this tree that reader is the one deciding
+whether a fixture already covers the case they were about to add.
+
+Refactoring Rationale: the `batch_reference_update` scenario in the table above was
+named `invalid_type_abend` and is now `invalid_type_soft_reject`. The rename is not
+cosmetic: `9999-ABEND` in
+[`COBTUPDT.cbl`](../../../../../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl)
+displays a message, moves 4 to `RETURN-CODE` and EXITs -- it does not `STOP RUN` --
+so control returns to the read loop and the record after the invalid one IS
+processed. The old name described the paragraph's label rather than its body, and a
+fixture whose second row exists precisely to prove the loop advanced read as though
+it proved the run halted.
+
+Assumptions: the file count, the scenario count and the byte counts are measurements
+taken from the directory, so they will drift as scenarios are added. Section 9's
+classpath contract is the mechanism that makes a drift visible -- a consumer resolves
+`fixtures/<domain>/<scenario>/<file>.txt` and fails on a name that is not there,
+rather than silently testing nothing.
 
 **Present and depended upon elsewhere:**
 
@@ -1264,15 +1437,35 @@ not aspirational"*. Everything below was checked directly rather than assumed.
   roles these tables live in. It is owned entirely by the `data-migration`
   package: **nothing here copies it, stubs it, or extracts from it.**
 
-**Not present:**
+**Present, and one of them IS a consumer of these payloads:**
 
-- `services/reference-service/src/test/java/` does not exist. Of the nine
-  reactor modules, `reference-service` is currently the only one with no Java
-  test sources. **The consumers named in section 9.1 are therefore a contract
-  for when they land, not a claim that they exist today.**
+- `services/reference-service/src/test/java/` holds three test packages.
+  `com.carddemo.reference.config` holds `ReferenceApiContractTest`, which holds
+  the published OpenAPI document, `V1__reference.sql` and `SecurityConfig` to
+  each other; `com.carddemo.reference.dto` holds `ReferenceWireContractTest`,
+  which holds that same document to the Java records that realise it. Neither
+  reads a record file described here: their inputs are the packaged contract, the
+  migration and the DTOs, not these fixtures.
+- `com.carddemo.reference.fixtures` holds the two classes that **do** read them.
+  `ReferenceFixtureContractTest` resolves each one as
+  `fixtures/<domain>/<scenario>/<file>.txt` from the test classpath and asserts
+  the geometry section 10 measures, raising rather than skipping on an absent
+  name; `ReferenceFixtureTest` asserts the field-level and cross-file claims this
+  document makes, and contributes thirty-four executed assertions over the fifteen
+  files. **The consumers named in section 9.1 remain a contract for when they
+  land** -- no `*RepositoryIT`, `*ServiceTest` or `*ControllerTest` exists yet --
+  but the classpath contract itself is no longer unexercised.
 
-> **Trade-offs:** writing the byte-level contract before its consumers exist. The
-> rejected alternative is waiting for `src/test/java/` to land and documenting
+Refactoring Rationale: this block used to say the test tree held ONE package,
+that it was named `com.carddemo.reference.dto`, and that nothing read these
+payloads. All three statements have been overtaken: there are three packages, the
+contract test that the sentence described actually lives in `config`, and the two
+classes in `fixtures` read all fifteen files between them. A "not yet a consumer" note that
+outlives its own subject is the kind a reader believes, and believing it here
+means authoring a second fixture reader beside one that already exists.
+
+> Trade-offs: writing the byte-level contract before its consumers exist. The
+> rejected alternative is waiting for those consumers to land and documenting
 > the fixtures afterwards. Its concrete consequence is that whoever authors the
 > record files in the meantime has no stated derivation rule to author against,
 > so the bytes settle first and the contract is then written to match whatever
@@ -1281,8 +1474,8 @@ not aspirational"*. Everything below was checked directly rather than assumed.
 > is that this section must name artifacts that do not exist yet, which is why it
 > separates them explicitly rather than listing them alongside the present ones.
 
-**The live check that closes the loop:** once
-`services/reference-service/src/test/java/` lands,
+**The live check that closes the loop:** once a test under
+`services/reference-service/src/test/java/` reads these payloads,
 
 ```bash
 # WHAT: build reference-service and the common-lib it depends on, and run both
@@ -1293,9 +1486,12 @@ not aspirational"*. Everything below was checked directly rather than assumed.
 mvn -f services/pom.xml -pl reference-service -am clean verify
 ```
 
-must pass. While that sibling directory is absent there is nothing for the
-command to assert about this tree, and this section says so rather than omitting
-the check.
+must pass. The `-am` in that command is not optional and the reason is worth
+stating twice: a reactor build that excluded `common-lib` resolves the last
+INSTALLED copy of the codecs from the local repository instead of the sources
+under review, so a fixture can be validated against a stale decoder and report
+green. That failure mode has been observed on this branch, which is why the flag
+is written into the command rather than left to habit.
 
 ---
 
@@ -1384,7 +1580,7 @@ the symptom it actually produces, because the dangerous ones are silent.
 | A description tidied for consistent capitalisation | No length change at all, so nothing detects it until a comparison against the seeded description fails. **Silent**, and forbidden by Rule T8 |
 | A DEFAULT-fallback scenario built on any pair other than type `07` category `0001` while both groups are present | The assertion passes whether or not the fallback fired. **Vacuous** - the worst case, because it looks like coverage |
 | A `discgrp` fixture that omits the `DEFAULT` group | The consuming batch flow abends rather than returning a value; the scenario is asserting a crash and its README must say so |
-| An invalid byte in position 0 of a 53-byte record | `COBTUPDT` abends with `'ERROR: TYPE NOT VALID'`. It does **not** skip the row |
+| An invalid byte in position 0 of a 53-byte record | Reading `9999-ABEND` as a termination. It displays the message, moves `RETURN-CODE` to 4 and **continues with the next record**, so the scenario asserts a soft reject, not a crash |
 | Offsets read with the wrong base | Every field is off by one. Section 3.1 declares the base for exactly this reason |
 | A layout restated in test code instead of obtained from `CopybookLayout` | Two declarations of one geometry, which drift independently. Forbidden by section 5.8 |
 
@@ -1413,7 +1609,7 @@ eighth apply to documents including this one; the tenth applies to the module.
    with both groups present exercises type `07` category `0001`; any scenario
    claiming to prove the no-rate path exercises type `01` category `0005`.
 7. **README completeness audit.** A `README.md` exists at tree scope and in every
-   scenario directory. Each states its purpose, the byte-level contract with
+   scenario directory - measured at thirteen of thirteen. Each states its purpose, the byte-level contract with
    copybook line citations, the consumer and what it asserts, and the failure
    modes. Each non-obvious derivation carries one of the three available
    canonical labels, spelled plural, in ASCII, unbolded and unparenthesised.
@@ -1424,8 +1620,10 @@ eighth apply to documents including this one; the tenth applies to the module.
 9. **Reference-integrity audit.** `git status` shows no modification to any path
    under `app/**`, `tests/**`, `scripts/**` or `samples/**`.
 10. **Live check.** The reactor command given in section 10 passes with these
-    fixtures resolved from the test classpath, once the Java test sources named
-    there land.
+    fixtures resolved from the test classpath. `ReferenceFixtureTest` is what makes
+    this gate assert something: gates 1, 2, 4 and 6 are mechanical facts about the
+    bytes, and it checks all four of them on every build rather than only when
+    someone remembers to run the one-liner below.
 
 Gates 1 to 4 are mechanical and worth running as a one-liner over the tree:
 

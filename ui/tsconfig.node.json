@@ -38,8 +38,16 @@
 //     nothing in this tree invokes `-b`. Every consumer of the browser project
 //     reaches it through the literal `tsc --noEmit -p tsconfig.json`:
 //     ui/package.json's `typecheck` script runs it directly, its `build` script
-//     reaches it by delegating to `npm run typecheck`, and the planned type-check
-//     gate in .github/workflows/ui-ci.yml runs the same command again. Under a
+//     reaches it by delegating to `npm run typecheck`, and the type-check gate in
+//     .github/workflows/ui-ci.yml -- the "Type-check application and tool
+//     configuration" step, which runs `npm run typecheck` -- reaches the same
+//     command a third time. Refactoring Rationale: that gate was described here as
+//     "planned" while the paragraph above this list already stated, correctly, that
+//     the workflow invokes the script. One file cannot hold both readings: a
+//     contributor who believed the gate were still planned would have no reason to
+//     keep this project reachable by a literal `-p` invocation, which is the whole
+//     conclusion this entry reaches. The workflow now exists and both statements
+//     are written in the present tense. Under a
 //     references-only root that owns no files of its own, every one of those
 //     paths would check ZERO files and still exit 0 -- a gate that reports
 //     success having verified nothing. The two projects are therefore siblings,

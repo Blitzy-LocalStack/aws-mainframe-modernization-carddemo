@@ -149,6 +149,41 @@ class CognitoAccessTokenValidatorTest {
     }
 
     /**
+     * Confirms a null or blank client id SKIPS the client check silently, which is the documented and
+     * deliberately caller-hostile behaviour every caller in this repository refuses to rely on.
+     *
+     * <p>Refactoring Rationale: this expectation exists to pin behaviour that looks like a defect and is
+     * not one, so that nobody "fixes" it here and nobody depends on it there. A shared kernel cannot tell
+     * an unset property from a caller that has deliberately delegated the client check to an audience
+     * validator, so raising here would break the second caller to serve the first. The refusal therefore
+     * belongs to each caller that READS the property, and every {@code SecurityConfig} in this repository
+     * plus {@code JwtDecoderConfig} now throws {@code IllegalStateException} while its context is being
+     * built. The assertion below is what makes the division of responsibility visible at this end.</p>
+     *
+     * <p>Assumptions: the token used carries a client id belonging to a DIFFERENT client, so a validator
+     * that had applied the check would have refused it. Passing a matching client id would leave the two
+     * outcomes indistinguishable and the assertion would prove nothing.</p>
+     */
+    @Test
+    @DisplayName("a null or blank client id skips the client check, which is why every caller refuses one")
+    void blankClientIdSkipsTheClientCheck() {
+        Jwt fromAnotherClient = token(
+                Map.of("token_use", "access", "client_id", "7zzz9q0000000000000EXAMPLE", "scope", SCOPE));
+
+        assertThat(validator().validate(fromAnotherClient).hasErrors())
+                .as("with the client id configured, a token from another client must be refused")
+                .isTrue();
+
+        for (String unset : java.util.Arrays.asList(null, "", "   ")) {
+            assertThat(new CognitoAccessTokenValidator(unset, List.of(SCOPE))
+                            .validate(fromAnotherClient)
+                            .hasErrors())
+                    .as("a client id of [%s] leaves the check unapplied, silently", unset)
+                    .isFalse();
+        }
+    }
+
+    /**
      * Confirms the tokeniser produces stable, purpose-scoped, opaque identifiers and refuses key
      * material too short to key the underlying code.
      */

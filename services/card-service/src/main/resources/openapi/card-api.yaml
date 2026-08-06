@@ -7,15 +7,13 @@
 #   exposes, the paths, the operation identifiers, the parameter and property
 #   names, the response shapes and the error vocabulary. Every other tree that
 #   touches this context is written against this document rather than against a
-#   reading of the baseline. Landed at this checkpoint: the browser client at
-#   ui/src/api/cards.ts, which declares CardSummary, CardDetail and the seven-member
-#   page envelope from the schemas below, and the assertions at
+#   reading of the baseline. Its consumers are the browser client at
+#   ui/src/api/cards.ts, which declares CardSummary, CardDetail and the
+#   seven-member page envelope from the schemas below; the assertions at
 #   services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java,
-#   which hold this document and SecurityConfig to each other. Planned and NOT yet
-#   authored: the shared client type module ui/src/api/types.ts, and the
-#   controllers, request and response shapes and mapper of this module - so no
-#   Java type in this module implements the document yet, and the reader should
-#   not expect to find one.
+#   which hold this document and SecurityConfig to each other; and this module's
+#   own controllers, request and response shapes and mapper, which implement the
+#   shapes below rather than defining them.
 #
 #   The document the springdoc library generates from those controllers at
 #   run time is therefore not a second source of truth - it is a check on this
@@ -37,20 +35,19 @@
 #   Requests carry four kinds of input, and every one of them is described
 #   at the point it is declared rather than only here.
 #
-#   - A path parameter: the twenty-two-character opaque selector identifying one
-#     card, declared once at components/parameters/OpaqueCardIdPath and
-#     referenced by the three operations addressing a single card. It is NOT the
-#     card number; no card number appears in any path in this document.
-#   - Query parameters: the one optional list filter, accountId, and the two
-#     paging inputs, cursor and direction. All three are declared under
-#     components/parameters. The card-number filter of the baseline screen is
-#     deliberately NOT among them: it travels in the lookup operation's request
-#     body instead, because a query string is part of the request line and would
-#     carry a full account number into history and access logs.
+#   - A path parameter: the sixteen-digit card number identifying one card,
+#     declared once at components/parameters/CardNumberPath and referenced by the
+#     three operations addressing a single card. It is the primary key of
+#     card.cards, and it is a value a user supplies rather than one any response
+#     hands out; a masked rendering is refused there.
+#   - Query parameters: the two optional list filters, accountId and cardNumber,
+#     which are the two filter fields of the baseline list screen, and the two
+#     paging inputs, cursor and direction. All four are declared under
+#     components/parameters.
 #   - A request header: X-Correlation-Id, optional on every operation, declared
 #     once at components/parameters/CorrelationIdHeader.
-#   - Two request bodies: CardUpdateRequest, carried by the update operation, and
-#     CardLookupRequest, carried by the lookup operation.
+#   - One request body: CardUpdateRequest, carried by the update operation. The
+#     three read operations carry no body.
 #
 #   The number of rows a full page carries is NOT among them. It is settled
 #   server-side at seven by carddemo.card.list.page-size (application.yml),
@@ -58,8 +55,7 @@
 #   app/cbl/COCRDLIC.cbl:177-178. A client cannot vary it.
 #
 # Return values:
-#   - CardPage, from the list and lookup operations: one page of CardSummary rows
-#     with the
+#   - CardPage, from the list operation: one page of CardSummary rows with the
 #     sealed cursor tokens and the two availability indicators needed to walk
 #     the ordered set by key.
 #   - CardDetail, from the non-administrative read and from a successful update:
@@ -146,14 +142,20 @@
 #      in-scope artifact of the same migration - and a query parameter is a
 #      string on both sides, so neither a Java build nor a TypeScript build
 #      could ever have reported the mismatch: it would have surfaced only as
-#      400 responses at run time. Two of the three differences are resolved in
-#      THIS document, because on both the client was right: a card number in a
-#      path is written into gateway access logs, browser history and referrer
-#      metadata, so the opaque selector is now the only selector here; and one
-#      cursor parameter cannot name the wrong response member, so it is now the
-#      only paging position here. The third is resolved in the client, which
-#      gains the administrative operation's absence, the two list filters and
-#      the four page members it was missing.
+#      400 responses at run time. The paging difference is resolved in THIS
+#      document, because on it the client was right: one cursor parameter cannot
+#      name the wrong response member, so it is now the only paging position
+#      here. The selector difference is resolved the other way, and deliberately:
+#      the path carries the sixteen-digit card number, which is the primary key
+#      and the one value a user actually holds, and the exposure a path segment
+#      creates is answered by redaction rather than by indirection --
+#      common-lib's CardNumberMasker renders a number embedded in a path or a
+#      query down to its last four digits before any operational record is
+#      written. Indirection cost more than it saved: it made the primary key
+#      unpublishable, which forced a second read operation and a POST whose only
+#      purpose was to accept in a body the number the URL could not carry. The
+#      rest is resolved in the client, which gains the administrative operation's
+#      absence, the two list filters and the four page members it was missing.
 #   8. Assumptions: the authority each operation requires is a machine-readable
 #      field on the operation, x-required-authority, and not prose. The
 #      rationale for the field and for rejecting the security-scheme scope
@@ -179,7 +181,8 @@ info:
   title: CardDemo Card Service API
   version: 1.0.0
   summary: >-
-    Card list, card lookup, card detail and card update for the card bounded
+    Card list, card detail, administrative card detail and card update for the
+    card bounded
     context of the migrated CardDemo credit-card management application.
   description: >-
     The card bounded context owns one table, card.cards, and exposes it through
@@ -195,7 +198,7 @@ info:
     it replaces. Session state is gone: the baseline was pseudo-conversational
     and carried identity, selection and navigation in a buffer the terminal
     echoed back, so every request here instead takes identity from a signed
-    token and selection from an opaque selector in the request path. The
+    token and selection from the card number in the request path. The
     four-verb VSAM browse
     becomes a single keyset-paginated query per request. And the record's
     before-image, which the update screen carried across the gap between
@@ -330,25 +333,29 @@ paths:
         baseline states the same thing unconditionally at
         app/cbl/COCRDLIC.cbl:1287.
       x-required-authority: carddemo-user
-      # WHY : Refactoring Rationale: the second filter field of the baseline
-      #       screen -- the card number at app/cpy-bms/COCRDLI.CPY:72 -- is NOT a
-      #       query parameter of this operation, and an earlier revision of this
-      #       document declared it as one. A query string is part of the request
-      #       line, so that revision put a full primary account number into every
-      #       browser history entry, every referrer header and every access log
-      #       the load balancer and the distribution write, none of which this
-      #       service can redact. The filter itself is preserved, exactly, by the
-      #       lookup operation below: because the card number is the unique
-      #       primary key of card.cards, narrowing a list to one card number can
-      #       return at most one row, so a body-carried lookup answering with this
-      #       same page shape is the same observable behaviour with the number out
-      #       of the request line.
+      # WHY : Refactoring Rationale: BOTH filter fields of the baseline screen are
+      #       query parameters of this operation -- the account number at
+      #       app/cpy-bms/COCRDLI.CPY:66 and the card number at :72 -- so the two
+      #       inputs a terminal user typed are the two inputs a caller supplies. An
+      #       intermediate revision of this document moved the card-number filter
+      #       into the body of a separate operation to keep a primary account
+      #       number out of the request line. The concern was real and it is met
+      #       without a second operation: common-lib's CardNumberMasker redacts a
+      #       card number embedded in a request path or query before it reaches an
+      #       operational record, and GlobalExceptionHandler already applies it on
+      #       every error it writes. Splitting one screen's two filters across two
+      #       operations, one of them a POST, was the cost of not using it.
+      # WHY : Assumptions: the card-number filter is OPTIONAL and the account
+      #       filter is optional too, so a request carrying neither is the whole
+      #       collection one page at a time. app/cbl/COCRDUPC.cbl:193-194 words the
+      #       constraint as "Card number if supplied must be a 16 digit number",
+      #       which states the optionality and the width in one sentence.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/AccountIdFilter'
+        - $ref: '#/components/parameters/CardNumberFilter'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/PagingDirection'
-        - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
           description: >-
@@ -372,7 +379,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /api/v1/cards/{opaqueCardId}:
+  /api/v1/cards/{cardNumber}:
 
     description: >-
       One card, addressed by its own primary account number. It carries the two
@@ -399,7 +406,7 @@ paths:
         the CardDetail schema.
       x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CardNumberPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
@@ -451,7 +458,7 @@ paths:
         refusal and each is reported separately; see the 409 response.
       x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CardNumberPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         required: true
@@ -507,28 +514,28 @@ paths:
   #       so a single mishandled value would widen disclosure silently, and
   #       every audit of who read a full account number would first have to
   #       reconstruct which requests carried the flag.
-  # WHY : Refactoring Rationale: that distinct path is a SUB-RESOURCE of the card
-  #       and an earlier revision of this document put it under a separate
-  #       /api/v1/admin prefix. The prefix made the operation unreachable. The
-  #       load balancer forwards this service on the patterns "/api/v1/cards" and
-  #       "/api/v1/cards/*" (infra/envs/dev/main.tf and infra/envs/prod/main.tf)
-  #       and the edge's route table publishes "ANY /api/v1/cards/{opaqueCardId}"
-  #       and "ANY /api/v1/cards/{opaqueCardId}/{proxy+}"
-  #       (infra/modules/api-gateway-http/variables.tf), so "/api/v1/admin/cards/..."
-  #       matched no rule at either hop and would have answered 404 from the load
-  #       balancer for an operation the service implements. Everything the separate
-  #       path was chosen FOR survives the move: this is still its own path, with
-  #       its own operation identifier, its own required authority and its own
-  #       audit trail, and it is still not a flag on an endpoint every caller may
-  #       reach. What changes is only that it now sits where the deployed edge
-  #       already routes it.
-  # WHY : Alternatives Considered: adding "/api/v1/admin/cards" to the load
-  #       balancer rule set and the edge route table instead, so the prefix could
-  #       stay. Rejected because it buys nothing this sub-resource does not already
-  #       have, while adding a third routed prefix for one service and a second
-  #       place where a card operation's path is spelled - and the edge's own
-  #       route-key rationale records that its list is deliberately one matched
-  #       pair of keys per service rather than a per-operation table.
+  # WHY : Refactoring Rationale: that distinct path carries its OWN /api/v1/admin
+  #       prefix and is not a sub-resource suffix beneath the card. An intermediate
+  #       revision of this document spelled it "/api/v1/cards/{id}/unmasked",
+  #       because the deployed edge routed the card subtree and not an admin
+  #       prefix, and the routing has been extended rather than the path bent to
+  #       fit it: the load balancer rule set now forwards "/api/v1/admin/cards" and
+  #       "/api/v1/admin/cards/*" and the edge route table now publishes the
+  #       matching pair of keys, exactly as a second top-level segment was already
+  #       added once for another service whose contract needed one. The suffix
+  #       spelling cost something concrete that the prefix does not: it placed the
+  #       administrative operation INSIDE the subtree every authenticated caller
+  #       may reach, so its authority depended on an ordered rule table in which
+  #       the specific rule had to be evaluated before the subtree rule that would
+  #       otherwise shadow it. Under a separate prefix no subtree rule can shadow
+  #       it and the ordering hazard does not exist.
+  # WHY : Alternatives Considered: leaving the operation as a suffix on the card
+  #       subtree and defending the ordering with a test. Rejected because a test
+  #       that a rule precedes another rule protects the table as it stands and not
+  #       the next entry added to it, whereas a distinct prefix makes the widest
+  #       card rule unable to match the administrative path at all; the cost is one
+  #       further routed prefix at two infrastructure hops, which is the price of
+  #       removing an ordering dependency from an authorization decision.
   # WHY : Refactoring Rationale: the two read operations return DIFFERENT
   #       schemas, and an earlier revision of this document returned one schema
   #       from both. That revision described the difference between them in prose
@@ -543,18 +550,18 @@ paths:
   #       asserted, and the duplication the earlier revision avoided is avoided
   #       still because AdminCardDetail composes CardDetail rather than restating
   #       it.
-  /api/v1/cards/{opaqueCardId}/unmasked:
+  /api/v1/admin/cards/{cardNumber}:
 
     get:
-      operationId: getCardUnmasked
+      operationId: getAdminCardDetail
       tags:
         - admin-cards
       summary: Read one card with the full primary account number
       description: >-
-        Returns the same card state as the non-administrative read operation,
-        with one difference: the optional cardNumber member is present and
-        carries the primary account number in full. The masked
-        displayCardNumber member is present here too and is unchanged, so a
+        Returns the same card state as the non-administrative read operation at
+        /api/v1/cards/{cardNumber}, with one difference: the optional cardNumber
+        member is present and carries the primary account number in full. The
+        masked displayCardNumber member is present here too and is unchanged, so a
         client holding one type renders either response. The caller must hold
         the carddemo-admin authority, which the shared token converter derives
         from the signed cognito:groups claim; a token carrying only
@@ -566,7 +573,7 @@ paths:
         be rendered of the account number and nothing else.
       x-required-authority: carddemo-admin
       parameters:
-        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CardNumberPath'
         - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
@@ -591,99 +598,6 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
-
-  # WHY : Refactoring Rationale: this operation exists because the card-number
-  #       filter of the baseline list screen (CARDSIDI PIC X(16) at
-  #       app/cpy-bms/COCRDLI.CPY:72) cannot be a query parameter without putting
-  #       a full primary account number into the request line, and therefore into
-  #       browser history, referrer headers and the access logs the load balancer
-  #       and the distribution write -- none of which this service can redact. An
-  #       earlier revision of this document declared exactly that parameter. The
-  #       behaviour is preserved rather than dropped: the number is carried in a
-  #       request body, where no hop logs it by default, and the answer is the
-  #       same page shape the list operation returns.
-  # WHY : Assumptions: a lookup by card number can match at most one row, so a
-  #       page is a truthful answer rather than a contrivance. The card number is
-  #       the unique primary key of card.cards -- CARD-NUM PIC X(16) at
-  #       app/cpy/CVACT02Y.cpy:5, the KSDS key the baseline browses on -- so
-  #       narrowing a list to one number narrows it to one row, and the baseline
-  #       screen that carried this filter rendered precisely that: its list with a
-  #       single line on it.
-  # WHY : Alternatives Considered: returning the card detail directly instead of a
-  #       one-row page, which would have been the more obvious shape for a lookup.
-  #       Rejected because it would make this operation a second way to read a
-  #       card, competing with the two that already exist and each of which has
-  #       its own disclosure boundary; a client would then have two answers to
-  #       "how much of the number is rendered" for one request. Answering with the
-  #       list's own shape keeps this operation a FILTER, which is what the
-  #       baseline field was, and leaves reading a card to the read operations.
-  # WHY : Alternatives Considered: a GET whose card number travels in a header
-  #       rather than the query string, which would also keep it out of the
-  #       request line. Rejected because a header is not part of the resource
-  #       identity a cache keys on, so an intermediate cache would serve one
-  #       card's page for another card's request; a POST is uncacheable by
-  #       default, which is the property this operation needs.
-  # WHY : Alternatives Considered: POST /api/v1/cards/search as the path. Rejected
-  #       only for reachability arithmetic: the edge publishes
-  #       "ANY /api/v1/cards/{opaqueCardId}" and the load balancer forwards
-  #       "/api/v1/cards/*", so any single trailing segment is already routed and
-  #       no route-table change is needed for either spelling -- and "lookup"
-  #       names what the operation does to a caller holding a number rather than
-  #       implying a general query facility this contract does not offer.
-  /api/v1/cards/lookup:
-
-    post:
-      operationId: lookUpCardByNumber
-      tags:
-        - cards
-      summary: Find one card by its number without putting the number in a URL
-      description: >-
-        Answers with the one card bearing the supplied number, as a page holding
-        that single row, or with an empty page when no card bears it. This
-        carries across the card-number filter field of the baseline list screen
-        at app/cpy-bms/COCRDLI.CPY:72 and the constraint the baseline states for
-        it, 'Card number if supplied must be a 16 digit number' at
-        app/cbl/COCRDUPC.cbl:193-194. The row it returns carries the opaque
-        identifier every other operation of this contract selects on, so a
-        caller holding a number reaches the card by looking it up and then using
-        that identifier.
-
-
-        An unmatched number is a success with an empty items array, not 404,
-        exactly as the list operation reports a filtered-out page: a query that
-        matched nothing succeeded. The baseline distinguished the two by message
-        and this contract keeps them distinguishable by content, because an
-        empty page and a page with a row differ observably.
-      x-required-authority: carddemo-user
-      parameters:
-        - $ref: '#/components/parameters/CorrelationIdHeader'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CardLookupRequest'
-      responses:
-        '200':
-          description: >-
-            A page holding the one matching card, or an empty page when none
-            matches. Both cursor tokens are absent and neither availability
-            indicator is set, because a lookup by primary key has no further
-            page in either direction.
-          headers:
-            X-Correlation-Id:
-              $ref: '#/components/headers/XCorrelationId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CardPage'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
 
 # WHY : Assumptions: (1) the shapes reused from the shared kernel are
 #       described here and never forked. ApiError, its nested field error and
@@ -720,51 +634,56 @@ components:
         operation requires yields 403.
 
   parameters:
-
-    # WHY : Refactoring Rationale: the selector is an opaque token and NOT the
-    #       primary account number, and an earlier revision of this document put
-    #       the sixteen-digit number in the path. That is the one place a value
-    #       cannot be kept private: a path segment is written into the gateway and
-    #       load-balancer access logs, into the browser's history and its
-    #       referrer header, and into the path member of this document's own error
-    #       body - so publishing an account number there disclosed it into four
-    #       stores at once, and masking it in every response body bought nothing
-    #       while the URL carried it in full. The token is produced by
-    #       services/common-lib/src/main/java/com/carddemo/common/security/OpaqueIdentifier.java,
-    #       whose TOKEN_LENGTH is 22, and it is stable for one card under one
-    #       deployment key, so a client may bookmark a card route and reuse it.
-    # WHY : Assumptions: the token is not reversible by its holder and is not
-    #       meant to be. It is a truncated keyed authentication code over the
-    #       protected value, so the service resolves it by looking it up rather
-    #       than by decoding it, and a client cannot construct one for a card it
-    #       was never shown. That is the property that makes it safe to log.
-    # WHY : Trade-offs: exactly 22 characters, matched by a pattern rather than
-    #       left free-form. The cost is that lengthening the token later is a
-    #       breaking change to this contract; what it buys is that a caller that
-    #       mistakenly places a sixteen-digit account number in the path is
-    #       refused with 400 by the shape check alone, before any handler runs and
-    #       before the value reaches a log. The already-authored browser client
-    #       enforces the same 22-character URL-safe shape at
-    #       ui/src/routes/cards.ts:12, so client and contract refuse the same
-    #       values.
-    OpaqueCardIdPath:
-      name: opaqueCardId
+    # WHY : Assumptions: the path segment IS the sixteen-digit card number, which
+    #       is the primary key of card.cards -- CARD-NUM PIC X(16) at
+    #       app/cpy/CVACT02Y.cpy:5, the KSDS key the baseline browses on -- and it
+    #       is the value a user supplies rather than one this service issues. The
+    #       baseline's own card-detail and card-update screens are reached by a
+    #       user typing that number into the filter field CARDSIDI PIC X(16) at
+    #       app/cpy-bms/COCRDLI.CPY:72, so the number a caller places here is the
+    #       number a terminal user typed and not a value read out of a response.
+    # WHY : Refactoring Rationale: an intermediate revision of this document
+    #       replaced this parameter with an opaque 22-character token, on the
+    #       ground that a path segment is written into gateway and load-balancer
+    #       access logs, into browser history and referrer headers, and into the
+    #       path member of this document's own error body. That exposure is real
+    #       and it is answered by redaction rather than by indirection:
+    #       common-lib's CardNumberMasker renders a card number embedded anywhere
+    #       in a request path down to its last four digits, and the shared error
+    #       advice applies it to every path it records, so this document's error
+    #       body cannot carry a full number even though the request line did. The
+    #       indirection cost more than it saved -- it made the primary key
+    #       unpublishable, which forced a second read operation and a POST whose
+    #       only purpose was to accept in a body the number the URL could not
+    #       carry, and it left a client unable to construct a card route from the
+    #       one value a user actually holds.
+    # WHY : Trade-offs: exactly sixteen digits, matched by an anchored pattern
+    #       rather than left free-form. A masked rendering taken from a response
+    #       is consequently refused with 400 by the shape check alone, before any
+    #       handler runs, which is the failure a client is most likely to produce
+    #       -- the masked form does not identify a row. The cost is that the
+    #       request line carries the number in the clear to this service, which is
+    #       why the redaction above is a requirement of the logging path and not an
+    #       optional courtesy.
+    CardNumberPath:
+      name: cardNumber
       in: path
       required: true
       description: >-
-        The card to act on, identified by the opaque 22-character token this
-        service issues for it. Take the value from the opaqueCardId property of
-        a card returned by the list or read operation and send it back
-        unchanged. It is not an account number, it is not a masked account
-        number, and neither of those is accepted here: the row it stands for is
-        card.cards keyed on CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5, but
-        that key is never published and never travels in a URL.
+        The card to act on, as exactly sixteen digit characters. It is the
+        primary key of card.cards, CARD-NUM PIC X(16) at
+        app/cpy/CVACT02Y.cpy:5. A masked rendering such as the
+        displayCardNumber member of a list row is NOT accepted here, because the
+        masked form identifies no row; supply the number a user entered. A value
+        of the wrong width, or one carrying a non-digit, is refused with 400 and
+        the baseline's own wording 'Card number if supplied must be a 16 digit
+        number' from app/cbl/COCRDUPC.cbl:193-194.
       schema:
         type: string
-        minLength: 22
-        maxLength: 22
-        pattern: '^[A-Za-z0-9_-]{22}$'
-      example: 'Zm9vYmFyYmF6cXV1eDEyMw'
+        minLength: 16
+        maxLength: 16
+        pattern: '^[0-9]{16}$'
+      example: '4111111111111111'
 
     AccountIdFilter:
       name: accountId
@@ -844,6 +763,40 @@ components:
     #       column is needed and paging by it is total and exact; adding the
     #       account identifier as a second sort column would reorder the set
     #       and produce plausible pages in the wrong sequence.
+    # WHY : Assumptions: this filter is the second of the list screen's two, and
+    #       it is a query parameter for the same reason the path parameter is a
+    #       card number: the value is one a user types, and the redaction that
+    #       protects the path protects the query string with it. An intermediate
+    #       revision of this document moved it into the body of a separate POST
+    #       operation; the rationale on the list operation records why that was
+    #       withdrawn.
+    # WHY : Trade-offs: narrowing by card number can match at most one row,
+    #       because the card number is the unique primary key, so this filter
+    #       answers with a page carrying one item rather than with a card. The cost
+    #       is a page wrapper around a single row; what it buys is that the filter
+    #       stays a filter and composes with the account filter and the cursors,
+    #       exactly as the baseline screen composed its two filter fields, instead
+    #       of becoming a third way to read a card with its own disclosure
+    #       boundary.
+    CardNumberFilter:
+      name: cardNumber
+      in: query
+      required: false
+      description: >-
+        Narrows the list to one card. Sixteen digit characters exactly when
+        supplied; omit it to list without this narrowing. This carries across the
+        CARDSIDI PIC X(16) filter field of the list screen at
+        app/cpy-bms/COCRDLI.CPY:72, and the baseline states both its optionality
+        and its width in one sentence, 'Card number if supplied must be a 16
+        digit number' at app/cbl/COCRDUPC.cbl:193-194. A masked rendering is not
+        a valid value, because the masked form identifies no row.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 16
+        pattern: '^[0-9]{16}$'
+      example: '4111111111111111'
+
     Cursor:
       name: cursor
       in: query
@@ -913,7 +866,12 @@ components:
         the published bound or carries a character outside the published set is
         refused with 400 rather than being silently replaced, so that a caller
         cannot believe it is correlating requests that the service is in fact
-        correlating under a different identity.
+        correlating under a different identity. A value whose shape is that of a
+        primary account number -- only digits and the three separators, with
+        thirteen or more digits -- is refused on the same terms, because this
+        identity is echoed and logged. The refusal carries the shared problem body
+        and the response correlation header, the same as any other 400, and it names
+        the rule it applied without ever repeating the value it refused.
       schema:
         $ref: '#/components/schemas/CorrelationId'
 
@@ -1034,7 +992,7 @@ components:
                 subsystem: APPLICATION
                 status: 400
                 correlationId: 8F1C0E423A554D219B7E6C0F
-                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+                path: /api/v1/cards/************1111
                 timestamp: '2026-08-05 09:14:27.481903'
                 fieldErrors:
                   - field: embossedName
@@ -1057,7 +1015,7 @@ components:
                 subsystem: APPLICATION
                 status: 400
                 correlationId: 2B7A91D055E44F0A8C31D90B
-                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+                path: /api/v1/cards/************1111
                 timestamp: '2026-08-05 09:15:02.117640'
                 fieldErrors:
                   - field: activeStatus
@@ -1098,10 +1056,10 @@ components:
 
     NotFound:
       description: >-
-        No card exists for the opaque selector supplied in the path. A
-        well-formed selector that stands for no row and a selector this
-        deployment never issued are reported alike, so that a caller cannot
-        probe for valid selectors by comparing the two.
+        No card exists for the card number supplied in the path. A well-formed
+        number that stands for no row is reported the same way whatever the reason,
+        so that a caller cannot distinguish a number this deployment has never held
+        from one it holds but the caller may not see.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -1212,7 +1170,7 @@ components:
                 subsystem: RELATIONAL
                 status: 409
                 correlationId: 6D3E88B17C024A94B5DF1E47
-                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+                path: /api/v1/cards/************1111
                 timestamp: '2026-08-05 09:16:44.902355'
                 fieldErrors:
                   - field: version
@@ -1220,7 +1178,6 @@ components:
                     message: Record changed by some one else. Please review
                 abend: null
                 card:
-                  opaqueCardId: 'Zm9vYmFyYmF6cXV1eDEyMw'
                   displayCardNumber: '************0011'
                   accountId: '00000000011'
                   embossedName: JOHN Q PUBLIC
@@ -1242,7 +1199,7 @@ components:
                 subsystem: RELATIONAL
                 status: 409
                 correlationId: B04F7A2911DE4C639A8053C7
-                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+                path: /api/v1/cards/************1111
                 timestamp: '2026-08-05 09:17:19.336208'
                 fieldErrors: []
                 abend: null
@@ -1262,7 +1219,7 @@ components:
                 subsystem: RELATIONAL
                 status: 409
                 correlationId: 3A5C6FF89B714E0D82AC7D1B
-                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+                path: /api/v1/cards/************1111
                 timestamp: '2026-08-05 09:17:53.774019'
                 fieldErrors: []
                 abend: null
@@ -1362,15 +1319,25 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
-        stop. A value the service mints is exactly twenty-four upper-case
-        hexadecimal characters over twelve bytes of entropy; a value a caller
+        stop. A value the service mints is exactly the two-character prefix CD followed by twenty-two upper-case hexadecimal
+        characters over eleven bytes of entropy; a value a caller
         supplies need only fit the bound and the set. The empty string appears
         only inside an error body, and only for a failure raised before any
-        identity had been established.
+        identity had been established. The pattern additionally
+        refuses one narrow class the character set alone admits: a value made up
+        only of digits and the three separators, carrying thirteen or more digits.
+        That is the shape of a primary account number, in contiguous form and in
+        every separated form, and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for
+        the request -- so accepting one would copy a card number into both. Ordinary
+        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        and is accepted, and any value containing a letter is accepted whatever its
+        digits. A value the service mints begins CD, which is a non-numeric prefix
+        chosen so that a minted identity can never fall into the refused class.
       example: 4F1C0E423A554D219B7E6C0F
 
     # WHY : Refactoring Rationale: identifiers travel as digit strings and
@@ -1410,10 +1377,10 @@ components:
         displayed per row, whose twenty-eight-character layout is declared at
         app/cbl/COCRDLIC.cbl:258-260 as an eleven-character account number, a
         sixteen-character card number and a one-character status - with the card
-        number rendered masked - together with one member the baseline had no
-        need of, the opaque selector by which a client addresses this row's card
-        in a subsequent request. The twenty-eighth character is the status and
-        not a row-selection marker.
+        number rendered masked. It carries NO member by which a client can address
+        this row's card in a subsequent request, for the reason recorded on its
+        properties below. The twenty-eighth character is the status and not a
+        row-selection marker.
 
 
         The selection and separator fields the list screen carried alongside
@@ -1423,32 +1390,29 @@ components:
         submit the whole screen; a client instead calls the detail or update
         operation for the card it wants, so they have no counterpart.
       required:
-        - opaqueCardId
         - displayCardNumber
         - accountId
         - activeStatus
       additionalProperties: false
       properties:
-        # WHY : Refactoring Rationale: the row carries a SELECTOR distinct from
-        #       its rendering, and an earlier revision carried only the rendering.
-        #       That left a client no value it could act on: the masked number
-        #       identifies no row, so a client wanting the detail of a row it was
-        #       shown had to be given the unmasked number - which is what put a
-        #       primary account number into the list response and then into every
-        #       link built from it. Separating the two means the widest exposure in
-        #       this context discloses four digits and a token that stands for a
-        #       row without disclosing anything about it.
-        opaqueCardId:
-          type: string
-          minLength: 22
-          maxLength: 22
-          pattern: '^[A-Za-z0-9_-]{22}$'
-          description: >-
-            The selector for this row, to be sent back as the opaqueCardId path
-            parameter of the read and update operations. Opaque, stable for this
-            card under this deployment, and safe to place in a link, a bookmark
-            or a log. It is not derived from anything a client can compute.
-          example: 'Zm9vYmFyYmF6cXV1eDEyMw'
+        # WHY : Refactoring Rationale: a row carries the MASKED rendering and no
+        #       value that could address the card, and an intermediate revision of
+        #       this document added an opaque selector member for that purpose. The
+        #       member is withdrawn with the opaque path parameter it fed: the
+        #       operations are addressed by card number, and a card number is a value
+        #       a user supplies rather than one a list response hands out. Publishing
+        #       an addressable value per row would put back exactly what masking the
+        #       rendering exists to prevent -- a list response from which a full
+        #       account number, or a token standing in for one, can be lifted for
+        #       every row at once.
+        # WHY : Trade-offs: a client therefore cannot build a detail link from a row
+        #       alone, and reaches a card by the number a user entered. That is the
+        #       baseline's own workflow -- its detail and update screens are entered
+        #       by typing the number into CARDSIDI PIC X(16) at
+        #       app/cpy-bms/COCRDLI.CPY:72, and its row-selection fields are absent
+        #       here for the reason stated above. The cost is one interaction a
+        #       row-click would have saved; what it buys is that a list response
+        #       carries nothing that addresses anything.
         displayCardNumber:
           type: string
           maxLength: 16
@@ -1537,12 +1501,11 @@ components:
     #       representation that discloses nothing, and the cost - that a client
     #       cannot display the field - is no cost at all, because no baseline
     #       screen displayed it either.
-    # WHY : Assumptions: the baseline's update path moves that never-populated
-    #       field into the record it writes, at app/cbl/COCRDUPC.cbl:1464-1465.
-    #       This divergence is documented, not fixed: the baseline does that,
-    #       whereas an update here carries no such value and leaves the stored
-    #       enciphered column untouched, and the difference is registered as
-    #       D-CVV-UNTOUCHED in
+    # WHY : Assumptions: the baseline does move that never-populated field into
+    #       the record its update path writes, at app/cbl/COCRDUPC.cbl:1464-1465,
+    #       and app/** is untouched. The target does otherwise: an update here
+    #       carries no such value and leaves the stored enciphered column
+    #       untouched. That divergence is registered as D-CVV-UNTOUCHED in
     #       docs/architecture/cobol-to-service-traceability.md.
     CardDetailCore:
       type: object
@@ -1554,8 +1517,8 @@ components:
         strings rather than in their stored types; and the card_num column is
         rendered by two members rather than one, a masked displayCardNumber
         carried on every response and an optional full cardNumber carried only
-        by the administrative read. A fourth member, opaqueCardId, corresponds
-        to no column: it is derived from the primary key rather than stored.
+        by the administrative read. Every member here corresponds to a column;
+        none is derived.
 
 
         The single target-side rename is carried through: the record field
@@ -1570,7 +1533,6 @@ components:
         AdminCardDetail is this core plus the one property that carries a full
         account number.
       required:
-        - opaqueCardId
         - displayCardNumber
         - accountId
         - embossedName
@@ -1578,23 +1540,6 @@ components:
         - activeStatus
         - version
       properties:
-
-        # WHY : Assumptions: the selector is the same value the list row carries
-        #       for this card, so a client that navigated from a row already holds
-        #       it and a client that read the card directly can navigate onward
-        #       with it. It is echoed on the detail rather than left implicit in
-        #       the request path so that a response stored on its own remains
-        #       actionable.
-        opaqueCardId:
-          type: string
-          minLength: 22
-          maxLength: 22
-          pattern: '^[A-Za-z0-9_-]{22}$'
-          description: >-
-            The selector for this card, identical to the value in the path that
-            addressed it and to the value the list row carried. Send it back as
-            the opaqueCardId path parameter of the update operation.
-          example: 'Zm9vYmFyYmF6cXV1eDEyMw'
 
         # WHY : Refactoring Rationale: this member is masked on EVERY operation,
         #       and an earlier revision of this document made one member mean two
@@ -1802,6 +1747,15 @@ components:
       required:
         - cardNumber
       properties:
+        # WHY : Trade-offs: the example is sixteen zeros rather than a
+        #       realistic-looking specimen. The schema requires exactly sixteen
+        #       digits, so the placeholder cannot be shortened or masked without
+        #       failing its own pattern; an all-zero value satisfies the pattern
+        #       while being unmistakably synthetic. A plausible-looking specimen
+        #       was rejected because a full-length digit run in a card-number
+        #       field is indistinguishable to a secret scanner, and to a reader
+        #       skimming a diff, from real cardholder data -- so it costs review
+        #       attention on every audit and buys nothing a placeholder does not.
         cardNumber:
           type: string
           minLength: 16
@@ -1812,8 +1766,29 @@ components:
             carried across CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and
             stored as card_num. It appears on this schema only, is returned by
             the administrative read only, and is accepted as an input nowhere in
-            this document - the selector on every path is the opaque token.
-          example: '4111111111110011'
+            this document - the selector on every path is the card number itself,
+            redacted on the logging path by common-lib's CardNumberMasker.
+          # WHY : Assumptions: the example below is SYNTHETIC and cannot be a real
+          #       card, and the three properties that make that true are stated
+          #       here rather than assumed, because this is the one member of this
+          #       contract whose example is shaped exactly like live cardholder
+          #       data. (1) Its major industry identifier is 9, which ISO/IEC 7812
+          #       reserves for national assignment and which no payment network
+          #       issues under, so it cannot collide with a Visa, Mastercard, Amex
+          #       or Discover range. (2) It fails the Luhn check that every issued
+          #       card satisfies - the weighted digit sum is 36, and 36 is not a
+          #       multiple of ten - so any system validating a number rejects it.
+          #       (3) It is sixteen digits, so it still satisfies this member's own
+          #       pattern and length and remains a usable illustration.
+          # WHY : Refactoring Rationale: the previous example was
+          #       '4111111111110011'. It also failed Luhn, but it opened with the
+          #       payment industry's best-known Visa test prefix, which makes it
+          #       read as a genuine account number at a glance and makes it
+          #       indistinguishable from one to any reviewer who does not run the
+          #       check by hand. An example on a full-PAN member has to be
+          #       recognisable as synthetic WITHOUT arithmetic, and a
+          #       nationally-reserved prefix is; a Visa prefix is not.
+          example: '9999000000000000'
       description: >-
         The state of one card as returned by the administrative read, being the
         shared core plus the full primary account number. A caller holding only
@@ -2089,52 +2064,6 @@ components:
             response and never chosen or incremented by the caller.
           example: 3
 
-    # WHY : Assumptions: this schema exists so that a card number has somewhere
-    #       to travel that is not a request target. It carries one member and
-    #       will not acquire a second: any further narrowing belongs on the list
-    #       operation's query parameters, where it can be combined with paging,
-    #       and only the card-number criterion has a reason to be in a body.
-    # WHY : Trade-offs: a single-member object rather than a bare string body.
-    #       A bare string would be shorter and is rejected because it cannot
-    #       name the member that failed validation, so the per-field error array
-    #       every other refusal in this document populates would have nothing to
-    #       point at; an object gives the field the name 'cardNumber' in that
-    #       array and leaves room for the schema to state its own constraint.
-    CardLookupRequest:
-      type: object
-      description: >-
-        The criterion for the lookup operation: one card number, carried in a
-        request body rather than in a request target. This is the body form of
-        the baseline's CARDSIDI list filter field at
-        app/cpy-bms/COCRDLI.CPY:72.
-      required:
-        - cardNumber
-      additionalProperties: false
-      properties:
-        cardNumber:
-          type: string
-          minLength: 16
-          maxLength: 16
-          pattern: '^[0-9]{16}$'
-          description: >-
-            The card number to narrow to, as exactly sixteen digit characters. A
-            masked rendering taken from a previous response is not a valid value,
-            because the masked form does not identify a row. An absent value, or
-            one of the wrong width or carrying a non-digit, yields 400 with the
-            baseline's own wording 'Card number if supplied must be a 16 digit
-            number' from app/cbl/COCRDUPC.cbl:193-194 and an entry naming this
-            field in the per-field array.
-          # WHY : Assumptions: the member is declared write-only, and the flag is
-          #       load-bearing rather than decorative. This is the only place in
-          #       this contract that ACCEPTS a full primary account number, and no
-          #       response other than the administrative read renders one, so a
-          #       generated client that modelled this schema in both directions
-          #       would expose a response accessor for a value it can never
-          #       receive. A contract test asserts the flag, because a schema that
-          #       accepts a full number without declaring its direction is the
-          #       shape a future response could be built from by accident.
-          writeOnly: true
-
 
     # WHY : Assumptions: this mirrors the shared ApiError in
     #       services/common-lib/src/main/java/com/carddemo/common/error member
@@ -2277,25 +2206,24 @@ components:
             is an idea this migration inherited rather than introduced: the
             baseline's structured error record already carries a
             twenty-character event key.
-        # WHY : Refactoring Rationale: the example is an opaque card selector and
-        #       an earlier revision of this document showed a masked account
-        #       number here. That example was consistent with itself and still
-        #       wrong as guidance, because it advertised a URL shape whose path
-        #       segment was derived from a primary account number, and this
-        #       document no longer has one: the selector on every card path is the
-        #       opaque token described on OpaqueCardIdPath. Nothing derived from an
-        #       account number reaches this member, masked or otherwise.
+        # WHY : Assumptions: a card path DOES carry a card number, so this member
+        #       is the one place a full account number could escape into a stored
+        #       record, and it does not: the shared advice applies common-lib's
+        #       CardNumberMasker to every path before placing it here, which renders
+        #       any embedded sixteen-digit run down to its last four digits. The
+        #       example therefore shows a MASKED path segment, which is what a
+        #       client receives, rather than the number it sent.
         path:
           type: string
           description: >-
             The request path that failed, so that a client reporting a problem
             does not have to reconstruct which call produced it. The empty
-            string when no path is available. No card number, and nothing derived
-            from one, appears here: every card path carries the opaque selector,
-            and the shared advice additionally masks any digit run long enough to
-            be an account number before placing a path in this member, so a
+            string when no path is available. No FULL card number appears here even
+            though a card path carries one: the shared advice masks any digit run
+            long enough to be an account number before placing a path in this
+            member, so a
             mistaken route cannot leak one through the diagnostic field.
-          example: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
+          example: /api/v1/cards/************1111
         timestamp:
           type: string
           description: >-

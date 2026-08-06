@@ -315,8 +315,11 @@
   // caller reaches this project through the literal `tsc --noEmit -p
   // tsconfig.json` -- ui/package.json's `typecheck` script runs it directly, its
   // `build` script reaches it by delegating to `npm run typecheck`, and the
-  // planned type-check gate in .github/workflows/ui-ci.yml runs the same command
-  // again. Under the stock shape every one of those paths would resolve an empty
+  // type-check gate in .github/workflows/ui-ci.yml -- its "Type-check application
+  // and tool configuration" step, which runs `npm run typecheck` -- reaches the
+  // same command a third time. Refactoring Rationale: that gate was described here
+  // as "planned"; the workflow exists and runs the script, so the present tense is
+  // what a reader can verify. Under the stock shape every one of those paths would resolve an empty
   // file list, check nothing, and exit 0 -- a gate that cannot fail, reporting
   // success over a tree of type errors.
   // ui/eslint.config.js would inherit the same emptiness from the other

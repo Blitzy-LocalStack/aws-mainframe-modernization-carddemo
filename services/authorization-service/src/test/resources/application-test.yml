@@ -259,15 +259,25 @@ spring:
     #       resolve. Setting only one can place migration state in `public` while
     #       tables land in the authorization schema, making a repeated run report
     #       the wrong history.
-    #       (2) Assumptions: the doubled quoting is required and is copied from the
-    #       base verbatim. The outer single quotes keep YAML from stripping the
-    #       inner double quotes, and the inner double quotes are what stop
-    #       PostgreSQL parsing a reserved word as a keyword. Writing the value bare
-    #       would produce a syntax error inside Flyway's own DDL rather than a
-    #       misdirected migration, which is the better failure but not one worth
-    #       discovering.
-    schemas: '"authorization"'
-    default-schema: '"authorization"'
+    #       (2) Refactoring Rationale: both keys are written BARE, and both are
+    #       copied from the base verbatim -- which is the point of copying them.
+    #       They previously read '"authorization"' on the stated ground that "the
+    #       doubled quoting is required ... the inner double quotes are what stop
+    #       PostgreSQL parsing a reserved word as a keyword". That reasoning
+    #       confused a NAME with SQL TEXT. Flyway takes these values as identifiers
+    #       and applies the database's own quoting when it emits DDL, so a value
+    #       carrying quote characters becomes """authorization""" and
+    #       names a schema whose name literally contains two double quotes. Measured
+    #       against a real PostgreSQL 17 instance holding this schema, the quoted
+    #       form fails with SQLSTATE 3F000, `schema ""authorization"" does not
+    #       exist`, so the failure was neither a syntax error nor a misdirected
+    #       migration but a total refusal to start. The bare form resolves
+    #       "authorization"."flyway_schema_history". The base file's
+    #       connection-init-sql keeps its quotes for the opposite reason: that value
+    #       IS SQL text sent verbatim, and there an unquoted reserved word is a
+    #       syntax error.
+    schemas: authorization
+    default-schema: authorization
 
     # WHY : (1) Assumptions: the base deliberately sets this false because
     #       data-migration/sql/V0__schemas_and_roles.sql owns deployed schemas,

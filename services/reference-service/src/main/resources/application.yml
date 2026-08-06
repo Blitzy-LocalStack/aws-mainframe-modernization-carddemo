@@ -819,9 +819,14 @@ springdoc:
     #   the interface". That was true while this module had no filter chain
     #   and became false when config/SecurityConfig.java landed: that class
     #   permits /actuator/health/** alone, requires the carddemo-admin
-    #   authority for POST, PUT, PATCH and DELETE, and closes everything
-    #   else with anyRequest().authenticated() -- so /swagger-ui.html needs a
-    #   token like any other GET. Serving the page and authorizing the page
+    #   authority for POST, PUT, PATCH and DELETE and for the management
+    #   namespace, and closes everything else with a catch-all requiring one
+    #   of the two group authorities -- so /swagger-ui.html needs a token
+    #   carrying a recognised group, not merely a valid one. Refactoring
+    #   Rationale: this note said anyRequest().authenticated() until that rule
+    #   was found to admit a signed token holding no group at all; the
+    #   correction is recorded here because the claim about this page rested
+    #   on it. Serving the page and authorizing the page
     #   are two independent decisions, made in two files, and this key makes
     #   only the first of them.
     # Assumptions: url points the UI at the hand-authored contract

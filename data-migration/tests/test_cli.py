@@ -18,9 +18,14 @@ from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXI
 #   registers, and the test states them literally rather than reading them back from the
 #   parser. Reading them back would make this test pass for any surface the module
 #   happens to expose, including one that had silently lost a command.
-_IMPLEMENTED_SUBCOMMANDS = ("list-datasets", "stage-dataset", "apply-credentials")
+_IMPLEMENTED_SUBCOMMANDS = (
+    "list-datasets",
+    "decode-record",
+    "stage-dataset",
+    "apply-credentials",
+)
 
-# Assumptions: these four are contracted in README.md section 5.2 but their backing
+# Assumptions: these five are contracted in README.md section 5.2 but their backing
 #   modules -- readers/, loaders/aurora.py and verify/ -- are absent from this
 #   distribution, so the parser must NOT advertise them. The test is written as an
 #   explicit denial because an unimplemented command that reaches `--help` is how an
@@ -32,6 +37,15 @@ _UNREGISTERED_SUBCOMMANDS = (
     "verify-money-totals",
     "verify-all",
 )
+
+# Assumptions: the decode tests read the SHIPPED extracts rather than fixtures built here,
+#   because the command exists to prove a real delivery decodes at its declared geometry and a
+#   fixture this file wrote would only prove the file agreed with itself. The paths are
+#   resolved from this module's own location so the tests run from any working directory.
+_EBCDIC_DIRECTORY = Path(__file__).resolve().parents[2] / "app" / "data" / "EBCDIC"
+_ACCOUNT_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.ACCTDATA.PS"
+_CARD_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.CARDDATA.PS"
+_USER_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.USRSEC.PS"
 
 
 class _FakeS3Client:
@@ -159,6 +173,7 @@ def test_list_datasets_touches_no_client(monkeypatch: pytest.MonkeyPatch) -> Non
     #   happened through an already-imported module; a raiser fails loudly the moment
     #   this command reaches for an environment it promises not to need.
     def _refuse() -> None:
+        """Fail the test if staging settings are resolved at all."""
         raise AssertionError("list-datasets must not resolve staging settings")
 
     monkeypatch.setattr(cli, "resolve_dataset_staging_settings", _refuse)
@@ -233,6 +248,7 @@ def test_stage_dataset_reports_an_unresolvable_environment(
     source.write_bytes(b"x")
 
     def _unresolvable() -> None:
+        """Stand in for a staging resolver that cannot find its parameters."""
         raise ConfigurationError("no dataset bucket parameter")
 
     monkeypatch.setattr(cli, "resolve_dataset_staging_settings", _unresolvable)
@@ -258,6 +274,7 @@ def test_stage_dataset_passes_every_argument_through(
     monkeypatch.setattr(cli, "_s3_client", _FakeS3Client)
 
     def _capture(**kwargs: Any) -> cli.StagedGeneration:
+        """Record the staging call and answer with a fixed successful generation."""
         recorded.update(kwargs)
         return cli.StagedGeneration(
             key="ledger/TRAN/dt=2022-07-18/gen=0001/DALYTRAN.PS",
@@ -293,6 +310,7 @@ def test_stage_dataset_honours_an_explicit_object_name_and_retention(
     monkeypatch.setattr(cli, "_s3_client", _FakeS3Client)
 
     def _capture(**kwargs: Any) -> cli.StagedGeneration:
+        """Record the staging call and answer with a generation that deleted one prefix."""
         recorded.update(kwargs)
         return cli.StagedGeneration(key="k", deleted_generation_prefixes=("old/",))
 
@@ -314,6 +332,7 @@ def test_stage_dataset_maps_a_rejected_request_to_usage(
     monkeypatch.setattr(cli, "_s3_client", _FakeS3Client)
 
     def _refuse(**kwargs: Any) -> None:
+        """Stand in for a staging call that rejects an out-of-range generation."""
         raise ValueError("generation 0 is outside 1-9999")
 
     monkeypatch.setattr(cli, "stage_generation", _refuse)
@@ -327,6 +346,7 @@ def test_apply_credentials_delegates_with_an_empty_argument_list(
     seen: list[Any] = []
 
     def _record(argv: Any = None) -> int:
+        """Record the argument vector the credential entry point was handed."""
         seen.append(argv)
         return EXIT_FAILED
 
@@ -342,3 +362,150 @@ def test_apply_credentials_delegates_with_an_empty_argument_list(
 def test_apply_credentials_accepts_no_options() -> None:
     """Refuse an option, because a per-role invocation leaves a deployment half applied."""
     assert cli.main(["apply-credentials", "--role", "carddemo_ledger"]) == EXIT_USAGE
+
+
+def _decode_arguments(
+    source: Path,
+    *,
+    dataset: str = "ACCOUNT",
+    record: int = 1,
+) -> list[str]:
+    """Build a decode-record argument list with one field overridable per call.
+
+    Purpose
+    -------
+    Keep the decode tests below from restating the full argument list, so a test reads as
+    the one property it asserts rather than as an invocation.
+
+    Parameters
+    ----------
+    source : Path
+        Path passed as ``--source``.
+    dataset : str, optional
+        Layout name passed as ``--dataset``; defaults to the account master.
+    record : int, optional
+        One-based ordinal passed as ``--record``; defaults to the first record.
+
+    Returns
+    -------
+    list of str
+        A complete argument list for :func:`cli.main`.
+
+    Raises
+    ------
+    None
+    """
+    return [
+        "decode-record",
+        "--dataset",
+        dataset,
+        "--source",
+        str(source),
+        "--record",
+        str(record),
+    ]
+
+
+def test_decode_record_decodes_a_shipped_extract(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Decode a record of the shipped account extract through the whole codec stack."""
+    # Assumptions: this test is what makes the packed, zoned and EBCDIC codecs EXECUTED
+    #   through a caller rather than only unit-tested in isolation. It reads the real
+    #   extract, so a defect anywhere from the record cut through the per-field transcode to
+    #   the fixed-point assembly surfaces here as a wrong value rather than as nothing.
+    assert cli.main(_decode_arguments(_ACCOUNT_EXTRACT)) == EXIT_OK
+    fields = json.loads(capsys.readouterr().out)
+    assert fields["ACCT-ID"] == "00000000001"
+    assert fields["ACCT-CURR-BAL"] == "194.00"
+    assert fields["ACCT-OPEN-DATE"] == "2014-11-20"
+
+
+def test_decode_record_renders_money_as_a_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Emit every value as a JSON string so no consumer re-reads money as a float."""
+    # Assumptions: the type is asserted on the PARSED JSON, which is the only place the
+    #   distinction is observable. A JSON number would be read into a float by this very
+    #   parser, and the whole fixed-point codec stack exists to keep that from happening.
+    assert cli.main(_decode_arguments(_ACCOUNT_EXTRACT)) == EXIT_OK
+    fields = json.loads(capsys.readouterr().out)
+    assert all(isinstance(value, str) for value in fields.values())
+
+
+def test_decode_record_redacts_every_sensitive_field(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Never print a stored password, a cardholder name or a card verification value."""
+    # Assumptions: the security-relevant assertion is the ABSENCE of the cleartext, and it is
+    #   made against the whole rendered output rather than against one field, because a
+    #   sensitive value reaching a container log does so through whatever field carried it.
+    #   The shipped security extract stores its passwords in plaintext, which is exactly why
+    #   a diagnostic that printed them would be a new exposure rather than a cosmetic one.
+    assert cli.main(_decode_arguments(_USER_EXTRACT, dataset="SECUSER", record=2)) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "PASSWORD" not in printed
+    fields = json.loads(printed)
+    assert fields["SEC-USR-ID"] == "ADMIN002"
+    assert fields["SEC-USR-TYPE"] == "A"
+    assert "<" in fields["SEC-USR-PWD"]
+
+
+def test_decode_record_reveals_only_a_card_number_s_last_four(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mask a card number to its trailing four digits and suppress the verification value."""
+    assert cli.main(_decode_arguments(_CARD_EXTRACT, dataset="CARD")) == EXIT_OK
+    fields = json.loads(capsys.readouterr().out)
+    assert fields["CARD-NUM"].startswith("*" * 12)
+    assert len(fields["CARD-NUM"]) == layouts.layout("CARD").fields[0].length
+    assert not fields["CARD-CVV-CD"].isdigit()
+
+
+def test_decode_record_rejects_an_unknown_dataset(tmp_path: Path) -> None:
+    """Refuse an unregistered layout name before opening anything."""
+    absent = tmp_path / "never-opened.PS"
+    assert cli.main(_decode_arguments(absent, dataset="NOT-A-DATASET")) == EXIT_USAGE
+    # Assumptions: the source deliberately does not exist, so a usage result also proves the
+    #   name is validated BEFORE any I/O. Were the order reversed this would report a read
+    #   failure and the misspelling would be diagnosed as a missing file.
+    assert not absent.exists()
+
+
+def test_decode_record_rejects_a_non_positive_ordinal() -> None:
+    """Refuse record zero, because the ordinal this command accepts is one-based."""
+    assert cli.main(_decode_arguments(_ACCOUNT_EXTRACT, record=0)) == EXIT_USAGE
+
+
+def test_decode_record_reports_an_ordinal_past_the_end_of_the_dataset() -> None:
+    """Refuse an ordinal the dataset does not reach rather than printing nothing."""
+    beyond = _ACCOUNT_EXTRACT.stat().st_size // layouts.reclen_of("ACCOUNT") + 1
+    assert cli.main(_decode_arguments(_ACCOUNT_EXTRACT, record=beyond)) == EXIT_USAGE
+
+
+def test_decode_record_reports_an_unreadable_source(tmp_path: Path) -> None:
+    """Report a failed step, not a usage error, when the extract cannot be read."""
+    assert cli.main(_decode_arguments(tmp_path / "absent.PS")) == EXIT_FAILED
+
+
+def test_decode_record_reports_a_truncated_dataset(tmp_path: Path) -> None:
+    """Report a dataset that does not divide into whole records as a failed step."""
+    # Assumptions: the truncation is asserted to be reported for RECORD 1, which the file
+    #   does contain in full. That is the point: the division check runs before the first
+    #   record is yielded, so a truncated delivery is refused rather than partly loaded.
+    truncated = tmp_path / "truncated.PS"
+    reclen = layouts.reclen_of("ACCOUNT")
+    truncated.write_bytes(_ACCOUNT_EXTRACT.read_bytes()[: reclen * 2 + 13])
+    assert cli.main(_decode_arguments(truncated)) == EXIT_FAILED
+
+
+def test_decode_record_rejects_an_unregistered_code_page() -> None:
+    """Report a code page the interpreter does not register as a failed step."""
+    arguments = [*_decode_arguments(_ACCOUNT_EXTRACT), "--code-page", "cp-does-not-exist"]
+    assert cli.main(arguments) == EXIT_FAILED
+
+
+def test_decode_record_requires_both_the_dataset_and_the_source() -> None:
+    """Refuse an invocation missing either required argument."""
+    assert cli.main(["decode-record", "--dataset", "ACCOUNT"]) == EXIT_USAGE
+    assert cli.main(["decode-record", "--source", str(_ACCOUNT_EXTRACT)]) == EXIT_USAGE

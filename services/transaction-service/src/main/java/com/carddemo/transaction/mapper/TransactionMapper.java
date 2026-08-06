@@ -6,6 +6,7 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.BillPaymentResponse;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
 import com.carddemo.transaction.dto.TransactionDetailResponse;
@@ -103,8 +104,14 @@ import org.springframework.stereotype.Component;
  * identifier, and lines 448 to 451 generate a new transaction identifier by exactly that route.
  * The consequence is measurable: 30 of the 300 records in that seed file carry a card number
  * beginning with a zero at the sixteen bytes starting at offset 262, among them
- * {@code 0927987108636232}, {@code 0500024453765740} and {@code 0923877193247330}, and the first
- * record's transaction identifier reads {@code 0000000000683580}. A numeric type would discard
+ * {@code 0***********6232}, {@code 0***********5740} and {@code 0***********7330}, and the first
+ * record's transaction identifier reads {@code 0000000000683580}. Trade-offs: those three are shown
+ * with their twelve interior digits masked, in the same twelve-asterisk form the response contract
+ * publishes, because the sentence needs only two properties of them -- that the first character is a
+ * zero and that they are sixteen positions wide -- and reproducing the remaining digits would put
+ * three usable primary account numbers into production documentation to make a point about padding.
+ * The transaction identifier beside them is not a card number and is shown whole. A numeric type
+ * would discard
  * those leading zeros and turn a sixteen-character identifier into a shorter number that no longer
  * matches the value stored, printed or indexed.
  *
@@ -324,6 +331,16 @@ public class TransactionMapper {
     public static final int DATE_WIDTH = 10;
 
     /**
+     * The declared character width of an account identifier.
+     *
+     * <p>Assumptions: {@code CC-ACCT-ID PIC X(11)} at line 34 of {@code app/cpy/CVCRD01Y.cpy}, which
+     * agrees with {@code ACTIDINI PIC X(11)} at line 60 of {@code app/cpy-bms/COBIL00.CPY}. It is
+     * eleven and not the sixteen of a card number, and the two are kept as separate constants rather
+     * than one because a shared constant would make a change to either width change both.
+     */
+    public static final int ACCOUNT_ID_WIDTH = 11;
+
+    /**
      * Converts one stored transaction into the detail view the single-transaction screen shows.
      *
      * <p>Assumptions: the component order this builds is the record's own declaration order at lines
@@ -331,11 +348,24 @@ public class TransactionMapper {
      * {@code TransactionDetailResponse} declares, so the two read against each other directly and a
      * transposed pair of same-typed components cannot hide.
      *
-     * <p>Assumptions: the category code, the merchant identifier and the two text values are passed
-     * through with their storage padding intact. The columns behind them are declared
-     * {@code CHAR(4)}, {@code CHAR(10)} and {@code CHAR(16)}, which PostgreSQL pads with spaces to
-     * the declared width, and the reference program moves each value into a screen field of that
-     * same width, so the padding is what the reference screen also showed.
+     * <p>Assumptions: every character value except the card number is passed through unaltered, and
+     * the fixed-width ones keep their storage padding. The columns behind those are declared
+     * {@code transaction_id CHAR(16)}, {@code type_cd CHAR(2)}, {@code category_cd CHAR(4)},
+     * {@code source CHAR(10)} and {@code merchant_zip CHAR(10)}, which PostgreSQL pads with spaces
+     * to the declared width, and the reference program moves each value into a screen field of that
+     * same width, so the padding is what the reference screen also showed. The three descriptive
+     * values -- {@code description VARCHAR(100)}, {@code merchant_name VARCHAR(50)} and
+     * {@code merchant_city VARCHAR(50)} -- are passed through in exactly the same way but have no
+     * padding to preserve, because a varying-length column stores only what was written to it.
+     *
+     * <p>Assumptions: the merchant identifier is the exception among those components and is NOT a
+     * pass-through, which is worth stating because it sits between two values that are. Its column
+     * is {@code merchant_id BIGINT} rather than a character column, because line 11 of that
+     * copybook declares {@code TRAN-MERCHANT-ID PIC 9(09)} -- an unsigned magnitude rather than a
+     * token -- so there is no stored padding for anything to preserve. The nine-character form the
+     * reference field declares is RE-CREATED on the way out, by left-padding the decimal rendering
+     * with zeros to that width, and a value needing more positions than the field declares is
+     * refused rather than truncated.
      *
      * <p>Alternatives Considered: right-trimming every character value on the way out, evaluated and
      * rejected. A value whose own final character is a space would then be indistinguishable from a
@@ -694,7 +724,10 @@ public class TransactionMapper {
      *
      * <p>Assumptions: this acknowledgement carries no card number, so nothing is masked here. The
      * response declares three components and none of them is the card, which is why the masking
-     * decision recorded on this class applies to the detail view alone.
+     * decision recorded on this class reaches only the detail view among this class's conversions.
+     * It is not the only masked crossing in the module -- {@code BillPaymentMapper} masks the card
+     * its response reports -- so the decision is a package-wide one applied at each crossing that
+     * carries a card, rather than one this class owns alone.
      *
      * @param transaction the appended row, whose identifier and amount must both be present; must
      *     not be {@code null}
@@ -909,8 +942,9 @@ public class TransactionMapper {
      * appearing to succeed, and both identifiers this is applied to are keys or index columns, so a
      * silent coercion is the failure that costs most to find.
      *
-     * @param value the digits to pad, in either the bare or the already-padded form; must not be
-     *     {@code null}
+     * @param value the digits to pad, in either the bare or the already-padded form, validated
+     *     exactly as supplied with no trimming, so a value carrying a leading or trailing blank is
+     *     refused rather than cleaned; must not be {@code null}
      * @param width the declared character width of the field the value is stored in
      * @param component the argument name reproduced in the refusal so that it names the value that
      *     failed; must not be {@code null}
@@ -922,7 +956,22 @@ public class TransactionMapper {
     private static String zeroPaddedDigits(String value, int width, String component) {
         Objects.requireNonNull(component, "component must not be null");
         Objects.requireNonNull(value, component + " must not be null");
-        String digits = value.trim();
+
+        // WHY : Refactoring Rationale: the value is validated exactly as supplied. An earlier
+        //   revision trimmed it first, which quietly widened the contract: " 123 " reached the digit
+        //   loop as "123" and was accepted, although the Javadoc above and the refusal message below
+        //   both say a character other than a digit is rejected. Trade-offs: refusing the padded form
+        //   here costs nothing, because none of the three call sites can legitimately produce one.
+        //   transactionId and resolvedCardNumber are derived inside this service -- the identifier by
+        //   the caller and the card number from the cross-reference -- so a surrounding blank in
+        //   either is a defect in the producer, and trimming it would store a key while hiding the
+        //   defect that formed it. merchantId is the one value a client supplies, and it is trimmed
+        //   nowhere because it does not need to be: TransactionAddRequest declares it @NotBlank with
+        //   @Pattern(regexp = MERCHANT_ID_DIGITS), and a Bean Validation pattern matches the WHOLE
+        //   value, so " 123456789 " is refused at that boundary and never reaches this method. That
+        //   constraint is the explicit external boundary for the padded form, and it is the only
+        //   place a submitted value's surrounding whitespace is ruled on.
+        String digits = value;
         if (digits.isEmpty() || digits.length() > width) {
             throw new IllegalArgumentException(component + " must be between 1 and " + width
                     + " digits, because the reference field declares that width");
@@ -966,5 +1015,61 @@ public class TransactionMapper {
      */
     private static String absentWhenNeverSupplied(String message) {
         return FieldValidationFlag.isNeverSupplied(message) ? null : message;
+    }
+
+    /**
+     * Converts a posted bill payment into the acknowledgement the bill-payment screen shows.
+     *
+     * <p>Refactoring Rationale: this method exists because nothing constructed
+     * {@link BillPaymentResponse} at all. The record and the published contract each described a shape
+     * and no code produced either, so the two could -- and did -- drift apart with no build step able to
+     * notice. A mapper is what makes the shape a fact rather than a description, and it is why the
+     * balance's side of the subtraction is decided HERE, at one site, instead of at each call site.
+     *
+     * <p>Assumptions: the balance handed in must be the one read BEFORE the payment was applied, and
+     * that is the whole contract of the argument. Statement order in the reference fixes it: line 193 of
+     * {@code app/cbl/COBIL00C.cbl} moves {@code ACCT-CURR-BAL} into the display field, line 224 reuses
+     * the same untouched value as the transaction amount, line 233 writes the transaction, and only line
+     * 234 subtracts. Line 242 sends the display field unchanged, so what the operator sees is the
+     * pre-payment figure. Reading the balance off the UPDATED account entity instead would report the
+     * post-payment figure, which for this program is always exactly zero because line 234 subtracts the
+     * whole balance from itself -- a value that would look plausible and carry no information.
+     *
+     * <p>Trade-offs: the balance is taken as an argument rather than read from an account entity, which
+     * means the caller can hand in the wrong one. Reading it here was the alternative and is worse: this
+     * mapper's context does not own the account table, so it would either reach across a bounded-context
+     * boundary the layering rules forbid or receive the entity AFTER the update and read the zero. Taking
+     * the value the caller already holds keeps the ownership boundary intact and puts the requirement in
+     * this documentation, where the argument's own name cannot express it.
+     *
+     * <p>Assumptions: the identifiers are zero-padded to their declared widths on the way out, the same
+     * treatment the append acknowledgement gives, so a caller comparing the echoed account identifier
+     * with the one it submitted finds the same characters. {@code CC-ACCT-ID PIC X(11)} at line 34 of
+     * {@code app/cpy/CVCRD01Y.cpy} and {@code TRAN-ID PIC X(16)} at line 5 of
+     * {@code app/cpy/CVTRA05Y.cpy} are those widths.
+     *
+     * @param accountId the account that was paid, in either the bare or the already-padded form; must
+     *     not be {@code null}
+     * @param balanceBeforePayment the balance read before the payment was applied, which is also the
+     *     amount paid; must not be {@code null}
+     * @param transactionId the key of the transaction the payment wrote, in either form; must not be
+     *     {@code null}
+     * @param returnMessage the confirmation sentence accompanying the payment, or {@code null} when
+     *     there is none; any of the three spellings of absence is collapsed onto {@code null}
+     * @return the acknowledgement, with its posted discriminator fixed by the record's own factory
+     * @throws NullPointerException if {@code accountId}, {@code balanceBeforePayment} or
+     *     {@code transactionId} is {@code null}
+     * @throws IllegalArgumentException if either identifier is empty, holds a character other than a
+     *     digit, or is longer than its declared width
+     */
+    public BillPaymentResponse toBillPaymentResponse(String accountId, Money balanceBeforePayment,
+            String transactionId, String returnMessage) {
+        Objects.requireNonNull(balanceBeforePayment, "balanceBeforePayment must not be null:"
+                + " the reference always has a balance to report on a posted payment");
+        return BillPaymentResponse.posted(
+                zeroPaddedDigits(accountId, ACCOUNT_ID_WIDTH, "accountId"),
+                balanceBeforePayment,
+                zeroPaddedDigits(transactionId, TRANSACTION_ID_WIDTH, "transactionId"),
+                absentWhenNeverSupplied(returnMessage));
     }
 }

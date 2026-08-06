@@ -79,9 +79,16 @@
       LayeringRulesTest, so the `architecture-rules` execution below NO LONGER
       selects nothing: it packages that class into
       common-lib-<version>-tests.jar and re-runs its three architectural gates
-      inside every module that consumes the shared kernel, which this reactor
-      confirms by the execution reporting `Tests run: 6` under each consumer
-      rather than `Tests are skipped.`. Two `*IT` classes now exist as well -
+      and two guards inside every module that consumes the shared kernel, which
+      this reactor confirms by the execution reporting `Tests run: 5` under each
+      of the eight consumers rather than `Tests are skipped.`. That count is five
+      and not six: the class declares three architectural assertions - domain
+      isolation, no cross-root domain dependency, and no binary floating point on
+      the money path - plus two guards that assert the imported class graph is
+      non-vacuous and that the ownership contract is exactly the nine fixed
+      package roots. Selecting nothing is now also a BUILD FAILURE rather than a
+      silent success; see the `architecture-rules-fail-if-absent` profile at the
+      foot of this file. Two `*IT` classes now exist as well -
       CardDemoCommonAutoConfigurationIT here and TransactionRepositoryIT in
       transaction-service - so the Failsafe configuration beside it likewise has
       real work. Comments that describe those suites therefore describe classes
@@ -136,17 +143,43 @@
       Assumptions: Boot 4.1.0 carries Spring Framework 7, which relocated retry
         support into the framework core as
         org.springframework.resilience.annotation.Retryable, ConcurrencyLimit
-        and EnableResilientMethods. That relocation is the entire reason NO
-        resilience library appears anywhere in this build. Note the attribute is
+        and EnableResilientMethods. That relocation is the entire reason this
+        build DECLARES no resilience library. Note the attribute is
         `maxRetries` (total attempts are one more than that value) and the
         enabling annotation is EnableResilientMethods, not the older
         EnableRetry, so a service that copies a Boot 3 example will not compile.
+      Assumptions: "declares none" is the precise claim, and an earlier revision
+        of this comment overstated it as "NO resilience library appears anywhere
+        in this build". That was measurably false. The path is
+        io.awspring.cloud:spring-cloud-aws-starter-sqs:4.1.0 ->
+        io.awspring.cloud:spring-cloud-aws-sqs:4.1.0 ->
+        org.springframework.retry:spring-retry:2.0.13 at COMPILE scope, and it
+        resolves in four of the nine modules: account-service,
+        reference-service, batch-service and authorization-service, being the
+        four that consume the SQS starter. That artifact references
+        org/springframework/retry from six of its own classes, among them
+        AbstractPollingMessageSource, ContainerOptions and
+        AbstractPollingMessageSource$NoOpsBackOffContext. Confirm with
+        `mvn -f services/pom.xml dependency:tree
+        -Dincludes=org.springframework.retry:spring-retry`.
+      Alternatives Considered: excluding spring-retry from the SQS starter so
+        that the original claim would become true. Rejected on the measurement
+        above: those six classes implement the listener container's own polling
+        back-off, so the exclusion would remove a type the integration loads at
+        run time and turn a documentation defect into a NoClassDefFoundError
+        under load. The claim was corrected instead of the dependency graph.
+      Trade-offs: what is therefore guaranteed is narrower than absence and is
+        the thing the decision actually needs - that no CardDemo class reaches
+        for a retry or resilience library. That is enforced rather than asserted:
+        rule A5 of the ArchUnit gate in the shared kernel fails the build if any
+        class under com.carddemo depends on org.springframework.retry.. or
+        io.github.resilience4j.., and it runs in every module of this reactor.
       Alternatives Considered: io.github.resilience4j:resilience4j-spring-boot3
         was evaluated and rejected because its published artifact targets Spring
         Boot 3.x; org.springframework.retry:spring-retry was rejected as
-        superseded by the core relocation above. Adopting either would add a
-        dependency that duplicates a framework capability already on the
-        classpath, and would have to be re-evaluated at every Boot upgrade.
+        superseded by the core relocation above. Adopting either DELIBERATELY
+        would add a dependency that duplicates a framework capability already on
+        the classpath, and would have to be re-evaluated at every Boot upgrade.
       Trade-offs: no circuit breaker is present either, and its absence is a
         decision rather than an omission. The only synchronous hops between
         these services run inside the private network behind an internal load
@@ -1037,6 +1070,14 @@
             rejected because it would re-run that module's codec, money and
             timestamp suites once per service, and one defect in one module would
             then be reported eight times in eight places.
+          Assumptions: that literal coupling is exactly what makes this execution
+            able to select nothing, so the guard against it is NOT here. It is the
+            `architecture-rules-fail-if-absent` profile at the foot of this file,
+            which adds `failIfNoTests` to this execution in every module that has
+            a `src/main/java` directory. It has to be a profile rather than one
+            more element in the configuration below, because this aggregator is
+            `pom` packaging and the guard would otherwise fail the aggregator's own
+            build; that profile records the measurement.
           Assumptions: no reportsDirectory is set, so both executions of this
             plugin write to target/surefire-reports, which is where the services
             pipeline collects results from. Relocating either would make the build
@@ -1168,6 +1209,71 @@
       <properties>
         <carddemo.checkstyle.config.dir>${basedir}/../../config/checkstyle</carddemo.checkstyle.config.dir>
       </properties>
+    </profile>
+
+    <!--
+      WHY :
+        Refactoring Rationale: the `architecture-rules` execution above was
+          fail-OPEN and this profile is what closes it. That execution selects the
+          shared layering rules by the literal include `**/LayeringRulesTest.java`
+          out of a scanned dependency, and Surefire's default behaviour when an
+          include matches nothing is to report no tests and SUCCEED. So a renamed
+          rule class, a dropped `common-lib` test-scoped dependency in one module,
+          or a one-character drift in that include pattern would each have removed
+          the layering gate from that module while the reactor stayed green - and
+          removed it silently, because a gate that runs no tests prints almost
+          nothing. `failIfNoTests` turns every one of those into a build failure.
+          Measured both ways before being adopted: with the guard armed the full
+          reactor builds and the execution reports five tests under each of the
+          eight consumers, and with the include deliberately changed to a class
+          name that does not exist the build FAILS with "No tests were executed!".
+        Alternatives Considered: setting `failIfNoTests` directly on the
+          `architecture-rules` execution in the build section above, which is the
+          obvious placement and is WRONG. A parent POM's `build/plugins` applies to
+          the parent's own build as well as to its children, and this aggregator is
+          `pom` packaging with no test sources at all, so the guard would fire
+          against the aggregator itself and fail every build with "No tests were
+          executed! on project carddemo-services". That was measured, not reasoned
+          about. Declaring the execution in `pluginManagement` and repeating it in
+          nine module POMs was also rejected: it moves one decision into nine
+          files, and a module that forgot to repeat it would be exactly the module
+          whose gate had gone missing.
+        Assumptions: the activation file is `src/main/java`, and it is chosen
+          because it is the one path that separates the nine real modules from this
+          aggregator. All nine have it, including `reference-service`, which has
+          no test sources of its own and still runs the scanned rules, and this
+          aggregator has no `src` directory at all. Activation is evaluated from
+          each module's own base directory, which is the same mechanism the two
+          Checkstyle profiles above rely on and record.
+        Trade-offs: the guard is expressed as a profile, so a reader looking only
+          at the `architecture-rules` execution above will not see it. The comment
+          on that execution therefore names this profile. The cost is accepted
+          because the alternative placements either break the aggregator or
+          scatter the decision across nine files.
+    -->
+    <profile>
+      <id>architecture-rules-fail-if-absent</id>
+      <activation>
+        <file>
+          <exists>${basedir}/src/main/java</exists>
+        </file>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>architecture-rules</id>
+                <configuration>
+                  <failIfNoTests>true</failIfNoTests>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
 
   </profiles>

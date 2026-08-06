@@ -1,9 +1,13 @@
 package com.carddemo.batch;
 
+import com.carddemo.batch.dto.BatchJobName;
+import com.carddemo.batch.dto.BatchJobParameters;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.common.observability.LogSafeText;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -538,15 +542,32 @@ public class BatchApplication {
      *     {@link #EXIT_STATUS_HARD_FAILURE} on any failure, including a malformed command line
      */
     static int execute(String[] args) {
-        final String jobName;
-        final String businessDate;
+        final BatchJobParameters parameters;
         // WHY : Assumptions: the command line is validated BEFORE any context is built, so a
         //       malformed command costs no database connection, no parameter-store lookup and no
         //       credential resolution, and its diagnostic cannot be buried under a startup failure
         //       caused by infrastructure that the run was never going to need.
+        // WHY : Refactoring Rationale: the two validators below are the module's ONE argument parser,
+        //       and their result is carried in BatchJobParameters rather than in two loose strings.
+        //       An earlier revision had a second, independent parser on that record -- thoroughly
+        //       tested and never reached by this method -- so its test suite could stay green while
+        //       the parsing that actually ran diverged from the parsing that was certified. The two
+        //       had in fact already diverged on a real rule: the record's parser admitted six of the
+        //       seven jobs with no business date, while this method has always required one for every
+        //       job. That parser is gone; the record now receives what this method parsed, so exactly
+        //       one implementation reads the argument vector.
+        // WHY : Assumptions: constructing the record here is what makes its invariants run in
+        //       production rather than only under test -- non-null holders, a target generation that
+        //       must agree with the business date, and the accrual job's own requirement of a date.
+        //       Those checks raise the same IllegalArgumentException the validators do, so the single
+        //       catch below reports them through the same usage diagnostic.
+        // WHY : Assumptions: BatchJobName.resolve cannot fail here, because requiredJobName has
+        //       already refused any token outside JOB_NAMES and that list is the same seven tokens the
+        //       enumeration declares. The order is therefore load-bearing: resolving first would echo
+        //       an unsanitised token from the enumeration's own message, whereas requiredJobName
+        //       neutralises the value before it reaches any message at all.
         try {
-            jobName = requiredJobName(args);
-            businessDate = requiredBusinessDate(args);
+            parameters = parseArguments(args);
         } catch (IllegalArgumentException rejection) {
             // WHY : Assumptions: this ONE diagnostic goes to standard error as well as to the log,
             //       and it is the only one that does. It is raised before any context exists, so the
@@ -576,7 +597,8 @@ public class BatchApplication {
             System.err.println(usage());
             return EXIT_STATUS_HARD_FAILURE;
         }
-        return runInContext(args, jobName, businessDate);
+        return runInContext(args, parameters.jobName().token(),
+                parameters.requireBusinessDate().token());
     }
 
     /**
@@ -982,6 +1004,66 @@ public class BatchApplication {
         //       file for the empty posting feed records a return code of 0, so an empty feed must
         //       report clean and any other reading would fail that scenario.
         return EXIT_STATUS_CLEAN;
+    }
+
+    /**
+     * Parses the container command line into the one parameter record this module runs a job from.
+     *
+     * <p>This is the module's ONLY argument parser, and the sequence {@link #execute(String[])} runs.
+     *
+     * <p>Assumptions: it is PUBLIC, and the reason is the contract rather than the tests. The container
+     * command line is this module's externally-supplied interface -- an orchestration state definition
+     * outside this repository composes it -- and the record this returns is a public type in a
+     * different package. A package-private parser would therefore be unreachable from the package that
+     * owns the shape it produces, which is where its cases belong.
+     *
+     * <p>Alternatives Considered: keeping it package-private and moving every parsing case into this
+     * class's own test. That is equally correct and was rejected only on blast radius: it would relocate
+     * seventeen cases across two files to gain no property this visibility does not already give. What
+     * was NOT acceptable, and is the reason this method exists at all, is a test that reassembles these
+     * three steps for itself -- that would be a second parser again, differing from the first only in
+     * who wrote it, which is precisely the defect being removed.
+     *
+     * <p>Refactoring Rationale: this method exists because there were previously TWO parsers. The
+     * record this returns carried its own {@code fromArguments} factory, thoroughly tested and never
+     * called by production, and the two had already diverged on a real rule -- that factory admitted
+     * six of the seven jobs with no business date, while this class has always required one for every
+     * job. A test suite covering the unused factory could therefore stay green while the parsing that
+     * actually ran drifted away from it. Extracting the production sequence into one named method,
+     * rather than leaving it inline in {@code execute}, is what lets the tests certify the code that
+     * runs instead of a copy of it: a test that reassembled these three steps itself would be a second
+     * implementation again, differing only in who wrote it.
+     *
+     * <p>Assumptions: the ORDER is load-bearing. {@link #requiredJobName(String[])} refuses any token
+     * outside {@link #JOB_NAMES} and neutralises the offending value before it reaches a message,
+     * whereas {@code BatchJobName.resolve} echoes its argument unsanitised; validating first therefore
+     * means the enumeration's own diagnostic is unreachable from a hostile argument. The two token
+     * sets are the same seven values, so resolution after validation cannot fail.
+     *
+     * <p>Assumptions: the business date is REQUIRED here for every job, which is stricter than the
+     * record's own invariant -- that invariant demands one only for the accrual job, whose generated
+     * transaction identifiers concatenate the token. The stricter rule is kept because it is the
+     * behaviour this entry point has always had, and it SUBSUMES the record's rule rather than
+     * conflicting with it: a run that supplies a date for every job necessarily supplies one for the
+     * accrual job. Relaxing it to match the record was the alternative and was rejected as a
+     * behavioural change to the deployed contract, which no finding asks for.
+     *
+     * <p>Assumptions: no target generation is supplied from a command line, because no option carries
+     * one. A job that creates a generation knows its own family and builds the coordinate itself, so
+     * the holder is empty here rather than guessed.
+     *
+     * @param args the container command arguments; may be {@code null} or empty, both of which are
+     *     rejected as a missing job option
+     * @return the parsed parameters, never {@code null}
+     * @throws IllegalArgumentException when the job option is absent or names an unknown job, when the
+     *     business-date option is absent or malformed, or when the record's own invariants refuse the
+     *     combination
+     */
+    public static BatchJobParameters parseArguments(String[] args) {
+        BatchJobName resolvedJob = BatchJobName.resolve(requiredJobName(args));
+        BusinessDate resolvedDate = new BusinessDate(requiredBusinessDate(args));
+
+        return new BatchJobParameters(resolvedJob, Optional.of(resolvedDate), Optional.empty());
     }
 
     /**

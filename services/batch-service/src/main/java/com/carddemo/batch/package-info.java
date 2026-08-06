@@ -43,11 +43,49 @@
  * additionally held to committed bytes, and where prose and committed bytes
  * disagree the bytes are right.</p>
  *
+ * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ *
+ * <p>Assumptions: every class name, inventory and count in this charter describes the
+ * module's <b>target contract</b> as the migration plan assigns it, not the set of files
+ * present in this subtree today. The migration lands its artifacts in plan order and
+ * this charter is authored early, so a type named below that has no file yet is
+ * <b>planned</b>, not missing. The distinction is declared here because the roster below
+ * otherwise reads as present tense, and this is the single place a reader has to look to
+ * tell a target from a measurement.</p>
+ *
+ * <p>Measured at the checkpoint that authored this section, the subtree holds
+ * <b>19</b> production classes of a target <b>43</b>, and all <b>8</b> charter files.
+ * What has landed is the data-shaped half of the module: {@code BatchApplication};
+ * {@code DataSourceConfig} in {@code config}; six entities in {@code domain}
+ * ({@code Account}, {@code BatchRun}, {@code CardXref}, {@code DailyTransaction},
+ * {@code DisclosureGroup} and {@code Transaction}); eight records in {@code dto}
+ * ({@code BatchErrorEvent}, {@code BatchJobName}, {@code BatchJobParameters},
+ * {@code BatchReturnCode}, {@code BatchRunSummary}, {@code BusinessDate},
+ * {@code DatasetGeneration} and {@code DisclosureGroupKey}); and three mappers
+ * ({@code AccountRecordMapper}, {@code CardXrefRecordMapper} and
+ * {@code TransactionRecordMapper}).</p>
+ *
+ * <p>Planned and not yet authored are the twenty-four behavioural types: all seven
+ * {@code job} definitions, all four {@code service} classes, {@code BatchRunRepository}
+ * and the granted-schema data access in {@code repository}, the remaining five
+ * {@code mapper} classes, and {@code BatchConfig} and {@code SqsConfig} in
+ * {@code config}. Each is authored at a later index of the same plan, and each is named
+ * in the subpackage list below and again in its own subpackage charter, so no planned
+ * type is discoverable from only one place.</p>
+ *
+ * <p>Trade-offs: stating the split costs this section its brevity and dates it -- a
+ * reader has to trust that the measurement was taken when it says it was. It is worth
+ * that because the alternative is a roster a reader cannot distinguish from an
+ * inventory, which is exactly how a charter stops being usable: once one named type
+ * turns out to be absent, every other name in the document becomes a question rather
+ * than a statement.</p>
+ *
  * <h2>What each subpackage owns</h2>
  *
  * <p>Seven subpackages, and no eighth. The list is closed, so the question
  * "which subpackage does this belong in" keeps a definite answer as the tree
- * grows:</p>
+ * grows. The list is a target roster: read every entry against the landed-versus-planned
+ * split declared above.</p>
  *
  * <ul>
  *   <li><b>{@code job}</b> -- the seven Spring Batch job definitions:
@@ -288,13 +326,20 @@
  * encrypts the national and government-issued identifiers and renames three
  * misspelled baseline fields -- and each of those decisions needs its
  * justification at the mapping site, which a generated mapper has nowhere to
- * hold. No resilience library and no circuit breaker are added: retry support
- * lives in the framework core the parent dependency management already
+ * hold. No resilience library is DECLARED and no class here uses one: retry
+ * support lives in the framework core the parent dependency management already
  * supplies, the durable retry tier is queue redelivery with a dead-letter
  * queue plus per-state retry in the state machine, and a breaker would add a
  * failure mode without removing one for in-network calls that already carry
- * bounded timeouts. No cache tier, no streaming platform and no read replica:
- * the baseline has none of the three, and parity is the requirement.</p>
+ * bounded timeouts. Assumptions: declaration and presence are separated because
+ * this module is one of four where
+ * {@code org.springframework.retry:spring-retry} arrives as a compile-scoped
+ * transitive of the SQS starter, which uses it for its own polling back-off and
+ * so cannot be excluded; what is guaranteed is that no {@code com.carddemo}
+ * class depends on it, and rule A5 of the shared layering gate fails this
+ * module's build if one does. No cache tier, no streaming platform and no read
+ * replica: the baseline has none of the three, and parity is the
+ * requirement.</p>
  *
  * <h2>Invariants every file in this subtree inherits</h2>
  *

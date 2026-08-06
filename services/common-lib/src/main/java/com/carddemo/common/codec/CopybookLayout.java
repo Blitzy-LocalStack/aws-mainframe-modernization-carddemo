@@ -530,7 +530,25 @@ public final class CopybookLayout {
         //       transcribed independently, either by appending fields to it or by altering one
         //       field's flags. There are exactly three. Deriving them is what keeps the shared prefix
         //       single-sourced, as recorded on extendWith and withFieldFlags below.
-        DERIVED
+        DERIVED,
+
+        // WHY : Assumptions: a record transcribed from a copybook that defines a persistent IMS
+        //       DL/I segment rather than a VSAM dataset. There are exactly two, the parent and the
+        //       child of the authorization extension's database.
+        // WHY : Alternatives Considered: labelling these two BASE_MASTER, which is the closer of the
+        //       two existing values because both are copybook-transcribed and both are persistent.
+        //       Rejected because baseMasterNames() is consumed as the population that has a shipped
+        //       flat extract to load and a byte count to divide by -- app/data/EBCDIC holds one file
+        //       per VSAM master and none for either segment, since the segments are loaded from a
+        //       generation data set by the extension's own load program rather than from a seed
+        //       extract. Folding them in would have put two records with no extract into the group
+        //       whose defining obligation is to agree with one.
+        // WHY : Alternatives Considered: labelling them DERIVED, on the ground that they are simply
+        //       not base masters. Rejected because DERIVED states something specific and false about
+        //       them: a derived record's geometry is BUILT from a base master's, which is why
+        //       extendWith and withFieldFlags exist, whereas these two are transcribed from their own
+        //       copybooks and share no prefix with any other record here.
+        IMS_SEGMENT
     }
 
     // WHY : Assumptions: eighteen is the largest number of digit positions the reference dialect
@@ -1100,14 +1118,31 @@ public final class CopybookLayout {
      * class. A key is therefore addressable as one interval without any consumer having to know that
      * the copybook happened to bracket its leading fields.</p>
      *
+     * <p>Assumptions: a record may declare NO RETRIEVAL KEY, and it says so by carrying
+     * {@link #NO_RETRIEVAL_KEY} as its key length. Not every fixed-width record in this migration is
+     * a keyed data set: a print file and a statement file are sequential output, declared with a
+     * record format and no key operand at all, and nothing ever reads a band of one by key.</p>
+     *
+     * <p>Refactoring Rationale: the key length was originally required to be one or more, which forced
+     * every keyless descriptor to INVENT a key -- the report bands declared one nominal byte at offset
+     * zero and the statement bands declared the whole eighty-character line -- so the metadata read as
+     * a retrieval contract that does not exist, and read differently on two record families that are
+     * keyless for the identical reason. No output byte depended on the invention, which is precisely
+     * what made it dangerous: a consumer that started trusting {@code keyLength} would have extracted
+     * a key from a print line and been given a plausible answer. Admitting a keyless value makes the
+     * absence expressible, so a descriptor states what is true and {@link #hasRetrievalKey()} lets a
+     * consumer ask.</p>
+     *
      * @param name the registry key for this record, which is a logical name rather than a copybook
      *     name because two records may share a copybook geometry without being the same record; never
      *     null and never blank
      * @param reclen the total declared record length in bytes, which must equal the sum of the field
      *     lengths; one or more
      * @param keyLength the byte width of the primary key, taken from the dataset definition that
-     *     declares it; one or more
-     * @param keyOffset the ZERO-based byte offset at which the primary key begins; zero or more
+     *     declares it; one or more for a keyed record, or exactly {@link #NO_RETRIEVAL_KEY} for a
+     *     record that has no retrieval key at all
+     * @param keyOffset the ZERO-based byte offset at which the primary key begins, which must be zero
+     *     when {@code keyLength} is {@link #NO_RETRIEVAL_KEY}; zero or more
      * @param fields the ordered field descriptors covering the record from offset zero with no gap and
      *     no overlap; never null and never empty
      */
@@ -1141,12 +1176,15 @@ public final class CopybookLayout {
          *
          * @param name the registry key for this record
          * @param reclen the total declared record length in bytes
-         * @param keyLength the byte width of the primary key
-         * @param keyOffset the ZERO-based byte offset at which the primary key begins
+         * @param keyLength the byte width of the primary key, or {@link #NO_RETRIEVAL_KEY} for a
+         *     keyless record
+         * @param keyOffset the ZERO-based byte offset at which the primary key begins, which must be
+         *     zero for a keyless record
          * @param fields the ordered field descriptors covering the record
          * @throws LayoutException if the name is null or blank, the record length is below one, the key
-         *     length is below one, the key offset is negative, the key runs past the end of the record,
-         *     or the field list is null, empty or contains a null element
+         *     length is negative, the key offset is negative, a keyless record declares a non-zero key
+         *     offset, the key runs past the end of the record, or the field list is null, empty or
+         *     contains a null element
          */
         public RecordSpec {
             if (name == null || name.isBlank()) {
@@ -1157,13 +1195,32 @@ public final class CopybookLayout {
                 throw new LayoutException("record " + name + " must declare a length of at least one"
                         + " byte, but reclen=" + reclen);
             }
-            if (keyLength < 1) {
-                throw new LayoutException("record " + name + " must declare a key of at least one"
-                        + " byte, but keyLength=" + keyLength);
+
+            // WHY : Assumptions: a NEGATIVE key length is still rejected while zero is now admitted,
+            //       and the boundary matters. Zero is the one value that can only mean "this record has
+            //       no retrieval key", because a key of no bytes cannot be extracted and no dataset
+            //       definition declares one; a negative length has no reading at all and is a
+            //       arithmetic slip at the call site. Admitting zero without still refusing negatives
+            //       would let a transposed argument pair through as a keyless declaration.
+            if (keyLength < NO_RETRIEVAL_KEY) {
+                throw new LayoutException("record " + name + " must declare a key length of at least"
+                        + " " + NO_RETRIEVAL_KEY + ", which denotes a keyless record, but keyLength="
+                        + keyLength);
             }
             if (keyOffset < 0) {
                 throw new LayoutException("record " + name + " must declare a non-negative key"
                         + " offset, but keyOffset=" + keyOffset);
+            }
+
+            // WHY : Assumptions: a keyless record must declare offset zero, because an offset is a
+            //       position WITHIN a key and there is no key to be positioned in. Leaving the offset
+            //       free would admit two spellings of the same fact -- keyless at zero and keyless at
+            //       304 -- and a consumer comparing two descriptors for the same record would then find
+            //       them unequal over a component that means nothing in either.
+            if (keyLength == NO_RETRIEVAL_KEY && keyOffset != 0) {
+                throw new LayoutException("record " + name + " declares no retrieval key, so its key"
+                        + " offset must be 0 rather than " + keyOffset + "; an offset positions a key"
+                        + " and there is no key here to position");
             }
 
             // WHY : Assumptions: a key that runs past the end of the record cannot be extracted at
@@ -1181,6 +1238,58 @@ public final class CopybookLayout {
                         + " the field list was " + (fields == null ? "null" : "empty"));
             }
             fields = List.copyOf(fields);
+        }
+
+        /**
+         * The key length that denotes a record with no retrieval key, zero.
+         *
+         * <p>Assumptions: zero rather than a negative sentinel or a boxed absent value, because zero is
+         * the one number whose only possible reading here is "no key": a key of no bytes cannot be
+         * extracted, and no dataset definition in the reference tree declares one. A negative sentinel
+         * would be indistinguishable from an arithmetic slip, and a boxed absent value would change the
+         * record's component types, which the parity assertion on the component list pins.</p>
+         */
+        public static final int NO_RETRIEVAL_KEY = 0;
+
+        /**
+         * Declares a keyless record, so that no call site has to spell the sentinel or an offset.
+         *
+         * <p>Assumptions: this factory exists so that a keyless declaration reads as one at the call
+         * site. The canonical constructor takes the key length and the key offset as two adjacent
+         * integer arguments, and passing {@code 0, 0} through it states the absence twice while looking
+         * exactly like a transposition; naming the factory states it once and states it in words.</p>
+         *
+         * <p>Trade-offs: the geometry check is deliberately NOT run here, so a caller still calls
+         * {@link #validateGeometry()} exactly as it would on a keyed record. Running it inside the
+         * factory would leave two construction paths with different guarantees, and a reader comparing
+         * a keyed declaration against a keyless one beside it would have to know which path validated
+         * what.</p>
+         *
+         * @param name the registry key for this record; never null and never blank
+         * @param reclen the total declared record length in bytes; one or more
+         * @param fields the ordered field descriptors covering the record from offset zero with no gap
+         *     and no overlap; never null and never empty
+         * @return a record descriptor declaring no retrieval key, never {@code null}
+         * @throws LayoutException if the name is null or blank, the record length is below one, or the
+         *     field list is null, empty or contains a null element
+         */
+        public static RecordSpec keyless(String name, int reclen, List<FieldSpec> fields) {
+            return new RecordSpec(name, reclen, NO_RETRIEVAL_KEY, 0, fields);
+        }
+
+        /**
+         * Reports whether this record declares a retrieval key at all.
+         *
+         * <p>Assumptions: a consumer asks this rather than comparing {@link #keyLength()} against zero,
+         * so that the meaning of zero lives in one place. A consumer that extracted a key without
+         * asking would, on a keyless record, be handed an empty interval and no indication that the
+         * descriptor never claimed to have one.</p>
+         *
+         * @return {@code true} when this record declares a key of one or more bytes, {@code false} when
+         *     it declares {@link #NO_RETRIEVAL_KEY}
+         */
+        public boolean hasRetrievalKey() {
+            return keyLength != NO_RETRIEVAL_KEY;
         }
 
         /**
@@ -1716,11 +1825,116 @@ public final class CopybookLayout {
             TRAN_LAYOUT.withFieldFlags("INTTRAN", "TRAN-ORIG-TS", true, false);
 
     /**
+     * The authorization summary segment, the parent of the authorization database.
+     *
+     * <p>Assumptions: 100 bytes with a six-byte key at offset zero, and both numbers have two
+     * independent sources. The length is declared by {@code SEGM NAME=PAUTSUM0,PARENT=0,BYTES=100} in
+     * {@code app/app-authorization-ims-db2-mq/ims/DBPAUTP0.dbd}, and it is reproduced by summing the
+     * field widths of {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} lines 19 to 31 through
+     * {@link #packedWidth} and {@link #binaryWidth}. The key is declared by
+     * {@code FIELD NAME=(ACCNTID,SEQ,U),START=1,BYTES=6,TYPE=P} in the same descriptor, which is the
+     * packed account identifier at line 19 and nothing else -- {@code START=1} is one-based there, so
+     * the offset here is zero.</p>
+     *
+     * <p>Assumptions: the five-occurrence account-status table at line 22 is transcribed as ONE
+     * ten-byte character field rather than as five two-byte fields. The segment is decoded here as
+     * bytes at offsets, and the reference program reads the table by subscript from the same ten bytes,
+     * so one field of the declared total keeps the geometry exact while leaving the subscripting to the
+     * consumer that has the subscript. Five separate fields would also have required five distinct
+     * names, and the copybook gives the group one.</p>
+     *
+     * <p>Alternatives Considered: omitting this layout from the Java registry and reading the segment
+     * through the Python ETL alone, which is where its geometry was first transcribed. Rejected because
+     * the two implementations exist precisely so that a decode can be checked against an independent
+     * transcription of the same copybook, and a record present in only one of them has no second
+     * reading to disagree with it -- which is the whole mechanism by which an offset error in a
+     * packed-decimal money field gets caught rather than posted.</p>
+     */
+    private static final RecordSpec PAUTSUM0_LAYOUT = new RecordSpec("PAUTSUM0", 100, 6, 0, List.of(
+            packed("PA-ACCT-ID", 0, 11, 0, true),  // CIPAUSMY L19 PIC S9(11) COMP-3, 6 bytes
+            uint("PA-CUST-ID", 6, 9),  // CIPAUSMY L20 PIC 9(09) display
+            text("PA-AUTH-STATUS", 15, 1),  // CIPAUSMY L21 PIC X(01)
+            text("PA-ACCOUNT-STATUS", 16, 10),  // CIPAUSMY L22 PIC X(02) OCCURS 5, 10 bytes
+            packed("PA-CREDIT-LIMIT", 26, 9, 2, true),  // CIPAUSMY L23 PIC S9(09)V99 COMP-3
+            packed("PA-CASH-LIMIT", 32, 9, 2, true),  // CIPAUSMY L24 PIC S9(09)V99 COMP-3
+            packed("PA-CREDIT-BALANCE", 38, 9, 2, true),  // CIPAUSMY L25 PIC S9(09)V99 COMP-3
+            packed("PA-CASH-BALANCE", 44, 9, 2, true),  // CIPAUSMY L26 PIC S9(09)V99 COMP-3
+            binary("PA-APPROVED-AUTH-CNT", 50, 4, 0, true),  // CIPAUSMY L27 PIC S9(04) COMP, 2 bytes
+            binary("PA-DECLINED-AUTH-CNT", 52, 4, 0, true),  // CIPAUSMY L28 PIC S9(04) COMP, 2 bytes
+            packed("PA-APPROVED-AUTH-AMT", 54, 9, 2, true),  // CIPAUSMY L29 PIC S9(09)V99 COMP-3
+            packed("PA-DECLINED-AUTH-AMT", 60, 9, 2, true),  // CIPAUSMY L30 PIC S9(09)V99 COMP-3
+            text("FILLER", 66, 34))).validateGeometry();  // CIPAUSMY L31 PIC X(34) trailing pad
+
+    /**
+     * The authorization detail segment, the child of the authorization database.
+     *
+     * <p>Assumptions: 200 bytes with an eight-byte key at offset zero. The length is declared by
+     * {@code SEGM NAME=PAUTDTL1,PARENT=((PAUTSUM0,)),BYTES=200} in
+     * {@code app/app-authorization-ims-db2-mq/ims/DBPAUTP0.dbd}, and the key by
+     * {@code FIELD NAME=(PAUT9CTS,SEQ,U),START=1,BYTES=8,TYPE=C}, which spans the two packed
+     * components the copybook brackets under {@code PA-AUTHORIZATION-KEY} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} line 19 -- three bytes for the date at
+     * line 20 and five for the time at line 21, eight together.</p>
+     *
+     * <p>Assumptions: the group item at line 19 is FLATTENED, so its two components appear here as
+     * peers of the fields that follow them rather than nested. Every consumer works in flat byte
+     * offsets, and the composite it forms survives as the declared key length, which is how the
+     * eight-byte sequence field is reproduced without a tree.</p>
+     *
+     * <p>Assumptions: the two twelve-digit money fields at lines 34 and 35 are SEVEN bytes each, and
+     * the segment's declared 200 is what proves it. At six bytes apiece the field widths sum to 198,
+     * two short of the declared length with no field left to absorb them; at seven they sum to exactly
+     * 200. The arithmetic is {@link #packedWidth}'s and this layout merely consumes it, but the
+     * segment is the corroborating witness, so it is recorded here as well as there.</p>
+     *
+     * <p>Assumptions: the misspelling in {@code PA-MERCHANT-CATAGORY-CODE} at line 36 is carried
+     * across verbatim. This registry names fields as the copybook declares them, because the name is
+     * how a reader matches a field here against the line that defines it; the correction to
+     * {@code merchant_category_code} belongs to the mapping layer and is recorded in
+     * {@code docs/architecture/data-model-and-schema-mapping.md}.</p>
+     *
+     * <p>Assumptions: only the primary account number at line 24 is marked sensitive. The segment
+     * carries no card verification value at all, and the merchant name, city, state and postal code
+     * are acquirer-supplied merchant identity rather than cardholder identity, so marking them would
+     * redact the very fields a fraud reviewer reads to recognise a merchant.</p>
+     */
+    private static final RecordSpec PAUTDTL_LAYOUT = new RecordSpec("PAUTDTL", 200, 8, 0, List.of(
+            packed("PA-AUTH-DATE-9C", 0, 5, 0, true),  // CIPAUDTY L20 PIC S9(05) COMP-3, 3 bytes
+            packed("PA-AUTH-TIME-9C", 3, 9, 0, true),  // CIPAUDTY L21 PIC S9(09) COMP-3, 5 bytes
+            text("PA-AUTH-ORIG-DATE", 8, 6),  // CIPAUDTY L22 PIC X(06)
+            text("PA-AUTH-ORIG-TIME", 14, 6),  // CIPAUDTY L23 PIC X(06)
+            sensitiveText("PA-CARD-NUM", 20, 16),  // CIPAUDTY L24 PIC X(16)
+            text("PA-AUTH-TYPE", 36, 4),  // CIPAUDTY L25 PIC X(04)
+            text("PA-CARD-EXPIRY-DATE", 40, 4),  // CIPAUDTY L26 PIC X(04)
+            text("PA-MESSAGE-TYPE", 44, 6),  // CIPAUDTY L27 PIC X(06)
+            text("PA-MESSAGE-SOURCE", 50, 6),  // CIPAUDTY L28 PIC X(06)
+            text("PA-AUTH-ID-CODE", 56, 6),  // CIPAUDTY L29 PIC X(06)
+            text("PA-AUTH-RESP-CODE", 62, 2),  // CIPAUDTY L30 PIC X(02), 88 at L31
+            text("PA-AUTH-RESP-REASON", 64, 4),  // CIPAUDTY L32 PIC X(04)
+            uint("PA-PROCESSING-CODE", 68, 6),  // CIPAUDTY L33 PIC 9(06) display
+            packed("PA-TRANSACTION-AMT", 74, 10, 2, true),  // CIPAUDTY L34 S9(10)V99 COMP-3, 7 bytes
+            packed("PA-APPROVED-AMT", 81, 10, 2, true),  // CIPAUDTY L35 S9(10)V99 COMP-3, 7 bytes
+            text("PA-MERCHANT-CATAGORY-CODE", 88, 4),  // CIPAUDTY L36 PIC X(04), misspelt in source
+            text("PA-ACQR-COUNTRY-CODE", 92, 3),  // CIPAUDTY L37 PIC X(03)
+            uint("PA-POS-ENTRY-MODE", 95, 2),  // CIPAUDTY L38 PIC 9(02) display
+            text("PA-MERCHANT-ID", 97, 15),  // CIPAUDTY L39 PIC X(15)
+            text("PA-MERCHANT-NAME", 112, 22),  // CIPAUDTY L40 PIC X(22)
+            text("PA-MERCHANT-CITY", 134, 13),  // CIPAUDTY L41 PIC X(13)
+            text("PA-MERCHANT-STATE", 147, 2),  // CIPAUDTY L42 PIC X(02)
+            text("PA-MERCHANT-ZIP", 149, 9),  // CIPAUDTY L43 PIC X(09)
+            text("PA-TRANSACTION-ID", 158, 15),  // CIPAUDTY L44 PIC X(15)
+            text("PA-MATCH-STATUS", 173, 1),  // CIPAUDTY L45 PIC X(01), 88s L46-L49
+            text("PA-AUTH-FRAUD", 174, 1),  // CIPAUDTY L50 PIC X(01), 88s L51-L52
+            text("PA-FRAUD-RPT-DATE", 175, 8),  // CIPAUDTY L53 PIC X(08)
+            text("FILLER", 183, 17))).validateGeometry();  // CIPAUDTY L54 PIC X(17) trailing pad
+
+    /**
      * The registry of every layout this class declares, keyed by logical record name.
      *
      * <p>Assumptions: insertion order is preserved and is meaningful, so the map is a linked one rather
      * than a hashed one. The eleven base masters are inserted first, in the order their copybooks
-     * define the datasets, and the three derived records follow. That makes {@link #names()}
+     * define the datasets, then the three derived records, then the two IMS segments. That makes
+     * {@link #names()}
      * deterministic, which matters because a failure message that lists the known names would otherwise
      * list them differently on different runs and defeat a comparison against a committed
      * expectation.</p>
@@ -1736,10 +1950,10 @@ public final class CopybookLayout {
      * equivalent self-check at import time for the same stated reason, that the codec is the single
      * source of truth so a wrong offset must never reach the code depending on it.</p>
      *
-     * <p>Assumptions: the eleven base masters are inserted before the three derived records, and the
-     * provenance and oracle-support flags are supplied per entry rather than inferred from the name.
-     * Inferring would mean encoding the population in a condition somewhere, and the population is
-     * exactly the thing that has been miscounted before.</p>
+     * <p>Assumptions: the eleven base masters are inserted before the three derived records and the
+     * two IMS segments, and the provenance and oracle-support flags are supplied per entry rather than
+     * inferred from the name. Inferring would mean encoding the population in a condition somewhere,
+     * and the population is exactly the thing that has been miscounted before.</p>
      *
      * @return an unmodifiable, insertion-ordered map from logical record name to its registration
      * @throws LayoutException if any layout is registered twice under one name
@@ -1779,6 +1993,15 @@ public final class CopybookLayout {
         register(registry, TRNX_LAYOUT, Provenance.DERIVED, true);
         register(registry, REJECT_LAYOUT, Provenance.DERIVED, true);
         register(registry, INTTRAN_LAYOUT, Provenance.DERIVED, true);
+
+        // WHY : Assumptions: the two IMS segments are inserted last and are marked as having no
+        //       oracle round trip, because the parity oracle's codec registers neither and no shipped
+        //       flat extract exists for either -- app/data/EBCDIC holds one file per VSAM master and
+        //       none for a segment. A decode of one of these therefore rests on its own copybook and
+        //       the database descriptor that declares its length, which is why both are cited in full
+        //       at each declaration above.
+        register(registry, PAUTSUM0_LAYOUT, Provenance.IMS_SEGMENT, false);
+        register(registry, PAUTDTL_LAYOUT, Provenance.IMS_SEGMENT, false);
 
         return Collections.unmodifiableMap(registry);
     }
@@ -1878,6 +2101,20 @@ public final class CopybookLayout {
      */
     public static List<String> derivedNames() {
         return namesWithProvenance(Provenance.DERIVED);
+    }
+
+    /**
+     * Returns the names of the layouts transcribed from an IMS segment copybook.
+     *
+     * <p>Assumptions: this group is published as its own accessor rather than folded into
+     * {@link #baseMasterNames()}, because the two groups carry different obligations. A base master has
+     * a shipped flat extract whose byte count divides by its record length; a segment has neither, so a
+     * caller iterating the base masters to verify extract lengths must not be handed these two.</p>
+     *
+     * @return an unmodifiable list of the IMS segment names in registration order
+     */
+    public static List<String> imsSegmentNames() {
+        return namesWithProvenance(Provenance.IMS_SEGMENT);
     }
 
     /**

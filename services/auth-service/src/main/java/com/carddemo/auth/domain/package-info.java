@@ -106,9 +106,12 @@
  * the fixed-length record -- byte positions, declared widths, blank padding to the right of a
  * short value, the sign and zone conventions a display-numeric field would use, the dropped
  * padding field and the baseline field-name spellings -- belongs on the far side of an
- * anti-corruption boundary implemented by {@code com.carddemo.auth.mapper} and by the codecs in
- * {@code com.carddemo.common.codec}. A type in this package sees a decoded value and a column,
- * never a byte range.</p>
+ * anti-corruption boundary. That boundary is the codecs in
+ * {@code com.carddemo.common.codec}, which exist, together with
+ * {@code com.carddemo.auth.mapper}, which the plan assigns but which is <b>not yet authored</b> --
+ * the qualification is stated here rather than left to the reader because a bare "implemented by"
+ * would name a package that cannot be opened. A type in this package sees a decoded value and a
+ * column, never a byte range.</p>
  *
  * <p>Alternatives Considered: letting the entity hold its own offsets and widths, so that one type
  * describes both the row and the record it came from. Rejected on the precedent the existing test

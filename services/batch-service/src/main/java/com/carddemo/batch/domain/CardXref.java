@@ -306,27 +306,23 @@ import org.hibernate.type.SqlTypes;
  * {@code com.carddemo.common.security.OpaqueIdentifier} where an identity rather than a value is
  * wanted. The mapper layer of each exposing service is where that obligation is discharged.</p>
  */
-// WHY : Assumptions: this mapping carries the same unsatisfied SEQUENCING DEPENDENCY as the
-//       sibling account mapping, and it is recorded at both sites because a reader arrives at one
-//       or the other rather than at a common ancestor. The migration that creates
-//       {@code account.card_xref} is
-//       services/account-service/src/main/resources/db/migration/V1__account.sql, an
-//       account-service deliverable that is not yet authored; that module holds no db/migration
-//       directory. Until it lands, the column names, widths and the primary key declared below
-//       are described rather than verified, and a job resolving a card number through this
-//       cross-reference against a database migrated with V0 alone fails with
-//       {@code relation "account.card_xref" does not exist}. This module's grant on the table is
-//       SELECT only, granted schema-wide by data-migration/sql/V0__schemas_and_roles.sql, so
-//       unlike the account master there is no conditional per-table grant to re-run for it -- the
-//       missing piece is the table itself and nothing else.
-// WHY : Alternatives Considered: authoring that migration here so the mapping becomes verifiable
-//       immediately, rejected for the ownership reason set out in full on the sibling account
-//       mapping: account-service's own entities are the authority for every column in its schema,
-//       and a migration written from a consuming module would invert that. The dependency is
-//       tracked instead, here, at the account mapping and in
-//       docs/architecture/data-model-and-schema-mapping.md; when the migration lands, re-verify
-//       the sixteen-character key column, the two identifier columns and the dropped pad recorded
-//       below against it.
+// WHY : Assumptions: the table this type maps is created by
+//       services/account-service/src/main/resources/db/migration/V1__account.sql, alongside the
+//       account master the sibling mapping reads. The sixteen-character key column, the two
+//       identifier columns and the dropped fourteen-byte pad recorded below were each verified
+//       against that migration applied to a live database. This module's grant on the table is
+//       SELECT only, conveyed schema-wide by data-migration/sql/V0__schemas_and_roles.sql, so
+//       unlike the account master there is no conditional per-table grant for it -- a
+//       cross-reference is resolved, never rewritten.
+// WHY : Refactoring Rationale: this block formerly recorded the dependency as UNSATISFIED, noting
+//       that the migration was not yet authored and that account-service held no db/migration
+//       directory. Both statements were true when written and neither is now. The note also
+//       rejected authoring the migration from THIS module, on the ground that account-service's
+//       own schema is the authority for every column in it; that objection is why the file was
+//       authored under account-service rather than here, so the resolution followed the direction
+//       of authority the note prescribed rather than overriding it. The resolution is recorded at
+//       both mapping sites and in docs/architecture/data-model-and-schema-mapping.md, because a
+//       reader arrives at one of them rather than at a common ancestor.
 @Entity
 @Immutable
 @Table(name = "card_xref", schema = "account")

@@ -153,7 +153,40 @@
  * and {@code KeysetPaginationGateProofTest}. Each one constructs a subject that
  * violates a boundary and asserts that the corresponding rule rejects it, so
  * the evidence that the gate bites is produced by the build rather than assumed
- * from the gate's presence.
+ * from the gate's presence. Each also asserts the complement, that a compliant
+ * subject is ACCEPTED, because a rule that had degenerated into one rejecting
+ * everything would satisfy the violation assertion while gating nothing -- and an
+ * over-matching predicate is the likelier of the two accidents.
+ *
+ * <p>Assumptions: what a proof reuses from the gate is the CONDITION, not the
+ * whole rule, and the distinction is deliberate. An ArchUnit rule is a package
+ * selection paired with a condition; the selection names the production packages
+ * the gate protects, and a fixture cannot be placed in one of those without
+ * putting the prohibited construct into a package the gate protects, at which
+ * point the gate would fail by construction. Each proof therefore pairs the
+ * gate's own condition object with a selection naming this package. Alternatives
+ * Considered: rebuilding the condition inside the proof, which would need no
+ * shared member at all; rejected because it demonstrates that a COPY of the gate
+ * can fail, and a copy drifts from the gate silently while the proof keeps
+ * passing. What stays proof-local is a literal package identifier a reader
+ * verifies by eye; what is shared is the part that decides violations.
+ *
+ * <p>Assumptions: the violating and compliant subjects are private static nested
+ * types of the proof that declares them, and that is consistent with the closure
+ * below rather than an exception to it. The closure forbids a helper file and a
+ * base class because a rule split across two files can be weakened by editing the
+ * one that reads as maintenance; a nested fixture holds no part of any rule, is
+ * never instantiated and is never referenced from production code, so weakening a
+ * gate by editing one is not possible -- editing it can only make the proof fail.
+ * Alternatives Considered: top-level fixture classes in the sibling test
+ * packages, rejected because each of those packages has its own closed roster
+ * that a fixture would silently expand.
+ *
+ * <p>Assumptions: the fixtures are the only types in this module permitted to
+ * contain the tokens the money family forbids or to name an offset-paging
+ * construct. A proof of a prohibition needs an instance of the prohibited
+ * construct, and the production graph both gates import excludes every test
+ * source, so a fixture cannot reach the gate it exists to trip.
  *
  * <p>Assumptions: the need for that proof is the exact consequence of the
  * empty-set tolerance described above, because a rule carrying that tolerance
@@ -203,9 +236,17 @@
  * <p>This directory holds four {@code .java} files and no others -- this
  * charter, {@code TransactionLayeringRulesTest}, {@code MoneyPathGateProofTest}
  * and {@code KeysetPaginationGateProofTest} -- and no subdirectory beneath it.
- * This charter is one of the six the parent test charter's count canon admits
+ * This charter is one of the eight the parent test charter's count canon admits
  * across this test subtree, so the figure here can be re-checked against that
  * one rather than argued again.
+ *
+ * <p>Refactoring Rationale: this sentence previously cited the canon as admitting
+ * six. The parent charter's own enumeration names eight -- its root charter plus
+ * one in each of the seven subpackages -- so the six was a transcription of a
+ * figure the parent has since restated, and the subtree now holds all eight. The
+ * point of citing the canon rather than re-deriving a count here is that one
+ * number is maintained in one place; that only holds while the citation tracks
+ * it, so the figure is corrected here rather than left to disagree.
  *
  * <p>Assumptions: the closure extends past Java sources, and each exclusion is
  * an absence with a plausible alternative, recorded so that nobody restores one

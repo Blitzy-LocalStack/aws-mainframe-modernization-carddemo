@@ -12,10 +12,10 @@
  * than as remote-data state owned by the hooks layer.
  */
 
-import { useCallback, useEffect, useRef } from "react";
-import type { RefObject } from "react";
+import { useCallback, useEffect, useRef } from 'react';
+import type { RefObject } from 'react';
 
-import { INVALID_KEY_PRESSED } from "../messages/messages";
+import { INVALID_KEY_PRESSED } from '../messages/messages';
 
 // Alternatives Considered: Importing `usePagedQuery` to coordinate page keys
 // would invert its declared dependency on layout vocabulary and create a cycle;
@@ -31,22 +31,22 @@ import { INVALID_KEY_PRESSED } from "../messages/messages";
  * though the shared shell most often exposes seven keys.
  */
 export const CICS_AIDS = Object.freeze([
-  "ENTER",
-  "CLEAR",
-  "PA1",
-  "PA2",
-  "PFK01",
-  "PFK02",
-  "PFK03",
-  "PFK04",
-  "PFK05",
-  "PFK06",
-  "PFK07",
-  "PFK08",
-  "PFK09",
-  "PFK10",
-  "PFK11",
-  "PFK12",
+  'ENTER',
+  'CLEAR',
+  'PA1',
+  'PA2',
+  'PFK01',
+  'PFK02',
+  'PFK03',
+  'PFK04',
+  'PFK05',
+  'PFK06',
+  'PFK07',
+  'PFK08',
+  'PFK09',
+  'PFK10',
+  'PFK11',
+  'PFK12',
 ] as const);
 
 /**
@@ -63,18 +63,18 @@ export type CicsAid = (typeof CICS_AIDS)[number];
  * a shifted function key remains observationally equivalent to its base PF key.
  */
 export const PF_KEY_ALIASES: Readonly<Record<string, CicsAid>> = Object.freeze({
-  F13: "PFK01",
-  F14: "PFK02",
-  F15: "PFK03",
-  F16: "PFK04",
-  F17: "PFK05",
-  F18: "PFK06",
-  F19: "PFK07",
-  F20: "PFK08",
-  F21: "PFK09",
-  F22: "PFK10",
-  F23: "PFK11",
-  F24: "PFK12",
+  F13: 'PFK01',
+  F14: 'PFK02',
+  F15: 'PFK03',
+  F16: 'PFK04',
+  F17: 'PFK05',
+  F18: 'PFK06',
+  F19: 'PFK07',
+  F20: 'PFK08',
+  F21: 'PFK09',
+  F22: 'PFK10',
+  F23: 'PFK11',
+  F24: 'PFK12',
 });
 
 /**
@@ -85,36 +85,35 @@ export const PF_KEY_ALIASES: Readonly<Record<string, CicsAid>> = Object.freeze({
  * while measured usage across all 21 online programs is zero, so assigning
  * arbitrary web keys would create behavior absent from the source application.
  */
-export const KEYBOARD_KEY_TO_AID: Readonly<Record<string, CicsAid>> =
-  Object.freeze({
-    Enter: "ENTER",
-    F1: "PFK01",
-    F2: "PFK02",
-    F3: "PFK03",
-    F4: "PFK04",
-    F5: "PFK05",
-    F6: "PFK06",
-    F7: "PFK07",
-    F8: "PFK08",
-    F9: "PFK09",
-    F10: "PFK10",
-    F11: "PFK11",
-    F12: "PFK12",
-    ...PF_KEY_ALIASES,
-  });
+export const KEYBOARD_KEY_TO_AID: Readonly<Record<string, CicsAid>> = Object.freeze({
+  Enter: 'ENTER',
+  F1: 'PFK01',
+  F2: 'PFK02',
+  F3: 'PFK03',
+  F4: 'PFK04',
+  F5: 'PFK05',
+  F6: 'PFK06',
+  F7: 'PFK07',
+  F8: 'PFK08',
+  F9: 'PFK09',
+  F10: 'PFK10',
+  F11: 'PFK11',
+  F12: 'PFK12',
+  ...PF_KEY_ALIASES,
+});
 
 /**
  * Semantic action represented by a registered PF-key handler.
  */
 export type PfKeyAction =
-  | "submit"
-  | "back"
-  | "clear"
-  | "save"
-  | "page-backward"
-  | "page-forward"
-  | "cancel"
-  | "screen-defined";
+  | 'submit'
+  | 'back'
+  | 'clear'
+  | 'save'
+  | 'page-backward'
+  | 'page-forward'
+  | 'cancel'
+  | 'screen-defined';
 
 /**
  * Default semantic actions observed across the online COBOL programs.
@@ -123,22 +122,21 @@ export type PfKeyAction =
  * screens such as transaction-type maintenance to bind PF2 and PF10 without
  * assigning misleading global semantics.
  */
-export const DEFAULT_PF_KEY_ACTIONS: Readonly<
-  Partial<Record<CicsAid, PfKeyAction>>
-> = Object.freeze({
-  ENTER: "submit",
-  PFK03: "back",
-  PFK04: "clear",
-  PFK05: "save",
-  PFK07: "page-backward",
-  PFK08: "page-forward",
-  PFK12: "cancel",
-});
+export const DEFAULT_PF_KEY_ACTIONS: Readonly<Partial<Record<CicsAid, PfKeyAction>>> =
+  Object.freeze({
+    ENTER: 'submit',
+    PFK03: 'back',
+    PFK04: 'clear',
+    PFK05: 'save',
+    PFK07: 'page-backward',
+    PFK08: 'page-forward',
+    PFK12: 'cancel',
+  });
 
 /**
  * Reason that a recognized CICS AID could not be dispatched.
  */
-export type PfKeyRejectionReason = "unmapped" | "disabled";
+export type PfKeyRejectionReason = 'unmapped' | 'disabled';
 
 /**
  * Error-channel payload emitted for a recognized but unavailable AID.
@@ -149,7 +147,7 @@ export interface PfKeyRejection {
   /** Byte-preserved invalid-key text imported from the message catalog. */
   readonly message: typeof INVALID_KEY_PRESSED;
   /** Message severity expected by screen-level status renderers. */
-  readonly severity: "error";
+  readonly severity: 'error';
   /** Whether the screen omitted the handler or disabled it for current state. */
   readonly reason: PfKeyRejectionReason;
 }
@@ -184,9 +182,7 @@ export interface PfKeyHandlerEntry {
 /**
  * Sparse set of AID handlers registered by the active screen.
  */
-export type PfKeyHandlerMap = Partial<
-  Readonly<Record<CicsAid, PfKeyHandlerEntry>>
->;
+export type PfKeyHandlerMap = Partial<Readonly<Record<CicsAid, PfKeyHandlerEntry>>>;
 
 /**
  * Render-ready PF-key metadata shared with `PfKeyBar`.
@@ -304,9 +300,7 @@ type PfKeyListenerCleanup = () => void;
  * key is not a terminal attention identifier represented on the web.
  */
 export function resolveAid(key: string): CicsAid | undefined {
-  return Object.hasOwn(KEYBOARD_KEY_TO_AID, key)
-    ? KEYBOARD_KEY_TO_AID[key]
-    : undefined;
+  return Object.hasOwn(KEYBOARD_KEY_TO_AID, key) ? KEYBOARD_KEY_TO_AID[key] : undefined;
 }
 
 /**
@@ -321,9 +315,7 @@ export function resolveAid(key: string): CicsAid | undefined {
  * @returns {CicsAid | undefined} Matching CICS AID, or `undefined` when the
  * event is modified or does not represent a mapped attention identifier.
  */
-export function resolveAidFromKeyboardEvent(
-  event: KeyboardEvent,
-): CicsAid | undefined {
+export function resolveAidFromKeyboardEvent(event: KeyboardEvent): CicsAid | undefined {
   if (event.altKey || event.ctrlKey || event.metaKey) {
     return undefined;
   }
@@ -372,21 +364,21 @@ export function resolveAidFromKeyboardEvent(
  * being migrated rather than an omission.
  */
 export const ENTER_ACTIVATED_TARGET_SELECTOR = [
-  "button",
+  'button',
   '[role="button"]',
-  "a[href]",
-  "area[href]",
+  'a[href]',
+  'area[href]',
   '[role="link"]',
-  "summary",
-  "select",
-  "textarea",
+  'summary',
+  'select',
+  'textarea',
   'input[type="button"]',
   'input[type="image"]',
   'input[type="reset"]',
   'input[type="submit"]',
   '[contenteditable=""]',
   '[contenteditable="true"]',
-].join(", ");
+].join(', ');
 
 /**
  * Reports whether the event's own target will act on the key, so the shell must
@@ -407,11 +399,8 @@ export const ENTER_ACTIVATED_TARGET_SELECTOR = [
  * @returns {boolean} `true` when dispatch must be skipped so the target's own
  * behaviour survives.
  */
-export function isAidClaimedByEventTarget(
-  aid: CicsAid,
-  target: EventTarget | null,
-): boolean {
-  if (aid !== "ENTER" || !(target instanceof Element)) {
+export function isAidClaimedByEventTarget(aid: CicsAid, target: EventTarget | null): boolean {
+  if (aid !== 'ENTER' || !(target instanceof Element)) {
     return false;
   }
 
@@ -426,7 +415,8 @@ export function isAidClaimedByEventTarget(
  * attention identifier per attention key. Holding a key down in a browser
  * produces a stream of keydown events, so without this an operator resting on F5
  * would run a save as many times as the platform's repeat rate allows - and PF5
- * is a write verb on `app/bms/COACTUP.bms` and `app/bms/COTRTUP.bms`.
+ * is a write verb on `app/bms/COACTUP.bms` and, in the transaction-type
+ * extension tree, `app/app-transaction-type-db2/bms/COTRTUP.bms`.
  *
  * Assumptions: an in-composition event is suppressed because a user committing
  * an input-method composition presses Enter to accept candidate text, not to
@@ -455,7 +445,7 @@ export function isKeydownSuppressed(event: KeyboardEvent): boolean {
 function isHandlerDisabled(entry: PfKeyHandlerEntry): boolean {
   const { disabled } = entry;
 
-  return typeof disabled === "function" ? disabled() : disabled === true;
+  return typeof disabled === 'function' ? disabled() : disabled === true;
 }
 
 /**
@@ -466,7 +456,7 @@ function isHandlerDisabled(entry: PfKeyHandlerEntry): boolean {
  * @returns {PfKeyAction} Explicit, shared-default, or screen-defined action.
  */
 function resolveAction(aid: CicsAid, entry: PfKeyHandlerEntry): PfKeyAction {
-  return entry.action ?? DEFAULT_PF_KEY_ACTIONS[aid] ?? "screen-defined";
+  return entry.action ?? DEFAULT_PF_KEY_ACTIONS[aid] ?? 'screen-defined';
 }
 
 // Refactoring Rationale: Literal `EVALUATE EIBAID` callers such as
@@ -496,7 +486,7 @@ function reportRejectedAid(
     aid,
     message: INVALID_KEY_PRESSED,
     reason,
-    severity: "error",
+    severity: 'error',
   };
 
   options.onInvalidKey?.(rejection);
@@ -530,7 +520,7 @@ function createBindings(
       action: resolveAction(aid, entry),
       aid,
       enabled: screenEnabled && !isHandlerDisabled(entry),
-      label: entry.label ?? "",
+      label: entry.label ?? '',
     });
   }
 
@@ -629,12 +619,12 @@ export function usePfKeys(
       const entry = state.handlers[aid];
 
       if (entry === undefined) {
-        reportRejectedAid(aid, "unmapped", state.options);
+        reportRejectedAid(aid, 'unmapped', state.options);
         return false;
       }
 
       if (isHandlerDisabled(entry)) {
-        reportRejectedAid(aid, "disabled", state.options);
+        reportRejectedAid(aid, 'disabled', state.options);
         return false;
       }
 
@@ -654,7 +644,7 @@ export function usePfKeys(
      * environment, or `undefined` during server rendering.
      */
     function subscribeToPfKeys(): PfKeyListenerCleanup | undefined {
-      if (typeof document === "undefined") {
+      if (typeof document === 'undefined') {
         return undefined;
       }
 
@@ -714,7 +704,7 @@ export function usePfKeys(
         invoke(aid);
       }
 
-      eventTarget.addEventListener("keydown", handleKeydown);
+      eventTarget.addEventListener('keydown', handleKeydown);
 
       /**
        * Removes exactly the listener installed by this effect execution.
@@ -723,7 +713,7 @@ export function usePfKeys(
        * keydown dispatch.
        */
       function unsubscribeFromPfKeys(): void {
-        eventTarget.removeEventListener("keydown", handleKeydown);
+        eventTarget.removeEventListener('keydown', handleKeydown);
       }
 
       return unsubscribeFromPfKeys;

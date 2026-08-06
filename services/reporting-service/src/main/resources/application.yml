@@ -1052,10 +1052,16 @@ carddemo:
   #       sign-on flow issues while accepting the identity tokens this block exists
   #       to refuse. It would invert the control, which is worse than having no
   #       control, and that is why no audiences key appears anywhere in this file.
-  #       (4) Assumptions: these keys are read by config/SecurityConfig.java, which
-  #       installs a delegating token validator ahead of the group mapping, so a
-  #       token failing any of the three never reaches JwtRoleConverter and no
-  #       authority is derived from it. The shared kernel's security package owns
+  #       (4) Assumptions: these keys are read by config/JwtDecoderConfig.java --
+  #       NOT by config/SecurityConfig.java, which this note named until the two
+  #       classes were checked against it. This context is the one module whose
+  #       decoder lives in its own class, recorded at both ends: SecurityConfig
+  #       carries the filter chain and the group mapping and declares no decoder
+  #       bean, because a second bean of that type would make which one the
+  #       resource server used depend on bean ordering. JwtDecoderConfig installs a
+  #       delegating token validator ahead of the group mapping, so a token failing
+  #       any of the three never reaches JwtRoleConverter and no authority is
+  #       derived from it. The shared kernel's security package owns
   #       the group mapping alone and explicitly no token validation, so the
   #       validator belongs to each service; the property shape is identical in
   #       every service so the eight filter chains cannot diverge in what they

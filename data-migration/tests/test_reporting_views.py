@@ -49,19 +49,36 @@ import pytest
 #   sets neither.
 _SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
-# Assumptions: the four names are the ones the reporting JPA entities declare in
-#   their @Table annotations. They are listed here rather than derived, because the
-#   point of the check is that the SQL and the Java agree, and deriving one from the
-#   other would make the check unable to detect a disagreement.
+# Assumptions: the seven names are the relations the reporting context reads. They are
+#   listed here rather than derived, because the point of the check is that the SQL and
+#   the Java agree, and deriving one from the other would make the check unable to
+#   detect a disagreement.
+# Refactoring Rationale: the list held FOUR names while the three account-backed views
+#   could not be created -- account.accounts, account.customers and account.card_xref
+#   did not exist, and CREATE VIEW resolves its references at creation time. The owning
+#   module's V1__account.sql now creates them, so the three views exist and are held to
+#   the same ownership, barrier, grant and revoke contract as the original four.
 _EXPECTED_VIEWS = (
     "reporting.v_report_transactions",
     "reporting.v_statement_transactions",
     "reporting.v_transaction_types",
     "reporting.v_transaction_categories",
+    "reporting.v_accounts",
+    "reporting.v_customers",
+    "reporting.v_card_xref",
 )
 
-# Assumptions: only the two views built over the ledger publish a card number;
-#   the two reference projections carry codes and descriptions alone. Naming the two
+# Assumptions: the one table this migration creates, which the reporting service role
+#   must never be able to read. It holds the secret mixed into the statement view's
+#   per-card grouping token, and the token is only non-invertible while that secret is
+#   unavailable to whoever holds the token -- a sixteen-digit card number is recovered
+#   from an UNKEYED digest by exhaustive search.
+_GROUPING_KEY_TABLE = "reporting.card_grouping_key"
+
+# Assumptions: only the two views built over the ledger publish a card number under the
+#   't' alias; the reference projections carry codes and descriptions alone, and
+#   v_card_xref publishes a masked card number under its own 'x' alias and is asserted
+#   separately by test_card_xref_view_masks_its_card_number. Naming the two
 #   that must mask, rather than asserting over all four, is what lets the masking
 #   assertion be exact instead of conditional.
 _VIEWS_PUBLISHING_A_CARD_NUMBER = (
@@ -212,6 +229,95 @@ def test_card_number_is_masked_in_the_view(views_sql: str, view: str) -> None:
     assert mask in body, f"{view} must publish a masked card number"
     assert "t.card_num," not in body, (
         f"{view} must not publish the unmasked card_num column alongside the mask"
+    )
+
+
+def test_card_xref_view_masks_its_card_number(views_sql: str) -> None:
+    """Assert the cross-reference projection masks its card number to the last four digits.
+
+    Parameters
+    ----------
+    views_sql : str
+        The whitespace-collapsed migration text.
+
+    Raises
+    ------
+    AssertionError
+        If the projection omits the mask expression, or selects the raw column. This view
+        is asserted separately from the two ledger-backed ones because it aliases its
+        source table ``x`` rather than ``t``, so the shared mask literal does not match
+        it. The property is the same and matters as much: this relation joins to both of
+        the others, so publishing an unmasked number here would defeat their masking.
+    """
+    body = _projection_of(views_sql, "reporting.v_card_xref")
+    mask = "('************' || right(rtrim(x.card_num), 4))::character(16) AS card_num"
+    assert mask in body, "v_card_xref must publish a masked card number"
+    assert "x.card_num," not in body, (
+        "v_card_xref must not publish the unmasked card_num column alongside the mask"
+    )
+
+
+def test_grouping_key_table_is_created_owned_and_withheld(views_sql: str) -> None:
+    """Assert the grouping-key table exists, is owner-held, and is revoked from the service role.
+
+    Parameters
+    ----------
+    views_sql : str
+        The whitespace-collapsed migration text.
+
+    Raises
+    ------
+    AssertionError
+        If the table is not created, not reassigned to the barrier owner, or not revoked
+        from the reporting login role. The revoke is the load-bearing statement: the
+        bootstrap sets a default privilege granting ``SELECT`` on tables in this schema
+        to that role, and PostgreSQL default privileges cannot distinguish a view from a
+        table, so without an explicit revoke the secret would be readable by the very
+        role it is withheld from and the per-card token would be invertible again.
+    """
+    assert f"CREATE TABLE IF NOT EXISTS {_GROUPING_KEY_TABLE}" in views_sql, (
+        "the grouping-key table must be created by this migration"
+    )
+    assert f"ALTER TABLE {_GROUPING_KEY_TABLE} OWNER TO carddemo_reporting_owner" in views_sql, (
+        "the grouping-key table must be owned by the barrier owner"
+    )
+    assert f"REVOKE ALL ON {_GROUPING_KEY_TABLE} FROM carddemo_reporting" in views_sql, (
+        "the grouping-key table must be revoked from the reporting service role"
+    )
+    assert f"GRANT SELECT ON {_GROUPING_KEY_TABLE}" not in views_sql, (
+        "the grouping-key table must never be granted to any role"
+    )
+
+
+def test_statement_fingerprint_is_keyed_and_not_a_bare_digest(views_sql: str) -> None:
+    """Assert the per-card grouping token mixes in the secret rather than hashing the card alone.
+
+    Parameters
+    ----------
+    views_sql : str
+        The whitespace-collapsed migration text.
+
+    Raises
+    ------
+    AssertionError
+        If the projection uses an unkeyed digest, or does not join the key table. A digest
+        is only as hard to invert as its input space is large, and a card number is a
+        sixteen-digit decimal string -- so an unkeyed digest beside a masked ``card_num``
+        column gives back exactly what the mask withholds. This is a regression guard on a
+        security property, not a formatting preference.
+    """
+    body = _projection_of(views_sql, "reporting.v_statement_transactions")
+    assert "md5(" not in body, (
+        "the statement projection must not use an unkeyed md5 digest of the card number"
+    )
+    assert "k.key_value || rtrim(t.card_num)" in body, (
+        "the fingerprint must concatenate the secret with the trimmed card number"
+    )
+    assert "sha256(convert_to(" in body, (
+        "the fingerprint must be a SHA-256 over an explicitly encoded byte string"
+    )
+    assert f"CROSS JOIN {_GROUPING_KEY_TABLE}" in body, (
+        "the statement projection must join the single-row key table"
     )
 
 

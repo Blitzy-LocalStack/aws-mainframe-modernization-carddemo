@@ -242,7 +242,7 @@ is that the two authorization segments are the only **persisted** packed layouts
 and `CVEXPORT` is the only packed **file** layout. `authorization` is therefore the
 one target schema whose columns are derived from packed source bytes.
 
-> **Assumptions: the sign convention is a compiler setting in the baseline, and
+> Assumptions: **the sign convention is a compiler setting in the baseline, and
 > must be an explicit codec in the target.**
 > [`tests/README.md`](../../tests/README.md) §5.2 (L273–L275) records that
 > `-fsign=EBCDIC` is **required** when compiling these programs, because *"the
@@ -260,7 +260,7 @@ Thirteen of the seed datasets are EBCDIC-encoded fixed-width files under
 [`app/data/EBCDIC`](../../app/data/EBCDIC); nine are ASCII text under
 [`app/data/ASCII`](../../app/data/ASCII).
 
-> **Assumptions: decode per fixed-width field, never per record. This is the
+> Assumptions: **decode per fixed-width field, never per record. This is the
 > single most likely implementation mistake in the whole extract-transform-load
 > path.** A record decoded as one string routes sign-overpunch bytes, packed
 > nibbles and embedded low values through a text decoder. Some of those bytes are
@@ -387,7 +387,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > the idea: what was wrong with the old shape is that four fields could disagree
 > about one instant, and no constraint prevented it.
 
-> **Refactoring Rationale: the target adds the `CHECK` constraints the baseline
+> Refactoring Rationale: **the target adds the `CHECK` constraints the baseline
 > could not enforce.** `MATCH_STATUS` (L23) and `AUTH_FRAUD` (L24) are bare
 > `CHAR(1)` columns with no domain constraint, yet both fields have fully specified
 > domains in COBOL: `PA-MATCH-STATUS` carries the `88`-level values `'P'`, `'D'`,
@@ -416,7 +416,7 @@ The derivations the baseline chose, each with the target rule it corroborates:
 > constrain identifier width at the request boundary rather than relying on the
 > store to reject an over-wide value.
 
-> **Assumptions: two date-string conventions coexist in the baseline, and both
+> Assumptions: **two date-string conventions coexist in the baseline, and both
 > reach `DATE`.** `FRAUD_RPT_DATE` at L25 is a `DATE` derived from
 > `PA-FRAUD-RPT-DATE PIC X(08)`, an eight-character form. Every character date in
 > the base masters is ten characters — `ACCT-OPEN-DATE`, `ACCT-EXPIRAION-DATE`,
@@ -494,7 +494,7 @@ CREATE UNIQUE INDEX CARDDEMO.XAUTHFRD
 
 Two properties of those four lines carry into the target.
 
-> **Assumptions: the descending order is deliberate access-path intent, not
+> Assumptions: **the descending order is deliberate access-path intent, not
 > decoration.** This is a `UNIQUE` index over the **same two columns as the primary
 > key** already declared at `AUTHFRDS.ddl` L28. A unique index that duplicates the
 > primary key adds no new uniqueness, so the only thing it can be adding is the
@@ -589,7 +589,7 @@ sequential files used to load and unload the segments, not additional databases
 with structure of their own. `DLIGSAMP.PSB` L21–L22 declares them as two
 `PCB TYPE=GSAM,PROCOPT=LS` entries.
 
-> **Assumptions: the segment byte counts independently validate the copybook
+> Assumptions: **the segment byte counts independently validate the copybook
 > layouts, and both totals were recomputed here from the pictures.** The two
 > `BYTES=` values are declared in the database description; the two copybooks
 > declare field widths. They are independent statements about the same records, and
@@ -616,7 +616,7 @@ L20. **`KEYLEN=14` is exactly `6 + 8`** — the root's 6-byte packed key
 concatenated with the child's 8-byte key — which is how a hierarchical store
 addresses a child: by the full path from the root, not by a key of its own.
 
-> **Assumptions: `PAUTBPCB` is a program-communication-block mask for
+> Assumptions: **`PAUTBPCB` is a program-communication-block mask for
 > `DBPAUTP0`, not a third database.** The three masks in the extension's copybook
 > set (`PADFLPCB.CPY`, `PASFLPCB.CPY`, `PAUTBPCB.CPY`) are DL/I *linkage*
 > structures — the areas through which a program receives segment-level status —
@@ -664,7 +664,7 @@ full address is the 14-byte concatenation. In Db2 the same data is keyed
 **`(CARD_NUM, AUTH_TS)`**, and the account and customer identifiers are demoted to
 ordinary nullable columns (`AUTHFRDS.ddl` L26–L27 — neither is `NOT NULL`).
 
-> **Refactoring Rationale: the target adopts the baseline's relational key, not
+> Refactoring Rationale: **the target adopts the baseline's relational key, not
 > its hierarchical one.** What was wrong with the hierarchical shape, for the
 > queries this data actually serves, is that a detail row has no identity of its own:
 > it is identified by a path, so every access begins at an account even when the
@@ -677,7 +677,7 @@ ordinary nullable columns (`AUTHFRDS.ddl` L26–L27 — neither is `NOT NULL`).
 > which is how both access paths stay indexed instead of one of them becoming a
 > scan.
 
-> **Assumptions: two-phase commit disappears, and it disappears because of a
+> Assumptions: **two-phase commit disappears, and it disappears because of a
 > storage decision made here.** In the baseline the pending-authorization segments
 > are in IMS and the fraud rows are in Db2, so marking an authorization fraudulent
 > spans two products and requires a coordinated commit. The target places all three
@@ -751,7 +751,7 @@ key at zero-based offset 304, which is precisely the full width and position of
 comma-separated, which is worth noting because a reader transcribing the clause
 into a comma-separated form will not find it by searching.
 
-> **Assumptions: two honest discrepancies in that control card, disclosed rather
+> Assumptions: **two honest discrepancies in that control card, disclosed rather
 > than smoothed over.** First, L41 annotates the card number as `ZD` (zoned
 > decimal) although `CVTRA05Y.cpy` L15 declares it `PIC X(16)`. The *offsets and
 > widths* agree exactly, which is the corroboration being claimed; only the sort-side
@@ -795,7 +795,7 @@ sorts on all three key components in order, corroborating that
 than a single surrogate. The job consumes `TCATBALF.BKUP(+1)` (L39) and its
 `REPROC` procedure's internal step is named `PRC001` (L32, L35).
 
-> **Assumptions: `TRAN-CAT-BAL,18,11,ZD` is independent proof that base-master
+> Assumptions: **`TRAN-CAT-BAL,18,11,ZD` is independent proof that base-master
 > money is zoned.** The control card declares the balance field as `ZD`, zoned
 > decimal. This is a second source, written for a different purpose by a different
 > mechanism, agreeing with the copybook's `PIC S9(09)V99` display form — which is
@@ -885,18 +885,30 @@ The target ownership model is schema-per-service, and the names below are taken
 verbatim from [`service-catalog.md`](service-catalog.md), which is the naming
 authority. There are **eight schemas for eight contexts**: six contexts own a schema
 and the tables designed for it, one owns a schema plus narrowly-scoped write grants
-outside it, and one owns a schema that holds no table at all.
+outside it, and one owns a schema whose only table is unreadable by the service that
+uses the schema — `reporting.card_grouping_key`, which holds the secret behind the
+statement grouping token and is granted to the schema owner alone.
+
+> **Refactoring Rationale: the status column below formerly reported three of these
+> seven migrations as unauthored** — `account`, `card` and `authorization` — and
+> described the reporting schema as holding four views whose "account/card source
+> migrations remain absent". The `account` row was accurate until
+> `V1__account.sql` landed; the `card` and `authorization` rows had fallen out of
+> date while their migrations existed, which is the failure mode a status column
+> invites and the reason this note names it. All seven per-service migrations are
+> authored, and the reporting schema now holds seven views. Each entry below names
+> the file that substantiates it, so the claim can be checked rather than trusted.
 
 | Schema | Owning context | Target tables or views | Authored migration status |
 |---|---|---|---|
 | `auth` | `auth-service` | `users` | `V1__auth.sql` authored |
-| `account` | `account-service` | `accounts`, `customers`, `card_xref` | no service migration authored |
-| `card` | `card-service` | `cards` | no service migration authored |
+| `account` | `account-service` | `accounts`, `customers`, `card_xref` | `V1__account.sql` authored |
+| `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
 | `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` | `V1__reference.sql` and `V2__seed_reference.sql` authored |
 | `batch` | `batch-service` | `batch_run`, plus the batch framework's own job-repository tables | `V1__batch.sql` authored |
-| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | no service migration authored |
-| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table** — four read-only cross-schema views | `data-migration/sql/V1__reporting_views.sql` authored; its account/card source migrations remain absent |
+| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored |
+| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — seven read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
 
 When the bootstrap SQL is applied, `batch-service` receives narrowly-scoped
 cross-schema **write** grants on `ledger.*` and `account.*` only. That is the one
@@ -968,7 +980,7 @@ The identifier is `CHAR(8)` rather than `VARCHAR(8)` because it is a key of decl
 fixed width and rule 2 applies; the two name fields are descriptive, so rule 3 gives
 `VARCHAR`.
 
-> **Refactoring Rationale: the plaintext password field is deliberately not
+> Refactoring Rationale: **the plaintext password field is deliberately not
 > carried forward.** `SEC-USR-PWD PIC X(08)` at
 > [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) L21 stores an
 > eight-character password in plain text, and sign-on compares it directly. The
@@ -1021,7 +1033,7 @@ the database described for the fraud table.
 whose width is meaningful: the group identifier is the lookup key into
 `reference.disclosure_groups`, and a trimmed value would not match the seeded key.
 
-> **Refactoring Rationale: the `version` column expresses concurrency control the
+> Refactoring Rationale: **the `version` column expresses concurrency control the
 > baseline already implements.** `COACTUPC` snapshots the entire pre-edit record
 > into a before-image area and compares it before rewriting, holding each numeric as
 > a display field with a numeric `REDEFINES` alongside. That is optimistic
@@ -1060,7 +1072,7 @@ whose width is meaningful: the group identifier is the lookup key into
 | `FILLER` (L23) | `X(168)` | 168 | 332 | dropped | — | — |
 | — | — | — | — | `version` | `BIGINT NOT NULL` | `long` |
 
-> **Trade-offs: the two national-identifier fields become encrypted `BYTEA`, not
+> Trade-offs: **the two national-identifier fields become encrypted `BYTEA`, not
 > the type their pictures suggest.** `CUST-SSN PIC 9(09)` is all digits and
 > `CUST-GOVT-ISSUED-ID PIC X(20)` is characters, so rules 1 and 3 would give
 > `BIGINT` and `VARCHAR(20)`. Both are overridden because these are the two most
@@ -1085,49 +1097,73 @@ whose width is meaningful: the group identifier is the lookup key into
 see [Alternate indexes become real secondary
 indexes](#alternate-indexes-become-real-secondary-indexes).
 
-#### Sequencing dependency: this schema's tables are mapped before they are created
+#### Sequencing: this schema's tables are created by the owning module's migration
 
-The three tables above are **described by this document and by two already-authored
-consuming entities, and are not yet created by any migration.** The migration that
-creates them is
+The three tables above are created by
 `services/account-service/src/main/resources/db/migration/V1__account.sql`, an
-account-service deliverable; that module currently holds no `db/migration`
-directory. The dependency is recorded here, rather than left to be met at run time,
-because three distinct artifacts already depend on it:
+account-service deliverable and the authoritative column list for this schema.
+Every column name, type, nullability, key and index recorded above was verified
+against that migration applied to a live PostgreSQL 17 database.
 
-| Depends on the table | What is deferred until the migration lands |
-|---|---|
-| `batch-service` `domain/Account.java` — `@Table(name = "accounts", schema = "account")` | Every column mapping on that entity, including its `version` column's `BIGINT NOT NULL` claim, is described but not verified against a created table |
-| `batch-service` `domain/CardXref.java` — `@Table(name = "card_xref", schema = "account")` | The `CHAR(16)` key column, the two identifier columns and the dropped 14-byte pad are described but not verified |
-| `data-migration/sql/V0__schemas_and_roles.sql` L778–L791 | The conditional `GRANT UPDATE ON account.accounts TO carddemo_batch` takes its `ELSE` branch and raises a notice instead of granting; the nightly posting and interest jobs cannot rewrite an account master until it is re-run |
-
-> **WHY : Assumptions.** The absence is *anticipated* rather than overlooked. `V0`
-> creates the `account` schema and its roles, and guards the per-table grant with
-> `IF to_regclass('account.accounts') IS NOT NULL … ELSE RAISE NOTICE` precisely so
-> that a first bootstrap — run before any per-service Flyway migration — succeeds
-> instead of failing. The notice names the statement to re-run and falls silent once
-> the grant is in place, so a clean re-run is what confirms the privilege graph is
-> complete.
+> **Refactoring Rationale: this subsection formerly recorded the dependency as
+> UNSATISFIED, and the change is worth stating rather than silently editing away.**
+> It reported that the three tables were "described by this document and by two
+> already-authored consuming entities, and are not yet created by any migration",
+> that account-service held no `db/migration` directory, and that three artifacts
+> were therefore blocked: `batch-service`'s `Account` and `CardXref` mappings could
+> not be verified against a created table, and the conditional
+> `GRANT UPDATE ON account.accounts TO carddemo_batch` in
+> `data-migration/sql/V0__schemas_and_roles.sql` took its `ELSE` branch and raised a
+> notice instead of granting. All of that was accurate when written and none of it
+> is true now.
 >
-> **WHY : Alternatives Considered.** Authoring the migration from one of the
-> consuming modules, so that the mappings above become verifiable at once. Rejected
-> on ownership rather than on effort: `account-service`'s own entities are the
-> authority for every column name, type and constraint in its schema, and they are
-> not yet authored either — so a migration written from a consumer would fix the
-> columns by inference from a *reader's* view of them, and the owning module would
-> afterwards have to be written to match a file it did not author. That inverts the
-> direction of authority this document set maintains everywhere else (copybook →
-> migration → entity → contract) and would leave two files claiming to define one
-> table.
+> **Assumptions: the resolution followed the direction of authority this subsection
+> insisted on rather than overriding it.** The earlier note rejected authoring the
+> migration from one of the *consuming* modules, on the ground that a migration
+> written from a reader's view of a schema inverts the direction the document set
+> maintains everywhere else — copybook → migration → entity → contract — and would
+> leave two files claiming to define one table. The migration was therefore authored
+> in `account-service`, the owning module, which is exactly what that objection
+> prescribed.
 >
-> **WHY : Trade-offs.** What deferring costs is that a batch account path cannot be
-> exercised end to end against a database migrated with `V0` alone: an attempt fails
-> with `relation "account.accounts" does not exist`. That is the correct failure and
-> it is loud, which is why deferring is acceptable where guessing the columns would
-> not be. **On landing `V1__account.sql`, re-verify every column mapping in this
-> section and on both consuming entities against it, then re-run
-> `V0__schemas_and_roles.sql` so the conditional grant takes its `IF` branch.**
+> **Assumptions: the bootstrap re-run is part of the sequence and has been
+> performed.** The order is `V0__schemas_and_roles.sql` → each service's Flyway
+> migration → `data-migration/sql/V1__reporting_views.sql` → `V0` once more. `V0` is
+> idempotent by construction, so the second pass is the documented sequence rather
+> than a workaround; on that pass the `to_regclass` guard finds the table, the
+> conditional grant takes its `IF` branch and the notice falls silent.
+> `carddemo_batch` then holds `SELECT` and `UPDATE` on `account.accounts` and
+> `SELECT` alone on `account.customers` — the narrow privilege the nightly posting
+> and interest jobs need, and no more.
+>
+> **Assumptions: the three account-backed reporting views exist for the same
+> reason.** `reporting.v_accounts`, `reporting.v_customers` and
+> `reporting.v_card_xref` are created by `V1__reporting_views.sql`, which could not
+> create them while the base tables were absent because `CREATE VIEW` resolves its
+> references at creation time. They complete the reporting context's declared set of
+> seven projections. Each is a deliberate subset: `v_customers` omits
+> `ssn_encrypted`, `govt_issued_id_encrypted` and `fico_credit_score` entirely
+> rather than masking them, and `v_card_xref` masks `card_num` to its last four
+> digits as every card-bearing relation in that schema does.
 
+##### Three column decisions that the copybooks alone do not settle
+
+Recorded here because each was decided from the baseline's *behaviour* rather than
+from a `PICTURE` clause, and a reader checking the migration against the table above
+will want the reasoning rather than the conclusion.
+
+| Column | Decision | What settled it |
+|---|---|---|
+| `accounts.group_id` | `NOT NULL`, and **no** foreign key to `reference.disclosure_groups` | All 50 records of `app/data/ASCII/acctdata.txt` carry ten **blanks** here. A foreign key would refuse every seed row — and the blank is not an accident of the sample: `app/cbl/CBACT04C.cbl` reads the disclosure group by this key and falls back to the group named `DEFAULT` when the read returns VSAM status 23, so the blank is the ordinary case and the fallback is the path that actually runs |
+| `customers.fico_credit_score` | `NOT NULL`, and **no** `CHECK (300..850)` | `app/cbl/COACTUPC.cbl` declares `88 FICO-RANGE-IS-VALID VALUES 300 THROUGH 850` (L848–L849) and rejects anything outside it (L2523) — but **21 of the 50** seed records carry a score below 300, the lowest being `001`. A schema-level check would refuse 42% of the extract. VSAM enforces no domain, so a record loaded by `IDCAMS REPRO` was never checked; the rule is carried across at the update boundary, where the baseline enforces it |
+| `customers.addr_line_3` | `NOT NULL`, unlike `addr_line_2` | The baseline labels it **`City`** and edits it with the *required* routine `1225-EDIT-ALPHA-REQD` (`app/cbl/COACTUPC.cbl` L1615, L1618), whereas `addr_line_2`'s edit is **commented out** at L1614. Nullability follows the program's treatment, not the positional name; the column keeps the copybook's name because the copybook is normative for names |
+
+`middle_name` is nullable on the same kind of evidence — it is edited with
+`1235-EDIT-ALPHA-OPT` (L1571), the *optional* routine, while the first and last
+names use the required one (L1563, L1579) — and both phone columns are nullable
+because `1260-EDIT-US-PHONE-NUM` comments "Not mandatory to enter a phone number"
+and returns valid on an all-blank field. All 50 seed records populate every one of
+those columns, so the extract alone could not have settled any of them.
 
 ### `card` — `card-service`
 
@@ -1145,7 +1181,7 @@ bytes · dataset `CARDDATA` → table **`card.cards`**
 | `FILLER` (L11) | `X(59)` | 59 | 91 | dropped | — | — |
 | — | — | — | — | `version` | `BIGINT NOT NULL` | `long` |
 
-> **Trade-offs: the card verification value is stored as encrypted `BYTEA` and
+> Trade-offs: **the card verification value is stored as encrypted `BYTEA` and
 > returned by no endpoint.** `CARD-CVV-CD PIC 9(03)` is a three-digit number, so
 > rule 7 would give `SMALLINT`. It is overridden for the same reason as the national
 > identifiers, and more strictly: the value is **write-only** from the application's
@@ -1203,7 +1239,7 @@ prefix in place of `TRAN-`. Every offset in the table above therefore applies
 unchanged: `DALYTRAN-CARD-NUM` at 262, `DALYTRAN-PROC-TS` at 304, `FILLER X(20)` at
 330.
 
-> **Alternatives Considered: two tables with one shape, rather than one table with
+> Alternatives Considered: **two tables with one shape, rather than one table with
 > a discriminator column.** Because the two layouts are byte-identical, a single
 > table with a `stage` column distinguishing daily from posted rows was the obvious
 > alternative, and it was rejected for a specific reason: the posting job reads the
@@ -1261,7 +1297,7 @@ including `VARCHAR(50)` for the description.
 | `TRAN-CAT-TYPE-DESC` (L8) | `X(50)` | 50 | 6 | `description` | `VARCHAR(50)` | `String` |
 | `FILLER` (L9) | `X(04)` | 4 | 56 | dropped | — | — |
 
-> **Refactoring Rationale: the restrict-on-delete rule is preserved as a
+> Refactoring Rationale: **the restrict-on-delete rule is preserved as a
 > constraint and surfaced as a status code.** `transaction_categories` carries
 > `FOREIGN KEY (type_cd) REFERENCES transaction_types (type_cd) ON DELETE RESTRICT`,
 > transcribing `TRNTYCAT.ddl` L6–L7 — which is where that clause actually lives, as
@@ -1284,7 +1320,7 @@ including `VARCHAR(50)` for the description.
 | `DIS-INT-RATE` (L9) | `S9(04)V99` | 6 | 16 | `interest_rate` | `NUMERIC(6,2)` | `BigDecimal` |
 | `FILLER` (L10) | `X(28)` | 28 | 22 | dropped | — | — |
 
-> **Trade-offs: the key columns keep the record's own `DIS-TRAN-` prefix here, while
+> Trade-offs: **the key columns keep the record's own `DIS-TRAN-` prefix here, while
 > `transaction_categories` drops it.** The two tables carry the same two code values,
 > so an unqualified `type_cd`/`cat_cd` pair would read identically in both and the
 > shorter form was considered for that reason. It is not used, because the disclosure
@@ -1296,7 +1332,7 @@ including `VARCHAR(50)` for the description.
 > names in this table are the ones the migration creates, in
 > [`services/reference-service/src/main/resources/db/migration/V1__reference.sql`](../../services/reference-service/src/main/resources/db/migration/V1__reference.sql).
 
-> **Assumptions: the `'DEFAULT'` group row is mandatory seed data, and its absence
+> Assumptions: **the `'DEFAULT'` group row is mandatory seed data, and its absence
 > fails silently.** The interest calculation reads this table by
 > `(acct_group_id, tran_type_cd, tran_cat_cd)`; when the account's own group key is not
 > found it retries with the literal group `'DEFAULT'`, at
@@ -1326,7 +1362,7 @@ recording.
 | `batch_run` | `run_id`, `step_name`, `status`, `started_at`, `finished_at`, `return_code` | Net-new |
 | the batch framework's job-repository tables | as the framework defines them | Net-new |
 
-> **Assumptions: this is an addition, not a port, because the baseline has no
+> Assumptions: **this is an addition, not a port, because the baseline has no
 > checkpoint contract to port.** There is no active restart directive anywhere in
 > the JCL tree — the only one present is commented out — and no checkpoint
 > declaration at all. `batch_run` therefore gives each step a durable idempotency
@@ -1368,7 +1404,7 @@ Note the two `S9(04) COMP` counters at L27–L28: these are **binary**, two byte
 each, not packed, so the reader must not hand them to the packed codec. They are the
 only binary fields in either segment.
 
-> **Trade-offs: the five-slot array becomes five discrete columns, not a
+> Trade-offs: **the five-slot array becomes five discrete columns, not a
 > PostgreSQL array.** `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
 > [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) L22
 > becomes `account_status_1` through `account_status_5`. **A `CHAR(2)[]` array column
@@ -1430,7 +1466,7 @@ eight-character form. The two `CHECK` constraints are the addition described in
 `CHECK (match_status IN ('P','D','E','M'))` from L46–L49 and
 `CHECK (auth_fraud IN ('F','R') OR auth_fraud IS NULL)` from L51–L52.
 
-> **Assumptions: the composite primary key transcribes the hierarchical path, and
+> Assumptions: **the composite primary key transcribes the hierarchical path, and
 > the two key components stay separate integers.** IMS addresses a detail segment by
 > the concatenation of the root key and the child key, 14 bytes in total
 > (`DLIGSAMP.PSB` L18 `KEYLEN=14`). The target expresses the same identity as
@@ -1474,7 +1510,7 @@ Two target indexes, both partial and both on unpublished rows only:
 | `idx_auth_reply_outbox_pending` | `(created_at) WHERE published_at IS NULL` | The drain's claim query. Partial rather than full because a published row is never selected again, so indexing one would grow the index for the lifetime of the retention window without ever serving a read. |
 | `idx_auth_reply_outbox_group` | `(order_group_token, outbox_id) WHERE published_at IS NULL` | Per-card publication order through the purpose-scoped opaque group token. The drain sends one token's pending replies in write order without putting the primary account number in SQS metadata; this index makes that ordering an index scan rather than a sort. |
 
-> **Assumptions — publication state is a nullable timestamp rather than a status
+> Assumptions: **publication state is a nullable timestamp rather than a status
 > column.** A `CHAR(1)` status with a check constraint was the alternative, matching
 > how `match_status` and `auth_fraud` are modelled elsewhere in this schema. It was
 > rejected here for a specific reason: those columns carry a domain the baseline
@@ -1485,7 +1521,7 @@ Two target indexes, both partial and both on unpublished rows only:
 > as `published_at IS NOT NULL` rather than as an equality, which is one more
 > keyword in every query that touches it.
 
-> **Assumptions — target retention is bounded by the existing purge job, not by a new
+> Assumptions: **target retention is bounded by the existing purge job, not by a new
 > one.** A published row has no further purpose, and rows accumulate at the rate
 > authorizations are decided. Deleting them at drain time was considered and
 > rejected: keeping a short published history is what lets an operator answer
@@ -1497,7 +1533,7 @@ Two target indexes, both partial and both on unpublished rows only:
 > never purged, because purging one would lose the reply this table exists to
 > guarantee.
 
-> **Assumptions — this target table belongs in the service migration, not data-migration.** It
+> Assumptions: **this target table belongs in the service migration, not data-migration.** It
 > holds no migrated data, so the extract-transform-load path has nothing to load into
 > it; it is created by `authorization-service`'s own Flyway migration,
 > [`V1__authorization.sql`](../../services/authorization-service/src/main/resources/db/migration/V1__authorization.sql),
@@ -1511,13 +1547,21 @@ Two target indexes, both partial and both on unpublished rows only:
 > [`messaging-contracts.md`](messaging-contracts.md).
 
 
-### `reporting` — `reporting-service`, a schema with no tables
+### `reporting` — `reporting-service`, a schema it can only read
 
 `reporting-service` owns **no tables**. The authored database bootstrap nevertheless
 defines `reporting` as the eighth of the eight schemas in
 [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 and [`V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
-authors the four read-only cross-schema views. Applying those scripts makes the
+authors the seven read-only cross-schema views, plus one table the service role
+cannot select from: `reporting.card_grouping_key`. That table holds the secret mixed
+into `v_statement_transactions.card_fingerprint`, the per-card grouping token that
+lets a statement break by card while the card number itself stays masked. It is
+granted to `carddemo_reporting_owner` alone, and both `V1__reporting_views.sql` and
+`V0__schemas_and_roles.sql` revoke it from `carddemo_reporting` — the first because
+the schema's default privilege would otherwise convey it at creation, the second
+because the bootstrap's blanket `GRANT SELECT ON ALL TABLES` would convey it again on
+the re-run the sequence prescribes. Applying those scripts makes the
 context read `ledger`, `account`, `card` and `reference` through a login holding
 `SELECT` on the views alone. The artifacts have been executed successfully against a
 disposable PostgreSQL validation database; no provisioned application environment is
@@ -1532,7 +1576,7 @@ deliberate:
 | Contents | tables, indexes and constraints | views only, no table of any kind |
 | Target creation authority | the owning service's own Flyway migration | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations |
 
-> **Assumptions — the owner is deliberately not the reporting login, and that is
+> Assumptions: **the owner is deliberately not the reporting login, and that is
 > the security property.** A schema's owner holds `CREATE` in it unconditionally.
 > Owning `reporting` with `carddemo_reporting` would therefore let the one role a
 > reporting process authenticates as create, replace or drop the very views that are
@@ -1544,7 +1588,7 @@ deliberate:
 > it, so nothing that looks the schema up by name is affected — only the owner
 > differs.
 
-> **Assumptions — a view executes with its owner's privileges, which is why the
+> Assumptions: **a view executes with its owner's privileges, which is why the
 > grant model has two halves.** `carddemo_reporting_owner` holds `USAGE` and `SELECT` on
 > `ledger`, `account`, `card` and `reference` because it owns the views and they
 > resolve their reads as it when the scripts are applied; `carddemo_reporting` then
@@ -1559,7 +1603,7 @@ deliberate:
 > as not issuing them, which is what makes it idempotent in the direction a
 > `GRANT`-only script cannot be.
 
-> **Assumptions — the views are a data-migration artifact rather than a service
+> Assumptions: **the views are a data-migration artifact rather than a service
 > migration, for an ordering reason and not a stylistic one.** A view cannot be
 > created over a table that does not exist, and V0 runs before any table exists
 > anywhere, so the views cannot be created with the schema. They also span four
@@ -1612,7 +1656,7 @@ and every operand of that definition carries into the target index:
 | L39, L42–L44 | `STEP25` `DEFINE PATH NAME(...AIX.PATH) PATHENTRY(...AIX)` | The path object that lets a program open the index as a file. A relational secondary index needs no separate object, so this step has no target equivalent |
 | L49, L52–L54 | `STEP30` `BLDINDEX INDATASET(...KSDS) OUTDATASET(...AIX)` | The bulk index build. Retired for the same reason as `UPGRADE` |
 
-> **Refactoring Rationale: three of these clauses are retired rather than mapped,
+> Refactoring Rationale: **three of these clauses are retired rather than mapped,
 > and the reason is a property of the target store.** `UPGRADE`, `DEFINE PATH` and
 > `BLDINDEX` all exist because a VSAM alternate index is a **separate dataset** that
 > must be declared, related, opened and populated as its own object, and can drift
@@ -1624,7 +1668,7 @@ and every operand of that definition carries into the target index:
 > migration against this job will otherwise find three steps with no counterpart and
 > reasonably suspect an omission.
 
-> **Alternatives Considered: keyset pagination rather than offset pagination, for
+> Alternatives Considered: **keyset pagination rather than offset pagination, for
 > the browses these indexes serve.** The online list screens drive a sequential
 > browse over these paths rather than a keyed read, carrying a first-key, last-key
 > and next-page-exists triple between turns. Offset pagination was the alternative
@@ -1652,7 +1696,7 @@ copybooks or COBOL programs, so the misspelling never leaves the source tree.
 
 **The third is different in kind, and the difference matters.**
 
-> **Trade-offs: correcting `CATAGORY` is a breaking divergence, because it is a
+> Trade-offs: **correcting `CATAGORY` is a breaking divergence, because it is a
 > persisted column name and not only a copybook typo.** The misspelling reaches
 > **six** source-of-truth locations, not one:
 >
@@ -1702,7 +1746,7 @@ model:
 | Python (the extract-transform-load path) | `Decimal` |
 | JSON on the wire | a **string** |
 
-> **Assumptions: money is a JSON string because a JSON number is parsed into an
+> Assumptions: **money is a JSON string because a JSON number is parsed into an
 > IEEE-754 double by most clients.** That is the specific reason, and it is a
 > statement about client behaviour rather than about taste. A double has 53 bits of
 > significand, so it cannot represent every two-decimal value exactly; a balance
@@ -1714,7 +1758,7 @@ model:
 > prohibited in the money path, and the prohibition is enforced by an architecture
 > test rather than by review, so a reintroduction fails the build.
 
-> **Assumptions: this preserves the baseline's own wire contract rather than
+> Assumptions: **this preserves the baseline's own wire contract rather than
 > inventing a convention, and that is verifiable in two files.** The baseline already
 > transports money as **edited decimal text** on its message wire:
 > `PA-RQ-TRANSACTION-AMT PIC +9(10).99` at
@@ -1732,7 +1776,7 @@ model:
 
 ### Arithmetic order is preserved
 
-> **Assumptions: where the baseline computes a product before a quotient, the
+> Assumptions: **where the baseline computes a product before a quotient, the
 > target multiplies at full precision and only then divides, with an explicit scale
 > and rounding mode.** The interest calculation is the case that matters:
 > [`app/cbl/CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) L462–L465, in paragraph
@@ -1749,7 +1793,7 @@ model:
 > parity failure rather than as a rounding note. The target therefore multiplies at
 > full precision, divides once, and applies scale 2 at that single point.
 
-> **Assumptions — the mode at that single point is `HALF_UP`, the same mode as every
+> Assumptions: **the mode at that single point is `HALF_UP`, the same mode as every
 > other hop, and the baseline diverges from it in a way that is recorded rather than
 > matched.** The reference program truncates, and two observations establish that.
 > First, the receiving field is declared at
@@ -1770,14 +1814,14 @@ model:
 > intentional divergence, alongside the three baseline defects that are likewise not
 > reproduced.
 >
-> **Trade-offs — the cost is exactly one cent, and only where a quotient lands on an
+> Trade-offs: **the cost is exactly one cent, and only where a quotient lands on an
 > exact half cent.** On the vectors the reference fixtures actually carry the two modes
 > agree, which is why the divergence has to be written down rather than left for a
 > fixture to catch: a balance of `1000.00` at a rate of `15.00` yields `12.5000`
 > exactly and both modes return `12.50`; at a rate of `2.50` against the same balance
 > the quotient is `2.08333…` and both return `2.08`. They part company only at
 > `1000.80` and `2.50`, where the quotient is `2.0850` exactly — truncation returns
-> `2.08` and half-up returns `2.09`. **Alternatives Considered — implementing
+> `2.08` and half-up returns `2.09`. Alternatives Considered: **implementing
 > `RoundingMode.DOWN` here to match the baseline cent for cent** was evaluated and
 > rejected: it would leave the plan, every sibling package descriptor and the
 > documentation standard stating one mode while the shared kernel implemented another,
@@ -1888,7 +1932,7 @@ schema statement describes a target design. The provisioning and teardown comman
 belong to [`docs/runbooks/deploy.md`](../runbooks/deploy.md) and
 [`docs/runbooks/teardown.md`](../runbooks/teardown.md).
 
-**Assumptions — the measured state is given rather than the phrase, because
+Assumptions: **the measured state is given rather than the phrase, because
 "statically validated" is a claim a reader can check.** All sixteen modules,
 both environment roots, and the bootstrap root have resource bodies and outputs.
 Formatting, initialized backend-free validation, recursive TFLint,

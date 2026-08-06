@@ -1,7 +1,9 @@
 package com.carddemo.auth.dto;
 
+import com.carddemo.common.error.FieldOrdering;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import java.util.List;
 
 /**
  * Carries the two values the sign-on screen collects, for one exchange with the identity provider.
@@ -30,11 +32,33 @@ import jakarta.validation.constraints.Size;
  * a user-visible string the migration carries across unchanged under transformation rule T8. Swapping
  * the two components here would change which message such a caller receives.
  *
- * <p>Assumptions: the ordered chain itself is not implemented by this record. The constraints below are
- * the transport-level guard, which rejects a malformed body per field; the first-error ordering that
- * the reference chain produces belongs to the sign-on service logic that consumes this record. This
- * record's contribution to that ordering is only that it declares the components in the order the
- * reference presents them.
+ * <p>Refactoring Rationale: the ordered chain IS implemented by this record, and an earlier revision
+ * deferred it to "the sign-on service logic that consumes this record". That deferral could not work,
+ * and the reason is a matter of when each layer runs rather than of how either is written. Bean
+ * validation on a request body runs in the argument resolver, before the handler method is entered at
+ * all, so a body that fails it never reaches any service logic -- there is nothing downstream left to
+ * repair the ordering, because the request is already answered. Worse, the validation provider reports
+ * its violations in an order it does not define, so the aggregate message a screen displays was
+ * whichever failure happened to be reported first: a caller submitting an empty screen could be told
+ * about the credential, where the reference tells it about the identifier.
+ *
+ * <p>Assumptions: the ordering is expressed by implementing
+ * {@link com.carddemo.common.error.FieldOrdering}, whose declared order the shared advice sorts the
+ * per-field entries into before latching the FIRST entry's own message as the aggregate. Two properties
+ * of the reference are reproduced that way rather than one. The chain at
+ * {@code app/cbl/COSGN00C.cbl} lines 117 to 130 is a single {@code EVALUATE TRUE} whose first matching
+ * branch sends the screen and stops, so only one message is ever displayed and it is the earliest
+ * failing field's -- which is what latching the first entry gives. And every per-field entry is still
+ * carried in the response array, which the reference has no analogue for but transformation rule T7
+ * requires, so a form can draw its marker against every failing control while displaying the one
+ * sentence the reference would have displayed.
+ *
+ * <p>Trade-offs: the declared order is a list of property names, so a rename that missed it would
+ * silently degrade that property to encounter order rather than failing the build. The alternative --
+ * a custom class-level constraint that evaluates the two components in sequence and reports one
+ * violation -- was rejected because it would report only the earliest failure and discard the rest,
+ * losing the per-field array T7 requires, and because it would move the presence rule off the property
+ * it constrains and out of the published schema's reach.
  *
  * <h2>The credential, and what becomes of it</h2>
  *
@@ -167,8 +191,88 @@ import jakarta.validation.constraints.Size;
  *     {@code app/cpy/CSUSR01Y.cpy} line 21 having no column in the owning schema at all
  */
 public record SignOnRequest(
-        @NotBlank @Size(max = USER_ID_MAX_LENGTH) String userId,
-        @NotBlank @Size(max = PASSWORD_MAX_LENGTH) String password) {
+        @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+        @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG) String userId,
+        @NotBlank(message = MESSAGE_PASSWORD_REQUIRED)
+        @Size(max = PASSWORD_MAX_LENGTH, message = MESSAGE_PASSWORD_TOO_LONG) String password)
+        implements FieldOrdering {
+
+    /**
+     * The sentence the reference displays when the identifier is absent, carried across verbatim.
+     *
+     * <p>Refactoring Rationale: this replaces the provider's default sentence, which for a non-blank
+     * constraint reads "must not be blank". That default is not a user-visible string of this system:
+     * transformation rule T8 requires every message a user sees to be reproduced character for
+     * character from its originating program, and {@code app/cbl/COSGN00C.cbl} line 120 moves exactly
+     * {@code 'Please enter User ID ...'} into the screen's message field. Leaving the default in place
+     * would have shown a caller a framework sentence in place of the application's own.
+     *
+     * <p>Assumptions: the trailing space before the ellipsis and the three periods are part of the
+     * string and are reproduced as written. The reference literal is a fixed-width move into
+     * {@code WS-MESSAGE}, so the padding that follows it is the field's rather than the message's and is
+     * not reproduced; the characters up to and including the last period are.
+     */
+    private static final String MESSAGE_USER_ID_REQUIRED = "Please enter User ID ...";
+
+    /**
+     * The sentence the reference displays when the credential is absent, carried across verbatim.
+     *
+     * <p>Assumptions: read from {@code app/cbl/COSGN00C.cbl} line 125, the second branch of the same
+     * {@code EVALUATE TRUE} the identifier's branch opens. It is reachable only when the identifier
+     * passed, which the declared field order below reproduces.
+     */
+    private static final String MESSAGE_PASSWORD_REQUIRED = "Please enter Password ...";
+
+    /**
+     * The sentence reported when the identifier exceeds its declared width.
+     *
+     * <p>Assumptions: this sentence has NO reference counterpart, and the absence is not an oversight.
+     * The reference collects the identifier in {@code USERIDI PIC X(8)} at
+     * {@code app/cpy-bms/COSGN00.CPY} line 72, a fixed-width screen field that cannot physically hold a
+     * ninth character, so the reference program has no over-length branch and no literal to carry
+     * across under transformation rule T8. The condition exists only because a JSON body has no such
+     * physical bound, so the sentence is authored for the target rather than reproduced.
+     *
+     * <p>Alternatives Considered: leaving the provider's default, which reads "size must be between 0
+     * and 8". Rejected because it states a lower bound of zero that the non-blank constraint beside it
+     * contradicts, so a caller reading it would be told an empty value is acceptable in the same
+     * response that refuses one. Alternatives Considered: reusing the absence sentence above. Rejected
+     * because it would tell a caller that submitted nine characters that it submitted none.
+     */
+    private static final String MESSAGE_USER_ID_TOO_LONG =
+            "User ID must be at most 8 characters ...";
+
+    /**
+     * The sentence reported when the credential exceeds this transport's bound.
+     *
+     * <p>Assumptions: authored for the target on the same grounds as the identifier's, and deliberately
+     * naming no number. The bound is this transport's own choice rather than a reference width or a pool
+     * policy, and quoting it would invite a caller to read it as the policy; the pool's actual
+     * requirements are reported by the outcome the pool returns.
+     */
+    private static final String MESSAGE_PASSWORD_TOO_LONG =
+            "Password is longer than this service accepts ...";
+
+    /**
+     * The order the reference checks the two components in, exposed to the shared error advice.
+     *
+     * <p>Assumptions: the list is the reference's own evaluation order and not a presentation
+     * preference. {@code app/cbl/COSGN00C.cbl} line 118 tests the identifier and line 123 tests the
+     * credential, in one {@code EVALUATE TRUE} that stops at its first matching branch, so a caller
+     * submitting both components blank is told about the identifier alone. Returning the names in this
+     * order is what makes the shared advice latch that sentence rather than the other.
+     *
+     * <p>Assumptions: the names are the record component names, which are also the property names the
+     * published contract declares, because the validation provider reports a violation keyed by the
+     * component it was declared on. A name here that matched no component would place that component
+     * last rather than dropping it, which is why the advice sorts stably instead of filtering.
+     *
+     * @return the two property names, identifier first, never {@code null}
+     */
+    @Override
+    public List<String> fieldOrder() {
+        return List.of("userId", "password");
+    }
 
     /**
      * The number of positions the reference declares for a user identifier.

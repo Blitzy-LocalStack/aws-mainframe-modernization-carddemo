@@ -23,14 +23,16 @@ import java.util.Map;
  * byte.</p>
  *
  * <p>Parameters, return values, exceptions or errors. This is a static holder that cannot be
- * instantiated, so the type accepts no parameter, yields no value and raises nothing of its own. The
- * inapplicability is stated rather than passed over, because user-specified Rule 1 (Explainability)
- * forbids at its line 39 a docstring that omits parameters, return values or purpose, and a reader has
- * to be able to tell a declared inapplicability from an oversight. Every member below carries its own
- * parameter, return and exception at-clauses. One error can arise from this class without any member
- * being called: each descriptor constant chains {@link CopybookLayout.RecordSpec#validateGeometry()}
- * in its initialiser, so a mis-stated offset surfaces as a {@link CopybookLayout.LayoutException}
- * wrapped in an initialisation error at class load rather than as a wrong report much later.</p>
+ * instantiated, so the type itself accepts no parameter and yields no value. The inapplicability is
+ * stated rather than passed over, because user-specified Rule 1 (Explainability) forbids at its line
+ * 39 a docstring that omits parameters, return values or purpose, and a reader has to be able to tell
+ * a declared inapplicability from an oversight. Every member below carries its own parameter, return
+ * and exception at-clauses. The type does raise, and it raises without any member being called: each
+ * descriptor constant chains {@link CopybookLayout.RecordSpec#validateGeometry()} in its initialiser,
+ * so a mis-stated offset surfaces at class load as a {@link CopybookLayout.LayoutException} wrapped in
+ * an {@link ExceptionInInitializerError} rather than as a wrong report much later. That is the one
+ * failure this type contributes, and it is stated here because it belongs to the class rather than to
+ * any member's at-clauses.</p>
  *
  * <h2>Assumptions: 133 is a declared record length and never a sum of field widths</h2>
  *
@@ -142,15 +144,22 @@ import java.util.Map;
  * would break the byte comparison the parity oracle performs. No band carries a timestamp item either,
  * so there is nothing for the parity comparison to blank.</p>
  *
- * <h2>Assumptions: these bands have no retrieval key, and the descriptor requires one anyway</h2>
+ * <h2>Assumptions: these bands have no retrieval key, and every one of them says so</h2>
  *
  * <p>Line 78 of {@code app/jcl/TRANREPT.jcl} declares the report data set with a record format of
  * {@code FB} and no key operand at all, which is what a sequential print file is. Nothing reads a
- * report band by key. {@link CopybookLayout.RecordSpec} nonetheless requires a key length of at least
- * one byte, because every layout it was shaped for is a keyed data set, so each band below declares the
- * nominal minimum of {@link #NO_RETRIEVAL_KEY_LENGTH} at offset {@link #NO_RETRIEVAL_KEY_OFFSET}. Those
- * two constants are named rather than written as bare digits so that a reader meets the explanation at
- * the point of use and does not mistake the value for a real key.</p>
+ * report band by key, so every band below is declared through
+ * {@link CopybookLayout.RecordSpec#keyless(String, int, java.util.List)} and carries
+ * {@link CopybookLayout.RecordSpec#NO_RETRIEVAL_KEY} as its key length.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision declared one nominal byte at offset zero on each
+ * band, because the descriptor then required a key length of at least one. No output byte depended on
+ * that invention, which is exactly what made it worth removing: the metadata asserted a retrieval
+ * contract that does not exist, and it asserted a DIFFERENT one from the statement bands, which are
+ * keyless for the identical reason and had invented their whole eighty-character line instead. A
+ * consumer that began trusting {@code keyLength} would have extracted a one-byte key from a print
+ * line and received a plausible answer. The descriptor now expresses the absence, so the two record
+ * families state the same fact the same way.</p>
  *
  * <h2>Assumptions: the copybook writes PIC before VALUE, and its literals wrap</h2>
  *
@@ -228,19 +237,6 @@ public final class ReportBandLayouts {
     //       every band below is checked against it: 11 + 86 on the page total, 13 + 84 on the account
     //       total, 11 + 86 on the grand total, and 97 bytes of preceding items on the detail band.
     public static final int AMOUNT_COLUMN_OFFSET = 97;
-
-    // WHY : Assumptions: RecordSpec requires a key of at least one byte because every layout it was
-    //       shaped for is a keyed data set, whereas line 78 of app/jcl/TRANREPT.jcl declares this
-    //       report RECFM=FB with no key operand, so no band has a retrieval key at all. One byte at
-    //       offset zero is the smallest declaration the descriptor accepts, and it is named so a
-    //       reader meets this explanation instead of inferring intent from a bare digit.
-    private static final int NO_RETRIEVAL_KEY_LENGTH = 1;
-
-    // WHY : Assumptions: the companion offset for the nominal key above. It is a separate constant
-    //       rather than a reused zero because the descriptor takes length and offset as two arguments
-    //       in sequence, and two same-valued literals in adjacent argument positions are exactly the
-    //       pair a later edit transposes without the compiler objecting.
-    private static final int NO_RETRIEVAL_KEY_OFFSET = 0;
 
     // WHY : Assumptions: 11, 13 and 11 are the declared widths of the three total labels, at lines 51,
     //       57 and 63 of app/cpy/CVTRA07Y.cpy. They are three constants and not one because the page
@@ -514,9 +510,8 @@ public final class ReportBandLayouts {
      * step gate, so it becomes a query restriction rather than anything this class models. It is named
      * here because it is the other half of the date agreement described above.</p>
      */
-    public static final CopybookLayout.RecordSpec REPORT_NAME_HEADER = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec REPORT_NAME_HEADER = CopybookLayout.RecordSpec.keyless(
             "REPORT-NAME-HEADER", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(
                     text("REPT-SHORT-NAME", 0, 38),
                     text("REPT-LONG-NAME", 38, 41),
@@ -547,9 +542,8 @@ public final class ReportBandLayouts {
      * @see #REPORT_PAGE_TOTALS
      */
     public static final CopybookLayout.RecordSpec TRANSACTION_DETAIL_REPORT =
-            new CopybookLayout.RecordSpec(
+            CopybookLayout.RecordSpec.keyless(
                     "TRANSACTION-DETAIL-REPORT", REPORT_RECORD_LENGTH,
-                    NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
                     List.of(
                             text(FIELD_TRAN_REPORT_TRANS_ID, 0, 16),
                             text(FILLER_L17, 16, 1),
@@ -624,9 +618,8 @@ public final class ReportBandLayouts {
      * the mapper. It is recorded here because a reader comparing this band's position against a report
      * listing needs to know why there is a line between the title and the headings.</p>
      */
-    public static final CopybookLayout.RecordSpec TRANSACTION_HEADER_1 = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec TRANSACTION_HEADER_1 = CopybookLayout.RecordSpec.keyless(
             "TRANSACTION-HEADER-1", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(
                     text(FILLER_L34, 0, 17),
                     text(FILLER_L36, 17, 12),
@@ -660,9 +653,8 @@ public final class ReportBandLayouts {
      * repetition is part of the byte stream the parity comparison reads, so an emitter must reproduce
      * every occurrence rather than collapsing them into one.</p>
      */
-    public static final CopybookLayout.RecordSpec TRANSACTION_HEADER_2 = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec TRANSACTION_HEADER_2 = CopybookLayout.RecordSpec.keyless(
             "TRANSACTION-HEADER-2", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(text(FIELD_SEPARATOR_RULE, 0, REPORT_RECORD_LENGTH))).validateGeometry();
 
     /**
@@ -676,9 +668,8 @@ public final class ReportBandLayouts {
      * and 84 and the 11 and 86 that follow and can be read against each other at a glance. A shared
      * helper would let one edit move all three.</p>
      */
-    public static final CopybookLayout.RecordSpec REPORT_PAGE_TOTALS = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec REPORT_PAGE_TOTALS = CopybookLayout.RecordSpec.keyless(
             "REPORT-PAGE-TOTALS", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(
                     text(FILLER_L51, 0, PAGE_TOTAL_LABEL_WIDTH),
                     text(FILLER_L53, PAGE_TOTAL_LABEL_WIDTH, PAGE_TOTAL_LEADER_WIDTH),
@@ -705,9 +696,8 @@ public final class ReportBandLayouts {
      * between the label and the break key is recorded rather than resolved, and choosing the break key
      * belongs to the emitter and not to this class.</p>
      */
-    public static final CopybookLayout.RecordSpec REPORT_ACCOUNT_TOTALS = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec REPORT_ACCOUNT_TOTALS = CopybookLayout.RecordSpec.keyless(
             "REPORT-ACCOUNT-TOTALS", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(
                     text(FILLER_L57, 0, ACCOUNT_TOTAL_LABEL_WIDTH),
                     text(FILLER_L59, ACCOUNT_TOTAL_LABEL_WIDTH, ACCOUNT_TOTAL_LEADER_WIDTH),
@@ -725,9 +715,8 @@ public final class ReportBandLayouts {
      * pair exactly. The two agreeing is a consequence of their two labels happening to be declared the
      * same width, not of a shared rule, which is why each keeps its own constants.</p>
      */
-    public static final CopybookLayout.RecordSpec REPORT_GRAND_TOTALS = new CopybookLayout.RecordSpec(
+    public static final CopybookLayout.RecordSpec REPORT_GRAND_TOTALS = CopybookLayout.RecordSpec.keyless(
             "REPORT-GRAND-TOTALS", REPORT_RECORD_LENGTH,
-            NO_RETRIEVAL_KEY_LENGTH, NO_RETRIEVAL_KEY_OFFSET,
             List.of(
                     text(FILLER_L63, 0, GRAND_TOTAL_LABEL_WIDTH),
                     text(FILLER_L65, GRAND_TOTAL_LABEL_WIDTH, GRAND_TOTAL_LEADER_WIDTH),

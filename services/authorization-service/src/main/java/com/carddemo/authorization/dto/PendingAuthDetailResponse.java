@@ -7,6 +7,18 @@ import jakarta.validation.constraints.Size;
 /**
  * Carries the pending-authorization detail screen outward as one projection of 27 components.
  *
+ * <h2>Which edge this record serves</h2>
+ *
+ * <p>Refactoring Rationale: this record is the record of what the 3270 detail screen displayed, and it
+ * is <b>not</b> an HTTP body. {@code src/main/resources/openapi/authorization-api.yaml} is the contract of
+ * record for this context's HTTP edge, and {@code PendingAuthDetailView} is its Java realisation for this payload; the
+ * package charter in {@code package-info.java} states the split once for all twelve types here. An earlier
+ * state of this package left the question open, so a reader had two plausible candidates for one payload
+ * and no way to choose. Assumptions: this record is retained rather than deleted because it is the only
+ * place three reference compositions and this screen's own field widths are recorded, and it is what the
+ * browser screen implements. Trade-offs: two types describe one screen, and the compensation is that each
+ * now names its edge on itself.</p>
+ *
  * <h2>What this record is derived from, and why it is one record rather than two</h2>
  *
  * <p><strong>Purpose.</strong> This is the response body of the pending-authorization detail

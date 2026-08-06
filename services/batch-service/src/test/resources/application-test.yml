@@ -125,7 +125,7 @@ spring:
   datasource:
     hikari:
       # WHY : (1) Assumptions: this restates the base statement verbatim, including
-      #       the ORDER of the five schemas, because the order is the resolution
+      #       the ORDER of the four schemas, because the order is the resolution
       #       order for an unqualified name and batch is deliberately first - the
       #       Spring Batch job repository tables and batch_run are the only objects
       #       this module creates, so an unqualified reference must find them before
@@ -134,7 +134,7 @@ spring:
       #       cannot append a currentSchema parameter to it. The statement is
       #       repeated as a session pin, and PostgreSQL resolves search-path names
       #       lazily, so it succeeds before Flyway creates `batch`.
-      connection-init-sql: "SET search_path TO batch, ledger, account, card, reference"
+      connection-init-sql: "SET search_path TO batch, ledger, account, reference"
 
       data-source-properties:
         # WHY : (1) Assumptions: the base profile requires verify-full and a CA

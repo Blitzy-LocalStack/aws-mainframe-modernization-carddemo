@@ -307,6 +307,23 @@ public record ApiError(
     public static final int INTERNAL_SERVER_ERROR_STATUS = 500;
 
     /**
+     * The HTTP status a contention refusal carries, 409.
+     *
+     * <p>Assumptions: declared here for the same reason {@link #INTERNAL_SERVER_ERROR_STATUS} is --
+     * {@code services/common-lib/pom.xml} marks the web dependency optional, so this record cannot read
+     * the framework's status enumeration and the number has to be stated. It is a constant rather than a
+     * literal inside {@link #ofConflict} so that a reader can see that the code and the status of a
+     * contention refusal are both fixed, and a test can assert the pair.</p>
+     *
+     * <p>Assumptions: 409 rather than 412. Both are defensible for a lost version comparison, and 409 is
+     * chosen because it covers all three contention conditions this migration distinguishes, whereas 412
+     * would describe only the one that arrives with a precondition header -- and this migration carries
+     * the version in the body, following the baseline's own before-image comparison rather than an HTTP
+     * conditional-request idiom the baseline has no counterpart for.</p>
+     */
+    public static final int CONFLICT_STATUS = 409;
+
+    /**
      * The CardDemo thank-you source literal from {@code CSMSG01Y}.
      *
      * <p>Assumptions: AE-12 preserves the 49-character literal at line 19 of
@@ -753,14 +770,30 @@ public record ApiError(
      * shape carrying an empty or all-blank message silently refused its first real message -- the exact
      * inverse of the first-message-wins behaviour it exists to reproduce.
      *
-     * <p>Assumptions: the {@code LOW-VALUES} off-state at line 30 of {@code app/cpy/CVCRD01Y.cpy}
-     * belongs to a DIFFERENT field, {@code CCARD-RETURN-MSG}, and citing it here was the error behind
-     * the previous reading. Over HTTP neither byte reaches this type at all: an aggregate the caller
-     * never set arrives as {@code null}, one a mapper defaulted arrives empty, and one padded out to
-     * its declared width arrives blank. {@link FieldValidationFlag#isNeverSupplied(String)} already
-     * folds all of those into one predicate for the field entries, so it is reused here rather than
-     * restated, which keeps one definition of never-supplied across the two halves of the same
-     * response.
+     * <p>Refactoring Rationale: the predicate is message-specific and is no longer
+     * {@link FieldValidationFlag#isNeverSupplied(String)}. That predicate folds THREE states into
+     * message-off -- null, empty, all-space and all-{@code LOW-VALUES} -- because a screen INPUT field
+     * genuinely arrives as either pad byte. This field is not a screen input. Its off-state is declared
+     * exactly once, as {@code 88 WS-RETURN-MSG-OFF VALUE SPACES} at line 174 of
+     * {@code app/cbl/COCRDUPC.cbl} and line 250 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}, and SPACES is the whole of it; the
+     * {@code LOW-VALUES} off-state at line 30 of {@code app/cpy/CVCRD01Y.cpy} belongs to a different
+     * field, {@code CCARD-RETURN-MSG}. Reusing the wider predicate therefore admitted a fourth state
+     * the cited baseline does not treat as off, and treating an all-{@code LOW-VALUES} aggregate as
+     * absent means silently OVERWRITING it -- the one thing first-message-wins exists to prevent.
+     *
+     * <p>Assumptions: narrowing the predicate changes nothing on any reachable path, which is what
+     * makes it safe rather than merely more faithful. Over HTTP an aggregate the caller never set
+     * arrives as {@code null}, one a mapper defaulted arrives empty, and one padded out to its declared
+     * width arrives blank -- and all three remain message-off here. The removed arm is the run of NUL
+     * characters, which no JSON body and no mapper in this migration produces, so it can only arise from
+     * a corrupted value; refusing to overwrite one is strictly better than replacing it and reporting
+     * nothing.
+     *
+     * <p>Trade-offs: one predicate becomes two, and the duplication is deliberate. The field entries
+     * keep {@link FieldValidationFlag#isNeverSupplied(String)} because they ARE screen inputs and both
+     * pad bytes reach them; the aggregate gets its own. A single shared predicate would have to be the
+     * wider of the two to serve the inputs, so sharing it is what caused this defect.
      *
      * @param candidate the aggregate message to latch; may be empty but must not be {@code null}
      * @return this instance when a message is already present, otherwise a new instance carrying
@@ -769,7 +802,7 @@ public record ApiError(
      */
     public ApiError latchMessage(String candidate) {
         Objects.requireNonNull(candidate, "candidate must not be null");
-        if (!FieldValidationFlag.isNeverSupplied(this.message)) {
+        if (!isMessageOff(this.message)) {
             return this;
         }
 
@@ -785,6 +818,38 @@ public record ApiError(
                 this.timestamp,
                 this.fieldErrors,
                 this.abend);
+    }
+
+    /**
+     * Reports whether an aggregate message is in the state the baseline declares as message-off.
+     *
+     * <p>Assumptions: the state is null, empty, or every character a space, and nothing else. Those are
+     * the three shapes an unset aggregate arrives in over HTTP -- absent, defaulted, or padded to a
+     * declared width -- and SPACES is the only off-state the field's own condition name declares, at
+     * line 174 of {@code app/cbl/COCRDUPC.cbl}. A run of NUL characters is deliberately NOT off-state
+     * here; the reasoning is on {@link #latchMessage(String)}.
+     *
+     * <p>Trade-offs: the space test is written out rather than delegated to the platform's blank test.
+     * {@code String.isBlank} answers true for every Unicode whitespace character -- a tab, a form feed,
+     * a no-break space -- and a value made of those is not a message the baseline would have written,
+     * so admitting it as off-state would let a non-space value be overwritten. Testing for the one
+     * character the condition name declares keeps the predicate exactly as wide as its source.
+     *
+     * @param message the aggregate message to classify, which may be {@code null}
+     * @return {@code true} when the message is {@code null}, empty, or made only of space characters
+     */
+    private static boolean isMessageOff(String message) {
+        if (message == null || message.isEmpty()) {
+            return true;
+        }
+
+        for (int index = 0; index < message.length(); index++) {
+            if (message.charAt(index) != ' ') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -951,6 +1016,63 @@ public record ApiError(
                 correlationId,
                 path,
                 TimestampFormatter.format(timestamp),
+                fieldErrors,
+                null);
+    }
+
+    /**
+     * Builds a contention problem shape whose subsystem is stated rather than assumed.
+     *
+     * <p>Refactoring Rationale: every conflict this stack emitted went through {@link #of} and therefore
+     * carried {@link Subsystem#APPLICATION}, while the published contracts declare a contention refusal
+     * as arising in the relational store and their examples show {@code RELATIONAL}. The body and the
+     * document describing it disagreed on a component a client can read, and no amount of care at the
+     * call site could fix it, because the factory hardcoded the value. This factory takes the subsystem
+     * as an argument so a caller that knows where the contention arose says so.
+     *
+     * <p>Assumptions: the code and the status are NOT arguments. Both are fixed properties of a
+     * contention refusal -- {@link #CODE_CONFLICT} and 409 -- so accepting them would let one caller
+     * emit a conflict under a different code and defeat the reason the code is a constant. The subsystem
+     * is an argument precisely because it genuinely varies: a version comparison this service performed
+     * is application-level, whereas one the persistence provider performed at commit, and an integrity
+     * constraint the database enforced, are relational.
+     *
+     * <p>Trade-offs: the field array is accepted even though a conflict is not a validation failure, and
+     * the reason is that it is the only satisfiable place in this shape to report the version a caller
+     * lost to. Adding a dedicated component for it was the alternative and was rejected: the published
+     * contracts seal this shape against unknown properties, so a component added for one refusal would
+     * have to be admitted -- and then documented as absent -- on every other. One entry keyed by the
+     * version field says the same thing inside the shape every client already parses.
+     *
+     * @param message the user-visible contention sentence, carried verbatim from its baseline source
+     * @param subsystem the part of the platform the contention arose in; must not be {@code null}
+     * @param correlationId the inherited correlation identity, or {@code null} when absent
+     * @param path the failed request path, or {@code null} when absent
+     * @param fieldErrors the field entries reporting the contended values, empty when there are none;
+     *     must not be {@code null}
+     * @param clock the explicit clock from which the timestamp is read; must not be {@code null}
+     * @return a 409 problem shape carrying {@link #CODE_CONFLICT} and the supplied subsystem, never
+     *     {@code null}
+     * @throws NullPointerException if {@code subsystem}, {@code fieldErrors}, one of its entries or
+     *     {@code clock} is {@code null}
+     * @throws IllegalArgumentException if the clock yields a year outside the formatter's supported
+     *     four-digit range
+     */
+    public static ApiError ofConflict(String message, Subsystem subsystem, String correlationId,
+            String path, List<FieldError> fieldErrors, Clock clock) {
+        Objects.requireNonNull(subsystem, "subsystem must not be null");
+        Objects.requireNonNull(fieldErrors, "fieldErrors must not be null");
+        Objects.requireNonNull(clock, "clock must not be null");
+        return new ApiError(
+                CODE_CONFLICT,
+                "",
+                message,
+                Severity.WARNING,
+                subsystem,
+                CONFLICT_STATUS,
+                correlationId,
+                path,
+                TimestampFormatter.formatNow(clock),
                 fieldErrors,
                 null);
     }

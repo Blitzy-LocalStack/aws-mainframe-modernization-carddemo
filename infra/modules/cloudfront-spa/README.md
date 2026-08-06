@@ -248,7 +248,6 @@ Renaming or removing any output is a breaking change for the consumers below.
 |---|---|
 | `distribution_arn` | The environment root passes the exact distribution identity into the KMS key policy rather than granting an account-wide distribution wildcard. |
 | `distribution_domain_name` | Environment outputs and DNS wiring use the CloudFront-assigned host as the distribution target; the custom alias remains the viewer-facing name. |
-| `distribution_hosted_zone_id` | Route 53 alias records use CloudFront's hosted-zone identifier without repeating a global service constant. |
 | `distribution_id` | [The deployment workflow](../../../.github/workflows/deploy.yml) invalidates the entry document after publishing a build. |
 | `log_bucket_arn` | The environment root includes the log destination in its exact S3 policy context. The executable encryption setting in `main.tf` is SSE-S3. |
 | `log_delivery_source_arn` | The KMS key policy scopes CloudWatch Logs delivery permissions to this exact CloudFront source. |
@@ -267,6 +266,32 @@ The SPA receives its API endpoint through the environment variables documented
 in [`ui/.env.example`](../../../ui/.env.example). Neither this README nor the
 deployment workflow embeds an API endpoint, bucket name, distribution
 identifier, account identifier, or certificate ARN.
+
+### Where the published interface exceeds the enumerated one, and why
+
+The interface this module declares is wider than the twelve inputs and five
+outputs the module's own charter enumerates. Each addition is stated here rather
+than left for a reader to discover from the generated table, because an
+unexplained extra input or output is exactly the pattern Rule 1 forbids.
+
+| Addition | Consumer that requires it | Why it cannot be dropped |
+|---|---|---|
+| input `s3_kms_key_policy_id` | `s3_kms_key_policy_id = module.kms.s3_key_policy_id` in both roots | CloudFront standard logging v2 and an OAC read of an SSE-KMS object both need the S3 key policy's CloudFront grants **already applied**. Terraform cannot infer that ordering from the ARN alone, because an ARN is known before the policy is written. The input is consumed purely as an ordering token. |
+| input `api_connect_src_origins` | `api_connect_src_origins = var.cloudfront_api_connect_src_origins` in both roots | The response-headers policy's content-security-policy `connect-src` directive must name the API Gateway origin the SPA fetches from, or every authenticated call is blocked by the browser. The value is environment-specific and is supplied as a `TF_VAR_` environment variable rather than committed. |
+| output `distribution_arn` | the KMS module's CloudFront `kms:Decrypt` grant, and an IAM policy statement, in both roots | The grant is scoped to *this* distribution's ARN. Without the output a root would have to hard-code an ARN, which is the thing the module exists to prevent. |
+| output `log_bucket_arn` | the KMS module's exact allowed S3 encryption contexts, in both roots | The log destination is created in-module by necessity (see the three-bucket callout above), so its ARN is the only way a sibling can scope a grant to it. |
+| output `log_delivery_source_arn` | `cloudwatch_log_delivery_source_arns` on the KMS module, in both roots | Log-delivery data-key generation is scoped to the exact delivery source. |
+
+Trade-offs: the accepted cost is five interface members beyond the enumerated
+set. Removing any one of them breaks a root that consumes it, and each exists to
+keep a KMS grant or a browser policy scoped to an exact resource rather than
+widened to a wildcard — so the narrower interface would be bought with a broader
+permission, which is the wrong trade. Refactoring Rationale: one further output,
+`distribution_hosted_zone_id`, was put to the same test and failed it, so it was
+withdrawn: no root reads it, neither root creates a Route 53 record, and
+`distribution_domain_name` already serves any DNS consumer. The rule applied here
+is therefore *consumed or withdrawn*, not *convenient to publish*.
+
 
 ## Module boundary and usage
 
@@ -606,7 +631,6 @@ or penetration-tested.
 |------|-------------|
 | <a name="output_distribution_arn"></a> [distribution\_arn](#output\_distribution\_arn) | ARN of the CloudFront distribution serving the SPA. The environment root passes this exact ARN back to the KMS module so the CloudFront service principal can decrypt only this distribution's SSE-KMS origin objects. |
 | <a name="output_distribution_domain_name"></a> [distribution\_domain\_name](#output\_distribution\_domain\_name) | CloudFront-assigned hostname of the distribution. This is the SPA's public entry point, the address that replaces a 3270 terminal session against CICS transaction CC00, and the environment roots re-export it as the deployed front-end host. |
-| <a name="output_distribution_hosted_zone_id"></a> [distribution\_hosted\_zone\_id](#output\_distribution\_hosted\_zone\_id) | Route 53 hosted-zone id of the CloudFront distribution, consumed by environment roots when they create the custom SPA alias without hard-coding CloudFront's global zone id. |
 | <a name="output_distribution_id"></a> [distribution\_id](#output\_distribution\_id) | Id of the CloudFront distribution serving the SPA. The deployment pipeline passes it to a cache invalidation after uploading a new build, and an operator uses it to address the distribution from the CLI. |
 | <a name="output_log_bucket_arn"></a> [log\_bucket\_arn](#output\_log\_bucket\_arn) | ARN of the CMK-encrypted S3 destination for CloudFront standard logging v2. The KMS module consumes it as an exact allowed S3 encryption context. |
 | <a name="output_log_delivery_source_arn"></a> [log\_delivery\_source\_arn](#output\_log\_delivery\_source\_arn) | Exact CloudWatch Logs delivery-source ARN for the distribution's standard logging v2 stream. The KMS key policy uses it to scope log-delivery data-key generation. |

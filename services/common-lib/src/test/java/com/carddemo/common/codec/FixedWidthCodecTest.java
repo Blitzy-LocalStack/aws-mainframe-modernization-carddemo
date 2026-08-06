@@ -938,10 +938,18 @@ class FixedWidthCodecTest {
      * Proves a record declaration with no usable name, length or key is refused.
      *
      * <p>Assumptions: the registry name is how every consumer resolves geometry, so a blank one resolves
-     * to nothing; a length below one describes a record with no bytes; and a key width below one or a
+     * to nothing; a length below one describes a record with no bytes; and a NEGATIVE key width or a
      * negative key offset describes an index that cannot be built. Each is refused at construction rather
      * than at first use, because every construction site in the registry is a constant declaration in a
      * static initialiser where no recovery is available.</p>
+     *
+     * <p>Refactoring Rationale: this test previously asserted that a key width of ZERO was refused with
+     * "key of at least one byte". That invariant forced every keyless descriptor to invent a key, so the
+     * print-line layouts each declared one nominal byte that no output byte depended on and that
+     * {@code keyOf} would nonetheless have returned. Zero now denotes a keyless record, so the refusal
+     * asserted here moved down to negative widths -- the one value with no reading at all -- and the
+     * keyless form is proven admitted by {@link #keylessRecordsAreDeclarableAndReportTheAbsenceOfAKey()}
+     * instead.</p>
      *
      * <p>This test takes no parameter and returns no value. It captures a
      * {@link CopybookLayout.LayoutException} from each refused declaration.</p>
@@ -961,11 +969,44 @@ class FixedWidthCodecTest {
                 () -> new RecordSpec("R", 0, 2, 0, oneField)))
                 .hasMessageContaining("length of at least one byte");
         assertThat(assertThrows(LayoutException.class,
-                () -> new RecordSpec("R", 10, 0, 0, oneField)))
-                .hasMessageContaining("key of at least one byte");
+                () -> new RecordSpec("R", 10, -1, 0, oneField)))
+                .hasMessageContaining("key length of at least");
         assertThat(assertThrows(LayoutException.class,
                 () -> new RecordSpec("R", 10, 2, -1, oneField)))
                 .hasMessageContaining("non-negative key offset");
+    }
+
+    /**
+     * Proves a keyless record is declarable, reports the absence, and cannot spell that absence twice.
+     *
+     * <p>Assumptions: a print line has no retrieval key, because nothing indexes a report band or a
+     * statement band by anything. The sentinel is therefore the honest declaration and the factory is the
+     * only spelling of it, so a consumer that must know whether a key exists asks
+     * {@code hasRetrievalKey()} rather than comparing a width against a magic number. A keyless record
+     * declaring a non-zero key offset is refused because an offset positions a key and there is none to
+     * position -- admitting it would make two descriptors for the same record compare unequal over a
+     * component that means nothing in either.</p>
+     *
+     * <p>This test takes no parameter and returns no value. It captures a
+     * {@link CopybookLayout.LayoutException} from the contradictory declaration.</p>
+     */
+    @Test
+    void keylessRecordsAreDeclarableAndReportTheAbsenceOfAKey() {
+        List<FieldSpec> oneField = List.of(CopybookLayout.text("ONLY", 0, 10));
+
+        RecordSpec keyless = RecordSpec.keyless("PRINT-BAND", 10, oneField);
+        assertEquals(RecordSpec.NO_RETRIEVAL_KEY, keyless.keyLength(),
+                "a keyless record must carry the sentinel key width");
+        assertEquals(0, keyless.keyOffset(), "a keyless record must carry key offset zero");
+        assertFalse(keyless.hasRetrievalKey(), "a keyless record must report that it has no key");
+
+        RecordSpec keyed = CopybookLayout.layout("TRAN");
+        assertTrue(keyed.hasRetrievalKey(), "a keyed record must report that it has a key");
+
+        assertThat(assertThrows(LayoutException.class,
+                () -> new RecordSpec("R", 10, RecordSpec.NO_RETRIEVAL_KEY, 4, oneField)))
+                .hasMessageContaining("declares no retrieval key")
+                .hasMessageContaining("must be 0");
     }
 
     /**
@@ -1304,13 +1345,18 @@ class FixedWidthCodecTest {
     }
 
     /**
-     * Proves the two populations partition the registry exactly, with no name in both or in neither.
+     * Proves the three populations partition the registry exactly, with no name in two or in none.
      *
-     * <p>Assumptions: conflating the two populations is how three records go missing without anyone
-     * noticing, because the parity oracle registers ELEVEN layouts and the migration has ELEVEN base
-     * masters and the two elevens are not the same set. Asserting a partition -- every name in exactly
-     * one population, and the two sizes adding to the total -- is what makes a substitution of one
-     * population for the other impossible to pass off as a count-correct registry.</p>
+     * <p>Assumptions: conflating populations is how records go missing without anyone noticing, because
+     * the parity oracle registers ELEVEN layouts and the migration has ELEVEN base masters and the two
+     * elevens are not the same set. Asserting a partition -- every name in exactly one population, and
+     * the three sizes adding to the total -- is what makes a substitution of one population for another
+     * impossible to pass off as a count-correct registry.</p>
+     *
+     * <p>Refactoring Rationale: this test asserted a two-way partition and now asserts a three-way one,
+     * because the registry gained the two authorization IMS segments. The count is deliberately checked
+     * as a SUM of the three published groups as well as against the literal total, so a fourth
+     * population added later fails here rather than sitting outside every group unremarked.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -1319,20 +1365,47 @@ class FixedWidthCodecTest {
         List<String> all = CopybookLayout.names();
         List<String> baseMasters = CopybookLayout.baseMasterNames();
         List<String> derived = CopybookLayout.derivedNames();
+        List<String> imsSegments = CopybookLayout.imsSegmentNames();
 
-        assertEquals(14, all.size(), "the registry total changed");
-        assertEquals(all.size(), baseMasters.size() + derived.size(),
-                "the two populations must add up to the registry total");
+        assertEquals(16, all.size(), "the registry total changed");
+        assertEquals(all.size(), baseMasters.size() + derived.size() + imsSegments.size(),
+                "the three populations must add up to the registry total");
         for (String name : all) {
-            boolean isBaseMaster = baseMasters.contains(name);
-            boolean isDerived = derived.contains(name);
-            assertNotEquals(isBaseMaster, isDerived,
-                    () -> name + " must belong to exactly one of the two populations");
-            assertEquals(isDerived ? Provenance.DERIVED : Provenance.BASE_MASTER,
-                    CopybookLayout.provenanceOf(name),
+            int memberships = (baseMasters.contains(name) ? 1 : 0)
+                    + (derived.contains(name) ? 1 : 0)
+                    + (imsSegments.contains(name) ? 1 : 0);
+            assertEquals(1, memberships,
+                    () -> name + " must belong to exactly one of the three populations");
+
+            Provenance expected;
+            if (derived.contains(name)) {
+                expected = Provenance.DERIVED;
+            } else if (imsSegments.contains(name)) {
+                expected = Provenance.IMS_SEGMENT;
+            } else {
+                expected = Provenance.BASE_MASTER;
+            }
+            assertEquals(expected, CopybookLayout.provenanceOf(name),
                     () -> name + " carries a provenance that disagrees with its population");
         }
-        assertThat(all).containsAll(baseMasters).containsAll(derived).doesNotHaveDuplicates();
+        assertThat(all).containsAll(baseMasters).containsAll(derived).containsAll(imsSegments)
+                .doesNotHaveDuplicates();
+    }
+
+    /**
+     * Proves the registry declares exactly the two authorization IMS segment names.
+     *
+     * <p>Assumptions: the two are asserted by name and in registration order, because their geometry is
+     * transcribed from copybooks whose lengths a database descriptor declares independently, and the
+     * order is what makes a failure message that lists the known names comparable against a committed
+     * expectation.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void registryDeclaresExactlyTheTwoImsSegmentNames() {
+        assertEquals(List.of("PAUTSUM0", "PAUTDTL"), CopybookLayout.imsSegmentNames(),
+                "the IMS segment population changed in number or in order");
     }
 
     /**
@@ -1348,6 +1421,12 @@ class FixedWidthCodecTest {
      * its own count of eleven up with the three derived records instead, so both counts are correct at
      * different levels and neither can be read as the other.</p>
      *
+     * <p>Refactoring Rationale: the two authorization IMS segments join that list, and the reason is not
+     * the same as the reason the three base masters are on it. The oracle's codec DECLARES both segment
+     * layouts but registers neither, so there is no second registered transcription to compare a decode
+     * against; and no flat extract ships for either, because the extension loads its segments from a
+     * generation data set rather than from a seed file. Either fact alone would put them here.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -1358,7 +1437,7 @@ class FixedWidthCodecTest {
                 withoutOracle.add(name);
             }
         }
-        assertEquals(List.of("SECUSER", "TRANCAT", "TRANTYPE"), withoutOracle,
+        assertEquals(List.of("SECUSER", "TRANCAT", "TRANTYPE", "PAUTSUM0", "PAUTDTL"), withoutOracle,
                 "the set of records with no independent implementation changed");
 
         assertFalse(CopybookLayout.hasOracleRoundTrip("SECUSER"));
@@ -1367,9 +1446,21 @@ class FixedWidthCodecTest {
                 "a derived record can still have an independent implementation");
 
         // WHY : Assumptions: the eight overlapping names are asserted explicitly because the arithmetic
-        //       that reconciles the two elevens is the whole point. Eleven base masters minus these three
-        //       leaves eight, and eight plus the three derived records is the oracle's own eleven.
-        assertEquals(8, CopybookLayout.baseMasterNames().size() - withoutOracle.size());
+        //       that reconciles the two elevens is the whole point. Eleven base masters minus the three
+        //       the oracle omits leaves eight, and eight plus the three derived records is the oracle's
+        //       own eleven.
+        // WHY : Refactoring Rationale: the subtrahend is now the BASE MASTERS without an oracle rather
+        //       than every name without one, and the distinction became load-bearing when the two IMS
+        //       segments were registered. They also lack an oracle, so subtracting the whole
+        //       no-oracle list from the base-master count would mix two populations and yield six --
+        //       a number that reconciles nothing, and which the earlier form would have reported as a
+        //       failure of the registry rather than of its own arithmetic.
+        List<String> baseMastersWithoutOracle = new ArrayList<>(CopybookLayout.baseMasterNames());
+        baseMastersWithoutOracle.retainAll(withoutOracle);
+        assertEquals(List.of("SECUSER", "TRANCAT", "TRANTYPE"), baseMastersWithoutOracle,
+                "the base masters the oracle omits changed");
+        assertEquals(8,
+                CopybookLayout.baseMasterNames().size() - baseMastersWithoutOracle.size());
     }
 
     /**

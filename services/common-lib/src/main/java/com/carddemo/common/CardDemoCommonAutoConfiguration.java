@@ -147,15 +147,24 @@ public class CardDemoCommonAutoConfiguration {
          * order and the pattern explicitly, which is what makes the guarantee above checkable rather
          * than incidental.</p>
          *
+         * <p>Assumptions: the context's shared clock is passed to the filter, because the filter now
+         * renders its own refusal body and that body carries a timestamp. Letting the filter fall back
+         * to its system-clock default would leave one request stamped from two different clocks
+         * whenever a test substituted a fixed reading for the advice, which is precisely the case a
+         * fixed reading exists to make assertable.</p>
+         *
+         * @param clock the clock the filter's refusal body reads its failure instant from, resolved
+         *     from the context so a test can substitute a fixed reading
          * @return the registration placing one shared {@link CorrelationIdFilter} instance at
          *     {@link CardDemoCommonAutoConfiguration#CORRELATION_FILTER_ORDER} across all request
          *     paths, never {@code null}
          */
         @Bean
         @ConditionalOnMissingBean(name = "carddemoCorrelationIdFilterRegistration")
-        public FilterRegistrationBean<CorrelationIdFilter> carddemoCorrelationIdFilterRegistration() {
+        public FilterRegistrationBean<CorrelationIdFilter> carddemoCorrelationIdFilterRegistration(
+                Clock clock) {
             FilterRegistrationBean<CorrelationIdFilter> registration =
-                    new FilterRegistrationBean<>(new CorrelationIdFilter());
+                    new FilterRegistrationBean<>(new CorrelationIdFilter(clock));
             registration.setOrder(CORRELATION_FILTER_ORDER);
 
             // WHY : Assumptions: every path, including the management endpoints. A health probe that

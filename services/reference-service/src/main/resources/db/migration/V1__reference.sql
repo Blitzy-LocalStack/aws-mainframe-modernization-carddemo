@@ -116,6 +116,40 @@ CREATE TABLE reference.transaction_types (
     --       every response body carry the padding.
     description  VARCHAR(50)  NOT NULL,
 
+    -- WHY : Refactoring Rationale: this column exists because the published
+    --       contract requires it and, until now, nothing persisted it. The
+    --       reference API declares a RecordVersion on the transaction-type
+    --       representation and on its replace request, and answers 409 with the
+    --       version the row now holds; this table had no column able to supply
+    --       any of that, so the contract described a mechanism the schema could
+    --       not implement.
+    -- WHY : Assumptions: the mechanism is the baseline's own, not an addition.
+    --       app/app-transaction-type-db2/cbl/COTRTUPC.cbl snapshots the record
+    --       it read into TTUP-OLD-DETAILS at its L328-L331, carries
+    --       WS-DATACHANGED-FLAG at L78 with the condition
+    --       DATA-WAS-CHANGED-BEFORE-UPDATE at L183, compares the snapshot
+    --       against the stored row in 1205-COMPARE-OLD-NEW at L783, and commits
+    --       with SYNCPOINT at L454 only when they agree. That is optimistic
+    --       concurrency across a pseudo-conversational gap, and a version
+    --       counter is the same guarantee expressed natively: the migration
+    --       already maps it that way for the three mutable master records, so
+    --       applying it to the one reference table the baseline maintains
+    --       through a screen keeps one mechanism rather than two.
+    -- WHY : Alternatives Considered: carrying the before image itself -- having
+    --       a replace request echo back the description it read, and comparing
+    --       that. Rejected because it compares only the fields the client chose
+    --       to echo, so a column added later is silently outside the check,
+    --       whereas a counter covers the whole row by construction. Also
+    --       rejected: leaving the contract to describe nothing, which is the
+    --       state this column replaces.
+    -- WHY : Trade-offs: the two lookup tables and disclosure_groups get NO such
+    --       column, and the omission is deliberate. Nothing in this contract
+    --       replaces a row in any of them -- they are seeded reference data with
+    --       read-only operations -- so a version column there would be written
+    --       once and never read, and its presence would suggest a maintenance
+    --       path that does not exist.
+    version      BIGINT       NOT NULL DEFAULT 0,
+
     -- WHY : Refactoring Rationale: no separate unique index accompanies this
     --       primary key. The baseline declares one at
     --       app/app-transaction-type-db2/ddl/XTRNTYPE.ddl, a UNIQUE INDEX on
@@ -173,6 +207,20 @@ CREATE TABLE reference.transaction_categories (
     --       VARCHAR(50) NOT NULL, and dcl/DCLTRCAT.dcl L47-L51 generates the
     --       matching length-plus-text pair.
     description  VARCHAR(50)  NOT NULL,
+
+    -- WHY : Assumptions: the same version column and the same reasoning as
+    --       reference.transaction_types above, which is where the mechanism, the
+    --       baseline citation and the rejected alternatives are recorded. It is
+    --       repeated here rather than cross-referenced only because the two
+    --       tables are maintained through the same screen family and a reader
+    --       arriving at either one needs to know the column is not decoration.
+    -- WHY : Assumptions: the default of zero applies to the seeded rows as well
+    --       as to inserted ones, so every row has a readable version from the
+    --       moment the migration runs and a caller never meets a null it has to
+    --       interpret. The service increments it on a successful replace; the
+    --       database does not, because an increment triggered in the database
+    --       would fire for a write the service did not intend as a revision.
+    version      BIGINT       NOT NULL DEFAULT 0,
 
     -- WHY : Refactoring Rationale: this composite primary key is also what
     --       satisfies app/app-transaction-type-db2/ddl/XTRNTYCAT.ddl, the

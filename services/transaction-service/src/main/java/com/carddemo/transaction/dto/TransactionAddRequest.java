@@ -348,7 +348,11 @@ import java.lang.annotation.Target;
  * decimal point from the tenth character, so the test at line 342 fails and line 345 is what the
  * operator sees -- so it is the correct message for the condition. Rewording it to name nine digits
  * was rejected because transformation rule T8 carries user-visible strings across character for
- * character, and an edited message is a behavioural change that no golden comparison would forgive.
+ * character, and an edited message is a behavioural change rather than a structural one. Verification
+ * of that string is by transcription against the cited reference lines, not by golden master: the
+ * source program is an online CICS program, and {@code tests/README.md} records at its lines 83 to 85
+ * that such programs cannot be run end to end without a CICS runtime, so no golden-master oracle
+ * exists for this path.
  *
  * <h2>Widths are the record's, and each narrowing is registered</h2>
  *

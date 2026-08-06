@@ -28,7 +28,7 @@ by path and line only.
 > obligation section 10 describes is still owed by whoever writes the first
 > consumer.
 >
-> **Why the annotation is here (Assumption made explicit).**
+> **Why the annotation is here.** Assumptions:
 > `tests/fixtures/README.md` section 9.3 mandates a **[present]**/**[planned]**
 > marker on every referenced artifact and gives its own reason for doing so: the
 > marker is what keeps a document from describing a future artifact as if it
@@ -622,7 +622,7 @@ justify authoring anything at all:
     bounds, both at year `2024`; row 3 carries year `1950` and row 4 year
     `2099`, the two inclusive year bounds, both at month `06`. The day is `15`
     on every record and is never the varying component.
-    Trade-off, and the reason the day is not sampled from the seed here: keeping
+    Trade-offs: the reason the day is not sampled from the seed here is that keeping
     each seed record's own day would have let a single record carry a boundary
     year *and* a boundary month *and* a distinct day at once, so a failing
     assertion could not name which component caused it. Pinning the background

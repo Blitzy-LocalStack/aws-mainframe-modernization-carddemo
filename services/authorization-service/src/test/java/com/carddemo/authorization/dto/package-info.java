@@ -1,12 +1,25 @@
 /**
  * Boundary-contract tests for the six payload types of the authorization bounded context.
  *
- * <p><b>Purpose.</b> Two classes execute here. {@code AuthorizationPayloadDomainTest} asserts the value
- * domains the queue payloads declare -- requiredness, the character domains the copybook pictures admit,
- * the two closed response domains and the non-negative amount domain -- and the truncation the detail
- * response's composed reason performs. {@code RowSelectorContractTest} asserts that a row is addressed
- * only by an opaque sealed selector, in both directions: the summary response refuses to publish anything
- * else, and the fraud request refuses to accept anything else.</p>
+ * <p><b>Purpose.</b> Six classes execute here, and the count is a measurement of the directory rather
+ * than a target. {@code AuthorizationPayloadDomainTest} asserts the value domains the queue payloads
+ * declare -- requiredness, the character domains the copybook pictures admit, the two closed response
+ * domains and the non-negative amount domain -- and the truncation the detail response's composed reason
+ * performs. {@code RowSelectorContractTest} asserts that a row is addressed only by an opaque sealed
+ * selector, in both directions: the summary response refuses to publish anything else, and the fraud
+ * request refuses to accept anything else. {@code AuthorizationRequestPayloadTest} covers the request
+ * record's own declarations, {@code SummaryRenderingTest} the values a summary rendering withholds,
+ * {@code PendingAuthSummarySegmentFixtureTest} the packed segment fixture the summary is decoded from,
+ * and {@code AuthorizationWireContractTest} the published document against the two queue payload
+ * records -- the corrected spelling, the wire ordinal it sits at, and that the eighteen request fields
+ * admit no nineteenth.</p>
+ *
+ * <p>Refactoring Rationale: that last class is named for the WIRE rather than for the API, and the name
+ * is deliberate. This module already holds {@code AuthorizationApiContractTest} in its {@code config}
+ * package, and two classes of one simple name inside one module are told apart only by the package they
+ * ran in -- so a reader given a failure, a report line or a reviewer's reference to "the contract test"
+ * cannot tell which class produced it. The same reasoning is recorded at length on the shared layering
+ * gate, which forbids a second class of its own simple name for exactly this reason.</p>
  *
  * <p>Assumptions: these are unit tests over records and a validation engine built from the default
  * provider, with no Spring context. A payload is a value, so its contract is testable as a value; slicing

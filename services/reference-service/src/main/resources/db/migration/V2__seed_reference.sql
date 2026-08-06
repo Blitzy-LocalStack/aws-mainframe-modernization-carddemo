@@ -75,9 +75,27 @@
 --     to a search_path, for the reason V1 gives: a path-dependent script
 --     produces different results for different callers, and one prefix per
 --     statement removes that difference.
---   - Assumptions: the seed values are taken from app/data/ASCII, the VSAM
---     lineage, wherever a value exists in two baseline lineages. See the
---     transaction_types insert, where the two lineages disagree.
+--   - Assumptions: two different "which source wins" questions arise in this
+--     file and they are settled separately, because conflating them is how a
+--     rate came to be seeded wrongly. The first axis is LINEAGE: where a value
+--     exists both as a VSAM seed dataset under app/data and as a Db2 extension
+--     control card under app/app-transaction-type-db2/ctl, the VSAM lineage wins,
+--     because this service replaces the VSAM-backed programs and its tables are
+--     derived from app/cpy rather than from the extension's DDL. See the
+--     transaction_types and transaction_categories inserts, where the two
+--     lineages disagree on casing and on one spelling each. The second axis is
+--     ENCODING: where one dataset ships as both an EBCDIC .PS extract and an
+--     ASCII .txt conversion, the EBCDIC extract wins, because it is the form the
+--     baseline programs read and the conversions are already known to be lossy.
+--     That axis affects exactly one value in this file and is argued in full at
+--     the disclosure_groups insert. Trade-offs: six of the seven inserts here
+--     read their values from app/data/ASCII and one reads from
+--     app/data/EBCDIC, so the provenance comments are not uniform. The
+--     non-uniformity is deliberate and is cheaper than the alternative: for the
+--     six, the twins are byte-identical so the encoding axis has no effect and
+--     naming the ASCII file keeps the comment checkable with a text editor; for
+--     the seventh, the twins differ on an interest rate, and uniformity there
+--     would have cost a hundred percent of the DEFAULT group's accrual.
 -- =============================================================================
 
 
@@ -212,7 +230,51 @@ ON CONFLICT (type_cd, cat_cd) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
--- reference.disclosure_groups  <-  app/data/ASCII/discgrp.txt (51 x 50 bytes)
+-- reference.disclosure_groups  <-  app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS
+--                                  (51 x 50 bytes)
+--
+-- WHY : Refactoring Rationale: THIS ONE TABLE IS SEEDED FROM THE EBCDIC TWIN, not
+--       from app/data/ASCII/discgrp.txt, and the exception is the only place in
+--       this file where the lineage note above does not apply. The two twins of
+--       this dataset are byte-identical except at ONE field of ONE record, and
+--       that field is an interest rate: record 34, the DEFAULT group's
+--       ('07','0001') combination, holds '00150{' in the EBCDIC extract and
+--       '00000{' in the ASCII convenience copy, so it decodes to 15.00 from one
+--       and 0.00 from the other. Measured across the whole dataset the rate
+--       multiplicities differ accordingly -- EBCDIC 29/16/6 and ASCII 30/15/6 for
+--       0.00/15.00/25.00 -- and every other byte of all fifty-one records agrees.
+--       Seeding the ASCII value here was a silent financial defect rather than a
+--       cosmetic one: app/cbl/CBACT04C.cbl L415-L441 falls back to the DEFAULT
+--       group whenever an account's own group key is absent (VSAM status 23), so
+--       an account on that fallback accrued 15.00% when data-migration's loaders
+--       had populated the table from the EBCDIC extract and nothing at all when
+--       Flyway had seeded it from here -- the same account, the same input, two
+--       different amounts of money, with no error on either path.
+--       data-migration/README.md settles the authority: where a dataset ships in
+--       both encodings the EBCDIC .PS extract is authoritative, because it is the
+--       mainframe extract the baseline programs actually read while the .txt files
+--       are conversions of it whose fidelity is already known to be imperfect
+--       (cardxref.txt has lost its trailing FILLER, three of the nine have
+--       acquired CRLF terminators). A conversion that dropped fourteen bytes from
+--       one file is not the form to trust when it disagrees about a rate. That
+--       settlement is applied here, and the divergence between the twins is
+--       registered as D-SEED-ENCODING-AUTHORITY in
+--       docs/architecture/cobol-to-service-traceability.md.
+--       Alternatives Considered: keeping the ASCII value for consistency with the
+--       other six inserts in this file. Rejected because consistency of PROVENANCE
+--       is worth nothing next to consistency of RESULT: the loaders and this
+--       migration are two routes into one table, and they must not disagree about
+--       an operand that CBACT04C L464-L465 multiplies a balance by. Alternatives
+--       Considered: editing one of the two extracts so the question disappears.
+--       Refused outright -- app/** is REFERENCE-only, so the divergence is
+--       resolved by choosing a source and never by changing a byte of either.
+-- WHY : Assumptions: the axis settled here is ENCODING (EBCDIC extract versus
+--       ASCII conversion) and it is unrelated to the VSAM-versus-Db2 lineage axis
+--       recorded at transaction_types and transaction_categories. Those two tables
+--       ship byte-identical twins -- all seven TRANTYPE records and all of
+--       TRANCATG agree between the encodings -- so their note about "two lineages"
+--       concerns the extension's control cards, not this one, and neither note
+--       overrides the other.
 --
 -- Field positions taken from app/cpy/CVTRA02Y.cpy: the DIS-GROUP-KEY group
 -- holds DIS-ACCT-GROUP-ID PIC X(10) at columns 1-10, DIS-TRAN-TYPE-CD PIC X(02)
@@ -227,16 +289,18 @@ ON CONFLICT (type_cd, cat_cd) DO NOTHING;
 -- -----------------------------------------------------------------------------
 
 -- WHY : Assumptions: the rates below are written as decoded fixed-point
---       literals, and the bytes on disk are not decimal digits. discgrp.txt
+--       literals, and the bytes on disk are not decimal digits. The extract
 --       stores DIS-INT-RATE as zoned decimal with a sign overpunch in the
 --       trailing byte, so the six bytes of a 15.00 rate are '00150{' -- the '{'
 --       is the overpunch that encodes a final digit 0 together with a positive
 --       sign. Under PIC S9(04)V99 the six digits carry an implied decimal point
 --       two places from the right, so the field decodes to 0015.00.
 --       The whole dataset uses only three rate values, and their multiplicities
---       account for all fifty-one rows: '00000{' appears 30 times and decodes
---       to 0.00, '00150{' appears 15 times and decodes to 15.00, and '00250{'
---       appears 6 times and decodes to 25.00. Every rate in this dataset is
+--       account for all fifty-one rows: '00000{' appears 29 times and decodes
+--       to 0.00, '00150{' appears 16 times and decodes to 15.00, and '00250{'
+--       appears 6 times and decodes to 25.00. Those are the EBCDIC extract's
+--       counts; the ASCII conversion reads 30/15/6 because of the single record
+--       the note above settles. Every rate in this dataset is
 --       therefore non-negative, and no negative overpunch byte occurs.
 --       The decoding is done before the literal reaches this file, and no
 --       overpunch byte appears anywhere in it. Passing '00150{' to PostgreSQL
@@ -284,7 +348,17 @@ INSERT INTO reference.disclosure_groups
     ('DEFAULT   ', '05', '0001', 15.00),
     ('DEFAULT   ', '06', '0001', 15.00),
     ('DEFAULT   ', '06', '0002', 15.00),
-    ('DEFAULT   ', '07', '0001',  0.00),
+    -- WHY : Assumptions: 15.00, from record 34 of
+    --       app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS, whose DIS-INT-RATE reads
+    --       '00150{'. This is the single field where the two encodings of this
+    --       dataset disagree -- app/data/ASCII/discgrp.txt row 34 reads '00000{'
+    --       -- and it is the DEFAULT group row that app/cbl/CBACT04C.cbl
+    --       L415-L441 falls back to, so the two values are 15.00% interest and
+    --       none at all on identical input. The header note above settles the
+    --       authority in favour of the EBCDIC extract and registers the
+    --       divergence as D-SEED-ENCODING-AUTHORITY; this literal is the one row
+    --       that settlement changes.
+    ('DEFAULT   ', '07', '0001', 15.00),
 
     ('ZEROAPR   ', '01', '0001',  0.00),
     ('ZEROAPR   ', '01', '0002',  0.00),

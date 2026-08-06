@@ -11,14 +11,12 @@
 #   database that starts empty, and how loudly the run reports itself. Every
 #   other value is inherited from the base document rather than restated here.
 #
-#   What consumes this file. Two shapes of test read it, and both are stated
-#   here as TARGET contracts. Naming a class below is never a claim that the
-#   class is on disk: this tree is landed in plan order, so a named class
-#   without a file yet is planned rather than missing, and the present contents
-#   of src/test/java are read from the directory itself or from
-#   `mvn -f services/transaction-service/pom.xml test` rather than from this
-#   comment, which could not stay accurate as each class arrives. The reactor
-#   states the same reading convention once, at services/pom.xml lines 73 to 92.
+#   What consumes this file. Two shapes of test read it, and both are stated here
+#   as TARGET contracts: a class named below is named because the plan assigns it
+#   to this module, and the directory itself -- or
+#   `mvn -f services/transaction-service/pom.xml test` -- is the authority for what
+#   the test tree contains. Naming the two shapes here rather than enumerating the
+#   tree is what keeps this comment correct as classes are added.
 #   The two shapes are:
 #     - every *RepositoryIT, which Failsafe runs against a real PostgreSQL
 #       container. These are the only tests that open a connection, apply
@@ -545,6 +543,46 @@ logging:
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
 
+# WHY : (1) Assumptions: the three overrides below sit under carddemo.security.jwt
+#       and NOT under carddemo.transaction, and the difference is load-bearing
+#       rather than stylistic. The authoring contract for this profile directs a
+#       test-side value that needs a custom namespace to carddemo.transaction and
+#       nothing else. These three are not test-side-only values: each one OVERRIDES
+#       a key the base src/main/resources/application.yml declares, and the reader
+#       is config/SecurityConfig.java, which binds all three by @Value at the exact
+#       paths carddemo.security.jwt.expected-token-use,
+#       carddemo.security.jwt.expected-client-id and
+#       carddemo.security.jwt.required-scope. A Spring override only takes effect
+#       when its key path matches the base character for character, so relocating
+#       these three under carddemo.transaction would not rename the contract - it
+#       would leave the override UNREAD while the base value still resolved. The
+#       base value for expected-client-id is the placeholder
+#       ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}, and @Value calls
+#       resolveRequiredPlaceholders, which raises rather than passing the literal
+#       through, so every context-loading test in this module would fail before its
+#       first assertion on any host that does not export that variable - which is
+#       every build host. A silently dead key is exactly the hazard the key-path
+#       warning in this profile's contract exists to prevent.
+#       (2) Alternatives Considered: renaming the namespace across every assigned
+#       contract in this module, so that the base application.yml, its dev and prod
+#       overlays, config/SecurityConfig.java and this file all read
+#       carddemo.transaction.security.jwt. Rejected on blast radius and on house
+#       shape. The namespace is not local to this module: all seven services that
+#       validate a token declare carddemo.security.jwt in their base
+#       application.yml and read it through their own config/SecurityConfig.java,
+#       and this module's base file is the designated house shape those siblings are
+#       instructed to follow. Renaming it here would either force six sibling
+#       modules outside this work's scope to follow, or leave one service's
+#       cross-cutting security contract spelled differently from the other six for
+#       no behavioural gain.
+#       (3) Assumptions: carddemo.transaction consequently has no legitimate
+#       occupant in this profile, and the absence is deliberate rather than
+#       overlooked. Nothing in this module exposes a test-side-only tunable: there
+#       is no Clock bean and no page-size, page-number or offset property anywhere
+#       in src/main/java, paging being keyset paging carried by common-lib's
+#       PageResponse envelope. Declaring a carddemo.transaction key with no reader
+#       would be dead configuration, which this profile refuses on the same ground
+#       that it refuses a renamed override.
 carddemo:
   security:
     jwt:

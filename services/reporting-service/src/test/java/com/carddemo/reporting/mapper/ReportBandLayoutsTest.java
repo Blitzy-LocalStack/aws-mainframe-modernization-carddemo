@@ -105,7 +105,6 @@ import org.junit.jupiter.params.provider.MethodSource;
  */
 class ReportBandLayoutsTest {
 
-    // WHAT: the record length every band is emitted at.
     // WHY : Alternatives Considered: it is restated here as a literal rather than read from
     //       ReportBandLayouts.REPORT_RECORD_LENGTH, because a test that took the number from the class
     //       under test would assert that the class agrees with itself. The literal is the 133 declared
@@ -113,7 +112,6 @@ class ReportBandLayoutsTest {
     //       78 of app/jcl/TRANREPT.jcl.
     private static final int DECLARED_RECORD_LENGTH = 133;
 
-    // WHAT: the width of each of the four amount items, counted from their pictures.
     // WHY : Alternatives Considered: PIC -ZZZ,ZZZ,ZZZ.ZZ at line 30 and PIC +ZZZ,ZZZ,ZZZ.ZZ at lines 54,
     //       60 and 66 of app/cpy/CVTRA07Y.cpy each spell one sign position, nine digit positions, two
     //       grouping separators, one decimal point and two fractional digits, which is fifteen character
@@ -121,7 +119,6 @@ class ReportBandLayoutsTest {
     //       what keeps this test independent of the formatter.
     private static final int AMOUNT_MASK_WIDTH = 15;
 
-    // WHAT: the zero-based offset at which all four amount items open, and its one-based column.
     // WHY : Assumptions: 97 zero-based is one-based column 98, and 97 + 15 gives an exclusive end of
     //       112, so the amount occupies one-based columns 98 to 112 inclusive. The three total bands
     //       reach 97 from three different label-and-leader pairs and the detail band reaches it by
@@ -129,7 +126,6 @@ class ReportBandLayoutsTest {
     //       an amount breaks it silently.
     private static final int AMOUNT_ZERO_BASED_START = 97;
 
-    // WHAT: the one-based column the amount column opens on.
     // WHY : Alternatives Considered: named rather than written as 98 at each use, because the whole
     //       hazard this constant guards is a reader or an editor treating a zero-based offset and a
     //       one-based column as interchangeable. Lines 30, 54, 60 and 66 of app/cpy/CVTRA07Y.cpy place
@@ -138,32 +134,27 @@ class ReportBandLayoutsTest {
     //       offset.
     private static final int AMOUNT_ONE_BASED_FIRST_COLUMN = 98;
 
-    // WHAT: the one-based column the amount column closes on.
     // WHY : Assumptions: 112 is the LAST occupied column, inclusive, where FieldSpec.end() reports 112
     //       as an EXCLUSIVE offset. The two numbers coincide precisely because one is one-based and the
     //       other zero-based, which is a coincidence worth naming rather than a fact to lean on.
     private static final int AMOUNT_ONE_BASED_LAST_COLUMN = 112;
 
-    // WHAT: the widths the six copybook items of the title band declare, summed.
     // WHY : Assumptions: lines 5, 7, 9, 11, 12 and 13 of app/cpy/CVTRA07Y.cpy declare 38, 41, 12, 10, 4
     //       and 10, which is 115. The seven native sums below are each a separate constant, and none is
     //       expressed in terms of another, so an edit to one band cannot move the expectation for a
     //       different band.
     private static final int NAME_HEADER_NATIVE_WIDTH = 115;
 
-    // WHAT: the widths the sixteen copybook items of the detail band declare, summed.
     // WHY : Assumptions: lines 16 to 31 of app/cpy/CVTRA07Y.cpy declare 16, 1, 11, 1, 2, 1, 15, 1, 4, 1,
     //       29, 1, 10, 4, 15 and 2, which is 114. This is the number most likely to be mistaken for the
     //       record length, since it is the band a report is mostly made of.
     private static final int DETAIL_NATIVE_WIDTH = 114;
 
-    // WHAT: the widths the seven copybook items of the column heading band declare, summed.
     // WHY : Assumptions: lines 34, 36, 38, 40, 42, 44 and 45 of app/cpy/CVTRA07Y.cpy declare 17, 12, 19,
     //       35, 14, 1 and 16, which is 114. It agrees with the detail band's sum by arithmetic
     //       coincidence and not by any shared rule, which is why it is declared separately.
     private static final int COLUMN_HEADER_NATIVE_WIDTH = 114;
 
-    // WHAT: the width the single elementary item of the separator rule declares.
     // WHY : Alternatives Considered: line 48 of app/cpy/CVTRA07Y.cpy declares PIC X(133) directly on the
     //       level-01 item, so this band is the only one whose native width IS the record length. It is
     //       declared as its own constant rather than reusing DECLARED_RECORD_LENGTH so that the two
@@ -171,12 +162,10 @@ class ReportBandLayoutsTest {
     //       one band declares.
     private static final int SEPARATOR_RULE_NATIVE_WIDTH = 133;
 
-    // WHAT: the widths the three copybook items of the page total band declare, summed.
     // WHY : Assumptions: lines 51, 53 and 54 of app/cpy/CVTRA07Y.cpy declare 11, 86 and 15, which is
     //       112.
     private static final int PAGE_TOTAL_NATIVE_WIDTH = 112;
 
-    // WHAT: the widths the three copybook items of the card-break total band declare, summed.
     // WHY : Alternatives Considered: lines 57, 59 and 60 of app/cpy/CVTRA07Y.cpy declare 13, 84 and 15,
     //       which is also 112. The three total bands reaching the same 112 from different
     //       label-and-leader pairs is the whole point of the compensating leader widths, so each band
@@ -184,12 +173,10 @@ class ReportBandLayoutsTest {
     //       prove.
     private static final int ACCOUNT_TOTAL_NATIVE_WIDTH = 112;
 
-    // WHAT: the widths the three copybook items of the grand total band declare, summed.
     // WHY : Assumptions: lines 63, 65 and 66 of app/cpy/CVTRA07Y.cpy declare 11, 86 and 15, which is
     //       112.
     private static final int GRAND_TOTAL_NATIVE_WIDTH = 112;
 
-    // WHAT: the number of items each band declares in the copybook, pad excluded.
     // WHY : Alternatives Considered: the counts are 6, 16, 7, 1, 3, 3 and 3 across lines 4 to 66 of
     //       app/cpy/CVTRA07Y.cpy. They are asserted alongside the width sums because the two fail
     //       differently: dropping a one-byte item changes the count by one and the sum by one, whereas
@@ -197,82 +184,67 @@ class ReportBandLayoutsTest {
     //       untouched. Neither check subsumes the other.
     private static final int NAME_HEADER_ITEM_COUNT = 6;
 
-    // WHAT: the item count of the detail band.
     // WHY : Assumptions: lines 16 to 31 of app/cpy/CVTRA07Y.cpy, sixteen items of which eight are
     //       FILLER. This is the band where a merge would be easiest to make and hardest to see, since
     //       eight of its items are single-byte separators.
     private static final int DETAIL_ITEM_COUNT = 16;
 
-    // WHAT: the item count of the column heading band.
     // WHY : Assumptions: lines 34 to 45 of app/cpy/CVTRA07Y.cpy, seven items every one of which is
     //       FILLER, so this band has no varying content at all.
     private static final int COLUMN_HEADER_ITEM_COUNT = 7;
 
-    // WHAT: the item count of the separator rule band.
     // WHY : Assumptions: line 48 of app/cpy/CVTRA07Y.cpy is an ELEMENTARY level-01 item with its own
     //       picture and no subordinates, so the band has exactly one item and that item is the band.
     private static final int SEPARATOR_RULE_ITEM_COUNT = 1;
 
-    // WHAT: the item count of the page total band.
     // WHY : Assumptions: lines 51 to 54, 57 to 60 and 63 to 66 of app/cpy/CVTRA07Y.cpy each declare a
     //       label, a dot leader and an amount. The three counts agree because the three bands have the
     //       same shape, and each is declared separately for the reason recorded on
     //       ACCOUNT_TOTAL_NATIVE_WIDTH.
     private static final int PAGE_TOTAL_ITEM_COUNT = 3;
 
-    // WHAT: the item count of the card-break total band.
     // WHY : Assumptions: lines 57, 59 and 60 of app/cpy/CVTRA07Y.cpy.
     private static final int ACCOUNT_TOTAL_ITEM_COUNT = 3;
 
-    // WHAT: the item count of the grand total band.
     // WHY : Assumptions: lines 63, 65 and 66 of app/cpy/CVTRA07Y.cpy.
     private static final int GRAND_TOTAL_ITEM_COUNT = 3;
 
-    // WHAT: how many of each band's items are declared FILLER.
     // WHY : Alternatives Considered: the counts are 1, 8, 7, 0, 2, 2 and 2, which total 22. They are
     //       asserted per band as well as in total because a total alone would be satisfied by twenty-two
     //       FILLER items distributed wrongly, and it is the DISTRIBUTION that determines which literals
     //       each band prints.
     private static final int NAME_HEADER_FILLER_COUNT = 1;
 
-    // WHAT: the FILLER count of the detail band.
     // WHY : Assumptions: lines 17, 19, 21, 23, 25, 27, 29 and 31 of app/cpy/CVTRA07Y.cpy. Six carry
     //       VALUE SPACES and two carry a hyphen literal.
     private static final int DETAIL_FILLER_COUNT = 8;
 
-    // WHAT: the FILLER count of the column heading band.
     // WHY : Assumptions: lines 34, 36, 38, 40, 42, 44 and 45 of app/cpy/CVTRA07Y.cpy. Six carry a
     //       heading literal and one carries VALUE SPACES.
     private static final int COLUMN_HEADER_FILLER_COUNT = 7;
 
-    // WHAT: the FILLER count of the separator rule band.
     // WHY : Assumptions: line 48 of app/cpy/CVTRA07Y.cpy declares a NAMED elementary level-01 item, so
     //       this band has no FILLER at all. Counting its hyphen rule as a FILLER, which is tempting
     //       because the rule is invariant content just as the leaders are, would make the corpus total
     //       twenty-three and put the per-band distribution out by one.
     private static final int SEPARATOR_RULE_FILLER_COUNT = 0;
 
-    // WHAT: the FILLER count of the page total band.
     // WHY : Assumptions: lines 51 and 53 of app/cpy/CVTRA07Y.cpy, the label and the dot leader. The
     //       amount item at line 54 is named, so it is not counted here.
     private static final int PAGE_TOTAL_FILLER_COUNT = 2;
 
-    // WHAT: the FILLER count of the card-break total band.
     // WHY : Assumptions: lines 57 and 59 of app/cpy/CVTRA07Y.cpy.
     private static final int ACCOUNT_TOTAL_FILLER_COUNT = 2;
 
-    // WHAT: the FILLER count of the grand total band.
     // WHY : Assumptions: lines 63 and 65 of app/cpy/CVTRA07Y.cpy.
     private static final int GRAND_TOTAL_FILLER_COUNT = 2;
 
-    // WHAT: the corpus-wide FILLER total across all seven bands.
     // WHY : Assumptions: 1 + 8 + 7 + 0 + 2 + 2 + 2 is 22, counted item by item from app/cpy/CVTRA07Y.cpy
     //       read in full, and every one of the 22 carries a VALUE clause. The proportion is therefore
     //       not most of them but all of them, which is the fact the whole content-versus-padding
     //       argument below rests on.
     private static final int CORPUS_FILLER_COUNT = 22;
 
-    // WHAT: how many FILLER items of the 22 carry a literal rather than blanks.
     // WHY : Assumptions: fifteen carry printed text -- the date joiner at line 12, the two hyphen
     //       joiners at lines 21 and 25, the six headings at lines 34, 36, 38, 40, 42 and 45, and the
     //       three label and leader pairs at lines 51, 53, 57, 59, 63 and 65 of app/cpy/CVTRA07Y.cpy. The
@@ -280,29 +252,24 @@ class ReportBandLayoutsTest {
     //       the two populations are counted apart.
     private static final int CONTENT_BEARING_FILLER_COUNT = 15;
 
-    // WHAT: how many FILLER items of the 22 are declared VALUE SPACES.
     // WHY : Assumptions: lines 17, 19, 23, 27, 29, 31 and 44 of app/cpy/CVTRA07Y.cpy. These seven are
     //       the only FILLER items whose declared content is blank, and 15 + 7 closing on 22 is what
     //       proves neither population has an item missing from it.
     private static final int BLANK_FILLER_COUNT = 7;
 
-    // WHAT: the three total-label widths, expected independently of the class under test.
     // WHY : Alternatives Considered: 11 at line 51, 13 at line 57 and 11 at line 63 of
     //       app/cpy/CVTRA07Y.cpy. The page and grand widths agreeing at 11 follows from their two
     //       literals happening to be declared the same width, so each is its own constant and one edit
     //       cannot move all three.
     private static final int EXPECTED_PAGE_LABEL_WIDTH = 11;
 
-    // WHAT: the card-break total label width.
     // WHY : Assumptions: 13 at line 57 of app/cpy/CVTRA07Y.cpy, the widest of the three by two bytes,
     //       and those two bytes are exactly what its shorter dot leader gives back.
     private static final int EXPECTED_ACCOUNT_LABEL_WIDTH = 13;
 
-    // WHAT: the grand total label width.
     // WHY : Assumptions: 11 at line 63 of app/cpy/CVTRA07Y.cpy.
     private static final int EXPECTED_GRAND_LABEL_WIDTH = 11;
 
-    // WHAT: the page total dot-leader width.
     // WHY : Alternatives Considered: 86 at line 53 of app/cpy/CVTRA07Y.cpy. This constant and the two
     //       below are declared and asserted SEPARATELY, never as one shared width. A single width would
     //       satisfy an implementation that had unified the three, and the failure that unification
@@ -311,23 +278,19 @@ class ReportBandLayoutsTest {
     //       three.
     private static final int EXPECTED_PAGE_LEADER_WIDTH = 86;
 
-    // WHAT: the card-break total dot-leader width.
     // WHY : Assumptions: 84 at line 59 of app/cpy/CVTRA07Y.cpy, two shorter than its siblings because
     //       its label is two longer. This is the one of the three a simplification would get wrong.
     private static final int EXPECTED_ACCOUNT_LEADER_WIDTH = 84;
 
-    // WHAT: the grand total dot-leader width.
     // WHY : Assumptions: 86 at line 65 of app/cpy/CVTRA07Y.cpy.
     private static final int EXPECTED_GRAND_LEADER_WIDTH = 86;
 
-    // WHAT: the width of the unparenthesised picture at line 44.
     // WHY : Assumptions: line 44 of app/cpy/CVTRA07Y.cpy declares FILLER PIC X with NO repeat count,
     //       which is one byte and not an unspecified width. A tokeniser that requires the X(n) form
     //       skips the item entirely, and that single byte is what closes the headings at offset 97, so
     //       losing it pulls the amount heading one column left of the amounts beneath it.
     private static final int EXPECTED_BARE_PICTURE_WIDTH = 1;
 
-    // WHAT: how many leading spaces the amount heading literal carries.
     // WHY : Alternatives Considered: line 46 of app/cpy/CVTRA07Y.cpy opens the literal with eight spaces
     //       before the word, and AAP Rule T8 carries user-visible strings across character for
     //       character. The count is asserted as a number as well as through the literal, because a
@@ -335,20 +298,17 @@ class ReportBandLayoutsTest {
     //       reports only that two strings differ.
     private static final int EXPECTED_AMOUNT_HEADING_LEADING_SPACES = 8;
 
-    // WHAT: a fifteen-character specimen for the signed-negative detail amount.
     // WHY : Alternatives Considered: line 30 of app/cpy/CVTRA07Y.cpy declares PIC -ZZZ,ZZZ,ZZZ.ZZ, so
     //       the value reaching the band is already rendered and this class only needs something of the
     //       right width to prove placement. Rendering correctness belongs to the formatter's own test,
     //       and duplicating it here would give two tests one subject.
     private static final String DETAIL_AMOUNT_SPECIMEN = "-      1,234.56";
 
-    // WHAT: a fifteen-character specimen for the leading-plus total amount.
     // WHY : Assumptions: lines 54, 60 and 66 of app/cpy/CVTRA07Y.cpy declare PIC +ZZZ,ZZZ,ZZZ.ZZ. One
     //       specimen serves all three total bands because the three masks are declared identically; the
     //       three LEADERS differ, and that is what the leader assertions cover.
     private static final String TOTAL_AMOUNT_SPECIMEN = "+      1,234.56";
 
-    // WHAT: the names the descriptor gives the copybook's 22 FILLER items.
     // WHY : Alternatives Considered: FILLER is the language's keyword for an item with NO name, so a
     //       line-derived suffix is supplied where the copybook supplied nothing to carry across, and AAP
     //       Rule T1 is untouched because no declared name is changed. The names are written out here as
@@ -365,7 +325,6 @@ class ReportBandLayoutsTest {
             "FILLER-L57", "FILLER-L59",
             "FILLER-L63", "FILLER-L65");
 
-    // WHAT: the exact literal each of the fifteen content-bearing FILLER items carries.
     // WHY : Assumptions: a FILLER carrying a VALUE is CONTENT and not padding -- the literal IS the
     //       printed report text. The reference program never restates any of them because line 362 of
     //       app/cbl/CBTRN03C.cbl re-initialises the band and the language's INITIALIZE verb SKIPS
@@ -389,7 +348,6 @@ class ReportBandLayoutsTest {
             Map.entry("FILLER-L63", "Grand Total"),
             Map.entry("FILLER-L65", ".".repeat(EXPECTED_GRAND_LEADER_WIDTH)));
 
-    // WHAT: the seven FILLER items whose declared content is blank.
     // WHY : Alternatives Considered: lines 17, 19, 23, 27, 29, 31 and 44 of app/cpy/CVTRA07Y.cpy declare
     //       VALUE SPACES, so blank is what these seven were DECLARED to hold. They are listed apart from
     //       the fifteen above so that a blank by declaration cannot be confused with a literal that went
@@ -675,7 +633,6 @@ class ReportBandLayoutsTest {
     @ParameterizedTest
     @MethodSource("declaredBands")
     void everyBandDeclaresTheReportRecordLength(BandExpectation expectation) {
-        // WHAT: the declared record length of the band, and the name it is declared under.
         // WHY : Assumptions: 133 is DECLARED, not summed. Line 48 of app/cpy/CVTRA07Y.cpy declares PIC
         //       X(133), line 133 of app/cbl/CBTRN03C.cbl declares WS-BLANK-LINE PIC X(133) VALUE SPACES,
         //       and line 78 of app/jcl/TRANREPT.jcl carries LRECL=133 on the output data set. Three
@@ -701,7 +658,6 @@ class ReportBandLayoutsTest {
     @ParameterizedTest
     @MethodSource("declaredBands")
     void everyBandsOwnCopybookWidthsSumToItsHandCheckedTotal(BandExpectation expectation) {
-        // WHAT: the sum of the band's declared widths with the target-side pad left out.
         // WHY : Alternatives Considered: the pad exists in no copybook, so a sum including it would
         //       equal 133 on every band and could never disagree with the record length. The seven
         //       expected sums -- 115, 114, 114, 133, 112, 112 and 112 -- were added up by hand from
@@ -712,7 +668,6 @@ class ReportBandLayoutsTest {
                         expectation.copybookName(), expectation.firstLine(), expectation.lastLine())
                 .isEqualTo(expectation.nativeWidthSum());
 
-        // WHAT: the pad closes the gap between the band's own widths and the record length.
         // WHY : Assumptions: this is the INVERSE of the statement layouts in StatementBandLayouts, where
         //       every band is natively its declared width and none is padded, and only line 48 of
         //       app/cpy/CVTRA07Y.cpy is natively 133 here. Asserting the pad width as the exact
@@ -738,7 +693,6 @@ class ReportBandLayoutsTest {
     void everyBandTilesItsDeclaredLengthContiguouslyFromOffsetZero(BandExpectation expectation) {
         int cursor = 0;
         for (CopybookLayout.FieldSpec field : expectation.spec().fields()) {
-            // WHAT: each field opens exactly where the previous field's exclusive end left off.
             // WHY : Alternatives Considered: FieldSpec.start() is ZERO-based and FieldSpec.end() is
             //       EXCLUSIVE, so equality between one field's end and the next field's start forbids a
             //       gap and an overlap in one condition. A gap would leave undeclared bytes that no
@@ -750,7 +704,6 @@ class ReportBandLayoutsTest {
             cursor = field.end();
         }
 
-        // WHAT: the tiling closes exactly on the declared record length.
         // WHY : Assumptions: the 133 this closes on is declared at line 48 of app/cpy/CVTRA07Y.cpy, at
         //       line 133 of app/cbl/CBTRN03C.cbl and as LRECL at line 78 of app/jcl/TRANREPT.jcl.
         //       Closing short would leave trailing bytes no value reaches and closing long is not
@@ -775,7 +728,6 @@ class ReportBandLayoutsTest {
     void everyBandDeclaresTheItemCountItsCopybookSectionHolds(BandExpectation expectation) {
         int padFieldCount = expectation.padWidth() == 0 ? 0 : 1;
 
-        // WHAT: the descriptor's field count once the target-side pad is discounted.
         // WHY : Alternatives Considered: the expected counts are 6, 16, 7, 1, 3, 3 and 3, read off
         //       app/cpy/CVTRA07Y.cpy item by item. The pad is discounted by its own width being zero or
         //       not, rather than by searching the field list for its name, so the discount cannot
@@ -785,7 +737,6 @@ class ReportBandLayoutsTest {
                         expectation.copybookName(), expectation.firstLine(), expectation.lastLine())
                 .isEqualTo(expectation.itemCount());
 
-        // WHAT: the separator rule alone carries no pad, and the other six each carry exactly one.
         // WHY : Assumptions: line 48 of app/cpy/CVTRA07Y.cpy is an ELEMENTARY level-01 item carrying its
         //       own PIC X(133), so it is natively the record length and has nothing to pad. Pinning that
         //       asymmetry here means a pad added to it, or dropped from one of the other six, fails.
@@ -806,7 +757,6 @@ class ReportBandLayoutsTest {
     @ParameterizedTest
     @MethodSource("declaredBands")
     void everyBandModelsTheFillerItemsItsCopybookSectionDeclares(BandExpectation expectation) {
-        // WHAT: how many of the band's fields are modelled FILLER items.
         // WHY : Assumptions: the expected distribution is 1, 8, 7, 0, 2, 2 and 2 across lines 4 to 66 of
         //       app/cpy/CVTRA07Y.cpy. The separator rule's zero is load-bearing: its hyphen rule is
         //       invariant content just as the dot leaders are, so counting it as a FILLER is tempting
@@ -832,7 +782,6 @@ class ReportBandLayoutsTest {
         List<CopybookLayout.FieldSpec> fields = expectation.spec().fields();
         CopybookLayout.FieldSpec probe = CopybookLayout.text("MUTATION-PROBE", 0, 1);
 
-        // WHAT: an append onto the published field list is refused.
         // WHY : Alternatives Considered: immutability is asserted by ATTEMPTING the mutation rather than
         //       by testing the runtime type of the list. CopybookLayout.RecordSpec takes a List.copyOf
         //       of the field list in its constructor, so the guarantee is real; a type check would
@@ -860,7 +809,6 @@ class ReportBandLayoutsTest {
     void everyBandEncodesToExactlyTheDeclaredRecordLength(BandExpectation expectation) {
         String encoded = encodeToText(expectation);
 
-        // WHAT: the encoded record is exactly the declared record length.
         // WHY : Assumptions: every band is encoded from a COMPLETE value map here. These seven are
         //       declared in ReportBandLayouts and are deliberately absent from the CopybookLayout
         //       registry, so the codec rebuilds nothing and demands a value for every declared field
@@ -870,7 +818,6 @@ class ReportBandLayoutsTest {
                 .as("band %s encoded from a complete value map", expectation.copybookName())
                 .hasSize(DECLARED_RECORD_LENGTH);
 
-        // WHAT: no byte of the encoded record is left at zero.
         // WHY : Assumptions: FixedWidthCodec allocates the record as a fresh array, whose bytes start at
         //       0x00, and 0x00 is NOT the 0x20 of a blank -- the reference reader distinguishes a low
         //       value from a space even though both look empty in a Java string. Asserting the absence
@@ -893,7 +840,6 @@ class ReportBandLayoutsTest {
     @MethodSource("declaredBands")
     void everyBandDeclaresNoSensitiveFieldAndNoNormalisedTimestamp(BandExpectation expectation) {
         for (CopybookLayout.FieldSpec field : expectation.spec().fields()) {
-            // WHAT: neither the sensitivity flag nor the timestamp-normalisation flag is set.
             // WHY : Alternatives Considered: app/cpy/CVTRA07Y.cpy declares a transaction identifier, an
             //       account identifier, two codes, two descriptions, a source and an amount, and no card
             //       number and no timestamp anywhere. Marking a field sensitive would not mask it in any
@@ -920,7 +866,6 @@ class ReportBandLayoutsTest {
             modelled.addAll(fillerNamesOf(band));
         }
 
-        // WHAT: the corpus holds exactly twenty-two FILLER items and no name among them repeats.
         // WHY : Assumptions: the codec resolves values BY FIELD NAME and a map holds one value per key,
         //       so two FILLER items sharing a name inside one band would leave one of them unreachable
         //       and the band uncomposable. Asserting distinctness across the corpus is what makes the
@@ -931,7 +876,6 @@ class ReportBandLayoutsTest {
                 .doesNotHaveDuplicates()
                 .containsExactlyInAnyOrderElementsOf(CORPUS_FILLER_NAMES);
 
-        // WHAT: the two FILLER populations partition the twenty-two names exactly.
         // WHY : Alternatives Considered: fifteen carry a literal and seven are declared VALUE SPACES.
         //       The partition is asserted over the NAMES rather than by adding 15 and 7, because a sum
         //       of two constants is folded at compile time and can never fail; only comparing the united
@@ -946,7 +890,6 @@ class ReportBandLayoutsTest {
                 .doesNotHaveDuplicates()
                 .containsExactlyInAnyOrderElementsOf(CORPUS_FILLER_NAMES);
 
-        // WHAT: every one of the twenty-two is seeded by the band template that owns it.
         // WHY : Assumptions: a FILLER modelled in a descriptor but absent from its template is not
         //       merely undocumented, it is unencodable -- FixedWidthCodec.encodeRecord demands a value
         //       for every declared field of a layout the CopybookLayout registry does not hold.
@@ -968,7 +911,6 @@ class ReportBandLayoutsTest {
         Map<String, Object> seeded = allSeededValues();
 
         for (Map.Entry<String, String> expected : CONTENT_BEARING_FILLER_LITERALS.entrySet()) {
-            // WHAT: the seeded value equals the copybook literal character for character.
             // WHY : Assumptions: line 362 of app/cbl/CBTRN03C.cbl opens the detail paragraph with
             //       INITIALIZE, and the language's INITIALIZE verb SKIPS FILLER, so in the reference
             //       these literals survive untouched in a record area that persists and never need
@@ -994,7 +936,6 @@ class ReportBandLayoutsTest {
         Map<String, Object> seeded = allSeededValues();
 
         for (String blankFiller : BLANK_FILLER_NAMES) {
-            // WHAT: the item is present in its template and its seeded content is blank.
             // WHY : Alternatives Considered: lines 17, 19, 23, 27, 29, 31 and 44 of app/cpy/CVTRA07Y.cpy
             //       declare VALUE SPACES, so blank is the declared content. Presence is asserted apart
             //       from blankness because the two failures differ: an ABSENT key makes the band
@@ -1020,7 +961,6 @@ class ReportBandLayoutsTest {
         CopybookLayout.FieldSpec bareItem =
                 ReportBandLayouts.TRANSACTION_HEADER_1.field("FILLER-L44");
 
-        // WHAT: the item declared with a bare picture is one byte wide.
         // WHY : Assumptions: a tokeniser that requires the X(n) form skips line 44 of
         //       app/cpy/CVTRA07Y.cpy entirely, and the failure is silent rather than loud -- the band
         //       still sums to something, so only the width sum and this assertion catch it.
@@ -1028,7 +968,6 @@ class ReportBandLayoutsTest {
                 .as("app/cpy/CVTRA07Y.cpy line 44 declares FILLER PIC X with no repeat count")
                 .isEqualTo(EXPECTED_BARE_PICTURE_WIDTH);
 
-        // WHAT: this one byte closes the preceding headings exactly at the amount column.
         // WHY : Assumptions: 17 + 12 + 19 + 35 + 14 is 97, so this byte occupies zero-based offset 97
         //       and the amount heading opens at 98. Dropping it would pull the amount heading one column
         //       left of the amounts beneath it, which is the concrete consequence of treating it as
@@ -1050,7 +989,6 @@ class ReportBandLayoutsTest {
         CopybookLayout.RecordSpec detail = ReportBandLayouts.TRANSACTION_DETAIL_REPORT;
         Map<String, Object> seeded = ReportBandLayouts.detailTemplate();
 
-        // WHAT: the joiner after the type code is one byte of hyphen content at offset 31.
         // WHY : Assumptions: line 20 declares TRAN-REPORT-TYPE-CD PIC X(02) ending at zero-based 31, so
         //       line 21's joiner sits immediately after it and immediately before the description at 32.
         //       Treating it as padding and blanking it would print a code and a description separated by
@@ -1059,7 +997,6 @@ class ReportBandLayoutsTest {
         assertThat(detail.field("FILLER-L21").start()).isEqualTo(31);
         assertThat(seeded.get("FILLER-L21")).isEqualTo("-");
 
-        // WHAT: the joiner after the category code is one byte of hyphen content at offset 52.
         // WHY : Alternatives Considered: line 24 declares TRAN-REPORT-CAT-CD PIC 9(04) ending at
         //       zero-based 52, so line 25's joiner binds the category code to its description exactly as
         //       line 21 binds the type code. Both are asserted because a single shared assertion would
@@ -1078,7 +1015,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theSeparatorRuleIsOneHundredThirtyThreeAsciiHyphenMinusBytes() {
-        // WHAT: the rule is exactly the record length and every character is the hyphen-minus.
         // WHY : Assumptions: the character is U+002D HYPHEN-MINUS specifically, not a dash of any other
         //       kind. A non-ASCII dash would still read as a rule on screen and would still be 133
         //       characters, but it is not a single byte in the target character set, so the encode would
@@ -1090,7 +1026,6 @@ class ReportBandLayoutsTest {
         assertThat(distinctCharacterCodesOf(ReportBandLayouts.SEPARATOR_RULE))
                 .containsExactly('-');
 
-        // WHAT: the band declares one field spanning all 133 bytes and it is named for the band.
         // WHY : Alternatives Considered: line 48 of app/cpy/CVTRA07Y.cpy declares an elementary level-01
         //       item, which has no subordinates, so the faithful reading is one field of 133 bytes whose
         //       name IS the band's name. Modelling it as a group with one child would invent a level the
@@ -1110,7 +1045,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void thePageTotalDotLeaderIsDeclaredEightySixBytesWide() {
-        // WHAT: the page total leader is 86 bytes and sits immediately after an 11-byte label.
         // WHY : Assumptions: this is asserted apart from its two siblings on purpose. A single assertion
         //       over one shared width would be satisfied by an implementation that had unified the three
         //       leaders, and that unification is the single most likely simplification anyone makes here
@@ -1132,7 +1066,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theCardBreakTotalDotLeaderIsDeclaredEightyFourBytesWide() {
-        // WHAT: the card-break total leader is 84 bytes, two shorter than its two siblings.
         // WHY : Assumptions: it is shorter by exactly the two bytes its longer label consumes -- the
         //       label is 13 where the other two are 11. Unifying the three leaders at 86 would put this
         //       band's label and leader at 13 + 86 = 99, moving this one amount two columns right of the
@@ -1155,7 +1088,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theGrandTotalDotLeaderIsDeclaredEightySixBytesWide() {
-        // WHAT: the grand total leader is 86 bytes and sits immediately after an 11-byte label.
         // WHY : Alternatives Considered: its agreement with the page total leader is a consequence of
         //       two label literals happening to be declared 11 bytes wide. Deriving this width from the
         //       page total's would encode that coincidence as a rule, and one edit to either label would
@@ -1177,7 +1109,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theThreeLeaderWidthsCompensateTheirLabelsOntoOneAmountColumn() {
-        // WHAT: each label-and-leader pair the subject PUBLISHES reaches the same offset of 97.
         // WHY : Alternatives Considered: the three sums are read from the published constants and not
         //       from this class's own expectations. Summing the expectations would be summing two
         //       compile-time literals, which the compiler folds into a constant that can never disagree,
@@ -1198,7 +1129,6 @@ class ReportBandLayoutsTest {
                 .as("app/cpy/CVTRA07Y.cpy lines 63 and 65 declare 11 and 86")
                 .isEqualTo(AMOUNT_ZERO_BASED_START);
 
-        // WHAT: the expectations this class carries agree with the copybook arithmetic themselves.
         // WHY : Assumptions: 11 + 86, 13 + 84 and 11 + 86 all reach 97 as read off lines 51 to 65 of
         //       app/cpy/CVTRA07Y.cpy. These three are folded constants and cannot fail, so they are
         //       stated as the arithmetic RECORD that the assertions above are checked against rather
@@ -1210,7 +1140,6 @@ class ReportBandLayoutsTest {
         assertThat(EXPECTED_GRAND_LABEL_WIDTH + EXPECTED_GRAND_LEADER_WIDTH)
                 .isEqualTo(AMOUNT_ZERO_BASED_START);
 
-        // WHAT: the label widths themselves are the declared 11, 13 and 11.
         // WHY : Assumptions: the compensation is only meaningful if the labels are right too. A pair of
         //       12 and 85 would also sum to 97 and would place the amount correctly while printing the
         //       label and the leader at the wrong widths, which a sum-only assertion cannot see.
@@ -1231,7 +1160,6 @@ class ReportBandLayoutsTest {
     void everyDotLeaderIsBuiltFromAsciiFullStops() {
         Map<String, Object> seeded = allSeededValues();
 
-        // WHAT: each leader is its declared width of full stops and holds no other character.
         // WHY : Alternatives Considered: the leaders are the widest invariant literals in the copybook
         //       at 86, 84 and 86 bytes, which makes them the likeliest place for a single stray
         //       character to hide. A width assertion alone would not see one substituted character, and
@@ -1262,7 +1190,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theThreeTotalLabelsAreCarriedByteExactWithinTheirDeclaredWidths() {
-        // WHAT: the page total label and the one byte its 11-wide field leaves spare.
         // WHY : Alternatives Considered: 'Page Total' is ten characters in a field of eleven, so exactly
         //       one trailing blank is field width rather than literal. Asserting the literal AND its
         //       declared width separately is what distinguishes a literal that lost a character from a
@@ -1272,7 +1199,6 @@ class ReportBandLayoutsTest {
                 .isEqualTo("Page Total")
                 .hasSize(EXPECTED_PAGE_LABEL_WIDTH - 1);
 
-        // WHAT: the card-break total label exactly fills its 13-wide field.
         // WHY : Assumptions: 'Account Total' is thirteen characters in a field of thirteen, an EXACT fit
         //       with no spare byte, and that exact fit is why this band's label is two bytes wider than
         //       its siblings' and its leader two bytes shorter. The label wording is carried across
@@ -1284,7 +1210,6 @@ class ReportBandLayoutsTest {
                 .isEqualTo("Account Total")
                 .hasSize(EXPECTED_ACCOUNT_LABEL_WIDTH);
 
-        // WHAT: the grand total label exactly fills its 11-wide field.
         // WHY : Assumptions: 'Grand Total' is eleven characters in a field of eleven, another exact fit.
         //       It shares a width with the page total label while being one character longer, so a
         //       reader cannot infer either width from either literal.
@@ -1302,7 +1227,6 @@ class ReportBandLayoutsTest {
      */
     @Test
     void theTitleBandLiteralsAreCarriedByteExact() {
-        // WHAT: the short and long report names.
         // WHY : Assumptions: lines 5 to 8 of app/cpy/CVTRA07Y.cpy declare these in fields of 38 and 41
         //       bytes, so both are far shorter than their fields and the trailing blanks are field width
         //       rather than literal. AAP Rule T8 carries user-visible strings across character for
@@ -1312,7 +1236,6 @@ class ReportBandLayoutsTest {
         assertThat(ReportBandLayouts.REPORT_LONG_NAME)
                 .as("app/cpy/CVTRA07Y.cpy lines 7 and 8").isEqualTo("Daily Transaction Report");
 
-        // WHAT: the date-range label keeps the trailing space that exactly fills its 12-byte field.
         // WHY : Assumptions: 'Date Range: ' is twelve characters in a PIC X(12) field, so the trailing
         //       space is the twelfth character of the literal and not padding the codec supplies.
         //       Trimming it would close up the gap before the start date printed immediately after it.
@@ -1322,7 +1245,6 @@ class ReportBandLayoutsTest {
                 .hasSize(12)
                 .endsWith(" ");
 
-        // WHAT: the date joiner keeps BOTH its leading and its trailing space.
         // WHY : Assumptions: line 12 of app/cpy/CVTRA07Y.cpy declares PIC X(04) VALUE ' to ', so all
         //       four characters are literal and the field is exactly filled. Losing either space runs
         //       the joiner into one of the two dates it separates, and a trim of one end is the likelier
@@ -1347,7 +1269,6 @@ class ReportBandLayoutsTest {
     void theAmountHeadingKeepsItsEightLeadingSpaces() {
         String heading = ReportBandLayouts.COLUMN_LABEL_AMOUNT;
 
-        // WHAT: the literal opens with eight spaces and is fourteen characters in a 16-byte field.
         // WHY : Assumptions: line 46 of app/cpy/CVTRA07Y.cpy carries the eight spaces inside the PIC
         //       X(16) declared on line 45. The COUNT is asserted as a number as well as through the
         //       literal, because a whitespace run is the one thing an editor silently reflows and a
@@ -1361,7 +1282,6 @@ class ReportBandLayoutsTest {
         assertThat(heading.length() - heading.stripLeading().length())
                 .isEqualTo(EXPECTED_AMOUNT_HEADING_LEADING_SPACES);
 
-        // WHAT: those eight spaces close the visible word on the amount column's last column.
         // WHY : Assumptions: the heading field opens at zero-based 98, so eight spaces put the word's
         //       first byte at 106 and its exclusive end at 112, which is one-based columns 107 to 112 --
         //       closing on the same column 112 the amount value closes on. That right-alignment is what
@@ -1384,7 +1304,6 @@ class ReportBandLayoutsTest {
     void theFiveRemainingColumnHeadingsAreCarriedByteExactWithinTheirDeclaredWidths() {
         CopybookLayout.RecordSpec headings = ReportBandLayouts.TRANSACTION_HEADER_1;
 
-        // WHAT: each heading literal and the width of the field that carries it.
         // WHY : Alternatives Considered: a heading field is sized to the COLUMN beneath it, not to its
         //       own text, so 'Tran Category' occupies 35 bytes because the category code, its joiner and
         //       its 29-byte description sit under it. Inferring any of these widths from its literal
@@ -1405,7 +1324,6 @@ class ReportBandLayoutsTest {
                 .as("app/cpy/CVTRA07Y.cpy lines 42 and 43").isEqualTo("Tran Source");
         assertThat(headings.field("FILLER-L42").length()).isEqualTo(14);
 
-        // WHAT: the amount heading field is 16 bytes wide.
         // WHY : Assumptions: lines 45 and 46 declare PIC X(16) around a 14-character literal, leaving
         //       two trailing blanks. The width is asserted here beside its four siblings so that all six
         //       heading widths -- 17, 12, 19, 35, 14 and 16 -- can be read against one another, and the
@@ -1427,7 +1345,6 @@ class ReportBandLayoutsTest {
         CopybookLayout.FieldSpec categoryDescription =
                 detail.field(ReportBandLayouts.FIELD_TRAN_REPORT_CAT_DESC);
 
-        // WHAT: the type description occupies one-based columns 33 to 47.
         // WHY : Assumptions: the conversion between the two numbering systems runs one way only,
         //       zeroBased = oneBased - 1, so a start of 32 IS column 33 and an EXCLUSIVE end of 47 IS
         //       the last occupied column 47. Applied backwards the whole band shifts one byte, and a
@@ -1439,7 +1356,6 @@ class ReportBandLayoutsTest {
         assertThat(typeDescription.length()).isEqualTo(15);
         assertThat(typeDescription.end()).isEqualTo(47);
 
-        // WHAT: the category description occupies one-based columns 54 to 82.
         // WHY : Assumptions: line 26 declares the widest description in the band at 29 bytes, opening
         //       immediately after the second hyphen joiner at zero-based 52. Its end at an exclusive 82
         //       is where a longer description is truncated, which is why the span is pinned rather than
@@ -1471,7 +1387,6 @@ class ReportBandLayoutsTest {
                         .field(ReportBandLayouts.FIELD_REPT_GRAND_TOTAL));
 
         for (CopybookLayout.FieldSpec amount : amounts) {
-            // WHAT: every amount item is fifteen bytes at one-based columns 98 to 112.
             // WHY : Assumptions: the fifteen is counted from the pictures at lines 30, 54, 60 and 66 of
             //       app/cpy/CVTRA07Y.cpy -- one sign, nine digits, two grouping separators, one decimal
             //       point and two fractional digits -- rather than taken from a formatter's width
@@ -1483,7 +1398,6 @@ class ReportBandLayoutsTest {
             assertThat(amount.start()).isEqualTo(AMOUNT_ONE_BASED_FIRST_COLUMN - 1);
             assertThat(amount.end()).isEqualTo(AMOUNT_ONE_BASED_LAST_COLUMN);
 
-            // WHAT: the receiving field is a plain character field.
             // WHY : Alternatives Considered: an edit mask is NOT one of the five regimes
             //       CopybookLayout.Kind offers, and formatting happens BEFORE placement. Declaring an
             //       amount under a numeric regime would re-justify and re-fill an already rendered
@@ -1505,7 +1419,6 @@ class ReportBandLayoutsTest {
         CopybookLayout.FieldSpec accountId = ReportBandLayouts.TRANSACTION_DETAIL_REPORT
                 .field(ReportBandLayouts.FIELD_TRAN_REPORT_ACCOUNT_ID);
 
-        // WHAT: the account identifier is a character field of eleven bytes.
         // WHY : Alternatives Considered: line 18 of app/cpy/CVTRA07Y.cpy declares PIC X(11) where the
         //       category code four items later declares PIC 9(04), and that asymmetry is in the source
         //       and is load-bearing. A character field is placed left-justified and blank-filled, so a
@@ -1532,7 +1445,6 @@ class ReportBandLayoutsTest {
         CopybookLayout.FieldSpec categoryCode = ReportBandLayouts.TRANSACTION_DETAIL_REPORT
                 .field(ReportBandLayouts.FIELD_TRAN_REPORT_CAT_CD);
 
-        // WHAT: the category code is the one numeric item of the band, at four digit positions.
         // WHY : Alternatives Considered: the unsigned display regime right-justifies and ZERO-fills,
         //       which is what PIC 9(04) means. Giving this field a zero-suppressing regime like the
         //       amounts' would blank the leading zeros and print a 1 followed by three blanks, and the
@@ -1548,8 +1460,6 @@ class ReportBandLayoutsTest {
                 DETAIL_NATIVE_WIDTH, DETAIL_ITEM_COUNT, DETAIL_FILLER_COUNT,
                 DECLARED_RECORD_LENGTH - DETAIL_NATIVE_WIDTH, completeDetail()));
 
-        // WHAT: category one renders as four digits with its leading zeros intact, joined to its
-        //       description by the hyphen at line 25.
         // WHY : Alternatives Considered: the regime is proven through the ENCODED BYTES rather than only
         //       through the declared kind, because a kind is a label and only the encode shows what the
         //       label does. Zero-based 48 to 52 is one-based columns 49 to 52, and the joiner byte
@@ -1559,7 +1469,6 @@ class ReportBandLayoutsTest {
                 .as("app/cpy/CVTRA07Y.cpy lines 24 and 25 render a zero-filled code and its joiner")
                 .isEqualTo("0001-");
 
-        // WHAT: the type code and its own joiner render the same way one column pair earlier.
         // WHY : Assumptions: line 20 declares PIC X(02) and line 21 its joiner, so zero-based 29 to 32
         //       is one-based columns 30 to 32. Asserting both code-and-joiner pairs in encoded bytes is
         //       what proves the two hyphens at lines 21 and 25 are emitted as data rather than absorbed
@@ -1609,7 +1518,6 @@ class ReportBandLayoutsTest {
             int labelWidth, int leaderWidth) {
         String encoded = encodeToText(expectation);
 
-        // WHAT: the label opens the record and its field is blank-filled to its declared width.
         // WHY : Alternatives Considered: a character field is placed left-justified and blank-filled, so
         //       the label occupies the first labelWidth bytes with any spare byte blank. Comparing the
         //       whole field rather than only the literal is what catches a label that was
@@ -1618,7 +1526,6 @@ class ReportBandLayoutsTest {
                 .as("band %s label field", expectation.copybookName())
                 .isEqualTo(label + " ".repeat(labelWidth - label.length()));
 
-        // WHAT: the dot leader fills every byte between the label and the amount column.
         // WHY : Assumptions: this is the compensation proven in bytes. The leader runs from labelWidth
         //       to 97 whatever labelWidth is, so 11 + 86 and 13 + 84 both close exactly on 97. A unified
         //       86-byte leader would overrun that boundary on the card-break band and this substring
@@ -1628,7 +1535,6 @@ class ReportBandLayoutsTest {
                 .isEqualTo(".".repeat(leaderWidth))
                 .hasSize(leaderWidth);
 
-        // WHAT: the amount occupies one-based columns 98 to 112 in every one of the three bands.
         // WHY : Assumptions: this single span holding for all three is the whole reason the leaders are
         //       86, 84 and 86 rather than one shared width, and asserting it in encoded bytes is what
         //       makes the claim checkable rather than arithmetic a reader has to redo.
@@ -1636,7 +1542,6 @@ class ReportBandLayoutsTest {
                 .as("band %s amount column", expectation.copybookName())
                 .isEqualTo(TOTAL_AMOUNT_SPECIMEN);
 
-        // WHAT: the trailing pad past the amount column is blank, not zero.
         // WHY : Assumptions: 133 minus 112 is 21 bytes of pad on each total band, and the pad exists
         //       only because the descriptor's geometry check is fail-closed on an exact sum. Asserting
         //       it as blanks proves the codec wrote it rather than leaving the fresh array's zero bytes,
@@ -1656,7 +1561,6 @@ class ReportBandLayoutsTest {
     void allBandsPublishesTheSevenDescriptorsInCopybookOrderAndRejectsMutation() {
         List<CopybookLayout.RecordSpec> bands = ReportBandLayouts.allBands();
 
-        // WHAT: exactly seven bands, in the order app/cpy/CVTRA07Y.cpy declares them.
         // WHY : Assumptions: app/cpy/CVTRA07Y.cpy declares SEVEN level-01 groups between its lines 4 and
         //       66, and a reader or a parser that stopped at the first one would silently lose six.
         //       Pinning the count and the order here is what makes that loss a failure instead of a
@@ -1673,7 +1577,6 @@ class ReportBandLayoutsTest {
                         ReportBandLayouts.REPORT_ACCOUNT_TOTALS,
                         ReportBandLayouts.REPORT_GRAND_TOTALS);
 
-        // WHAT: the published collection refuses mutation.
         // WHY : Assumptions: allBands() is static state read by every request that emits a report and is
         //       the source the eight parameterised sweeps above enumerate, so a caller able to remove
         //       one of the seven entries could change what a later emission covers. The mutation is
@@ -1682,7 +1585,6 @@ class ReportBandLayoutsTest {
         assertThatThrownBy(() -> bands.remove(0))
                 .isInstanceOf(UnsupportedOperationException.class);
 
-        // WHAT: the seven expected native width sums, read off in the same order.
         // WHY : Alternatives Considered: restating the seven sums as one ordered comparison catches a
         //       band swapped with another, which every per-band assertion above would miss because each
         //       of those is handed its own expectation alongside its own descriptor.

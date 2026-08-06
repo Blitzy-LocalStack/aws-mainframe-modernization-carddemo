@@ -853,36 +853,16 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   depends_on = [aws_s3_bucket_versioning.datasets]
 }
 
-resource "aws_lambda_permission" "dataset_generation_retention" {
-  statement_id   = "AllowDatasetGenerationRetentionFromS3"
-  action         = "lambda:InvokeFunction"
-  function_name  = var.object_created_lambda_arn
-  principal      = "s3.amazonaws.com"
-  source_arn     = aws_s3_bucket.datasets.arn
-  source_account = data.aws_caller_identity.current.account_id
-
-  # WHY : Assumptions: both SourceArn and SourceAccount are required. The bucket
-  #       ARN binds invocation to this bucket, while the account condition blocks
-  #       a confused-deputy request from a same-named bucket in another account.
-}
-
-resource "aws_s3_bucket_notification" "datasets" {
-  bucket = aws_s3_bucket.datasets.id
-
-  lambda_function {
-    lambda_function_arn = var.object_created_lambda_arn
-    events              = ["s3:ObjectCreated:*"]
-  }
-
-  # WHY : Refactoring Rationale: generation writers create distinct
-  #       `<family>/dt=.../gen=.../` keys, so S3's noncurrent-version count
-  #       cannot see generation six. Object-created notification covers nightly,
-  #       retry and ad-hoc writers through one retention path.
-  # WHY : Assumptions: the permission must exist before S3 validates and stores
-  #       the notification configuration; otherwise first apply fails even
-  #       though the function and bucket both exist.
-  depends_on = [aws_lambda_permission.dataset_generation_retention]
-}
+# WHY : Refactoring Rationale: an aws_lambda_permission and an
+#       aws_s3_bucket_notification stood here, invoking a caller-supplied function
+#       on every completed object write so it could prune all but the newest five
+#       generation prefixes. Both were removed with the `object_created_lambda_arn`
+#       input that fed them; variables.tf records the reasoning at the point the
+#       input used to be declared. The short form: an
+#       aws_s3_bucket_notification is a WHOLE-BUCKET resource, so claiming it here
+#       took the bucket's only notification slot away from every consumer of this
+#       module, for an event integration that belongs to whichever root owns the
+#       function.
 
 resource "aws_s3_bucket_logging" "datasets" {
   # Trade-offs: conditional rather than mandatory, so the module stays
@@ -971,19 +951,27 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
   bucket = aws_s3_bucket.audit.id
 
   rule {
-    id     = "expire-after-compliance-retention"
+    # WHY : Assumptions: the identifier names what the rule now does -- abandoning
+    #       incomplete multipart uploads -- rather than the compliance expiration it
+    #       used to carry. A stale identifier on a lifecycle rule is worse than an
+    #       imprecise one, because an operator reads the identifier in the console
+    #       and would infer an expiration horizon that is no longer configured.
+    id     = "abort-incomplete-multipart-uploads"
     status = "Enabled"
 
     filter {}
 
-    expiration {
-      days = var.audit_log_retention_days + 1
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = var.audit_log_retention_days + 1
-    }
-
+    # WHY : Refactoring Rationale: an `expiration` and a
+    #       `noncurrent_version_expiration` stood here, both computed from an
+    #       `audit_log_retention_days` input that defaulted to seven years. Both
+    #       were removed with that input; variables.tf records the reasoning where
+    #       the input used to be declared. What remains is the multipart cleanup
+    #       below, which is storage hygiene rather than a retention policy, so it
+    #       needs no compliance horizon to justify it.
+    #       Assumptions: a lifecycle rule needs at least one action, and
+    #       abort_incomplete_multipart_upload is one -- so removing the two
+    #       expirations leaves a rule that is still valid rather than an empty one
+    #       the API would reject.
     abort_incomplete_multipart_upload {
       days_after_initiation = var.abort_incomplete_multipart_upload_days
     }

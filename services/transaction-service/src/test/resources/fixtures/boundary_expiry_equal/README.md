@@ -95,6 +95,14 @@ Folder section 7 mandates the three items below.
    taken from this scenario's own `dailytran.txt`, for the reason given in item 3.
    `tcatbal.txt` is byte-identical to its `happy_path` counterpart, whose provenance
    is recorded in [`../happy_path/README.md`](../happy_path/README.md) section 4.2.
+   That counterpart's balance span is the authored `0000001000{`, which is **+100.00**
+   and not the seed's `0000000000{` -- so this file is template-derived rather than
+   seed-derived in that one field, and the reason for the authored value belongs to
+   the template's own section 4.2 rather than being restated here. Assumptions: the
+   balance is immaterial to what this scenario asserts, because the expiration gate
+   reads the account record and never this row; it is held identical to the template
+   so that the pair differs only in the date field that moves, which is what folder
+   section 1.1 requires.
 2. **No real person and no real account.** Every account number, card number,
    name and address byte here comes from the published CardDemo demonstration
    seed. They are demonstration values, not credentials, and they identify no real

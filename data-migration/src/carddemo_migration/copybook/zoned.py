@@ -161,19 +161,24 @@ not a convenience. The parity oracle compares batch output byte for byte after t
 normalisation, so a re-encoded record differing in one character is a failed comparison
 rather than a cosmetic difference.
 
-There is exactly one exception, and it is a property of the target types rather than a
-defect on either side. COBOL distinguishes the opening brace, a positive zero, from the
-closing brace, a negative zero, as two distinct bytes, so the baseline has a negative zero.
-The reference implementation preserves it: ``tests/helpers/record_codec.py`` documents at
-its line 241 that a closing-brace zero yields a signed zero, and its line 395 reads the
-sign back out of it. The Java parity anchor cannot represent it, because ``BigDecimal`` has
-no negative zero, so it normalises. This module follows the Java rather than the reference,
-because a value decoded here and the same span decoded there must be the same value: a
-closing-brace zero decodes to an unsigned zero, indistinguishable from an opening-brace
-zero; encoding any zero always emits the opening brace; and a closing-brace zero therefore
+There is exactly one exception, and it is a deliberate cross-language parity policy rather
+than a limitation of this language or a defect on either side. COBOL distinguishes the
+opening brace, a positive zero, from the closing brace, a negative zero, as two distinct
+bytes, so the baseline has a negative zero. The reference implementation preserves it:
+``tests/helpers/record_codec.py`` documents at its line 241 that a closing-brace zero
+yields a signed zero, and its line 395 reads the sign back out of it. Python could preserve
+it too -- ``Decimal`` represents a signed zero and ``Decimal("-0").is_signed()`` is true --
+so nothing here forces the normalisation. What forces it is the Java parity anchor:
+``BigDecimal`` has no signed zero at all, so a value it decodes from a closing-brace span
+is indistinguishable from one decoded from an opening-brace span. This module normalises to
+match that anchor, because a value decoded here and the same span decoded there have to be
+the same value; preserving the sign here would make the two implementations disagree on one
+input while agreeing on every other, which is the hardest kind of disagreement to notice.
+The consequence is stated plainly: a closing-brace zero decodes to an unsigned zero,
+encoding any zero always emits the opening brace, and a closing-brace zero therefore
 normalises to an opening brace across a round trip. That is the one and only span for which
-the law above does not hold. The baseline stores the distinction, this module does not
-represent it, and the divergence is documented here, in the Java charter and in the
+the law above does not hold. The baseline stores the distinction, this module deliberately
+does not represent it, and the divergence is documented here, in the Java charter and in the
 migration's traceability matrix.
 
 Diagnostics and sensitive fields
@@ -344,12 +349,13 @@ _PAD_DIGIT: Final[str] = "0"
 #   field needs, since the widest declaration in the corpus is twelve digit positions.
 _QUANTIZE_PRECISION_MARGIN: Final[int] = 8
 
-# Assumptions: only these two of the five storage regimes are display regimes, so
+# Assumptions: only these two of the six storage regimes are display regimes, so
 #   only these two can reach this module. Packed and binary fields are a different byte
 #   layout altogether and belong to ``packed``; a character field has no numeric reading at
-#   all. Naming the admissible set once means the field-oriented entry points reject a
-#   mis-routed field with one message instead of decoding its bytes as digits and returning
-#   a number that looks like an amount.
+#   all; and an opaque area holds several regimes at once, so it has none either. Naming the
+#   admissible set once means the field-oriented entry points reject a mis-routed field with
+#   one message instead of decoding its bytes as digits and returning a number that looks
+#   like an amount.
 _DISPLAY_KINDS: Final[frozenset[Kind]] = frozenset({Kind.ZONED, Kind.UINT})
 
 
@@ -1067,9 +1073,13 @@ def decode_zoned_field(record: str, field: FieldSpec) -> Decimal:
     span = text[field.start : field.end]
 
     # Assumptions: a whole record may contain sign bytes, packed nibbles, padding
-    #   low values, and ordinary text. Passing only this fixed-width span prevents a
-    #   character decoder from replacing one non-text byte while preserving record
-    #   length, a failure mode that leaves every later offset apparently valid.
+    #   low values, and ordinary text, so it is never handed to a text decoder. The
+    #   rule is a prohibition rather than a prediction, because what such a decode
+    #   does is charset-dependent: a single-byte codec maps all 256 values and
+    #   mistranslates in silence with no replacement at all, while a multi-byte codec
+    #   emits replacements whose count need not equal the bytes consumed and so moves
+    #   every later offset. Passing only this fixed-width span keeps both outcomes out
+    #   of reach instead of relying on either one being the benign case.
     return decode_zoned(span, *geometry, field=field)
 
 

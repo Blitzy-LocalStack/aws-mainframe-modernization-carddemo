@@ -399,13 +399,31 @@ paths:
           #   are separated from the 401 below: a caller can correct a 400 from
           #   the response alone, whereas a 401 tells it only that the pair was
           #   refused.
+          # Assumptions: the AGGREGATE message is the EARLIEST failing field's,
+          #   not an aggregate sentence and not whichever violation the validation
+          #   provider happened to report first. The baseline's two presence checks
+          #   are one EVALUATE TRUE at app/cbl/COSGN00C.cbl lines 117 to 130 whose
+          #   first matching branch sends the screen and stops, so a caller
+          #   submitting both fields blank sees the identifier's message and never
+          #   the credential's -- which is observable. SignOnRequest declares that
+          #   order to the shared error advice, which sorts the entries into it and
+          #   latches the first entry's own message as the top-level message.
+          # Trade-offs: the array still carries EVERY offending field even though
+          #   the baseline displays only one message, which is a deliberate
+          #   addition rather than a divergence in the displayed text. Migration
+          #   rule T7 makes the array the way a rejection is expressed, so a form
+          #   can mark every failing control; the single sentence the baseline
+          #   would have shown is preserved as the aggregate above it.
           description: >-
-            A submitted field was absent or blank. The fieldErrors array carries
-            one entry per offending field, keyed userId or password, and each
+            A submitted field was absent, blank or over-length. The fieldErrors
+            array carries one entry per offending field, keyed userId or password
+            and ordered as the baseline checks them -- userId first. Each presence
             entry's message is the corresponding baseline literal:
             "Please enter User ID ..." (app/cbl/COSGN00C.cbl line 120) or
             "Please enter Password ..." (line 125). Both retain the space before
-            the ellipsis exactly as the program writes it.
+            the ellipsis exactly as the program writes it. The top-level message
+            repeats the FIRST entry's message, reproducing the single sentence the
+            baseline screen displays.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1455,7 +1473,12 @@ components:
         bound, or carrying a character outside the published set, is refused with
         400 rather than being silently replaced, so a caller cannot believe it is
         correlating requests the service is in fact correlating under a different
-        identity.
+        identity. A value whose shape is that of a
+        primary account number -- only digits and the three separators, with
+        thirteen or more digits -- is refused on the same terms, because this
+        identity is echoed and logged. The refusal carries the shared problem body
+        and the response correlation header, the same as any other 400, and it names
+        the rule it applied without ever repeating the value it refused.
       schema:
         $ref: "#/components/schemas/CorrelationId"
 
@@ -1561,14 +1584,36 @@ components:
         #   same order at app/cbl/COSGN00C.cbl lines 118 and 123, so a caller
         #   submitting both fields blank is told about the identifier first, and
         #   that is observable.
+        # Refactoring Rationale: the NON-WHITESPACE PATTERN closes a gap between
+        #   this schema and the Java record that validates against it. An earlier
+        #   revision declared minLength 1 alone, which admits a value of eight
+        #   spaces; the record's @NotBlank constraint refuses exactly that value.
+        #   A caller generating requests from this contract could therefore build a
+        #   schema-VALID body that the service answers 400, which is the one class
+        #   of disagreement a published contract exists to prevent. The baseline
+        #   refuses it too -- app/cbl/COSGN00C.cbl line 118 tests
+        #   "= SPACES OR LOW-VALUES" -- so the schema was the side that was wrong.
+        # Assumptions: the pattern is UNANCHORED, which is the JSON Schema default
+        #   and is deliberate here: "\\S" as a partial match reads "contains at
+        #   least one non-whitespace character", which is precisely what @NotBlank
+        #   asserts. Anchoring it would instead demand the whole value be a single
+        #   non-whitespace character and would refuse every real identifier.
+        # Trade-offs: the rule is now stated twice, once as minLength and once as
+        #   a pattern, and the pattern alone would suffice. Both are kept because
+        #   minLength is the constraint a code generator maps to a length check and
+        #   the pattern is the one it maps to a regular expression, so a generated
+        #   client enforces the rule under either mapping rather than under only
+        #   the one this document happened to choose.
         userId:
           type: string
           minLength: 1
           maxLength: 8
+          pattern: "\\S"
           description: >-
             The signing-on user's identifier, at most eight characters. Must not
             be blank; the baseline treats SPACES and LOW-VALUES alike as absent
-            at app/cbl/COSGN00C.cbl line 118.
+            at app/cbl/COSGN00C.cbl line 118. A value of only whitespace is
+            refused by the pattern, matching that check.
         # Refactoring Rationale: the EIGHT-CHARACTER CEILING IS GONE, and its
         #   removal is the security correction this schema carries. An earlier
         #   revision of this document capped the value at eight characters and
@@ -1602,16 +1647,24 @@ components:
         #   express would collide with it. The cost is one arbitrary-looking
         #   number; what it buys is that this operation cannot be used to relay
         #   unbounded input to a third party.
+        # Assumptions: the same unanchored non-whitespace pattern as the identifier
+        #   above, for the same reason and from the same baseline check -- the
+        #   presence test at app/cbl/COSGN00C.cbl line 123 is the credential's
+        #   branch of the identifier's EVALUATE, testing "= SPACES OR LOW-VALUES"
+        #   identically. No further character rule is added: the pool's own policy
+        #   governs composition, and restating it here would put it in two places.
         password:
           type: string
           format: password
           minLength: 1
           maxLength: 256
+          pattern: "\\S"
           writeOnly: true
           description: >-
             The user's password, forwarded to the Cognito user pool for evaluation
             and never persisted, logged or echoed. Must not be blank, per the
-            presence check at app/cbl/COSGN00C.cbl line 123. Its length and
+            presence check at app/cbl/COSGN00C.cbl line 123; a value of only
+            whitespace is refused by the pattern, matching that check. Its length and
             composition are governed by the pool's own password policy, not by
             this contract: a value that fails that policy is reported by the
             outcome the pool returns rather than by field validation here. The
@@ -2154,15 +2207,25 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from the
         ASCII letters, the digits, the hyphen, the underscore and the full stop. A
-        value the service mints is exactly twenty-four upper-case hexadecimal
-        characters over twelve bytes of entropy; a value a caller supplies need
+        value the service mints is exactly the two-character prefix CD followed by twenty-two upper-case hexadecimal
+        characters over eleven bytes of entropy; a value a caller supplies need
         only fit the bound and the set. The empty string appears only inside an
         error body, and only for a failure raised before any identity had been
-        established.
+        established. The pattern additionally
+        refuses one narrow class the character set alone admits: a value made up
+        only of digits and the three separators, carrying thirteen or more digits.
+        That is the shape of a primary account number, in contiguous form and in
+        every separated form, and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for
+        the request -- so accepting one would copy a card number into both. Ordinary
+        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        and is accepted, and any value containing a letter is accepted whatever its
+        digits. A value the service mints begins CD, which is a non-numeric prefix
+        chosen so that a minted identity can never fall into the refused class.
       examples: ["4F1C0E423A554D219B7E6C0F"]
 
     PageResponse:

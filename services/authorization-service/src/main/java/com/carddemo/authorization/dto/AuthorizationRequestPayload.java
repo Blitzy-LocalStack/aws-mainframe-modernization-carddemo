@@ -125,7 +125,7 @@ import java.lang.annotation.Target;
  * codec emits at thirteen so that a message this system produces is one the reference consumer can
  * still receive. Both are deliberate and neither substitutes for the other.
  *
- * <h2>Declared widths are normative, and one field keeps its reference spelling</h2>
+ * <h2>Declared widths are normative, and one field's reference spelling is corrected</h2>
  *
  * <p>Assumptions: transformation rule T1 of the migration plan makes a copybook field's picture the
  * normative source of its width, its type and its offset, so every width asserted below is read
@@ -134,14 +134,28 @@ import java.lang.annotation.Target;
  * the user-specified rules: T1 is not Rule 1 and Rule 1 is not T1, so a citation blending the two
  * sends a reader to the wrong document entirely.
  *
- * <p>Assumptions: two facts about the ordinal-ten field are true at the same time, and neither
- * survives being reconciled with the other. On the wire the field keeps its reference spelling,
- * {@code PA-RQ-MERCHANT-CATAGORY-CODE} at {@code CCPAURQY.cpy} L28, in its ordinal-ten position,
- * because the wire is a contract with an external producer and a name that producer does not use is
- * not a name the wire can carry. In Java, and in the column that persists it, the spelling is
- * {@code merchantCategoryCode}. The reference spelling also appears in the persisted layout at
- * {@code cpy/CIPAUDTY.cpy} L36, so the target spelling is a uniform target-side choice rather than
- * something applied at one edge only.
+ * <p>Refactoring Rationale: the ordinal-ten field carries ONE target spelling,
+ * {@code merchantCategoryCode}, on every surface this migration owns -- this component, the
+ * persisted column {@code merchant_category_code}, the detail resource and the JSON envelope
+ * schema. An earlier revision of this paragraph held that two spellings were true at once, with the
+ * reference misspelling {@code PA-RQ-MERCHANT-CATAGORY-CODE} at {@code CCPAURQY.cpy} L28 kept "on
+ * the wire" because a name an external producer does not use is not a name the wire can carry. The
+ * premise of that reasoning is sound and its conclusion did not follow: the delimited wire carries
+ * no field NAME whatsoever, as the section below records, so there is nothing on it for a spelling
+ * to be preserved in. What the earlier revision actually produced was a JSON property name in the
+ * published schema that this record never emitted and never accepted, because a plain record binds
+ * by component name and this component has no property alias.
+ *
+ * <p>Assumptions: the correction is fixed by the migration plan rather than chosen here.
+ * Transformation rule T1 makes the copybook normative and permits exactly three renames, and this
+ * is the third of them, beside the account and card expiration-date fields. The reference name is
+ * misspelled consistently -- {@code PA-RQ-MERCHANT-CATAGORY-CODE} at {@code CCPAURQY.cpy} L28, the
+ * bare {@code PA-MERCHANT-CATAGORY-CODE} at {@code cpy/CIPAUDTY.cpy} L36 and the column
+ * {@code MERCHANT_CATAGORY_CODE} at {@code ddl/AUTHFRDS.ddl} L14 -- so it is the reference NAME and
+ * not a slip in one place, which is why the correction is uniform rather than applied at one edge.
+ * The reference spellings survive verbatim where they are load-bearing: {@code REQUEST_FIELD_NAMES}
+ * in {@code com.carddemo.common.codec.CsvAuthCodec} holds them, and that is what every wire-order
+ * assertion and every failure message reads from.
  *
  * <h2>The delimited text is the interface, and an envelope is offered beside it</h2>
  *
@@ -303,9 +317,10 @@ import java.lang.annotation.Target;
  *     and rendered as text rather than as a number wherever it is serialised
  * @param merchantCategoryCode the category an acquirer assigns the merchant, ordinal ten, four
  *     positions from the field {@code CCPAURQY.cpy} L28 spells
- *     {@code PA-RQ-MERCHANT-CATAGORY-CODE}; that reference spelling stays on the wire and in the
- *     persisted layout at {@code cpy/CIPAUDTY.cpy} L36, while this component and its column use the
- *     spelling above
+ *     {@code PA-RQ-MERCHANT-CATAGORY-CODE}. That reference spelling is provenance only: the
+ *     delimited wire transmits no field name, so this component, its column, the detail resource
+ *     and the JSON envelope schema all use the corrected spelling above, and the ordinal is what
+ *     the wire agreement fixes
  * @param acquirerCountryCode the country of the acquirer, ordinal eleven, three positions from
  *     {@code PA-RQ-ACQR-COUNTRY-CODE PIC X(03)} at L29; three positions admits an alphabetic or a
  *     numeric country encoding and the copybook commits to neither
@@ -419,8 +434,9 @@ public record AuthorizationRequestPayload(
      *
      * <p>Assumptions: the field this width is read from is spelled
      * {@code PA-RQ-MERCHANT-CATAGORY-CODE} in the copybook, and that spelling is what a search of
-     * the reference tree has to use to find it. The constant carries the target spelling because it
-     * names a Java constant; the two spellings are reconciled on this type rather than unified.
+     * the reference tree has to use to find it. The constant carries the target spelling, and so
+     * does every other target-side surface, so the reference spelling survives in this file as a
+     * search key and nowhere as a name.
      */
     private static final int MERCHANT_CATEGORY_CODE_WIDTH = 4;
 

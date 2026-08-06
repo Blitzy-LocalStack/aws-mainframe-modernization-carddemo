@@ -12,6 +12,7 @@ import io.swagger.v3.oas.models.servers.ServerVariable;
 import io.swagger.v3.oas.models.servers.ServerVariables;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -46,7 +47,7 @@ import org.springframework.context.annotation.Configuration;
  * mirror that file rather than replacing it. Keeping two descriptions of one surface in agreement is
  * a real and recurring cost, and it was accepted for a stated reason: a contract that external
  * consumers bind to has to be reviewable as a committed file, line by line in a change, rather than
- * emerging from annotations spread across controllers that do not exist yet. Every value this class
+ * assembled at run time from annotations spread across controllers. Every value this class
  * mirrors is named as a constant with the contract line it came from, so the agreement surface is one
  * short list instead of a scatter of literals.
  *
@@ -179,14 +180,40 @@ public class OpenApiConfig {
     private static final String BASE_PATH_VARIABLE = "basePath";
 
     /**
+     * The configuration key the contract path is read from, named so a refusal can cite it.
+     *
+     * <p>Refactoring Rationale: the key is named in a constant rather than written twice. It appears in
+     * the {@code @Value} expression below and in the message of every refusal, and a key quoted in a
+     * diagnostic that no longer matches the key being read sends an operator to the wrong line.</p>
+     */
+    private static final String CONTRACT_PATH_PROPERTY = "springdoc.swagger-ui.url";
+
+    /**
+     * The exact accepted shape of the contract path: origin-relative, one segment, ending in a YAML suffix.
+     *
+     * <p>Assumptions: the path must be ORIGIN-RELATIVE, so it resolves against whichever host served the
+     * page. An absolute URL would pin the contract to one host name and break the moment the service is
+     * reached through a different one -- the load balancer, the gateway, or a port-forward -- and it would
+     * also let a value in configuration point a reader's browser at a document served by somewhere else
+     * entirely. The single segment and the suffix together are what make the value resolvable under the
+     * served static location, which publishes one class-path folder and not a tree.</p>
+     */
+    private static final Pattern CONTRACT_PATH_SHAPE =
+            Pattern.compile("^/[A-Za-z0-9._-]+\\.ya?ml$");
+
+    /**
      * Supplies the metadata the generated API description of this service carries.
      *
      * @param contractPath the {@link String} request path the contract of record is served at, read
      *     from {@code springdoc.swagger-ui.url} so that the pointer this description publishes cannot
-     *     drift from the document the browser view actually loads; must not be blank
+     *     drift from the document the browser view actually loads; must be an origin-relative path of
+     *     one segment ending in a YAML suffix, which is checked rather than assumed
      * @return the {@link OpenAPI} metadata carrying the contract's specification version, information
      *     block, deployment root, tag set, global security requirement and bearer-token scheme, never
      *     {@code null}
+     * @throws IllegalStateException if {@code contractPath} is {@code null}, blank, or not an
+     *     origin-relative single-segment YAML path, because the generated description would then name a
+     *     contract a reader cannot fetch while presenting it as the document that governs
      */
     @Bean
     public OpenAPI transactionServiceOpenApi(
@@ -197,6 +224,18 @@ public class OpenApiConfig {
         //       browser view has no contract pinned either, so failing at startup reports the real
         //       condition. Supplying a default here would instead publish a path that resolves to
         //       nothing and read as a broken contract rather than as a missing setting.
+        // WHY : Refactoring Rationale: the resolved value is now CHECKED, where before it was
+        //       documented as "must not be blank" and never verified. The absent-property case does
+        //       fail on its own -- placeholder resolution refuses it -- but a property that resolves
+        //       to an empty string, to whitespace, or to an absolute URL resolves perfectly well and
+        //       was accepted. Each of those produces the same visible outcome: a generated
+        //       description whose own text tells a reader which document governs, naming a document
+        //       the reader cannot fetch. That is worse than no pointer at all, because it reads as
+        //       authoritative. Trade-offs: this refuses a value a wider service might legitimately
+        //       want -- a contract hosted elsewhere -- and that is the intended cost, because this
+        //       module publishes its contract from its own class path and an off-host pointer here
+        //       would be a change of design rather than of configuration.
+        requireServedContractPath(contractPath);
         // WHY : Assumptions: no endpoint, host or credential is written into this class. The one
         //       external value it consumes arrives through configuration, and the deployment root
         //       below is a relative template rather than an absolute address.
@@ -234,6 +273,35 @@ public class OpenApiConfig {
                 .addSecurityItem(new SecurityRequirement().addList(BEARER_SCHEME_NAME))
                 .components(new Components()
                         .addSecuritySchemes(BEARER_SCHEME_NAME, bearerTokenScheme()));
+    }
+
+    /**
+     * Refuses a contract path the browser view could not load, before it is written into the description.
+     *
+     * <p>Assumptions: the check is on SHAPE and not on existence. Whether the named file is packaged is
+     * asserted by this module's contract test, which can open it; a configuration class cannot, because the
+     * path is resolved by the servlet container's static-resource handling rather than by the class path
+     * directly, and a class that guessed at the mapping would be asserting its own guess.</p>
+     *
+     * @param contractPath the resolved value of {@link #CONTRACT_PATH_PROPERTY}
+     * @throws IllegalStateException if the value is {@code null}, blank, or does not take the accepted
+     *     origin-relative single-segment YAML form
+     */
+    private static void requireServedContractPath(String contractPath) {
+        if (contractPath == null || contractPath.isBlank()) {
+            throw new IllegalStateException(CONTRACT_PATH_PROPERTY
+                    + " must name the request path the contract of record is served at,"
+                    + " and must not be blank");
+        }
+
+        // Assumptions: the value is matched untrimmed. A path carrying leading or trailing whitespace is
+        // not the path the container serves, so accepting it after a trim would make this class agree
+        // with a value the static-resource handler would answer 404 for.
+        if (!CONTRACT_PATH_SHAPE.matcher(contractPath).matches()) {
+            throw new IllegalStateException(CONTRACT_PATH_PROPERTY + " must be an origin-relative path"
+                    + " of one segment ending in .yaml or .yml, such as /transaction-api.yaml;"
+                    + " an absolute URL would pin the contract to one host name");
+        }
     }
 
     /**

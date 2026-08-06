@@ -377,8 +377,9 @@ variable "route_keys" {
     "ANY /api/v1/accounts",
     "ANY /api/v1/accounts/{proxy+}",
     "ANY /api/v1/cards",
-    "ANY /api/v1/cards/{opaqueCardId}",
-    "ANY /api/v1/cards/{opaqueCardId}/{proxy+}",
+    "ANY /api/v1/cards/{cardNumber}",
+    "ANY /api/v1/admin/cards",
+    "ANY /api/v1/admin/cards/{cardNumber}",
     "ANY /api/v1/transactions",
     "ANY /api/v1/transactions/{proxy+}",
     "ANY /api/v1/billpay",
@@ -401,6 +402,18 @@ variable "route_keys" {
   #       The bare `/api/v1/billpay` key was ADDED for the first reason:
   #       transaction-service publishes one bill-payment operation at exactly that
   #       path and this list did not name it.
+  # WHY : Refactoring Rationale: the `/api/v1/admin/cards` pair was ADDED, and the
+  #       card subtree's greedy key WITHDRAWN, for those same two reasons in turn.
+  #       card-service's contract publishes its administrative card-detail operation
+  #       under its own `/api/v1/admin` prefix -- which is what removes the
+  #       rule-ordering dependency a suffix beneath the card subtree placed on that
+  #       service's authority table -- so the prefix had to be named here or the
+  #       operation would have been unreachable. The greedy
+  #       `/api/v1/cards/{cardNumber}/{proxy+}` key went the other way: with the
+  #       administrative read moved out from under the card, that contract publishes
+  #       nothing beneath a single card at all, so the key published a subtree with
+  #       nothing behind it. The load-balancer rules in infra/envs/dev/main.tf and
+  #       infra/envs/prod/main.tf carry the matching four patterns.
   # WHY : Refactoring Rationale: a `/api/v1/users` pair was WITHDRAWN for the
   #       second reason. auth-service serves its five user-administration
   #       operations at `/api/v1/auth/users` and `/api/v1/auth/users/{userId}` --
@@ -418,10 +431,11 @@ variable "route_keys" {
   #       makes this table checkable against the contracts rather than merely
   #       consistent with them.
   # WHY : Trade-offs: `/api/v1/billpay` is a BARE key with no greedy sibling,
-  #       deliberately. The contract publishes exactly one operation at exactly
-  #       that path and nothing beneath it, so a greedy key would publish a subtree
-  #       with nothing behind it -- the same defect this list removed by deleting
-  #       `/batch`. The pairing validation below is one-directional precisely so
+  #       deliberately, and the two card prefixes pair a bare key with a single
+  #       templated segment rather than with a greedy one for the same reason. Each
+  #       of those contracts publishes exactly the operations those keys name and
+  #       nothing beneath them, so a greedy key would publish a subtree with nothing
+  #       behind it -- the same defect this list removed by deleting `/batch`. The pairing validation below is one-directional precisely so
   #       that a bare key may stand alone. The load balancer rule for
   #       transaction-service does additionally carry `/api/v1/billpay/*`, and the
   #       asymmetry is the safe direction: the edge is the narrower gate, so a
@@ -651,18 +665,38 @@ variable "route_keys" {
     error_message = "route_keys must not contain duplicate entries: each route key may be created only once on an HTTP API."
   }
 
-  # WHY : Refactoring Rationale: the earlier card-detail contract named the
-  #       path value as a card number, and access logs consequently retained a
-  #       full PAN. The edge now names the selector `opaqueCardId`; the later UI
-  #       and service contracts must carry the same token. Prohibiting the old
-  #       parameter spellings catches a regression in the route inventory even
-  #       though the default uses a greedy service proxy for most contexts.
+  # WHY : Refactoring Rationale: this check bounds what a route key may CONTAIN as a
+  #       literal, and an earlier revision of it prohibited what a key may NAME its
+  #       path parameter -- specifically the spelling `{cardNumber}`, on the ground
+  #       that access logs would then retain a full card number. The concern is real
+  #       and the check did not address it: a path parameter's NAME is a template
+  #       label that appears in this inventory and nowhere else, while an access log
+  #       retains the VALUE a client sent, under whatever label the template gave the
+  #       segment. Renaming the label therefore changed what this file says and
+  #       nothing about what any log holds. The value-side exposure is answered where
+  #       the value exists -- common-lib's CardNumberMasker redacts a sixteen-digit
+  #       run embedded anywhere in a path, and card-service's contract test builds a
+  #       concrete URL from every published template and asserts the masker leaves no
+  #       full number in it. Prohibiting the label additionally blocked the card
+  #       contract from publishing its primary key, which is what forced that contract
+  #       into an opaque selector plus a POST carrying the number in a body.
+  # WHY : Assumptions: what IS checkable at this layer is a literal. A route key is a
+  #       committed constant, so a long digit run in one is a real card number pasted
+  #       into the route inventory, where no masker will ever reach it -- it is in the
+  #       plan output, the state file and this repository. That is the leak this rule
+  #       now refuses, and unlike a label it cannot be a false positive: no legitimate
+  #       route key carries twelve consecutive digits.
+  # WHY : Trade-offs: the bound is twelve digits rather than sixteen, so it also
+  #       catches a truncated or partially-typed number. The cost is that a future
+  #       route key needing a twelve-digit literal path segment would have to be
+  #       reasoned about here; no such segment exists, and an account identifier is
+  #       eleven digits, which stays clear of the bound by one.
   validation {
     condition = alltrue([
       for key in var.route_keys :
-      !can(regex("(?i)\\{(pan|card_?num|card_?number|num)\\}", key))
+      !can(regex("[0-9]{12,}", key))
     ])
-    error_message = "route_keys must not name a card path parameter as a PAN, card number or generic num. Card-detail selectors use the opaqueCardId contract so route templates and durable logs never describe a raw PAN-bearing path."
+    error_message = "route_keys must not contain a literal run of twelve or more digits: a route key is a committed constant that reaches the plan output, the state file and this repository, so a card or account number written into one is retained where no request-path masker can reach it. Name the segment as a path parameter instead."
   }
 }
 

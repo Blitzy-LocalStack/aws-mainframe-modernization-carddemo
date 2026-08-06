@@ -299,8 +299,22 @@
  *
  * <h2>The subtree this package roots</h2>
  *
- * <p>Eight package charters make up this context, this one included. Each subpackage is named for
- * its layer, so the layer a type belongs to is legible from its import alone:</p>
+ * <p>Assumptions: this inventory is the context's <b>target contract</b> as the migration plan
+ * assigns it, not a measurement of the directories present beside this one today. Eight package
+ * charters make up the context at target, this one included; <b>six of the eight exist at this
+ * checkpoint</b> -- this root, {@code .service}, {@code .repository}, {@code .domain},
+ * {@code .dto} and {@code .config} -- while {@code .api} and {@code .mapper} are <b>planned and
+ * not yet authored</b>. Each is marked as such in the list below, so a reader can tell a target
+ * from a measurement without leaving this charter. Each subpackage is named for its layer, so the
+ * layer a type belongs to is legible from its import alone:</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of this charter stated the figure of eight
+ * flatly, which read as a claim that all eight directories existed. Two did not, so the count was
+ * a target presented as an inventory. The correction marks the two rather than deleting them,
+ * because the plan does assign both -- {@code .api} carries the REST adapters and {@code .mapper}
+ * the fixed-width boundary -- and deleting them would lose the design the authors of those
+ * packages work from. This mirrors the convention already used by the test charter at
+ * {@code com.carddemo.auth.api}, so the module states the distinction one way and not two.</p>
  *
  * <dl>
  *   <dt>{@code com.carddemo.auth}</dt>
@@ -308,8 +322,8 @@
  *       Records that decision D-4 declines plaintext-password parity.</dd>
  *
  *   <dt>{@code .api}</dt>
- *   <dd>REST adapters only -- transport validation, HTTP status mapping, delegation. No business
- *       rules, no persistence access.</dd>
+ *   <dd><b>Planned, not yet authored.</b> REST adapters only -- transport validation, HTTP
+ *       status mapping, delegation. No business rules, no persistence access.</dd>
  *
  *   <dt>{@code .service}</dt>
  *   <dd>COBOL paragraph-to-method business behaviour, identity exchange, transaction boundaries,
@@ -327,8 +341,8 @@
  *       page type, no local error type.</dd>
  *
  *   <dt>{@code .mapper}</dt>
- *   <dd>The sole boundary at which fixed-width, trailing-blank and FILLER representation concerns
- *       may appear.</dd>
+ *   <dd><b>Planned, not yet authored.</b> The sole boundary at which fixed-width,
+ *       trailing-blank and FILLER representation concerns may appear.</dd>
  *
  *   <dt>{@code .config}</dt>
  *   <dd>Stateless JWT security, OpenAPI metadata, datasource and {@code search_path} wiring.</dd>

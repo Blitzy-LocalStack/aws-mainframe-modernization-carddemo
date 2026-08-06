@@ -29,14 +29,15 @@
 #   inventoried here, so no count written into this file can fall out of date.
 #   ENTRYPOINT remains the stable orchestration contract: Step Functions appends
 #   per-run arguments to the invariant `python -m carddemo_migration.cli` prefix.
-# Trade-offs: that contract is written before the module it names. Until
-#   `cli.py` lands, `docker run ... --help` resolves ENTRYPOINT plus CMD to
-#   `python -m carddemo_migration.cli --help` and exits 1 with
-#   `ModuleNotFoundError`, which is the correct loud failure for a missing module
-#   rather than a defect in this file; the BUILD itself succeeds, because the
-#   wheel installs from whatever the src tree holds. Writing ENTRYPOINT now is
-#   deliberate: changing an orchestration contract after the batch state machine
-#   has been written against it is a breaking change rather than a completion.
+# Trade-offs: ENTRYPOINT names a module rather than a console script, and the
+#   build is deliberately not coupled to that module resolving. The wheel installs
+#   whatever the src tree holds, so the BUILD succeeds either way; a run against an
+#   image whose package does not expose `carddemo_migration.cli` exits 1 with
+#   `ModuleNotFoundError`, which is the loud failure the orchestrator needs rather
+#   than a silent no-op. The alternative -- declaring a console-script entry point
+#   and invoking that -- was rejected because it moves the invocation contract into
+#   pyproject.toml metadata, where a rename is invisible to the state machine that
+#   appends arguments to this prefix.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: the base image is pinned by DIGEST as well as tag, for

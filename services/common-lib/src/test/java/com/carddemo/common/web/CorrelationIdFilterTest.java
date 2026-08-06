@@ -50,20 +50,34 @@ class CorrelationIdFilterTest {
 
         assertThat(response.getStatus()).isEqualTo(400);
         assertThat(chain.invoked).isFalse();
-        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER)).isNull();
         assertThat(MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY)).isNull();
+
+        // WHY : Refactoring Rationale: this assertion was inverted. It formerly required the response
+        //       to carry NO correlation header on a refusal, which is what the container-rendered
+        //       refusal produced and which left the caller with a 400 it could not correlate to
+        //       anything in the platform's logs. The refusal now mints a FRESH identity, publishes it,
+        //       and reports it inside the problem body, so the exchange is traceable without the
+        //       refused value ever being reflected.
+        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .isNotBlank()
+                .isNotEqualTo(PAN_SHAPED_ID);
     }
 
     /**
-     * Confirms the refusal explains itself in terms of the shape and never by repeating the value,
-     * because a diagnostic that echoed the refused number would reintroduce the exposure into the
-     * container's own error handling.
+     * Confirms the refusal is rendered as the platform's own error record rather than left to the
+     * container, and that the record names the shape rule without reproducing the refused value.
+     *
+     * <p>Refactoring Rationale: this test formerly read {@code response.getErrorMessage()}, which is
+     * populated only by {@code sendError} -- the very mechanism the correction replaced, because it
+     * hands the response to the container's error page and produces a body whose shape depends on the
+     * container rather than on the published contract. The assertion now reads the rendered body, which
+     * is the artifact a client actually receives.</p>
      *
      * @throws IOException if the mock chain reports one, which it does not
      * @throws ServletException if the mock chain reports one, which it does not
      */
     @Test
-    @DisplayName("the refusal names the numeric-shape rule without repeating the value")
+    @DisplayName("the refusal renders the shared error record and never repeats the value")
     void refusalNamesTheRuleWithoutTheValue() throws IOException, ServletException {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
         request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, PAN_SHAPED_ID);
@@ -71,8 +85,42 @@ class CorrelationIdFilterTest {
 
         new CorrelationIdFilter().doFilter(request, response, new MockFilterChain());
 
-        assertThat(response.getErrorMessage()).contains("must not be a bare run of");
-        assertThat(response.getErrorMessage()).doesNotContain(PAN_SHAPED_ID);
+        String body = response.getContentAsString();
+
+        assertThat(response.getContentType()).startsWith("application/json");
+        assertThat(body)
+                .contains("or more digits once separators are removed")
+                .contains(CorrelationIdFilter.CORRELATION_ID_HEADER)
+                .contains("\"status\":400")
+                .doesNotContain(PAN_SHAPED_ID);
+        assertThat(body)
+                .contains(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER));
+    }
+
+    /**
+     * Confirms the generated identity opens with a non-numeric prefix, so a minted value can never be
+     * mistaken for -- or refused as -- a card-shaped one.
+     *
+     * <p>Assumptions: the refusal rule counts digits once separators are removed, and hexadecimal
+     * rendering of eleven random bytes can produce twenty-two characters that are all digits. Without a
+     * literal prefix the platform could therefore mint an identity its own rule would refuse on the
+     * next hop. Asserting the prefix pins the guarantee rather than leaving it to chance, which a
+     * probabilistic assertion over the digits could not do.</p>
+     *
+     * @throws IOException if the mock chain reports one, which it does not
+     * @throws ServletException if the mock chain reports one, which it does not
+     */
+    @Test
+    @DisplayName("a minted identity carries a non-numeric prefix and the contracted width")
+    void mintedIdentityCarriesNonNumericPrefix() throws IOException, ServletException {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        new CorrelationIdFilter().doFilter(request, response, new MockFilterChain());
+
+        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .hasSize(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH)
+                .containsPattern("^[A-Za-z]");
     }
 
     /**
@@ -99,15 +147,22 @@ class CorrelationIdFilterTest {
     }
 
     /**
-     * Confirms a sixteen-character identity that carries a separator conforms, which is the shape a
-     * real caller sends and is the reason the rule tests the value as a whole rather than its length.
+     * Confirms a separator-bearing identity carrying a card number's worth of digits is refused too.
+     *
+     * <p>Refactoring Rationale: this test formerly asserted that {@code 4111-1111-1111-11} was ECHOED,
+     * and it was the exact exposure the correction closes rather than an incidental case. The three
+     * separators this header admits are the three a card number is conventionally written with, so a
+     * rule that counted characters instead of digits refused the contiguous form and published the
+     * separated form of the same value into every log line of the request. The rule now removes
+     * separators before counting, so both forms are refused and the echo contract is unchanged for
+     * everything that is not a run of digits.</p>
      *
      * @throws IOException if the mock chain reports one, which it does not
      * @throws ServletException if the mock chain reports one, which it does not
      */
     @Test
-    @DisplayName("a hyphenated identity of card-number length is still echoed unaltered")
-    void hyphenatedIdentityOfCardLengthIsEchoed() throws IOException, ServletException {
+    @DisplayName("a separator-bearing identity of card-number digit count is refused")
+    void separatedCardShapedIdentityIsRefused() throws IOException, ServletException {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
         request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, "4111-1111-1111-11");
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -115,10 +170,53 @@ class CorrelationIdFilterTest {
 
         new CorrelationIdFilter().doFilter(request, response, chain);
 
+        assertThat(response.getStatus()).isEqualTo(400);
+        assertThat(chain.invoked).isFalse();
+        assertThat(response.getContentAsString()).doesNotContain("4111");
+    }
+
+    /**
+     * Confirms the echo contract survives the widened rule for the identities real callers send.
+     *
+     * <p>Assumptions: the widened rule refuses only values built ENTIRELY from digits and accepted
+     * separators whose digits reach the account-number threshold, so the two shapes asserted here are
+     * the ones that prove the rule did not become a blanket refusal: a separated value whose digits stay
+     * under the threshold, and a value of full width that carries a letter. The second is the common
+     * case -- a trace identifier is hexadecimal -- and admitting it on the first non-digit character is
+     * why the rule costs nothing on the conforming path.</p>
+     *
+     * @throws IOException if the mock chain reports one, which it does not
+     * @throws ServletException if the mock chain reports one, which it does not
+     */
+    @Test
+    @DisplayName("separated short identities and letter-bearing identities are still echoed unaltered")
+    void conformingSeparatedAndAlphanumericIdentitiesAreEchoed() throws IOException, ServletException {
+        assertEchoed("2022-07-18-0930");
+        assertEchoed("a1b2c3d4e5f6a7b8c9d0e1f2");
+    }
+
+    /**
+     * Drives one request through a fresh filter and asserts the supplied identity was echoed unaltered.
+     *
+     * <p>Assumptions: extracting this keeps each echo case to one line, so a reader compares the VALUES
+     * being admitted rather than re-reading four identical assertions. The filter is constructed per
+     * call because it is stateless and a shared instance would say nothing about isolation.</p>
+     *
+     * @param identity the correlation identity to supply on the request, which must conform
+     * @throws IOException if the mock chain reports one, which it does not
+     * @throws ServletException if the mock chain reports one, which it does not
+     */
+    private static void assertEchoed(String identity) throws IOException, ServletException {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
+        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, identity);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        RecordingChain chain = new RecordingChain();
+
+        new CorrelationIdFilter().doFilter(request, response, chain);
+
         assertThat(response.getStatus()).isEqualTo(200);
         assertThat(chain.invoked).isTrue();
-        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
-                .isEqualTo("4111-1111-1111-11");
+        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER)).isEqualTo(identity);
     }
 
     /**
@@ -144,6 +242,64 @@ class CorrelationIdFilterTest {
         assertThat(chain.correlationId)
                 .hasSize(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH)
                 .isNotEqualTo(PAN_SHAPED_ID);
+    }
+
+    /**
+     * Confirms a SECOND pass of this filter over one request is a no-op, which is what makes a duplicate
+     * registration invisible rather than harmful.
+     *
+     * <p>Refactoring Rationale: this expectation pins a claim two service configurations make in prose.
+     * One of them previously made the OPPOSITE claim -- that a duplicate registration minted two
+     * identities for one request and that the inner pass's cleanup stripped the identity from every line
+     * the outer pass then logged. That is not what happens, and a prose correction alone would leave the
+     * next reader with two contradicting paragraphs and no way to settle them. This asserts the
+     * behaviour, so the paragraphs can cite something.</p>
+     *
+     * <p>Assumptions: both passes are driven over the SAME request object, because the guard is a request
+     * attribute -- that is precisely the shape a container produces for a forward, an include, an async
+     * resume, an error dispatch, or a filter registered twice. The identity captured by the inner chain is
+     * compared with the outer one, and the response header is asserted to carry exactly one value, which
+     * together rule out both a second mint and a lost identity.</p>
+     *
+     * @throws IOException if a mock chain reports one, which it does not
+     * @throws ServletException if a mock chain reports one, which it does not
+     */
+    @Test
+    @DisplayName("a second pass over one request mints nothing and disturbs neither context nor response")
+    void secondPassOverOneRequestIsANoOp() throws IOException, ServletException {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/cards");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        CorrelationIdFilter filter = new CorrelationIdFilter();
+
+        ContextCapturingChain inner = new ContextCapturingChain();
+        ContextCapturingChain outer = new ContextCapturingChain();
+
+        // WHY : Assumptions: the outer pass is driven with a chain that itself invokes the filter a
+        //       second time, which is the arrangement two registrations of one filter produce. Calling
+        //       the filter twice in sequence instead would not reproduce it: the outer pass removes its
+        //       guard attribute on the way out, so the second call would legitimately be a fresh request
+        //       as far as the filter can tell.
+        FilterChain nested = (nestedRequest, nestedResponse) -> {
+            outer.doFilter(nestedRequest, nestedResponse);
+            filter.doFilter(nestedRequest, nestedResponse, inner);
+        };
+
+        filter.doFilter(request, response, nested);
+
+        assertThat(outer.correlationId)
+                .as("the outer pass must establish an identity")
+                .isNotBlank();
+        assertThat(inner.correlationId)
+                .as("the inner pass must observe the SAME identity, not a second minted one")
+                .isEqualTo(outer.correlationId);
+        assertThat(MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY))
+                .as("the inner pass must not clear the context the outer pass still owns; the outer pass "
+                        + "clears it on the way out, which is why this reads null AFTER both returned")
+                .isNull();
+        assertThat(response.getHeaders(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .as("one request must carry exactly one correlation header, however often the filter runs")
+                .hasSize(1);
+        assertThat(response.getStatus()).isEqualTo(200);
     }
 
     /**

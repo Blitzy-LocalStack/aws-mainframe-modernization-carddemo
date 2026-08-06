@@ -81,7 +81,7 @@ class ApiErrorTest {
      *     {@code "null"} marker standing for an absent message
      */
     @ParameterizedTest(name = "the message-off state {0} accepts its first message")
-    @ValueSource(strings = {"null", "", "   ", "\u0000\u0000"})
+    @ValueSource(strings = {"null", "", "   "})
     @DisplayName("an absent, empty or blank message is message-off and accepts its first message")
     void messageOffStateAcceptsItsFirstMessage(String offState) {
         String message = "null".equals(offState) ? null : offState;
@@ -91,7 +91,37 @@ class ApiErrorTest {
         ApiError latched = off.latchMessage("now set");
 
         assertThat(latched.message()).isEqualTo("now set");
-        assertThat(FieldValidationFlag.isNeverSupplied(off.message())).isTrue();
+    }
+
+    /**
+     * Confirms an all-NUL aggregate message is NOT the message-off state and therefore latches.
+     *
+     * <p>Refactoring Rationale: this case was formerly a fourth parameter of the off-state list above,
+     * which made the aggregate message overwritable by low values as well as by spaces. That was
+     * broader than the state the reference declares. The off state this latch reproduces is
+     * {@code 88 WS-RETURN-MSG-OFF VALUE SPACES} over {@code WS-RETURN-MSG PIC X(75)}, at line 174 of
+     * {@code app/cbl/COCRDUPC.cbl}; low values are the off state of a DIFFERENT field --
+     * {@code CCARD-RETURN-MSG}, initialised to {@code LOW-VALUES} at line 21 of
+     * {@code app/cpy/CSMSG01Y.cpy} -- and conflating the two made the aggregate lose a message it had
+     * already been given whenever the earlier value happened to be low values rather than spaces.</p>
+     *
+     * <p>Assumptions: the case is retained rather than deleted because deleting it would leave the
+     * narrowing invisible. It is inverted instead, so the narrowed rule is a build-enforced fact.
+     * Reaching this state over HTTP is not possible -- a JSON string of NUL characters is not something
+     * a mapper in this system produces -- so the assertion documents the predicate's edge rather than a
+     * reachable request, and it is the predicate that had to narrow.</p>
+     */
+    @Test
+    @DisplayName("an all-NUL message is not message-off and is not overwritten")
+    void allNulMessageIsNotMessageOff() {
+        String lowValues = "\u0000\u0000";
+        ApiError set = ApiError.of(ApiError.CODE_VALIDATION, lowValues, 400, CORRELATION_ID, PATH,
+                CLOCK);
+
+        ApiError latched = set.latchMessage("now set");
+
+        assertThat(latched.message()).isEqualTo(lowValues);
+        assertThat(latched).isSameAs(set);
     }
 
     /**

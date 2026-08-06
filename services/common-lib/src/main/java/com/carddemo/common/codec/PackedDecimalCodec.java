@@ -133,8 +133,8 @@ import com.carddemo.common.money.Money;
  * <p>Assumptions: this codec is handed a digit geometry and a byte span, and a field name only ever
  * reaches it as diagnostic text a caller supplied. It therefore has no opinion on what a field is
  * called in the target, and it performs no renaming of any kind. That boundary is worth stating
- * because one of the migration's three documented misspelling corrections lands in a segment this
- * class decodes: {@code PA-MERCHANT-CATAGORY-CODE} at line 36 of
+ * because one of the three field names the target deliberately spells differently from the baseline
+ * lands in a segment this class decodes: {@code PA-MERCHANT-CATAGORY-CODE} at line 36 of
  * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy}, and the same misspelling carried with an
  * infix at line 28 of {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} as
  * {@code PA-RQ-MERCHANT-CATAGORY-CODE}, both of which become {@code merchant_category_code} in the
@@ -187,13 +187,17 @@ import com.carddemo.common.money.Money;
  * <p>Assumptions: every entry point on this class takes or returns bytes, and none takes or returns
  * text. Packed decimal is binary: two decimal digits share a byte and the sign occupies the low
  * nibble of the last byte, so a packed field contains byte values that are not characters in any
- * encoding. Routing them through a character decoder substitutes a replacement character for each
- * byte it cannot map, and because the substitution is the same width as the original the field still
- * has its declared length and still parses -- the damage surfaces only as a wrong amount. The parity
- * oracle takes the same position from the other direction: it treats the mainframe-character-set
- * datasets as opaque binary and never transcodes them, and its own helper comments record that
- * routing those bytes through a text write mangles them into replacement characters. Binary
- * {@code COMP} fields are the same hazard for the same reason.</p>
+ * encoding. The invariant is therefore stated as a prohibition rather than as a prediction: packed
+ * bytes, sign bytes and padding low values are never routed through a whole-record text decode. What
+ * such a decode does to them is a property of the charset, not a single behaviour that can be relied
+ * on -- a single-byte charset maps all 256 values to some character and so mistranslates silently
+ * with no replacement at all, while a multi-byte charset substitutes replacement characters whose
+ * count need not equal the number of bytes consumed, which moves every following field. Both
+ * outcomes are corruption and only one of them leaves the offsets intact, so neither the amount nor
+ * the record geometry may be assumed to survive. The parity oracle takes the same position from the
+ * other direction: it treats the mainframe-character-set datasets as opaque binary and never
+ * transcodes them, and its own helper comments record that routing those bytes through a text write
+ * mangles them. Binary {@code COMP} fields are the same hazard for the same reason.</p>
  */
 public final class PackedDecimalCodec {
 

@@ -37,9 +37,31 @@
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>What this package holds, and which contract each mapping is bound to</h2>
  *
- * <p>Eight entity types belong here and no ninth; with this charter the directory holds nine
- * compilation units. Each mapping is listed with the schema-qualified table it targets and the
- * baseline record that fixes its field set. The copybook is normative -- the migration plan's
+ * <p>Eight entity types belong here and no ninth; with this charter that makes nine compilation
+ * units. Each mapping is listed with the schema-qualified table it targets and the baseline
+ * record that fixes its field set.
+ *
+ * <p>Assumptions: that nine is this package's <b>target contract</b> as the migration plan
+ * assigns it, not a measurement of the directory. Measured at the checkpoint that authored this
+ * paragraph, six of the eight entities have landed -- {@code BatchRun}, {@code Account},
+ * {@code CardXref}, {@code DisclosureGroup}, {@code Transaction} and
+ * {@code DailyTransaction} -- so the directory holds seven compilation units. The remaining two
+ * are <b>planned</b>, not missing: {@code TransactionCategoryBalance} and
+ * {@code TransactionReject}, each of which arrives with the job that reads or writes its table.
+ * A type named in the roster below with no file beside it is therefore planned, and the roster
+ * stays closed at eight so that the question "which entity owns this table" keeps a definite
+ * answer while the package fills.
+ *
+ * <p>Refactoring Rationale: this paragraph stated the count in the present tense with nothing
+ * to distinguish the target from the measurement, so a reader reconciling "the directory holds
+ * nine compilation units" against a listing would find seven and be unable to tell whether two
+ * entities had been lost or had never been written. That is a costlier ambiguity here than in
+ * most packages, because the roster below pairs each entity with a schema-qualified table and a
+ * normative copybook: a reader who concluded an entity was missing would have both the table and
+ * the record layout in hand and might reasonably author a duplicate under a different name. The
+ * count canon is left at nine rather than lowered to today's seven, because the roster's
+ * closure is what the table-ownership question relies on and lowering it would have to be undone
+ * with each entity that lands. The copybook is normative -- the migration plan's
  * transformation rule T1 makes a field's {@code PICTURE} clause decide its column type, its Java
  * type and its byte offset -- so the copybook column below is the specification and not a
  * provenance note.</p>

@@ -98,8 +98,8 @@
  * provider to `ui/src/App.tsx`; and dependency pins to `ui/package.json`.
  * Duplicating any of those here would create a second source of truth.
  *
- * WHY (non-obvious design decisions)
- * ----------------------------------
+ * Design decisions
+ * ----------------
  * Assumptions: the token names below are an external contract of one exactly
  * pinned package version, and they are constrained at compile time against that
  * version's own declarations through {@link AntdTokenName} rather than written as
@@ -133,13 +133,14 @@
  * baseline rather than copied across.
  */
 
-import type { GlobalToken } from "antd";
+import type { GlobalToken } from 'antd';
 
 /**
  * Name of any token the design system's theme accepts.
  *
- * WHY this is derived from the library rather than declared as a string union
- * Alternatives Considered: importing `AliasToken`, which is the type the theme's
+ * Alternatives Considered: this name type is derived from the library's own
+ * declarations rather than declared as a hand-written string union. The direct
+ * type-level choice was importing `AliasToken`, which is the type the theme's
  * `token` property is declared against and the direct type-level choice. It is rejected
  * on availability, twice over: the package does not re-export `AliasToken` from
  * its root, and reaching it through a deep submodule path is refused by the
@@ -157,8 +158,8 @@ export type AntdTokenName = keyof GlobalToken;
 /**
  * How a measured baseline design value came to rest on its token.
  *
- * WHY the resolution kind is recorded per entry rather than inferred
- * Assumptions: a reader auditing this bridge needs to distinguish a value the
+ * Assumptions: the resolution kind is recorded on every entry rather than
+ * inferred from the value, because a reader auditing this bridge needs to distinguish a value the
  * system expresses natively from one that was moved onto the nearest token whose
  * role matches, because only the latter carries a judgement that can be
  * disagreed with. Recording the kind makes that distinction queryable instead of
@@ -174,14 +175,13 @@ export type AntdTokenName = keyof GlobalToken;
  * - `additive` — the baseline has no such vocabulary at all, so the value is new
  *   rather than mapped.
  */
-export type TokenResolutionKind =
-  "exact" | "snap" | "inherit" | "structural" | "additive";
+export type TokenResolutionKind = 'exact' | 'snap' | 'inherit' | 'structural' | 'additive';
 
 /**
  * The mapset population a measured count was taken over.
  *
- * WHY every count names its population
- * Assumptions: the two populations disagree on more than magnitude. Once the 4
+ * Assumptions: every count names the population it was taken over, because the
+ * two populations disagree on more than magnitude. Once the 4
  * extension mapsets are included, `COLOR=NEUTRAL` (90) overtakes `COLOR=GREEN`
  * (84), so a claim about the palette's rank order is true of one population and
  * false of the other; and `COLOR=PINK` exists only in the wider one. A figure
@@ -191,13 +191,13 @@ export type TokenResolutionKind =
  * - `base17` — the 17 mapsets under `app/bms`, 902 `DFHMDF` definitions.
  * - `all21` — those plus the 4 extension mapsets, 1166 `DFHMDF` definitions.
  */
-export type MeasurementPopulation = "base17" | "all21";
+export type MeasurementPopulation = 'base17' | 'all21';
 
 /**
  * One measured source attribute and the design-system decision made for it.
  *
- * WHY the rejected alternative is data rather than prose alone
- * Assumptions: a snap is auditable only when a consumer can inspect both the
+ * Assumptions: the rejected alternative is carried as data rather than as prose
+ * alone, because a snap is auditable only when a consumer can inspect both the
  * selected token and the candidates that were deliberately not selected.
  * Keeping the alternatives on every row lets validation assert that no snap
  * silently loses its rationale.
@@ -220,15 +220,15 @@ export interface BmsSourceMeasurement {
 /**
  * One documented mismatch between the BMS design language and Ant Design.
  *
- * WHY counts remain in their source wording
- * Assumptions: different gaps count different units—mapsets, fields, operands,
+ * Assumptions: counts remain in their source wording because different gaps
+ * count different units—mapsets, fields, operands,
  * or no source analogue—so coercing all six into one numeric unit would make
  * unlike measurements appear comparable. The population and unit therefore
  * remain explicit in `measuredCount`.
  */
 export interface DesignGap {
   /** Stable identifier used by the AAP and the design-token reference. */
-  readonly id: "G1" | "G2" | "G3" | "G4" | "G5" | "G6";
+  readonly id: 'G1' | 'G2' | 'G3' | 'G4' | 'G5' | 'G6';
   /** Short statement of the capability mismatch. */
   readonly description: string;
   /** Original BMS value or the recorded absence of a source analogue. */
@@ -246,7 +246,7 @@ export interface DesignGap {
  * evidence and rejected alternatives remain in {@link BMS_SOURCE_HISTOGRAM}.
  */
 export const BMS_COLOR_TOKENS = {
-  BLUE: "colorPrimary",
+  BLUE: 'colorPrimary',
   /*
    * Alternatives Considered: a bespoke turquoise token. Ant Design exposes no
    * turquoise semantic, and a literal hue would bypass the CSS-variable theme.
@@ -262,7 +262,7 @@ export const BMS_COLOR_TOKENS = {
    * `ui/src/theme/antdTheme.ts`. It is recorded here so a reader of this entry
    * alone does not conclude the two roles still collapse.
    */
-  TURQUOISE: "colorInfo",
+  TURQUOISE: 'colorInfo',
   /*
    * Trade-offs: a bespoke editable-input colour token was rejected because 65
    * of 76 base green fields are inputs whose affordance is already represented
@@ -270,20 +270,20 @@ export const BMS_COLOR_TOKENS = {
    * green-family semantic and preserves the AAP binding without applying green
    * text to those inputs.
    */
-  GREEN: "colorSuccess",
+  GREEN: 'colorSuccess',
   /*
    * Alternatives Considered: `colorText`. It was rejected because neutral is a
    * de-emphasis role in the baseline, while `colorText` is the base text role.
    */
-  NEUTRAL: "colorTextSecondary",
-  YELLOW: "colorWarning",
+  NEUTRAL: 'colorTextSecondary',
+  YELLOW: 'colorWarning',
   /*
    * Assumptions: `colorText` is also the fallback for the 240 base fields with
    * no `COLOR=` operand. The seven explicit colours total 662; 662 + 240 = 902,
    * and explicit DEFAULT 38 + absent operand 240 = 278 fields on this token.
    */
-  DEFAULT: "colorText",
-  RED: "colorError",
+  DEFAULT: 'colorText',
+  RED: 'colorError',
   /*
    * Alternatives Considered: `pink`, `colorPrimary`, and `colorInfo`. The
    * palette anchor `pink` carries no component semantic. In COPAU01, PINK marks
@@ -292,16 +292,9 @@ export const BMS_COLOR_TOKENS = {
    * adjacent AUTHRSN value returns to BLUE. `colorPrimary` would collapse PINK
    * into BLUE, and `colorInfo` would collapse each value into its label.
    */
-  PINK: "colorTextHeading",
+  PINK: 'colorTextHeading',
 } as const satisfies Record<
-  | "BLUE"
-  | "TURQUOISE"
-  | "GREEN"
-  | "NEUTRAL"
-  | "YELLOW"
-  | "DEFAULT"
-  | "RED"
-  | "PINK",
+  'BLUE' | 'TURQUOISE' | 'GREEN' | 'NEUTRAL' | 'YELLOW' | 'DEFAULT' | 'RED' | 'PINK',
   AntdTokenName
 >;
 
@@ -320,8 +313,8 @@ export const BMS_COLOR_TOKENS = {
  * these two entries exist; every other {@link BMS_COLOR_TOKENS} entry already
  * derives a distinct value and needs no anchor.
  *
- * WHY an anchor NAME rather than a colour value
- * Assumptions: this module records names and never values, and that invariant
+ * Assumptions: each anchor is a token NAME and never a colour value. This module
+ * records names and never values, and that invariant
  * survives here because these are names too — `blue` and `cyan` are settable
  * tokens of the design system's own seed layer, so the hue is read from the
  * library at run time rather than written down. A hex literal for turquoise was
@@ -345,10 +338,10 @@ export const BMS_COLOR_TOKENS = {
  */
 export const BMS_SEED_PALETTE_ANCHORS = {
   /** Anchor behind `colorPrimary`, kept as the reference the link role follows. */
-  BLUE: "blue",
+  BLUE: 'blue',
   /** Nearest anchor to 3270 turquoise, and the system's only cyan-family hue. */
-  TURQUOISE: "cyan",
-} as const satisfies Record<"BLUE" | "TURQUOISE", AntdTokenName>;
+  TURQUOISE: 'cyan',
+} as const satisfies Record<'BLUE' | 'TURQUOISE', AntdTokenName>;
 
 /**
  * Tokens for the five colour constants that executable programs move at run time.
@@ -368,13 +361,13 @@ export const BMS_SEED_PALETTE_ANCHORS = {
  * `.cbl` and `.cpy` files found zero executable or textual moves for all three.
  */
 export const DFH_RUNTIME_COLOR_TOKENS = {
-  DFHRED: "colorError",
-  DFHGREEN: "colorSuccess",
-  DFHNEUTR: "colorTextSecondary",
-  DFHDFCOL: "colorText",
-  DFHBLUE: "colorPrimary",
+  DFHRED: 'colorError',
+  DFHGREEN: 'colorSuccess',
+  DFHNEUTR: 'colorTextSecondary',
+  DFHDFCOL: 'colorText',
+  DFHBLUE: 'colorPrimary',
 } as const satisfies Record<
-  "DFHRED" | "DFHGREEN" | "DFHNEUTR" | "DFHDFCOL" | "DFHBLUE",
+  'DFHRED' | 'DFHGREEN' | 'DFHNEUTR' | 'DFHDFCOL' | 'DFHBLUE',
   AntdTokenName
 >;
 
@@ -391,115 +384,108 @@ export const DFH_RUNTIME_COLOR_TOKENS = {
  */
 export const BMS_SOURCE_HISTOGRAM = [
   {
-    sourceValue: "COLOR=BLUE",
+    sourceValue: 'COLOR=BLUE',
     counts: { base17: 289, all21: 384 },
-    token: "colorPrimary",
-    resolution: "exact",
-    measuredRole: "Dominant label and frame colour.",
+    token: 'colorPrimary',
+    resolution: 'exact',
+    measuredRole: 'Dominant label and frame colour.',
     rejectedAlternative: [],
   },
   {
-    sourceValue: "COLOR=TURQUOISE",
+    sourceValue: 'COLOR=TURQUOISE',
     counts: { base17: 127, all21: 157 },
-    token: "colorInfo",
-    resolution: "snap",
-    measuredRole: "Informational labels and values.",
-    rejectedAlternative: [
-      "A bespoke turquoise semantic token backed by a literal hue.",
-    ],
+    token: 'colorInfo',
+    resolution: 'snap',
+    measuredRole: 'Informational labels and values.',
+    rejectedAlternative: ['A bespoke turquoise semantic token backed by a literal hue.'],
   },
   {
-    sourceValue: "COLOR=GREEN",
+    sourceValue: 'COLOR=GREEN',
     counts: { base17: 76, all21: 84 },
-    token: "colorSuccess",
-    resolution: "snap",
+    token: 'colorSuccess',
+    resolution: 'snap',
     measuredRole:
-      "Editable-input affordance: 65 of 76 base fields are UNPROT and 63 are underlined.",
-    rejectedAlternative: ["A bespoke editable-input colour token."],
+      'Editable-input affordance: 65 of 76 base fields are UNPROT and 63 are underlined.',
+    rejectedAlternative: ['A bespoke editable-input colour token.'],
   },
   {
-    sourceValue: "COLOR=NEUTRAL",
+    sourceValue: 'COLOR=NEUTRAL',
     counts: { base17: 60, all21: 90 },
-    token: "colorTextSecondary",
-    resolution: "snap",
-    measuredRole:
-      "De-emphasised text; it overtakes green only in the all-21 population.",
-    rejectedAlternative: ["colorText, the non-de-emphasised base text role."],
+    token: 'colorTextSecondary',
+    resolution: 'snap',
+    measuredRole: 'De-emphasised text; it overtakes green only in the all-21 population.',
+    rejectedAlternative: ['colorText, the non-de-emphasised base text role.'],
   },
   {
-    sourceValue: "COLOR=YELLOW",
+    sourceValue: 'COLOR=YELLOW',
     counts: { base17: 55, all21: 70 },
-    token: "colorWarning",
-    resolution: "exact",
-    measuredRole: "Warning and function-key legend emphasis.",
+    token: 'colorWarning',
+    resolution: 'exact',
+    measuredRole: 'Warning and function-key legend emphasis.',
     rejectedAlternative: [],
   },
   {
-    sourceValue: "COLOR=DEFAULT",
+    sourceValue: 'COLOR=DEFAULT',
     counts: { base17: 38, all21: 69 },
-    token: "colorText",
-    resolution: "inherit",
-    measuredRole: "Explicit request for the default text colour.",
+    token: 'colorText',
+    resolution: 'inherit',
+    measuredRole: 'Explicit request for the default text colour.',
     rejectedAlternative: [],
   },
   {
-    sourceValue: "COLOR operand absent",
+    sourceValue: 'COLOR operand absent',
     counts: { base17: 240, all21: 285 },
-    token: "colorText",
-    resolution: "inherit",
-    measuredRole:
-      "Unspecified colour, concentrated in editable account and card fields.",
+    token: 'colorText',
+    resolution: 'inherit',
+    measuredRole: 'Unspecified colour, concentrated in editable account and card fields.',
     rejectedAlternative: [],
   },
   {
-    sourceValue: "COLOR=RED",
+    sourceValue: 'COLOR=RED',
     counts: { base17: 17, all21: 23 },
-    token: "colorError",
-    resolution: "exact",
+    token: 'colorError',
+    resolution: 'exact',
     measuredRole:
-      "Error emphasis; all 17 base red fields are BRT, while 21 of 23 are BRT across all 21.",
+      'Error emphasis; all 17 base red fields are BRT, while 21 of 23 are BRT across all 21.',
     rejectedAlternative: [],
   },
   {
-    sourceValue: "COLOR=PINK",
+    sourceValue: 'COLOR=PINK',
     counts: { base17: 0, all21: 4 },
-    token: "colorTextHeading",
-    resolution: "snap",
+    token: 'colorTextHeading',
+    resolution: 'snap',
     measuredRole:
-      "Record-identity emphasis for the authorization composite key plus its response code.",
+      'Record-identity emphasis for the authorization composite key plus its response code.',
     rejectedAlternative: [
-      "pink, a palette anchor with no component semantic.",
-      "colorPrimary, already assigned to BLUE and used by the adjacent ordinary value.",
-      "colorInfo, already assigned to the TURQUOISE labels on the same rows.",
+      'pink, a palette anchor with no component semantic.',
+      'colorPrimary, already assigned to BLUE and used by the adjacent ordinary value.',
+      'colorInfo, already assigned to the TURQUOISE labels on the same rows.',
     ],
   },
   {
-    sourceValue: "ATTRB list member BRT",
+    sourceValue: 'ATTRB list member BRT',
     counts: { base17: 37, all21: 43 },
-    token: "fontWeightStrong",
-    resolution: "snap",
-    measuredRole:
-      "Brightness orthogonal to colour: every bright field also has a colour operand.",
+    token: 'fontWeightStrong',
+    resolution: 'snap',
+    measuredRole: 'Brightness orthogonal to colour: every bright field also has a colour operand.',
     rejectedAlternative: [
-      "A brighter colour token, which would overwrite RED, NEUTRAL, or TURQUOISE.",
+      'A brighter colour token, which would overwrite RED, NEUTRAL, or TURQUOISE.',
     ],
   },
   {
-    sourceValue: "HILIGHT=UNDERLINE",
+    sourceValue: 'HILIGHT=UNDERLINE',
     counts: { base17: 158, all21: 175 },
     token: null,
-    resolution: "structural",
-    measuredRole: "Editable-field affordance carried by the Input border.",
-    rejectedAlternative: [
-      "A dedicated underline token duplicating the component border.",
-    ],
+    resolution: 'structural',
+    measuredRole: 'Editable-field affordance carried by the Input border.',
+    rejectedAlternative: ['A dedicated underline token duplicating the component border.'],
   },
   {
-    sourceValue: "HILIGHT=OFF",
+    sourceValue: 'HILIGHT=OFF',
     counts: { base17: 35, all21: 54 },
     token: null,
-    resolution: "structural",
-    measuredRole: "Explicit no-highlight state requiring no target token.",
+    resolution: 'structural',
+    measuredRole: 'Explicit no-highlight state requiring no target token.',
     rejectedAlternative: [],
   },
 ] as const satisfies readonly BmsSourceMeasurement[];
@@ -544,15 +530,15 @@ export const TYPOGRAPHY_TOKENS = {
    * the 4 extension mapsets add no JUSTIFY operands. A proportional face would
    * no longer keep those columns and decimal positions aligned.
    */
-  fixedPitchData: "fontFamilyCode",
+  fixedPitchData: 'fontFamilyCode',
   /*
    * Alternatives Considered: a larger heading level such as
    * `fontSizeHeading1`. It was rejected because the source title occupies one
    * of 24 rows, while a larger heading consumes extra vertical space on
    * screens whose field count reaches 128.
    */
-  screenTitleSize: "fontSizeHeading4",
-  screenTitleLineHeight: "lineHeightHeading4",
+  screenTitleSize: 'fontSizeHeading4',
+  screenTitleLineHeight: 'lineHeightHeading4',
   /*
    * Alternatives Considered: expressing BRT with a brighter colour. Every one
    * of the 37 base bright fields already has COLOR—RED 17, NEUTRAL 13, or
@@ -560,12 +546,9 @@ export const TYPOGRAPHY_TOKENS = {
    * axes; the all-21 figures remain orthogonal at RED 21, NEUTRAL 15, and
    * TURQUOISE 7.
    */
-  brightEmphasis: "fontWeightStrong",
+  brightEmphasis: 'fontWeightStrong',
 } as const satisfies Record<
-  | "fixedPitchData"
-  | "screenTitleSize"
-  | "screenTitleLineHeight"
-  | "brightEmphasis",
+  'fixedPitchData' | 'screenTitleSize' | 'screenTitleLineHeight' | 'brightEmphasis',
   AntdTokenName
 >;
 
@@ -583,17 +566,17 @@ export const TYPOGRAPHY_TOKENS = {
  * padding.
  */
 export const SPACING_TOKENS = {
-  sectionGapLarge: "marginLG",
-  sectionGapMedium: "marginMD",
-  sectionGapCompact: "marginXS",
-  controlPaddingLarge: "paddingLG",
-  controlPaddingCompact: "paddingSM",
+  sectionGapLarge: 'marginLG',
+  sectionGapMedium: 'marginMD',
+  sectionGapCompact: 'marginXS',
+  controlPaddingLarge: 'paddingLG',
+  controlPaddingCompact: 'paddingSM',
 } as const satisfies Record<
-  | "sectionGapLarge"
-  | "sectionGapMedium"
-  | "sectionGapCompact"
-  | "controlPaddingLarge"
-  | "controlPaddingCompact",
+  | 'sectionGapLarge'
+  | 'sectionGapMedium'
+  | 'sectionGapCompact'
+  | 'controlPaddingLarge'
+  | 'controlPaddingCompact',
   AntdTokenName
 >;
 
@@ -610,12 +593,12 @@ export const SPACING_TOKENS = {
  * inventing a literal.
  */
 export const ADDITIVE_TOKENS = {
-  panelRadius: "borderRadiusLG",
-  overlayElevation: "boxShadowSecondary",
-  fastMotion: "motionDurationFast",
-  standardMotion: "motionDurationMid",
+  panelRadius: 'borderRadiusLG',
+  overlayElevation: 'boxShadowSecondary',
+  fastMotion: 'motionDurationFast',
+  standardMotion: 'motionDurationMid',
 } as const satisfies Record<
-  "panelRadius" | "overlayElevation" | "fastMotion" | "standardMotion",
+  'panelRadius' | 'overlayElevation' | 'fastMotion' | 'standardMotion',
   AntdTokenName
 >;
 
@@ -631,9 +614,9 @@ export const ADDITIVE_TOKENS = {
  * breakpoint scale.
  */
 export const BREAKPOINT_TOKENS = {
-  medium: "screenMD",
-  large: "screenLG",
-} as const satisfies Record<"medium" | "large", AntdTokenName>;
+  medium: 'screenMD',
+  large: 'screenLG',
+} as const satisfies Record<'medium' | 'large', AntdTokenName>;
 
 /**
  * Token and marker that preserve the `CSSETATY.cpy` field-error contract.
@@ -651,11 +634,11 @@ export const BREAKPOINT_TOKENS = {
  * treated as a changed baseline defect.
  */
 export const FIELD_ERROR_TOKENS = {
-  errorColor: "colorError",
-  blankMarker: "*",
+  errorColor: 'colorError',
+  blankMarker: '*',
 } as const satisfies {
   readonly errorColor: AntdTokenName;
-  readonly blankMarker: "*";
+  readonly blankMarker: '*';
 };
 
 /**
@@ -679,13 +662,12 @@ export const DESIGN_GAPS = [
    * does not preserve pixel-for-character positioning.
    */
   {
-    id: "G1",
-    description: "No Ant Design equivalent of the fixed 24-by-80 grid.",
-    sourceValue: "SIZE=(24,80) with absolute POS=(row,column).",
-    measuredCount:
-      "17 of 17 base and 4 of 4 extension mapsets; 902 base and 1166 all-21 fields.",
+    id: 'G1',
+    description: 'No Ant Design equivalent of the fixed 24-by-80 grid.',
+    sourceValue: 'SIZE=(24,80) with absolute POS=(row,column).',
+    measuredCount: '17 of 17 base and 4 of 4 extension mapsets; 902 base and 1166 all-21 fields.',
     resolution:
-      "Use responsive Layout with Descriptions for details and Table for lists, keyed to screenMD and screenLG; preserve grouping, reading order, and tab order rather than absolute character positions.",
+      'Use responsive Layout with Descriptions for details and Table for lists, keyed to screenMD and screenLG; preserve grouping, reading order, and tab order rather than absolute character positions.',
   },
   /*
    * Refactoring Rationale: the original shorthand cited the 6 protected
@@ -694,15 +676,13 @@ export const DESIGN_GAPS = [
    * fields, preventing protected carriers from becoming interactive controls.
    */
   {
-    id: "G2",
-    description:
-      "DRK suppresses display, while a browser password control displays entry dots.",
-    sourceValue:
-      "DRK across five ATTRB combinations, separated by PROT and UNPROT.",
+    id: 'G2',
+    description: 'DRK suppresses display, while a browser password control displays entry dots.',
+    sourceValue: 'DRK across five ATTRB combinations, separated by PROT and UNPROT.',
     measuredCount:
-      "Base17: 14 total, with 10 protected and 4 unprotected; all21: 18 total, with 14 protected and 4 unprotected.",
+      'Base17: 14 total, with 10 protected and 4 unprotected; all21: 18 total, with 14 protected and 4 unprotected.',
     resolution:
-      "Apply Input.Password with visibilityToggle disabled only to the 4 unprotected fields; retain keystroke-registration feedback with no change to secret-value behaviour, and do not render protected carriers as password inputs.",
+      'Apply Input.Password with visibilityToggle disabled only to the 4 unprotected fields; retain keystroke-registration feedback with no change to secret-value behaviour, and do not render protected carriers as password inputs.',
   },
   /*
    * Alternatives Considered: literal turquoise, neutral, green, or pink hues.
@@ -710,14 +690,13 @@ export const DESIGN_GAPS = [
    * tokens retain the measured roles and the histogram retains every original.
    */
   {
-    id: "G3",
+    id: 'G3',
     description:
-      "No direct semantic tokens for turquoise, neutral, green-as-input, or pink identity emphasis.",
-    sourceValue: "COLOR=TURQUOISE, COLOR=NEUTRAL, COLOR=GREEN, and COLOR=PINK.",
-    measuredCount:
-      "Base17/all21: TURQUOISE 127/157, NEUTRAL 60/90, GREEN 76/84, PINK 0/4.",
+      'No direct semantic tokens for turquoise, neutral, green-as-input, or pink identity emphasis.',
+    sourceValue: 'COLOR=TURQUOISE, COLOR=NEUTRAL, COLOR=GREEN, and COLOR=PINK.',
+    measuredCount: 'Base17/all21: TURQUOISE 127/157, NEUTRAL 60/90, GREEN 76/84, PINK 0/4.',
     resolution:
-      "Snap to colorInfo, colorTextSecondary, colorSuccess, and colorTextHeading; retain every source value, count, role, and rejected alternative in BMS_SOURCE_HISTOGRAM.",
+      'Snap to colorInfo, colorTextSecondary, colorSuccess, and colorTextHeading; retain every source value, count, role, and rejected alternative in BMS_SOURCE_HISTOGRAM.',
   },
   /*
    * Alternatives Considered: a dedicated underline or no-highlight token. Both
@@ -725,12 +704,12 @@ export const DESIGN_GAPS = [
    * affordance and OFF explicitly requests the absence of extra highlighting.
    */
   {
-    id: "G4",
-    description: "HILIGHT operands have no theme-token equivalent.",
-    sourceValue: "HILIGHT=UNDERLINE and HILIGHT=OFF.",
-    measuredCount: "Base17/all21: UNDERLINE 158/175 and OFF 35/54.",
+    id: 'G4',
+    description: 'HILIGHT operands have no theme-token equivalent.',
+    sourceValue: 'HILIGHT=UNDERLINE and HILIGHT=OFF.',
+    measuredCount: 'Base17/all21: UNDERLINE 158/175 and OFF 35/54.',
     resolution:
-      "Carry the input affordance structurally with the Input border; add no token for UNDERLINE or the explicit OFF state.",
+      'Carry the input affordance structurally with the Input border; add no token for UNDERLINE or the explicit OFF state.',
   },
   /*
    * Trade-offs: radius, elevation, and motion are additive because the source
@@ -738,12 +717,12 @@ export const DESIGN_GAPS = [
    * additions while keeping them controlled by the shared theme.
    */
   {
-    id: "G5",
-    description: "The 3270 vocabulary has no radius, elevation, or motion.",
-    sourceValue: "No BMS source analogue.",
-    measuredCount: "Not countable in either population.",
+    id: 'G5',
+    description: 'The 3270 vocabulary has no radius, elevation, or motion.',
+    sourceValue: 'No BMS source analogue.',
+    measuredCount: 'Not countable in either population.',
     resolution:
-      "Use borderRadiusLG, boxShadowSecondary, motionDurationFast, and motionDurationMid as explicitly additive system tokens.",
+      'Use borderRadiusLG, boxShadowSecondary, motionDurationFast, and motionDurationMid as explicitly additive system tokens.',
   },
   /*
    * Assumptions: the exhaustive BMS attribute measurement is the available
@@ -751,11 +730,11 @@ export const DESIGN_GAPS = [
    * never supplied and could not be verified.
    */
   {
-    id: "G6",
-    description: "No Figma design source or attachment exists.",
-    sourceValue: "No Figma file, frame, URL, or attachment was provided.",
-    measuredCount: "Not applicable to either BMS population.",
+    id: 'G6',
+    description: 'No Figma design source or attachment exists.',
+    sourceValue: 'No Figma file, frame, URL, or attachment was provided.',
+    measuredCount: 'Not applicable to either BMS population.',
     resolution:
-      "Not a system gap: the Figma-to-token mapping table is NOT APPLICABLE, and the measured BMS attributes are the authoritative design source.",
+      'Not a system gap: the Figma-to-token mapping table is NOT APPLICABLE, and the measured BMS attributes are the authoritative design source.',
   },
 ] as const satisfies readonly DesignGap[];

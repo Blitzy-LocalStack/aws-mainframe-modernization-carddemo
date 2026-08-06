@@ -448,15 +448,32 @@ settings:
   #       locked for the directory rather than only the range its constraint
   #       permits, so the generated document and a fresh init agree. It does not
   #       change the Requirements table, which reports the constraint either way.
-  #       Assumptions: exactly THREE locks are COMMITTED, and all three are roots
-  #       -- infra/bootstrap/.terraform.lock.hcl, infra/envs/dev/.terraform.lock.hcl
-  #       and infra/envs/prod/.terraform.lock.hcl, each written by a real
-  #       `terraform init` on the validated toolchain. A root's init writes no
-  #       lock into the child modules it calls, because a module does not select a
-  #       provider version -- the root that calls it does. This setting therefore
-  #       enriches the three root documents; it is enabled globally rather than
-  #       per directory so that a fourth root added later is documented against
-  #       its lock without a configuration change here.
+  #       Assumptions: NINETEEN locks are COMMITTED -- the three roots
+  #       (infra/bootstrap, infra/envs/dev, infra/envs/prod) and all SIXTEEN
+  #       directories under infra/modules -- each written by a real `terraform
+  #       init` on the validated toolchain. Measured with `git ls-files`, not
+  #       assumed. Two facts are easy to conflate here and only the first is about
+  #       a root: a root's init writes no lock into the child modules it CALLS,
+  #       because a module does not select a provider version, the root that calls
+  #       it does; but `terraform init -backend=false` run directly IN a module
+  #       directory does write that directory's own lock, and that is the
+  #       documented way to make `terraform validate` work there, so every module
+  #       has one and the repository convention tracks it. This setting therefore
+  #       enriches ALL nineteen documents, and the effect is directly observable:
+  #       infra/modules/step-functions-batch/README.md renders Requirements `aws
+  #       ~> 6.56` from versions.tf and Providers `aws 6.57.1` from that
+  #       directory's lock. It is enabled globally rather than per directory so
+  #       that a twentieth directory added later is documented against its lock
+  #       without a configuration change here.
+  # WHY : Refactoring Rationale: this comment previously asserted that "exactly
+  #       THREE locks are COMMITTED, and all three are roots", and that the setting
+  #       "therefore enriches the three root documents". Both halves were wrong at
+  #       the time of writing and the count is now stated as a measurement. The
+  #       claim was self-inconsistent as well as inaccurate: the block immediately
+  #       below already recorded, correctly and with a measurement, that a module
+  #       directory's own lock IS read by terraform-docs -- so a reader had one
+  #       comment telling them module locks do not exist in version control and
+  #       the next telling them what happens when they do.
   # WHY : Refactoring Rationale: this comment previously went one step further and
   #       claimed the setting "is inert for the sixteen module documents, which
   #       continue to report the constraint from versions.tf". That does not hold,
@@ -469,19 +486,25 @@ settings:
   #       `6.57.1`, and with the same directory's lock removed it reads
   #       `~> 6.56`. The setting is therefore inert only for a module directory
   #       that has never been init'ed on its own.
-  #       Trade-offs: `lockfile: true` is kept regardless, and the consequence is
-  #       named instead of designed away. What it costs is that a module's
-  #       generated region can differ between two machines over an untracked file,
-  #       so `--output-check` can report drift that no committed change caused.
-  #       What it buys is that the three ROOT documents -- the only three a reader
-  #       consults to learn which provider release will actually be installed --
-  #       report the locked release rather than a range. Alternatives Considered:
-  #       setting it false to make every directory report only its constraint,
-  #       which would remove the discrepancy by removing the useful half; and
-  #       ignoring module locks per directory, which this configuration has no
-  #       expression for. Assumptions: anyone running the drift gate regenerates
-  #       and checks from a clean checkout, or removes a module's own lock first, so
-  #       that a per-directory init cannot be mistaken for a contract change.
+  #       Trade-offs: `lockfile: true` is kept, and what it costs has changed now
+  #       that all nineteen locks are tracked rather than only the three roots. It
+  #       no longer costs machine-dependence: a clean checkout carries every
+  #       directory's lock, so each generated region renders the same release
+  #       everywhere and `--output-check` is deterministic. What it costs instead is
+  #       that a lock is now a documented input, so RE-RESOLVING one -- an init
+  #       that picks up a newer release the constraint also permits, 6.58.0 rather
+  #       than the locked 6.57.1 -- drifts that directory's document until it is
+  #       regenerated. That is the correct place for the cost to land, because a
+  #       provider upgrade IS a change a reader should see in the README. What it
+  #       buys is that every document, root and module alike, reports the release
+  #       that will actually be installed rather than a range that could resolve to
+  #       several. Alternatives Considered: setting it false to make every directory
+  #       report only its constraint, which would remove the discrepancy by removing
+  #       the useful half; and ignoring module locks per directory, which this
+  #       configuration has no expression for. Assumptions: the drift gate is run
+  #       against the committed locks, so regenerating after a deliberate provider
+  #       bump and committing both together is the intended workflow -- the lock and
+  #       the document it feeds are one change.
   lockfile: true
 
   # WHY : Trade-offs: with read-comments left at its default, a variable with

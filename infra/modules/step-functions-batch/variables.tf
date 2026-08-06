@@ -19,8 +19,8 @@
 #   terraform.tfvars files instead of hidden in this module body.
 #
 # Parameters:
-#   Thirty-four inputs in nine groups, in the order they are declared below.
-#   Fifteen are REQUIRED and nineteen carry a default. Every required one is an
+#   Thirty-one inputs in nine groups, in the order they are declared below.
+#   Fourteen are REQUIRED and seventeen carry a default. Every required one is an
 #   identifier of a resource another module owns; every defaulted one is a name,
 #   a policy value or a sizing value this module can pick a defensible starting
 #   point for.
@@ -29,20 +29,34 @@
 #     ECS wiring ............... ecs_cluster_arn and three
 #                                task-definition/container-name pairs, one pair
 #                                per image the chain runs
-#     IAM ...................... task_role_arns
-#     Networking ............... private_app_subnet_ids, security_group_ids
+#     IAM ...................... pass_role_arns
+#     Networking ............... private_app_subnet_ids, task_security_group_id
 #     Data and notification .... dataset_bucket_name, notification_topic_arn
-#     Observability ............ log_retention_days, kms_key_arn, log_level,
-#                                include_execution_data, tracing_enabled
+#     Observability ............ log_retention_days, log_group_kms_key_arn,
+#                                log_level, log_include_execution_data
 #     Function-backed states ... quiesce_function_arn, resume_function_arn,
 #                                analyze_tables_function_arn,
 #                                read_only_flag_parameter_name
-#     Seed-dataset staging ..... seed_dataset_names,
+#     Seed-dataset staging ..... seed_datasets,
 #                                stage_datasets_max_concurrency
-#     Timing and resilience .... default_state_timeout_seconds,
-#                                state_timeout_seconds_overrides, three retry
-#                                knobs, posting_warn_return_code and the two
-#                                top-level execution ceilings
+#     Timing and resilience .... state_timeout_seconds, three retry knobs and
+#                                the two top-level execution ceilings
+#
+#   The roster above is closed: main.tf references every one of them, so tflint's
+#   terraform_unused_declarations rule fails on an input this module stops using,
+#   and an input main.tf needs but this file does not declare fails `validate`.
+#
+#   NOT AN INPUT -- the posting condition-code contract. The two exit statuses the
+#   transaction-posting state may return, 0 and 4, are locals in main.tf and not
+#   variables. They are the baseline's contract rather than a policy: app/cbl/
+#   CBTRN02C.cbl assigns RETURN-CODE in exactly one place, MOVE 4 TO RETURN-CODE at
+#   its line 230, so 0 and 4 are the only codes it produces. This was a single
+#   configurable ceiling compared with NumericLessThanEquals, which admitted 1, 2
+#   and 3 as reject nights when in truth they can only come from the runtime failing
+#   around the program, and which could be set to 255 -- at which point every
+#   failure the state can report satisfies the predicate and the chain runs interest
+#   accrual over transactions that were never posted. The rationale now sits at the
+#   locals, beside the predicate it decides.
 #
 #   PROVENANCE -- where a consumer gets each value. Every identifier is another
 #   module's published output, wired by the environment root: the cluster from
@@ -73,10 +87,11 @@
 #   Fifteen inputs have no default, so omitting any one of them stops the
 #   calling root with a missing-required-argument error before anything is
 #   created, rather than provisioning a chain that fails on its first
-#   invocation. Thirty-two of the thirty-four additionally carry a `validation`
+#   invocation. Twenty-nine of the thirty-one additionally carry a `validation`
 #   block. The two that do not are `tags`, a free-form map whose contents are
 #   the caller's to choose so there is nothing to constrain, and
-#   `include_execution_data`, a boolean whose type is already its whole domain.
+#   `log_include_execution_data`, a boolean whose type is already its whole
+#   domain.
 #   Every input naming an AWS resource has its service and
 #   resource-type fields asserted, because a wrong-but-well-formed identifier
 #   produces a valid plan, a clean apply, and a failure that first appears in
@@ -99,23 +114,27 @@
 #     main.tf. Exposing the state list would let one environment run a different
 #     chain from the other, which is precisely the topology divergence the two
 #     roots are required not to have.
-#   - Trade-offs: per-state timing is exposed as a floor plus an override map
-#     rather than as one input per state, or as one map required to carry all
-#     eleven keys. Eleven named inputs would document themselves but would have
-#     to be restated by every root and kept in step with main.tf whenever a
-#     state is renamed; a required all-keys map has the same restatement cost.
-#     The floor-plus-override shape lets a root override only the states whose
-#     duration it actually knows differs. The shape's one real failure mode is
-#     that a mistyped override key silently falls back to the floor, and that is
-#     closed by validating the key NAMES against the eleven states rather than
-#     by changing the shape -- see state_timeout_seconds_overrides.
-#   - Trade-offs: `kms_key_arn` is REQUIRED here, where a log-encryption key is
-#     often optional. Every CICS file in the baseline was defined
-#     `RECOVERY(NONE) JOURNAL(NO)` (app/csd/CARDDEMO.CSD:1-89), so encryption at
-#     rest is one of the properties this migration adds rather than preserves. A
-#     nullable key would fall back to service-managed encryption silently, which
-#     makes the added property skippable by omission; requiring it costs each
-#     root one line that names another module's output it already has.
+#   - Trade-offs: per-state timing is ONE `map(number)` carrying all eleven state
+#     names, rather than eleven named scalars or a floor plus a sparse override
+#     map. Eleven named inputs would document themselves but would have to be
+#     restated by every root and kept in step with main.tf whenever a state is
+#     renamed. A floor plus sparse overrides was the other candidate and it has a
+#     specific failure mode the all-keys map does not: a state left out of the
+#     overrides silently inherits a ceiling nobody chose for it, and a mistyped
+#     key does the same while the operator believes a limit was raised. Requiring
+#     every key turns both of those into a plan-time error naming the variable.
+#     The accepted cost is that the map is one degree less discoverable than
+#     eleven named inputs and that adding a state means extending the default and
+#     its validation together -- see state_timeout_seconds.
+#   - Trade-offs: `log_group_kms_key_arn` is NULLABLE with a null default, where
+#     the encryption posture argues for requiring it. Every CICS file in the
+#     baseline was defined `RECOVERY(NONE) JOURNAL(NO)`
+#     (app/csd/CARDDEMO.CSD:1-89), so customer-managed encryption at rest is one
+#     of the properties this migration adds rather than preserves, and both
+#     environment roots do supply the key. It is nullable anyway so that a module
+#     with no log-group key yet is still usable rather than merely less encrypted;
+#     the posture is asserted by the roots, and the input's own comment records
+#     that null is not the intended production value.
 #   - Assumptions: the business date is NOT an input here. app/jcl/INTCALC.jcl:22
 #     runs `PGM=CBACT04C,PARM='2022071800'`, injecting the processing date
 #     rather than letting the program read the clock, and that property is what
@@ -127,14 +146,30 @@
 #     describing what an input MEANS at those points, not reporting on a
 #     provisioned stack. This tree is authored and statically validated;
 #     applying it to a live account is an operator action outside this scope.
+#   - Refactoring Rationale: every comment below is a `# WHY : <label>:`
+#     rationale, and there is deliberately no `# WHAT:` narration line paired
+#     with it. An earlier revision of this file carried eighty such lines, one
+#     ahead of each rationale, and every one restated something already stated
+#     verbatim a line or two later: the purpose of an input is its
+#     `description`, which is also the text terraform-docs injects into
+#     README.md, and the purpose of a check is its `condition` together with its
+#     `error_message`. Rule 1 forbids a comment that restates the code, so those
+#     lines were not merely redundant. Removing them also brings this file back
+#     into line with the rest of the package -- this file and the one statement in
+#     its sibling main.tf were the only uses of the `WHAT:` form at statement level
+#     anywhere under infra/, and both are gone, while the `# WHY : <label>:` form
+#     they keep is used throughout. Assumptions: no
+#     rationale, `description`, `validation` or `error_message` was changed by
+#     that removal; where a removed line had been carrying the SUBJECT of an
+#     absence rather than restating a neighbour -- the six entries in the closing
+#     section -- the subject was folded into the rationale's own first sentence,
+#     which is what the canonical labels are for.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Naming and tagging
 # -----------------------------------------------------------------------------
 
-# WHAT: the prefix concatenated ahead of the environment suffix into the state
-#       machine, log group and execution role names this module creates.
 # WHY : Assumptions: every directory under infra/ takes its prefix through a
 #       variable of this name with this same default, which is what lets a root
 #       pass one value to every module it calls instead of each module
@@ -149,8 +184,6 @@ variable "name_prefix" {
   default     = "carddemo"
 
   validation {
-    # WHAT: that the prefix is legal in all three of the name spaces it is
-    #       concatenated into, and no longer than the shortest of them allows.
     # WHY : Trade-offs: a state machine name, a log group name and an IAM role
     #       name accept different character sets. Restricting the prefix to
     #       lowercase letters, digits and hyphens keeps it legal in all three at
@@ -163,8 +196,6 @@ variable "name_prefix" {
   }
 }
 
-# WHAT: the environment suffix that distinguishes one deployment's chain, log
-#       groups and execution role from the other's.
 # WHY : Trade-offs: this input is deliberately required with no default. A
 #       defaulted environment name is the exact mechanism by which a production
 #       schedule ends up starting a development state machine: the caller omits
@@ -177,7 +208,6 @@ variable "environment" {
   type        = string
 
   validation {
-    # WHAT: that the value is one of exactly two names.
     # WHY : Assumptions: two environment roots exist, infra/envs/dev and
     #       infra/envs/prod, and this module is called only from those two. They
     #       are required to differ in sizing and retention and never in
@@ -189,8 +219,6 @@ variable "environment" {
   }
 }
 
-# WHAT: tags layered onto the two state machines and their two log groups, on
-#       top of whatever the calling root already applies.
 # WHY : Trade-offs: an empty default reads as complete here rather than as
 #       missing tagging, and without this note it would read as the latter. The
 #       baseline tag set is not this module's to supply: each calling root
@@ -216,7 +244,6 @@ variable "tags" {
 # and holds the state open until the task stops, so the next state observes a
 # completed step exactly as a JCL step observed its predecessor's completion.
 #
-# WHAT: why these states run tasks rather than functions.
 # WHY : Alternatives Considered: implementing the job states as functions was
 #       evaluated and rejected on a hard limit rather than a preference. A
 #       function's execution is capped at fifteen minutes, and the posting,
@@ -227,8 +254,6 @@ variable "tags" {
 #       each and are declared in their own section below.
 # -----------------------------------------------------------------------------
 
-# WHAT: the cluster every task state starts its task in, and the cluster the
-#       execution role's ECS grants are scoped to.
 # WHY : Assumptions: this input is used twice and both uses need the full ARN.
 #       It is the `Cluster` parameter of every synchronous run-task state, and
 #       it is also the value of the `ecs:cluster` condition that scopes
@@ -242,8 +267,6 @@ variable "ecs_cluster_arn" {
   type = string
 
   validation {
-    # WHAT: that the identifier names the ECS service and the cluster resource
-    #       type.
     # WHY : Assumptions: a wrong-but-well-formed ARN here yields a syntactically
     #       valid IAM policy and a state machine that applies without complaint,
     #       then fails at the first invocation with a permissions error naming a
@@ -259,7 +282,6 @@ variable "ecs_cluster_arn" {
   }
 }
 
-# WHAT: the task definition the five batch job states run.
 # WHY : Assumptions: one definition serves all five jobs because each state
 #       overrides only the container command, so the per-step arguments stay in
 #       the state machine where the step order is also expressed rather than
@@ -270,8 +292,6 @@ variable "batch_task_definition_arn" {
   type = string
 
   validation {
-    # WHAT: that the identifier names an ECS task definition, with or without a
-    #       trailing revision.
     # WHY : Assumptions: the resource type is asserted and the revision
     #       deliberately is not. An ARN without a trailing revision names the
     #       family and resolves to its ACTIVE revision at invocation, which is
@@ -284,8 +304,6 @@ variable "batch_task_definition_arn" {
   }
 }
 
-# WHAT: which container inside the batch task definition receives the command
-#       override that selects the job.
 # WHY : Assumptions: `ContainerOverrides` addresses a container by NAME, and an
 #       override whose name matches nothing in the definition is not an error --
 #       it is ignored. The task then starts with the command baked into its
@@ -298,8 +316,6 @@ variable "batch_container_name" {
   default     = "batch"
 
   validation {
-    # WHAT: that the name is a legal container name and is neither empty nor
-    #       whitespace-bearing.
     # WHY : Trade-offs: only the character set is checked, not the container's
     #       existence. Terraform cannot read a definition's container list from
     #       an ARN that may carry no revision, so asserting existence is not
@@ -311,7 +327,6 @@ variable "batch_container_name" {
   }
 }
 
-# WHAT: the task definition each branch of the seed-staging map runs.
 # WHY : Assumptions: this is a separate definition from the batch one because
 #       the two carry different images, different task roles and different
 #       resource sizes. The staging branch reads a flat file and bulk-loads it;
@@ -322,7 +337,6 @@ variable "data_migration_task_definition_arn" {
   type = string
 
   validation {
-    # WHAT: the same task-definition shape accepted for the batch image.
     # WHY : Assumptions: same shape and same reasoning as the batch definition
     #       above; the two are validated separately rather than through one
     #       shared check so that an error message names the input the caller got
@@ -332,8 +346,6 @@ variable "data_migration_task_definition_arn" {
   }
 }
 
-# WHAT: which container inside the ETL task definition receives the command
-#       override carrying the dataset name.
 # WHY : Assumptions: the same name-matching contract as the batch container, and
 #       the same silent-substitution consequence if it is wrong -- a staging
 #       branch that appears to succeed while loading nothing the caller asked
@@ -344,7 +356,6 @@ variable "data_migration_container_name" {
   default     = "data-migration"
 
   validation {
-    # WHAT: that the name is a legal, non-empty container name.
     # WHY : Trade-offs: as for the batch container name, existence cannot be
     #       checked at plan time from an ARN, so the character set is the
     #       strongest available assertion.
@@ -353,8 +364,6 @@ variable "data_migration_container_name" {
   }
 }
 
-# WHAT: the task definition the two daily output states and the entire ad-hoc
-#       report machine run.
 # WHY : Assumptions: this is a THIRD definition rather than a reuse of the batch
 #       one, and the reason is verifiable rather than stylistic.
 #       services/batch-service's job-name list is exactly
@@ -371,7 +380,6 @@ variable "reporting_task_definition_arn" {
   type = string
 
   validation {
-    # WHAT: the same task-definition shape accepted for the other two images.
     # WHY : Assumptions: validating separately keeps a malformed reporting ARN
     #       attributed to the input that feeds the statement and report states
     #       rather than to a generic collection of task definitions.
@@ -380,8 +388,6 @@ variable "reporting_task_definition_arn" {
   }
 }
 
-# WHAT: which container inside the reporting task definition receives the
-#       command override.
 # WHY : Assumptions: the reporting image serves an HTTP surface as well as these
 #       jobs, so its baked-in command is a server start. An unmatched override
 #       here does not run the wrong job -- it starts a long-lived server inside
@@ -394,7 +400,6 @@ variable "reporting_container_name" {
   default     = "reporting"
 
   validation {
-    # WHAT: that the name is a legal, non-empty container name.
     # WHY : Trade-offs: existence cannot be checked from an ARN at plan time,
     #       but the legal character set can. Rejecting blank and
     #       whitespace-bearing names here prevents the server-start outcome
@@ -408,9 +413,6 @@ variable "reporting_container_name" {
 # IAM -- the roles the execution role may hand to ECS
 # -----------------------------------------------------------------------------
 
-# WHAT: every role the state machine is permitted to pass to ECS when it starts
-#       a task, which is the task role AND the task execution role of each of
-#       the three task definitions above -- six entries for three images.
 # WHY : Trade-offs: this is ONE list rather than six named scalars, or three
 #       pairs. A list keeps the surface small and is consumed directly as the
 #       `Resource` of a single `iam:PassRole` statement, at the cost of being
@@ -423,29 +425,48 @@ variable "reporting_container_name" {
 #       pulls the image and writes the log stream, the task role is what the
 #       running job authenticates as -- so supplying only the task roles fails
 #       at launch rather than at run.
-variable "task_role_arns" {
+variable "pass_role_arns" {
   description = "IAM role ARNs the state-machine execution role is permitted to pass to ECS: the task role AND the task execution role of each of the batch, data-migration and reporting task definitions, six entries for three images. The environment root assembles the list from the ecs-service outputs it already holds; enumerating it is the least-privilege boundary of what either state machine may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole."
 
   type = list(string)
 
   validation {
-    # WHAT: that at least one role is supplied and each entry is an IAM role
-    #       ARN.
     # WHY : Trade-offs: the grant is enumerated rather than written as a
     #       wildcard over the account's roles. A wildcard is one line shorter and
     #       would let this state machine start a task running as ANY role in the
     #       account, which turns a state-machine definition into a
     #       privilege-escalation path. Enumerating costs the caller a list it
     #       already has, because every entry is another module's output.
-    condition     = length(var.task_role_arns) >= 1 && alltrue([for r in var.task_role_arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
-    error_message = "task_role_arns must list at least one IAM role ARN, each of the form arn:<partition>:iam::<account-id>:role/<name>."
+    # WHY : Assumptions: the name says PASS rather than TASK because that is the
+    #       action the list authorises -- one `iam:PassRole` statement whose
+    #       Resource is exactly these ARNs. A name built around "task" invites the
+    #       reading that only task roles belong here, and a list missing the three
+    #       EXECUTION roles fails at the first run-task with an error naming
+    #       iam:PassRole rather than the omission.
+    # WHY : Refactoring Rationale: this condition accepted a single entry in an
+    #       earlier revision, which is the ONE arity that cannot be right. This
+    #       module starts tasks from three task definitions and each needs two
+    #       passable roles -- the execution role that pulls the image and writes
+    #       the log stream, and the task role the job authenticates as -- so the
+    #       complete set is six slots. An under-supplied list does not fail at
+    #       apply; it fails at the first nightly run-task with an access-denied
+    #       error on iam:PassRole that names a role rather than this input, which
+    #       is the most expensive place to discover it. Requiring the exact arity
+    #       moves that discovery to plan time.
+    # WHY : Assumptions: DUPLICATES are permitted deliberately, so this is an
+    #       exact-count check and not a distinctness check. A caller may share one
+    #       execution role across two or three task definitions, in which case the
+    #       same ARN legitimately fills more than one slot; rejecting repeats would
+    #       reject that composition, and the list is a set of grants where a repeat
+    #       grants nothing extra.
+    condition     = length(var.pass_role_arns) == 6 && alltrue([for r in var.pass_role_arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
+    error_message = "pass_role_arns must list exactly six IAM role ARNs -- the task role and the task execution role of each of the batch, data-migration and reporting task definitions -- each of the form arn:<partition>:iam::<account-id>:role/<name>. List a shared role once per slot it fills."
   }
 }
 
 # -----------------------------------------------------------------------------
 # Networking -- where the tasks are placed
 #
-# WHAT: why no input controls public addressing.
 # WHY : Alternatives Considered: exposing an `assign_public_ip` input was
 #       considered and rejected. main.tf sets that field to the literal
 #       `DISABLED`, because these subnets reach AWS APIs through the VPC's
@@ -455,7 +476,6 @@ variable "task_role_arns" {
 #       a choice worth offering an environment root.
 # -----------------------------------------------------------------------------
 
-# WHAT: the subnets the state machine places every task into.
 # WHY : Assumptions: these are the PRIVATE-APPLICATION tier specifically -- not
 #       the public tier, which carries only the load balancer and the NAT
 #       gateways, and not the isolated data tier, which has no internet route at
@@ -468,8 +488,6 @@ variable "private_app_subnet_ids" {
   type = list(string)
 
   validation {
-    # WHAT: that at least three subnets are supplied and each is a subnet
-    #       identifier.
     # WHY : Assumptions: the surrounding network module provisions three
     #       availability zones, so the three-subnet floor asserts that the batch
     #       tasks are placed across all of them rather than concentrated. An
@@ -478,12 +496,20 @@ variable "private_app_subnet_ids" {
     #       invocation rather than at apply; placing tasks in fewer than three
     #       zones would let one zone's loss stop the nightly chain in an
     #       environment whose whole point is that it does not.
-    condition     = length(var.private_app_subnet_ids) >= 3 && alltrue([for s in var.private_app_subnet_ids : can(regex("^subnet-[0-9a-f]{8,}$", s))])
-    error_message = "private_app_subnet_ids must list at least three subnet identifiers, each of the form subnet-<hex>, one per availability zone."
+    # WHY : Refactoring Rationale: the count check alone was satisfiable by one
+    #       subnet repeated three times, which passes the arithmetic while placing
+    #       every task in a single zone -- exactly the concentration the floor
+    #       exists to prevent, and invisible afterwards because the plan shows
+    #       three entries. Distinctness is therefore asserted alongside the count,
+    #       and unlike the role list above a repeat here is never legitimate: two
+    #       identical subnet identifiers describe one subnet.
+    condition = length(var.private_app_subnet_ids) >= 3 && length(distinct(var.private_app_subnet_ids)) == length(var.private_app_subnet_ids) && alltrue([
+      for s in var.private_app_subnet_ids : can(regex("^subnet-[0-9a-f]{8,}$", s))
+    ])
+    error_message = "private_app_subnet_ids must list at least three DISTINCT subnet identifiers, each of the form subnet-<hex>, one per availability zone."
   }
 }
 
-# WHAT: the security groups attached to every task the state machines start.
 # WHY : Assumptions: what this group must permit is egress to Aurora on the
 #       database port and egress on 443 to the VPC interface endpoints, and
 #       nothing wider -- those two are the whole of what a batch step reaches.
@@ -491,20 +517,25 @@ variable "private_app_subnet_ids" {
 #       awsvpc network configuration takes a list and because the sibling
 #       infra/modules/ecs-service input of the same name is a list, so a root
 #       passes the same expression to both without reshaping it.
-variable "security_group_ids" {
-  description = "Security groups attached to every task the state machines start, canonically the single application-tier group published by infra/modules/network. These are what permit the egress a batch step actually needs -- the database port to Aurora and 443 to the VPC interface endpoints -- and nothing wider. A list rather than one identifier, matching both the awsvpc network configuration and the identically named ecs-service input."
+variable "task_security_group_id" {
+  description = "Security group attached to every task the state machines start, the single application-tier group published by infra/modules/network. It is what permits the egress a batch step actually needs -- the database port to Aurora and 443 to the VPC interface endpoints -- and nothing wider."
 
-  type = list(string)
+  type = string
 
   validation {
-    # WHAT: that at least one group is supplied and each entry is a security
-    #       group identifier.
-    # WHY : Assumptions: an empty list would leave the service to apply the
-    #       VPC's default security group, which is a permissive group nobody
-    #       chose for this workload, and that substitution is silent. Requiring
-    #       at least one entry makes the group an explicit decision.
-    condition     = length(var.security_group_ids) >= 1 && alltrue([for g in var.security_group_ids : can(regex("^sg-[0-9a-f]{8,}$", g))])
-    error_message = "security_group_ids must list at least one security group identifier, each of the form sg-<hex>."
+    # WHY : Assumptions: a task started with no group at all falls back to the
+    #       VPC's default security group, which is a permissive group nobody chose
+    #       for this workload, and the substitution is silent. A required scalar
+    #       makes the group an explicit decision.
+    # WHY : Alternatives Considered: a `list(string)`, matching the awsvpc network
+    #       configuration's own shape and the identically named ecs-service input.
+    #       Rejected: this module attaches exactly one group, so a list would let a
+    #       caller pass several and quietly widen the egress the whole batch window
+    #       runs under, and main.tf would have to wrap or unwrap it either way. The
+    #       accepted cost is one `[var.task_security_group_id]` at the single point
+    #       the awsvpc block is built.
+    condition     = can(regex("^sg-[0-9a-f]{8,}$", var.task_security_group_id))
+    error_message = "task_security_group_id must be a security group identifier of the form sg-<hex>."
   }
 }
 
@@ -512,8 +543,6 @@ variable "security_group_ids" {
 # Data and notification
 # -----------------------------------------------------------------------------
 
-# WHAT: the versioned bucket the staging, backup, combine, statement and report
-#       states read and write dataset generations in.
 # WHY : Assumptions: this module CONSUMES the bucket and creates nothing inside
 #       it. The bucket itself, the ten generation-dataset prefix families and
 #       the five-noncurrent-version lifecycle rule that is the `LIMIT(5)
@@ -527,7 +556,6 @@ variable "dataset_bucket_name" {
   type = string
 
   validation {
-    # WHAT: that the value satisfies S3's own bucket-naming rules.
     # WHY : Assumptions: the rules asserted are the service's -- 3 to 63
     #       characters of lowercase letters, digits, hyphens and dots, beginning
     #       and ending alphanumeric. A name breaking them can neither be created
@@ -538,8 +566,6 @@ variable "dataset_bucket_name" {
   }
 }
 
-# WHAT: the topic the failure path publishes to before either machine reaches
-#       its terminal failure state.
 # WHY : Assumptions: the catch handler on every work state routes here first and
 #       only then to the terminal failure, so a failed nightly run notifies
 #       instead of failing silently. That is the analogue of the job log and the
@@ -553,7 +579,6 @@ variable "notification_topic_arn" {
   type = string
 
   validation {
-    # WHAT: that the identifier names the SNS service.
     # WHY : Assumptions: asserting the `sns:` service field catches the
     #       plausible substitution of a queue ARN, which a catch handler would
     #       accept into a valid plan and then fail to publish to at exactly the
@@ -568,7 +593,6 @@ variable "notification_topic_arn" {
 # Observability -- execution logs, their encryption, and tracing
 # -----------------------------------------------------------------------------
 
-# WHAT: how long both state machines' log groups retain events.
 # WHY : Assumptions: retention is one of the narrow set of parameters the dev and
 #       prod roots are permitted to set differently without changing the stack's
 #       shape, which is why it is an input rather than a constant fixed in
@@ -581,7 +605,6 @@ variable "log_retention_days" {
   default     = 30
 
   validation {
-    # WHAT: that the value is one of the retention periods the service accepts.
     # WHY : Assumptions: the set is closed because CloudWatch Logs accepts only
     #       these values and rejects anything else during apply, after other
     #       resources already exist. 0 is excluded deliberately even though the
@@ -594,7 +617,6 @@ variable "log_retention_days" {
   }
 }
 
-# WHAT: the customer-managed key both log groups are encrypted with.
 # WHY : Trade-offs: this is REQUIRED, where a log-encryption key is commonly
 #       optional with a null default meaning service-managed encryption. That
 #       alternative was considered and rejected on the merits. Every file
@@ -605,25 +627,34 @@ variable "log_retention_days" {
 #       which makes the added property skippable without any reader noticing.
 #       Requiring it costs each root one line naming an infra/modules/kms output
 #       it already holds, and that is the whole cost.
-variable "kms_key_arn" {
-  description = "ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Required rather than optional: every CICS file in the baseline was defined RECOVERY(NONE) JOURNAL(NO), so encryption at rest is one of the properties this migration adds, and making the key mandatory is what keeps that addition from being skippable by omission."
+variable "log_group_kms_key_arn" {
+  description = "ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption."
 
-  type = string
+  type     = string
+  nullable = true
+  default  = null
 
   validation {
-    # WHAT: that the identifier is a KMS KEY ARN and not an alias ARN.
     # WHY : Assumptions: both the `kms:` service field and the `:key/` resource
     #       type are asserted, because an alias ARN is the plausible wrong value
     #       -- an alias is what a human reads in the console -- and it carries
     #       resource type `alias/`, which a log group does not accept. Catching
     #       it here names this input; letting it through produces an apply-time
     #       failure attributed to the log group instead.
-    condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", var.kms_key_arn))
-    error_message = "kms_key_arn must be a KMS key ARN of the form arn:<partition>:kms:<region>:<account-id>:key/<key-id>, not an alias ARN."
+    # WHY : Trade-offs: the default is null, so a module applied with no key still
+    #       plans and the log groups fall back to service-managed encryption. That
+    #       is acceptable for a local smoke run and is NOT the intended production
+    #       posture: every CICS file in the baseline was defined RECOVERY(NONE)
+    #       JOURNAL(NO), and customer-managed encryption at rest is one of the
+    #       properties this migration adds, so both environment roots are expected
+    #       to supply the key. A required input was the alternative and was
+    #       rejected because it makes a module that has no log-group key yet
+    #       unusable rather than merely less encrypted.
+    condition     = var.log_group_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", var.log_group_kms_key_arn))
+    error_message = "log_group_kms_key_arn must be null, or a KMS key ARN of the form arn:<partition>:kms:<region>:<account-id>:key/<key-id>, not an alias ARN."
   }
 }
 
-# WHAT: which execution events reach both log groups.
 # WHY : Trade-offs: the default is the most verbose setting rather than the
 #       cheapest. A nightly chain runs once, so volume is bounded by eleven
 #       states rather than by a request rate, and the first question asked after
@@ -635,7 +666,6 @@ variable "log_level" {
   default     = "ALL"
 
   validation {
-    # WHAT: that the value is one of the three levels that still emit logs.
     # WHY : Alternatives Considered: accepting the service's fourth level, OFF,
     #       and leaving it to the CI policy scan to reject -- that scan requires
     #       logging to be enabled on a state machine, so OFF would be caught
@@ -650,8 +680,6 @@ variable "log_level" {
   }
 }
 
-# WHAT: whether each logged event carries the state's input and output payload
-#       as well as the transition itself.
 # WHY : Assumptions: the default is on, and what makes that safe is a checkable
 #       claim about what this chain's payloads contain -- a business date,
 #       dataset names, job names, execution identities and task metadata. NO
@@ -664,35 +692,17 @@ variable "log_level" {
 #       stays an INPUT rather than becoming a constant precisely because the
 #       claim is about the current chain: a future change that threaded
 #       record-level data through an execution input must revisit this default.
-variable "include_execution_data" {
+variable "log_include_execution_data" {
   description = "Whether each logged event carries the state's input and output payload as well as the transition itself. Safe to leave on because this chain's payloads are business dates, dataset names, job names and execution identities -- no cardholder data, primary account number or credential enters either state machine. It remains an input so that a future change threading record-level data through an execution can turn it off."
   type        = bool
   default     = true
 }
 
-# WHAT: whether both workflows emit end-to-end traces.
 # WHY : Trade-offs: tracing costs per recorded trace, and a chain that runs once
 #       a night records one. Against that cost, the question this module's
 #       failures raise is almost always where in the chain time went or which
 #       call failed, and a per-execution trace answers it without reconstructing
 #       a timeline from log timestamps across three services.
-variable "tracing_enabled" {
-  description = "Whether both workflows are traced end to end. The target observability contract requires one trace spanning the task and function invocations of a single execution, so both environment roots are expected to leave this true."
-  type        = bool
-  default     = true
-
-  validation {
-    # WHAT: that tracing is not switched off.
-    # WHY : Assumptions: dev and prod may differ in sizing and retention, not in
-    #       whether the topology emits traces. Asserting the value turns an
-    #       observability regression into a plan-time error rather than a
-    #       workflow that silently disappears from the trace view while its plan
-    #       still reads as clean.
-    condition     = var.tracing_enabled
-    error_message = "tracing_enabled must be true for both CardDemo state machines; dev and prod may differ in sizing and retention, not in whether traces are emitted."
-  }
-}
-
 # -----------------------------------------------------------------------------
 # Function-backed states -- the operator bracket and the statistics refresh
 #
@@ -701,15 +711,12 @@ variable "tracing_enabled" {
 # rather than one list, because each is invoked at a specific position in the
 # chain and a list would lose which is which.
 #
-# WHAT: why these three are functions while the rest are tasks.
 # WHY : Alternatives Considered: running them as Fargate tasks for uniformity.
 #       Rejected -- it would pay a task cold start and a task definition's worth
 #       of configuration for a call that writes one parameter or issues one
 #       statement. The fifteen-minute execution ceiling that rules a function
 #       out for a record-processing step rules nothing out for these three.
 #
-# WHAT: why this module accepts three function ARNs instead of creating the
-#       three functions.
 # WHY : Alternatives Considered: this module's remit is two state machines, one
 #       execution role and two log groups; there is no Lambda module in this
 #       infrastructure package, so function ownership sits with the environment
@@ -724,8 +731,6 @@ variable "tracing_enabled" {
 #       degrades a correctness guarantee into a no-op, so all three are required.
 # -----------------------------------------------------------------------------
 
-# WHAT: the function the first state invokes to SET the online read-only flag,
-#       opening the batch window.
 # WHY : Assumptions: this is the migrated form of app/jcl/CLOSEFIL.jcl:26-30,
 #       which issued five `CEMT SET FIL(...) CLO` operator commands over
 #       TRANSACT, CCXREF, ACCTDAT, CXACAIX and USRSEC. The target sets one
@@ -737,8 +742,6 @@ variable "quiesce_function_arn" {
   type = string
 
   validation {
-    # WHAT: that the identifier names the Lambda service and the function
-    #       resource type, allowing an optional version or alias qualifier.
     # WHY : Assumptions: an ARN of any other service is accepted into the plan
     #       and rejected only when the state runs, which is at the head of the
     #       nightly chain. A version or alias qualifier adds a further
@@ -749,21 +752,26 @@ variable "quiesce_function_arn" {
   }
 }
 
-# WHAT: the function the last state invokes to CLEAR the online read-only flag,
-#       closing the batch window.
 # WHY : Assumptions: this is app/jcl/OPENFIL.jcl:26-30, the five matching
 #       `CEMT SET FIL(...) OPE` commands, and it is the counterpart the chain
 #       cannot omit. The chain must clear the flag it set on the success path AND
 #       on the failure path alike, which is why main.tf invokes this function
 #       from both -- a chain that failed without clearing the flag would leave
 #       the online services read-only after the window ended.
+#       Trade-offs: main.tf invokes it from a THIRD place as well, outside the
+#       execution, because the two in-execution paths are both states and an
+#       execution that is timed out at the top level or aborted by an operator
+#       runs no further state. That third caller is an EventBridge rule on the
+#       daily machine's terminal status, so this ARN is granted to
+#       events.amazonaws.com as well as to the execution role. The handler
+#       overwrites the parameter unconditionally, so being called twice for one
+#       night costs one idempotent write.
 variable "resume_function_arn" {
-  description = "ARN of the function invoked to clear the online read-only flag, closing the batch window. Declared by the environment root. This is the migrated form of app/jcl/OPENFIL.jcl and the counterpart of the quiesce state: it is invoked on the success path and on the failure path alike, because a chain that failed without clearing the flag it set would leave the online services read-only after the window ended."
+  description = "ARN of the function invoked to clear the online read-only flag, closing the batch window. Declared by the environment root. This is the migrated form of app/jcl/OPENFIL.jcl and the counterpart of the quiesce state: it is invoked on the success path and on the failure path alike, because a chain that failed without clearing the flag it set would leave the online services read-only after the window ended. It is additionally invoked from outside the execution, by an EventBridge rule on the daily machine's terminal status, so a timed-out or operator-aborted execution -- which runs no further state and so reaches neither in-execution path -- still releases the flag."
 
   type = string
 
   validation {
-    # WHAT: the same Lambda function-ARN shape required of the quiesce function.
     # WHY : Assumptions: validated separately from the quiesce ARN so that an
     #       error message names the input the caller got wrong rather than the
     #       bracket as a whole.
@@ -772,8 +780,6 @@ variable "resume_function_arn" {
   }
 }
 
-# WHAT: the function the penultimate state invokes to refresh table statistics
-#       after the night's writes.
 # WHY : Assumptions: this replaces app/jcl/TRANIDX.jcl only IN PART, and the
 #       missing part is deliberate. That job REBUILT an alternate index with
 #       `IDCAMS BLDINDEX`; index building is retired outright because PostgreSQL
@@ -785,8 +791,6 @@ variable "analyze_tables_function_arn" {
   type = string
 
   validation {
-    # WHAT: the same Lambda function-ARN shape required of the bracket
-    #       functions.
     # WHY : Assumptions: validated separately for the same attribution reason as
     #       the resume function above.
     condition     = can(regex("^arn:[a-z0-9-]+:lambda:[a-z0-9-]+:[0-9]{12}:function:", var.analyze_tables_function_arn))
@@ -794,8 +798,6 @@ variable "analyze_tables_function_arn" {
   }
 }
 
-# WHAT: the Parameter Store parameter name the first and last states toggle,
-#       carried to the quiesce and resume functions in their invocation payload.
 # WHY : Alternatives Considered: relying solely on the parameter name the
 #       environment root already bakes into each function's own environment
 #       variables, which would make this input unnecessary. Rejected because it
@@ -817,17 +819,23 @@ variable "read_only_flag_parameter_name" {
   type = string
 
   validation {
-    # WHAT: that the value is a Parameter Store parameter NAME and not an ARN,
-    #       and that it is within the length the service accepts.
     # WHY : Assumptions: the plausible wrong value here is the parameter's ARN,
     #       because every other identifier this module takes is one. The API that
     #       the functions call takes a name, so an ARN would be accepted into a
     #       valid plan and fail inside the function at the head of the chain.
-    #       Rejecting a value containing `arn:` names this input instead. A
-    #       leading slash is optional because the service accepts a hierarchical
-    #       name either way.
-    condition     = can(regex("^/?[a-zA-Z0-9_.\\-/]+$", var.read_only_flag_parameter_name)) && !can(regex("^arn:", var.read_only_flag_parameter_name)) && length(var.read_only_flag_parameter_name) <= 2048
-    error_message = "read_only_flag_parameter_name must be an SSM parameter name of letters, digits, underscores, dots, hyphens and slashes -- for example \"/carddemo/dev/batch/online-writes-enabled\" -- and not a parameter ARN."
+    #       Rejecting a value containing `arn:` names this input instead.
+    # WHY : Refactoring Rationale: the leading slash is REQUIRED, where an earlier
+    #       revision made it optional on the grounds that Parameter Store accepts
+    #       a hierarchical name either way. The service does, but the consumer
+    #       does not: infra/lambda/online_write_flag.py raises
+    #       `PARAMETER_NAME must be an absolute SSM path` at IMPORT time unless
+    #       the name begins with a slash. Accepting a relative name therefore
+    #       produced a clean plan whose first state crashed on cold start, at the
+    #       head of the batch chain and immediately after the gate was set --
+    #       exactly where a failure is most expensive. Terraform now rejects what
+    #       the function rejects, so the two agree.
+    condition     = can(regex("^/[a-zA-Z0-9_.\\-/]+$", var.read_only_flag_parameter_name)) && !can(regex("^arn:", var.read_only_flag_parameter_name)) && length(var.read_only_flag_parameter_name) <= 2048
+    error_message = "read_only_flag_parameter_name must be an ABSOLUTE SSM parameter name beginning with \"/\", of letters, digits, underscores, dots, hyphens and slashes -- for example \"/carddemo/dev/batch/online-writes-enabled\" -- and not a parameter ARN."
   }
 }
 
@@ -835,8 +843,6 @@ variable "read_only_flag_parameter_name" {
 # Seed-dataset staging -- the branches of the second state's Map
 # -----------------------------------------------------------------------------
 
-# WHAT: the dataset names the seed-staging map iterates over, one Map branch and
-#       therefore one ETL task per entry.
 # WHY : Assumptions: the ten defaults correspond one-to-one to the ten IDCAMS
 #       master-refresh load jobs in app/jcl/ -- accounts to ACCTFILE.jcl, cards
 #       to CARDFILE.jcl, customers to CUSTFILE.jcl, card_xref to XREFFILE.jcl,
@@ -851,15 +857,13 @@ variable "read_only_flag_parameter_name" {
 #       DALYTRAN DD -- it is a flat sequential INPUT to posting, not a loaded
 #       master -- so staging it would invent a load step the baseline has no
 #       contract for.
-# WHAT: why the list is an input at all when the ETL readers fix what is
-#       loadable.
 # WHY : Trade-offs: a caller occasionally needs to stage a SUBSET -- reloading
 #       one master after a correction rather than the whole set -- and exposing
 #       the list makes that a tfvars change instead of a module edit. The
 #       accepted cost is that a caller can pass a name no reader supports, which
 #       the validation below cannot detect because the reader set lives in the
 #       ETL package rather than in Terraform.
-variable "seed_dataset_names" {
+variable "seed_datasets" {
   description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the ten loaded masters, one per IDCAMS master-refresh load job in app/jcl/; DALYTRAN is absent because posting reads it directly as sequential input rather than loading it into a master table. An environment may pass a subset to restage one master without a module edit."
 
   type = list(string)
@@ -878,19 +882,43 @@ variable "seed_dataset_names" {
   ]
 
   validation {
-    # WHAT: that at least one name is supplied and each is usable both as a path
-    #       segment and as a command argument.
     # WHY : Assumptions: each name becomes a path segment in the dataset prefix
     #       and an argument on the ETL container's command, so it is restricted
     #       to lowercase letters, digits and separators both accept. An empty
     #       list is rejected because a Map with no items SUCCEEDS while loading
     #       nothing, which is the one failure here that reads as a clean run.
-    condition     = length(var.seed_dataset_names) >= 1 && alltrue([for d in var.seed_dataset_names : can(regex("^[a-z0-9][a-z0-9_-]*$", d))])
-    error_message = "seed_dataset_names must list at least one name, each of lowercase letters, digits, hyphens and underscores, beginning with a letter or digit."
+    # WHY : Refactoring Rationale: membership in the closed ten-name set is
+    #       asserted rather than a character-shape pattern. The pattern it replaces
+    #       admitted any lowercase token, so `accounts_v2` or a misspelled
+    #       `custommers` passed validation and failed later inside a Map branch as
+    #       a container usage error naming an argument rather than naming this
+    #       input. Every legal value is one of the ten defaults, each corresponding
+    #       to exactly one IDCAMS master-refresh load job, so the set is knowable
+    #       here. An earlier revision argued the opposite -- that the reader set
+    #       lives in the ETL package and so could not be checked here -- but that
+    #       describes where the knowledge lives, not whether it can be asserted.
+    # WHY : Assumptions: distinctness is asserted too, because a repeated name
+    #       stages one master twice in the same run -- two Map branches loading the
+    #       same table concurrently, which is a write conflict rather than a slower
+    #       load, and which the count check alone would let through.
+    condition = length(var.seed_datasets) >= 1 && length(distinct(var.seed_datasets)) == length(var.seed_datasets) && alltrue([
+      for d in var.seed_datasets : contains([
+        "accounts",
+        "cards",
+        "customers",
+        "card_xref",
+        "transactions",
+        "disclosure_groups",
+        "transaction_category_balances",
+        "transaction_types",
+        "transaction_categories",
+        "users",
+      ], d)
+    ])
+    error_message = "seed_datasets must list at least one name, each DISTINCT and each one of the ten loaded masters: accounts, cards, customers, card_xref, transactions, disclosure_groups, transaction_category_balances, transaction_types, transaction_categories, users."
   }
 }
 
-# WHAT: how many staging branches the Map is allowed to run at once.
 # WHY : Trade-offs: three is chosen between two bad endpoints. Unbounded
 #       concurrency would start all ten branches at once, and ten simultaneous
 #       bulk loads can exhaust both the Aurora connection budget and the Fargate
@@ -906,7 +934,6 @@ variable "stage_datasets_max_concurrency" {
   default     = 3
 
   validation {
-    # WHAT: that the value is a whole number of branches within a bounded range.
     # WHY : Assumptions: the floor of 1 is what the Map itself requires -- 0 is
     #       the service's spelling of UNBOUNDED, so accepting it would silently
     #       turn the deliberate bound above into no bound at all. The ceiling of
@@ -926,60 +953,49 @@ variable "stage_datasets_max_concurrency" {
 # batch-orchestration.md is the prose home of the full mapping.
 # -----------------------------------------------------------------------------
 
-# WHAT: the timeout applied to every state that has no entry in the override map
-#       below.
 # WHY : Assumptions: a state with NO timeout waits indefinitely. Because the
 #       resume state runs only after the chain finishes or fails, a task that
 #       hangs holds the whole chain open AND leaves the online read-only flag set
 #       until an operator intervenes -- so the absence of a timeout is not a
 #       neutral default but an outage the flag makes worse. A conservative
 #       ceiling on every state is therefore safer than none.
-variable "default_state_timeout_seconds" {
-  description = "Ceiling applied to every state that has no entry in state_timeout_seconds_overrides. A state without a timeout waits indefinitely, so a hung task holds the whole chain open and the online read-only flag stays set until an operator intervenes; a conservative default is therefore safer than none."
-  type        = number
-  default     = 3600
+variable "state_timeout_seconds" {
+  description = "Ceiling on each of the eleven work states, keyed by the state name exactly as main.tf spells it. The default sizes the long-running states -- seed staging, posting, interest, statements and reports -- above the states that only toggle a flag or refresh statistics. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes."
 
-  validation {
-    # WHAT: that the ceiling is a whole number of seconds inside a bounded range.
-    # WHY : Trade-offs: the floor of one minute rejects a value so small that a
-    #       healthy task is killed during its own startup, which presents as an
-    #       intermittent failure rather than as a misconfiguration. The ceiling of
-    #       six hours is the point past which a timeout stops acting as a safety
-    #       net at all, since a chain permitted to sit that long has already lost
-    #       the property the bound exists to protect.
-    condition     = var.default_state_timeout_seconds >= 60 && var.default_state_timeout_seconds <= 21600 && floor(var.default_state_timeout_seconds) == var.default_state_timeout_seconds
-    error_message = "default_state_timeout_seconds must be a whole number of seconds from 60 to 21600 inclusive."
+  type = map(number)
+
+  default = {
+    QuiesceOnlineWrites        = 300
+    StageSeedDatasets          = 3600
+    PreflightDailyTransactions = 1800
+    PostTransactions           = 7200
+    CalculateInterest          = 7200
+    BackupTransactions         = 3600
+    CombineTransactions        = 3600
+    GenerateStatements         = 7200
+    GenerateReports            = 3600
+    AnalyzeTables              = 1800
+    ResumeOnlineWrites         = 300
   }
-}
-
-# WHAT: per-state exceptions to that ceiling, keyed by state name.
-# WHY : Trade-offs: a map keyed by state name is one degree less discoverable
-#       than eleven separately named inputs would be, and that cost is accepted
-#       because eleven inputs would have to be restated by every calling root and
-#       kept in step with main.tf whenever a state was renamed. The shape's one
-#       real hazard is that a MISTYPED key is inert -- main.tf reads this map with
-#       a lookup against the default, so a typo silently leaves that state on the
-#       floor value rather than failing. The key-name validation below closes
-#       exactly that hazard, which is why the shape did not have to change to a
-#       map required to carry all eleven keys.
-variable "state_timeout_seconds_overrides" {
-  description = "Per-state timeout exceptions, keyed by the state name exactly as main.tf spells it, for the states whose duration is known to differ from the default. Empty by default, because a timeout that has not been measured is better left at the module's conservative floor than guessed at per state. Keys are validated against the eleven work-state names, so a typo fails at plan time rather than silently falling back to the default."
-  type        = map(number)
-  default     = {}
 
   validation {
-    # WHAT: that every key names one of the eleven work states.
     # WHY : Assumptions: the eleven names are fixed by main.tf's own state list
     #       and are spelled here character for character -- QuiesceOnlineWrites,
     #       StageSeedDatasets, PreflightDailyTransactions, PostTransactions,
     #       CalculateInterest, BackupTransactions, CombineTransactions,
     #       GenerateStatements, GenerateReports, AnalyzeTables and
-    #       ResumeOnlineWrites. Without this check a key such as
-    #       "PostTransaction" is accepted, applies cleanly, and leaves posting on
-    #       the default ceiling while the operator believes it was raised. The
-    #       error names the offending keys so the typo is visible rather than
-    #       merely reported.
-    condition = length(setsubtract(keys(var.state_timeout_seconds_overrides), [
+    #       ResumeOnlineWrites. Both directions matter. A MISSING key would leave
+    #       that state without a ceiling, and a key such as "PostTransaction"
+    #       would apply cleanly while posting ran unbounded and the operator
+    #       believed a limit had been set. The error names the required set so the
+    #       typo or the omission is visible.
+    #       Assumptions: exactness needs both halves. `setsubtract` proves every
+    #       REQUIRED name is present but says nothing about an extra one, and a map
+    #       holds no duplicate keys -- so eleven keys that include all eleven
+    #       required names are exactly those names. Terraform has no
+    #       symmetric-difference function, which is why the count carries the
+    #       second half.
+    condition = length(var.state_timeout_seconds) == 11 && length(setsubtract([
       "QuiesceOnlineWrites",
       "StageSeedDatasets",
       "PreflightDailyTransactions",
@@ -991,23 +1007,31 @@ variable "state_timeout_seconds_overrides" {
       "GenerateReports",
       "AnalyzeTables",
       "ResumeOnlineWrites",
-    ])) == 0
-    error_message = "Every key in state_timeout_seconds_overrides must name one of the eleven work states exactly as main.tf spells it: QuiesceOnlineWrites, StageSeedDatasets, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
+    ], keys(var.state_timeout_seconds))) == 0
+    error_message = "state_timeout_seconds must hold exactly one entry for each of the eleven work states, named as main.tf spells them: QuiesceOnlineWrites, StageSeedDatasets, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
   }
 
   validation {
-    # WHAT: that every override value obeys the same bounds as the default.
-    # WHY : Assumptions: an override is the same kind of value as the default, so
-    #       an unbounded one reintroduces exactly the indefinite wait the default
-    #       exists to prevent -- the bound has to be asserted on both or it is
-    #       asserted on neither.
-    condition     = alltrue([for t in values(var.state_timeout_seconds_overrides) : t >= 60 && t <= 21600 && floor(t) == t])
-    error_message = "Every value in state_timeout_seconds_overrides must be a whole number of seconds from 60 to 21600 inclusive."
+    # WHY : Trade-offs: the floor of one minute rejects a value so small that a
+    #       healthy task is killed during its own startup, which presents as an
+    #       intermittent failure rather than as a misconfiguration. The ceiling of
+    #       six hours is the point past which a timeout stops acting as a safety
+    #       net at all, since a chain permitted to sit that long has already lost
+    #       the property the bound exists to protect.
+    condition     = alltrue([for t in values(var.state_timeout_seconds) : t >= 60 && t <= 21600 && floor(t) == t])
+    error_message = "Every value in state_timeout_seconds must be a whole number of seconds from 60 to 21600 inclusive."
   }
 }
 
-# WHAT: how many times each state retries after its first failure, before its
-#       catch handler runs.
+# WHY : Trade-offs: a map keyed by state name is one degree less discoverable
+#       than eleven separately named inputs would be, and that cost is accepted
+#       because eleven inputs would have to be restated by every calling root and
+#       kept in step with main.tf whenever a state was renamed. The shape's one
+#       real hazard is that a MISTYPED key is inert -- main.tf reads this map with
+#       a lookup against the default, so a typo silently leaves that state on the
+#       floor value rather than failing. The key-name validation below closes
+#       exactly that hazard, which is why the shape did not have to change to a
+#       map required to carry all eleven keys.
 # WHY : Assumptions: these three knobs express EXPONENTIAL BACKOFF together, and
 #       they are the TRANSIENT-FAULT tier only. A task that exits with a hard
 #       failure status has produced a deterministic outcome that retrying cannot
@@ -1021,8 +1045,6 @@ variable "retry_max_attempts" {
   default     = 3
 
   validation {
-    # WHAT: that the count is a whole number, permitting zero, up to a bounded
-    #       maximum.
     # WHY : Trade-offs: zero is permitted and is legitimate for a caller that
     #       wants a failure to surface immediately, so the floor is 0 rather than
     #       1. The ceiling of 10 exists because retrying a record-processing step
@@ -1034,8 +1056,6 @@ variable "retry_max_attempts" {
   }
 }
 
-# WHAT: the wait before a state's first retry, which the backoff rate then
-#       compounds.
 # WHY : Assumptions: this value and the rate together bound how long a retrying
 #       state can occupy the window, so neither is meaningful read alone; the
 #       transient-fault reasoning above governs both.
@@ -1045,8 +1065,6 @@ variable "retry_interval_seconds" {
   default     = 30
 
   validation {
-    # WHAT: that the interval is a whole number of seconds inside a bounded
-    #       range.
     # WHY : Trade-offs: the floor of 1 second is the smallest the service
     #       accepts, and the ceiling of 600 keeps a single first wait from
     #       exceeding the shortest permitted state timeout, which would otherwise
@@ -1057,7 +1075,6 @@ variable "retry_interval_seconds" {
   }
 }
 
-# WHAT: the multiplier applied to the retry interval on each successive attempt.
 # WHY : Assumptions: this is the third of the three backoff knobs and completes
 #       the transient-fault tier described above; a rate of exactly 1 makes every
 #       wait equal to the interval, which is a flat retry rather than a backoff
@@ -1068,7 +1085,6 @@ variable "retry_backoff_rate" {
   default     = 2.0
 
   validation {
-    # WHAT: that the rate never shrinks a successive wait.
     # WHY : Assumptions: the floor is 1.0 because a rate below one SHORTENS each
     #       successive wait, turning a backoff into an accelerating retry against
     #       a dependency that is already failing -- the opposite of what the
@@ -1078,85 +1094,46 @@ variable "retry_backoff_rate" {
   }
 }
 
-# WHAT: the highest process exit status the posting state may return and still
-#       let the chain continue.
-# WHY : Assumptions: the default of 4 is recovered from the baseline and is not a
-#       convention. app/cbl/CBTRN02C.cbl:229-230 sets RETURN-CODE to 4 when its
-#       reject count exceeds zero, and the downstream step is gated by
-#       `COND=(4,LT)` at app/jcl/TRANBKP.jcl:51. A JCL `COND` is a SKIP predicate,
-#       so "4 is less than the return code" skips the step only when the code
-#       EXCEEDS 4, and therefore RUNS it when the code is 4 or lower. A posting
-#       run that correctly rejected some transactions is a warn, not a failure,
-#       and the chain continues.
-# WHAT: why this is a predicate on a Choice rather than a Catch.
-# WHY : Refactoring Rationale: the naive translation of `COND=` is a retry or a
-#       catch handler, and both are wrong in the same way -- a catch treats exit
-#       status 4 as an error and aborts the night, losing the backup, the
-#       statements and the reports over rejects the baseline tolerated by design.
-#       Inverting the skip predicate into a run predicate on a Choice preserves
-#       the graded tier instead of collapsing it into pass-or-fail. A predicate
-#       written as "greater than" rather than "at or below" is the same error
-#       spelled forwards.
-# WHAT: why the tolerance stops at this state.
-# WHY : Trade-offs: this graded rubric belongs to the batch chain alone. It is
-#       deliberately NOT applied to any build or lint gate in this repository,
-#       where a check either passes or fails; letting a warn tolerance leak into
-#       a gate would turn a real failure into a tolerated warning.
-variable "posting_warn_return_code" {
-  description = "Highest process exit status the transaction-posting state may return and still let the chain continue. This is the migrated form of the baseline's graded condition code and the reason the posting state is followed by a choice rather than a plain success edge; the default of 4 is the value CBTRN02C sets when it has written rejects."
-
-  type    = number
-  default = 4
-
-  validation {
-    # WHAT: that the value is a whole number inside the range a process exit
-    #       status occupies.
-    # WHY : Assumptions: an exit status is one unsigned byte, so a value outside
-    #       0 to 255 can never be produced by a task and would make the choice
-    #       predicate either always or never true -- in the always case, every
-    #       failure would be tolerated as a warn.
-    condition     = var.posting_warn_return_code >= 0 && var.posting_warn_return_code <= 255 && floor(var.posting_warn_return_code) == var.posting_warn_return_code
-    error_message = "posting_warn_return_code must be a whole number from 0 to 255 inclusive, the range a process exit status occupies."
-  }
-}
-
-# WHAT: the ceiling on a whole daily execution, independent of any state's own
-#       timeout.
 # WHY : Assumptions: this is a CEILING, not an expectation of how long a run
 #       takes, and per-state timeouts do not make it redundant. An execution can
 #       stall between states, or in a Map's own bookkeeping, where no single
 #       state's timeout applies; without a top-level bound such an execution
 #       waits indefinitely, and because the resume state runs only once the chain
 #       finishes or fails, an indefinite wait holds the online write path
-#       quiesced for as long as it lasts. The top-level bound is the only thing
-#       that guarantees the bracket is released at all rather than held until an
-#       operator intervenes.
+#       quiesced for as long as it lasts.
+#       Trade-offs: the bound caps how long a RUNNING execution can hold the
+#       bracket; it does not itself release it. An execution-level TIMED_OUT
+#       stops the execution without running any further state, so the release on
+#       that path comes from the out-of-execution watchdog rule in main.tf. This
+#       same value is also published to the quiesce call as the bracket's lease
+#       length, so the advertised expiry and the enforced ceiling agree by
+#       construction instead of by a caller keeping a second input in step.
 variable "state_machine_timeout_seconds" {
-  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails."
+  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length."
   type        = number
   default     = 28800
 
   validation {
-    # WHAT: that the execution ceiling is a whole number of seconds, is bounded
-    #       by one day, and is never lower than the longest ceiling any single
-    #       state in this configuration is actually allowed.
     # WHY : Assumptions: the floor is computed from the other two timing inputs
     #       rather than written as a literal, because a literal floor would go
-    #       stale the moment a caller raised the per-state default. A top-level
+    #       stale the moment a caller raised any per-state ceiling. A top-level
     #       bound below the longest state bound could expire while a legitimately
     #       long state was still inside its own allowance, which aborts a healthy
     #       run and reads as a task failure rather than as a misconfigured bound.
     #       The one-day ceiling is the point past which this stops being a bound
     #       on a nightly chain at all.
+    #       Assumptions: `max` is spread over the map's values with `...` rather
+    #       than given a seed, which is safe here only because
+    #       state_timeout_seconds is validated to hold exactly eleven entries --
+    #       `max()` with no arguments is an error, so an empty map would fail this
+    #       check with a confusing message instead of a clear one.
     condition = var.state_machine_timeout_seconds <= 86400 && floor(var.state_machine_timeout_seconds) == var.state_machine_timeout_seconds && var.state_machine_timeout_seconds >= max(
-      var.default_state_timeout_seconds,
-      [for t in values(var.state_timeout_seconds_overrides) : t]...
+      [for t in values(var.state_timeout_seconds) : t]...
     )
-    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the longest per-state ceiling in effect -- the greater of default_state_timeout_seconds and any value in state_timeout_seconds_overrides."
+    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the largest value in state_timeout_seconds, which is the longest any single state is allowed to run."
   }
 }
 
-# WHAT: the ceiling on a single ad-hoc report execution.
 # WHY : Trade-offs: this is a SEPARATE ceiling from the daily one rather than a
 #       shared value, and the reason is that one on-demand report is a much
 #       smaller unit of work than the whole nightly chain. A single shared value
@@ -1169,22 +1146,18 @@ variable "adhoc_report_timeout_seconds" {
   default     = 7200
 
   validation {
-    # WHAT: that the ad-hoc ceiling is a whole number of seconds, is bounded by
-    #       one day, and covers the one work state it actually contains.
     # WHY : Assumptions: the ad-hoc machine's single work state draws its timeout
-    #       from the SAME override map and default as the daily report state,
-    #       under the key `GenerateReports`, so the floor is computed from that
-    #       exact lookup rather than from a literal. Deriving it is what keeps
-    #       this bound correct when a caller raises the report state's own
-    #       ceiling; a literal floor would silently become too low and the machine
-    #       would expire while its only real state was still within its
-    #       allowance.
-    condition = var.adhoc_report_timeout_seconds <= 86400 && floor(var.adhoc_report_timeout_seconds) == var.adhoc_report_timeout_seconds && var.adhoc_report_timeout_seconds >= lookup(
-      var.state_timeout_seconds_overrides,
-      "GenerateReports",
-      var.default_state_timeout_seconds,
-    )
-    error_message = "adhoc_report_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the ceiling the report state itself receives -- the GenerateReports entry in state_timeout_seconds_overrides, or default_state_timeout_seconds when there is none."
+    #       from the SAME map as the daily report state, under the key
+    #       `GenerateReports`, so the floor is computed from that exact entry
+    #       rather than from a literal. Deriving it is what keeps this bound
+    #       correct when a caller raises the report state's own ceiling; a literal
+    #       floor would silently become too low and the machine would expire while
+    #       its only real state was still within its allowance. The key is indexed
+    #       rather than looked up with a fallback because state_timeout_seconds is
+    #       validated to hold every one of the eleven state names, so
+    #       `GenerateReports` cannot be absent.
+    condition     = var.adhoc_report_timeout_seconds <= 86400 && floor(var.adhoc_report_timeout_seconds) == var.adhoc_report_timeout_seconds && var.adhoc_report_timeout_seconds >= var.state_timeout_seconds["GenerateReports"]
+    error_message = "adhoc_report_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the ceiling the report state itself receives -- the GenerateReports entry in state_timeout_seconds."
   }
 }
 
@@ -1194,8 +1167,8 @@ variable "adhoc_report_timeout_seconds" {
 # the owner the value belongs to instead.
 # -----------------------------------------------------------------------------
 
-# WHAT: why there is no `business_date` input.
-# WHY : Assumptions: the daily machine takes `businessDate` from its EXECUTION
+# WHY : Assumptions: NO `business_date` input, and its absence is the decision.
+#       The daily machine takes `businessDate` from its EXECUTION
 #       INPUT -- supplied by infra/modules/eventbridge-scheduler in the schedule
 #       payload, or by an operator starting an execution directly -- and threads
 #       it into every task's command override. A Terraform variable would bake
@@ -1205,8 +1178,8 @@ variable "adhoc_report_timeout_seconds" {
 #       date as a step parameter rather than letting the program read the clock,
 #       and that injection is exactly what makes a rerun reproducible.
 
-# WHAT: why there is no `state_machine_type` input.
-# WHY : Alternatives Considered: exposing the workflow type was considered and
+# WHY : Alternatives Considered: NO `state_machine_type` input. Exposing the
+#       workflow type was considered and
 #       rejected on two hard limits rather than a preference. main.tf hard-codes
 #       STANDARD because an Express workflow caps its execution at five minutes,
 #       which every task state here exceeds, and because Express does not support
@@ -1214,22 +1187,20 @@ variable "adhoc_report_timeout_seconds" {
 #       that makes a state wait for its task to finish. An input would therefore
 #       offer a value that cannot work.
 
-# WHAT: why there is no `schedule_expression` input.
-# WHY : Assumptions: the nightly cron belongs to
+# WHY : Assumptions: NO `schedule_expression` input. The nightly cron belongs to
 #       infra/modules/eventbridge-scheduler, which TARGETS the state-machine ARN
 #       this module publishes. Accepting a schedule here would invert that
 #       dependency and give one chain two possible triggers.
 
-# WHAT: why there is no `assign_public_ip` input.
-# WHY : Alternatives Considered: recorded in full on the networking section
+# WHY : Alternatives Considered: NO `assign_public_ip` input; recorded in full on
+#       the networking section
 #       above -- main.tf sets the literal DISABLED because these tasks reach AWS
 #       APIs through interface endpoints and the internet through the NAT
 #       gateway, so a public address would add exposure without adding
 #       reachability.
 
-# WHAT: why there is no bucket, prefix or lifecycle input beyond
-#       `dataset_bucket_name`.
-# WHY : Assumptions: the bucket itself, the ten generation-dataset prefix
+# WHY : Assumptions: NO bucket, prefix or lifecycle input beyond
+#       `dataset_bucket_name`. The bucket itself, the ten generation-dataset prefix
 #       families derived from app/jcl/DEFGDGB.jcl, app/jcl/DEFGDGD.jcl and
 #       app/jcl/DALYREJS.jcl, and the five-noncurrent-version retention rule that
 #       is the `LIMIT(5) SCRATCH` analogue all belong to
@@ -1237,8 +1208,8 @@ variable "adhoc_report_timeout_seconds" {
 #       and creates nothing inside the bucket, so a prefix or lifecycle input
 #       here would duplicate a contract that has one owner.
 
-# WHAT: why there is no alarm, dashboard or subscription input.
-# WHY : Assumptions: those belong to infra/modules/observability, which CONSUMES
+# WHY : Assumptions: NO alarm, dashboard or subscription input. Those belong to
+#       infra/modules/observability, which CONSUMES
 #       the state-machine ARN this module publishes. This module's only
 #       observability surface is the two log groups it owns and the topic it
 #       publishes a failure to; alarming on an execution is the consumer's

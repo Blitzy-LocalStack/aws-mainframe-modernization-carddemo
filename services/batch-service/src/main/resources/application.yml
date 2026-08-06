@@ -9,12 +9,10 @@
 #   Flyway migration of the one schema this module owns, persistence-provider
 #   behaviour, job-launch policy and log levels.
 #
-#   application-dev.yml EXISTS and is an OVERLAY on this document;
-#   application-prod.yml DOES NOT EXIST YET. This document is consequently the
-#   whole of the production configuration today, and it is written to start with
-#   no profile active at all, which is why every value a profile would otherwise
-#   tune is a concrete literal here. An overlay -- the one that exists and the one
-#   still to be authored -- may differ from this document only in sizing, pool
+#   application-dev.yml and application-prod.yml are OVERLAYS on this document.
+#   This document is written to start with no profile active at all, which is why
+#   every value a profile would otherwise tune is a concrete literal here. An
+#   overlay may differ from this document only in sizing, pool
 #   limits, log level and retention, never in topology, so a setting that changes
 #   behaviour rather than capacity belongs here and not in a profile. Every
 #   statement below about what an overlay MAY and MAY NOT vary is that constraint,
@@ -59,7 +57,7 @@
 #   or reformats a business date.
 #
 # Outputs (what this document establishes for every task):
-#   An ordered five-schema connection search path -- batch, ledger, account, card,
+#   An ordered FOUR-schema connection search path -- batch, ledger, account,
 #   reference -- applied once per physical pooled connection, so every unqualified
 #   table name resolves deterministically and Flyway's own connections are pinned
 #   by the same mechanism; Flyway scoped to this module's classpath location and to
@@ -123,23 +121,14 @@
 #     by the log driver the task definition configures, so no appender file is
 #     needed.
 #
-# State at this checkpoint:
-#   BatchApplication now exists and consumes --job and --business-date. The
-#   domain, dto and job package contracts also exist as package-info.java
-#   surfaces. The com.carddemo.batch.config classes and the concrete domain,
-#   repository, mapper, service and job implementations remain contracted at
-#   later indexes, so the current source tree does not yet contain the eight
-#   entity mappings this document's search path and validate-only setting exist
-#   to serve.
-#   Refactoring Rationale: the former inventory said BatchApplication and every
-#   package surface were absent after the entry point and three package
-#   contracts had landed. Distinguishing package contracts from concrete
-#   implementations keeps this state block useful without overstating runtime
-#   completeness. Every key below is nevertheless declared now, deliberately:
-#   these are the decisions a module author needs settled BEFORE writing the
-#   first class, and a schema search path or a migration scope retrofitted
-#   afterwards is exactly how a service ends up applying one context's migration
-#   into another context's schema.
+# Assumptions: every key below is declared up front, deliberately. These are the
+#   decisions a module author needs settled BEFORE writing the first class, and a
+#   schema search path or a migration scope retrofitted afterwards is exactly how a
+#   service ends up applying one context's migration into another context's schema.
+#   Trade-offs: the cost is a document whose settings cannot all be exercised by
+#   one entity mapping, which is accepted because the alternative -- adding each
+#   setting as the class that needs it arrives -- is what makes the search path an
+#   afterthought.
 #
 #   NO SECRET, CREDENTIAL, HOSTNAME, ENDPOINT, BUCKET, QUEUE URL, KEY
 #   IDENTIFIER OR ACCOUNT IDENTIFIER APPEARS ANYWHERE IN THIS FILE.
@@ -406,7 +395,7 @@ spring:
       pool-name: batch-pool
 
       # Assumptions: unqualified table names in the entity mappings must resolve
-      #   to a known schema in a known order. FIVE schemas are reached, each
+      #   to a known schema in a known order. FOUR schemas are reached, each
       #   listed for a verified reason, with `batch` first so the schema this
       #   module OWNS wins any future name collision and so the job-repository
       #   tables, the batch_run ledger and Flyway's own history table all resolve
@@ -417,15 +406,24 @@ spring:
       #               UPDATE on all its tables. Owned by transaction-service.
       #     account   read plus one narrow write; V0:719 grants SELECT on all its
       #               tables and V0:730 grants UPDATE on account.accounts alone.
-      #     card      read only, V0:757. Required because app/cbl/CBTRN01C.cbl:46
-      #               opens CARDFILE to validate the daily feed against the card
-      #               master, and that program is PreflightDailyTransactionsJob.
       #     reference read only, V0:766. Required because app/cbl/CBACT04C.cbl:47
       #               opens DISCGRP for the disclosure-group rate, and that
       #               program is CalculateInterestJob.
-      #   Omitting either of the last two fails its state at the database rather
-      #   than in this file. No two of the five own a table of the same name, so
+      #   Omitting `reference` fails the interest state at the database rather
+      #   than in this file. No two of the four own a table of the same name, so
       #   the extra resolution candidates cannot shadow anything.
+      # Refactoring Rationale: a fifth entry, `card`, stood between `account` and
+      #   `reference` and was removed. It was justified on the grounds that
+      #   app/cbl/CBTRN01C.cbl validates the daily feed against the card master,
+      #   and that reading is wrong: the program OPENS CARD-FILE at
+      #   app/cbl/CBTRN01C.cbl:309 and never issues a READ against it, its only
+      #   three reads being DALYTRAN at :203, XREF at :229 and ACCOUNT at :243.
+      #   The cross-reference it does read is CVACT03Y, which the target maps to
+      #   account.card_xref, not to the card schema. No entity in this module
+      #   declares @Table(schema = "card") either, so no statement this module
+      #   issues could ever have resolved there. A resolution candidate with no
+      #   consumer is path surface that can only shadow a future name, so it is
+      #   withdrawn rather than kept against a hypothetical reader.
       # Alternatives Considered: a currentSchema parameter on the JDBC URL, and a
       #   role-level search path. Both rejected, and not only by this file. The
       #   URL arrives from the environment and is outside this artifact's
@@ -440,7 +438,7 @@ spring:
       # Assumptions: the pool runs this once per PHYSICAL connection, so Flyway's
       #   connections are pinned by the same mechanism as the application's
       #   without a second declaration.
-      connection-init-sql: "SET search_path TO batch, ledger, account, card, reference"
+      connection-init-sql: "SET search_path TO batch, ledger, account, reference"
 
       # Assumptions: this is a correctness requirement for the streaming
       #   readers, not a tuning preference, and it is inseparable from the
@@ -745,15 +743,27 @@ spring:
       #   tests/golden/posting/reject_102_overlimit/return_code.expected
       #   records exactly 4, so a run that produced rejects and reported 0
       #   would be a parity failure rather than a tidier result.
-      # Assumptions: no table-prefix property is set because none
-      #   exists. This framework version exposes exactly two keys under
-      #   spring.batch, job.enabled and job.name, and no spring.batch.jdbc
-      #   group at all, so the prefix cannot be configured from a property
-      #   here and a key that looked like it did would be accepted in silence
-      #   and do nothing. The default prefix is unqualified, which is
-      #   CORRECT in this module: the search path above resolves it to the
-      #   `batch` schema, exactly where db/migration/V1__batch.sql:664-739
-      #   creates the six job-repository tables and their three sequences.
+      # Assumptions: neither spring.batch.jdbc.table-prefix nor
+      #   spring.batch.jdbc.initialize-schema is set here, because at the pinned
+      #   framework version NEITHER KEY EXISTS. The evidence is the binding class
+      #   itself: org.springframework.boot.batch.autoconfigure.BatchProperties
+      #   declares exactly one nested type, Job, carrying one property, name, so
+      #   the whole spring.batch namespace is job.enabled and job.name and there
+      #   is no jdbc group beneath it. The module's own
+      #   spring-configuration-metadata.json agrees, listing those two keys and
+      #   nothing else. A jdbc key written here would bind to nothing, be
+      #   accepted in silence, and leave a reader believing a prefix was pinned
+      #   when it was not, which is worse than its absence.
+      # Assumptions: both settings' INTENT is nevertheless satisfied, by
+      #   mechanisms that do exist. The prefix intent -- job-repository tables
+      #   resolved to the `batch` schema -- is met because the framework default
+      #   prefix is unqualified and the search path above puts `batch` first,
+      #   which resolves it to exactly where db/migration/V1__batch.sql:664-739
+      #   creates the six job-repository tables and their three sequences. The
+      #   initialize-schema intent -- the framework must not create those tables
+      #   and race Flyway -- is met because this framework version contributes no
+      #   batch schema initialiser at all, and spring.sql.init.mode below is
+      #   pinned to never so no script initialiser can become a second creator.
       enabled: false
 
   sql:
