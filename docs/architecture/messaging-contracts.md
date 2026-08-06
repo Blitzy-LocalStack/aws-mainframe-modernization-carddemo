@@ -452,7 +452,7 @@ levels are given separately and each is labelled.
 > executable, and neither is named as canonical:
 > `auth-request-amount-variants.csv` holds three **169**-byte payloads spanning the
 > negative, maximum and zero amount boundaries, and
-> `auth-request-declared-width-amount.csv` holds one **170**-byte payload whose
+> `auth-request-copybook-wire170-decode-only.csv` holds one **170**-byte payload whose
 > amount is at the copybook's declared width. `AuthRequestWireFixtureTest` asserts
 > the lengths, the decoded values, the refusal of the truncated form, and that
 > re-emitting the wider payload produces the canonical 169.

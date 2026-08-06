@@ -17,38 +17,99 @@ import org.hibernate.type.SqlTypes;
  * The segment's key is the account identifier, so this table's primary key is the account identifier
  * and nothing else, and {@link PendingAuthDetail} rows hang beneath it.</p>
  *
- * <p>Assumptions: every monetary component is exact fixed point at scale two, never a binary
- * floating-point type. The four amounts are declared {@code PIC S9(09)V99 COMP-3}, so the mapped
- * columns are {@code NUMERIC(11,2)} and the Java type is {@link BigDecimal}. Transformation rule T3
- * binds this entity as it binds every other, and the prohibition is enforced by the architecture test
- * rather than by review.</p>
+ * <p>Assumptions: twelve of that copybook's thirteen level-05 items become members here and the
+ * thirteenth is DROPPED. {@code FILLER PIC X(34)} at line 31 is padding: the twelve data fields sum to
+ * sixty-six bytes -- {@code 6 + 9 + 1 + (2 x 5) + 6 + 6 + 6 + 6 + 2 + 2 + 6 + 6} -- and the thirty-four
+ * that follow exist only to reach the hundred the segment declares. Transformation rule T1 drops
+ * {@code FILLER} and requires the drop to be recorded per record, which
+ * {@code docs/architecture/data-model-and-schema-mapping.md} does in its per-record inventory at line
+ * 838, and the reference system's own relational table shows the same treatment because
+ * {@code ddl/AUTHFRDS.ddl} declares no padding column either. The nuance worth keeping in view: a
+ * {@code FILLER} carrying a {@code VALUE} clause would be CONTENT rather than padding and could not be
+ * dropped on these grounds -- this one carries none. Recording the drop is what lets a later reader
+ * tell a deliberately absent member apart from an overlooked field.</p>
  *
- * <p>Assumptions: the packed-decimal representation does not survive into this type. The segment
- * holds its account identifier and its four amounts as {@code COMP-3}, and the ETL decodes them once
- * at the boundary; nothing here decodes a nibble, and no column stores one. That is what lets an
- * ordinary SQL predicate read a balance that the baseline could only read through a codec.</p>
+ * <p>Assumptions: THREE numeric representations coexist inside this one 100-byte record, and a
+ * mapping that assumes a single one of them gives some members the wrong type. Seven fields are
+ * {@code COMP-3} packed decimal: {@code PA-ACCT-ID} at line 19, the two limits and two balances at
+ * lines 23 to 26, and the two authorization totals at lines 29 and 30. Two are {@code COMP}, a
+ * signed two-byte binary halfword -- {@code PA-APPROVED-AUTH-CNT} and {@code PA-DECLINED-AUTH-CNT},
+ * both {@code PIC S9(04) COMP}, at lines 27 and 28. One, {@code PA-CUST-ID PIC 9(09)} at line 20,
+ * is plain DISPLAY with no {@code USAGE} clause at all. Reaching for one codec across the whole
+ * record decodes the two counters as though they were packed and stores plausible small integers
+ * that are not the counts the reference program wrote, and nothing about that result looks broken
+ * from the outside -- which is why the three regimes are named here rather than left to be inferred
+ * from thirteen PICTURE clauses. Each member below takes the type its own declared representation
+ * implies.</p>
  *
- * <p>Trade-offs: the five occurrences of {@code PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES} at line
- * 22 of that copybook are five discrete members here rather than an array. The arity is fixed at five
- * by the copybook, so five members let the schema enforce it, keep each value addressable by an
- * ordinary predicate, and keep the JPA mapping free of a converter. An array member would express the
- * shape more compactly and would accept a sixth element the baseline record cannot hold.</p>
+ * <p>Assumptions: every monetary component is exact fixed point at scale two, never an IEEE-754
+ * binary type. The six amounts are declared {@code PIC S9(09)V99 COMP-3}, so the mapped columns are
+ * {@code NUMERIC(11,2)} and the Java type is {@link BigDecimal}. Scale two and half-up rounding are
+ * the shared kernel's published contract, held as {@code com.carddemo.common.money.Money.SCALE} and
+ * {@code com.carddemo.common.money.Money.GENERAL_ROUNDING}, and an amount that leaves this context
+ * over the wire is written as a JSON STRING by {@code com.carddemo.common.money.MoneyModule} so that
+ * no client parses a cent through a binary approximation. Transformation rule T3 binds this entity as
+ * it binds every other, and the prohibition is enforced by the architecture test rather than by
+ * review. The precision differs from the child row on purpose: eleven here and twelve on
+ * {@link PendingAuthDetail}, because {@code S9(09)V99} and {@code S9(10)V99} are different pictures
+ * and carrying one precision across both would silently narrow the wider one.</p>
  *
- * <p>Assumptions: this entity declares no version column and therefore no optimistic-lock check,
- * which is a deliberate difference from the account and card entities. Those are edited by a user
- * across a screen turn, which is the situation a before-image comparison exists for; this row is
- * updated only by the authorization consumer, inside the same transaction that reads it, under a
- * pessimistic row lock the consumer takes with a select-for-update. Adding a version column would add
- * a conflict path that the single writer cannot produce.</p>
+ * <p>Refactoring Rationale: no packed byte reaches a column, and this states the consequence of the
+ * reference structure rather than a judgement on it. The segment holds its account identifier and its
+ * six amounts as {@code COMP-3} nibbles, sign included in the low nibble of the final byte; the
+ * extract and the mapper decode each one exactly once at the boundary, and nothing in this type
+ * decodes a nibble or stores one. Keeping the packed form would put a sign nibble inside a column,
+ * where no SQL predicate can read it, so every reader of a balance would have to carry a codec to
+ * answer a question an ordinary {@code WHERE} clause answers here. The packed layout itself is
+ * untouched under {@code app/}: this adds a decoded path, it does not remove the encoded one.</p>
  *
- * <p>Trade-offs: the table name is UNQUALIFIED and resolves through the connection
- * {@code search_path} that {@code com.carddemo.authorization.config.DataSourceConfig} pins, exactly as
- * this context's repository charter requires. Naming the schema on the annotation instead would compile
- * it into the mapping, and it would also have to be spelled {@code "\"authorization\""} at every
- * occurrence, because {@code authorization} is a reserved word in this database and an unquoted
- * qualification is a syntax error rather than a wrong lookup -- a failure mode
- * {@code data-migration/sql/V0__schemas_and_roles.sql} documents at lines 471 to 493 after hitting it.
- * Resolving through one pinned {@code search_path} keeps that quoting concern in a single place.</p>
+ * <p>Alternatives Considered: the five occurrences of
+ * {@code PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES} at line 22 of that copybook -- exactly ten of
+ * the hundred bytes -- become five discrete members mapped to five discrete columns. The obvious
+ * alternative, one array-valued member over a PostgreSQL {@code CHAR(2)[]} column, was evaluated and
+ * declined on two grounds: the arity of exactly five is part of the reference contract, and five
+ * columns let the SCHEMA ITSELF hold that arity where an array would accept a sixth element in
+ * silence; and five plain members keep the JPA mapping portable, where an array column needs a
+ * provider-specific type. The occurrence number is carried into each member name so the ordinal
+ * position of the reference table is not lost. Trade-offs: a caller that wants to walk the five now
+ * walks five members instead of one collection, which is the price of having the arity enforced one
+ * layer down. The table belongs to THIS segment alone -- {@link PendingAuthDetail} declares no
+ * {@code OCCURS} at all -- so nothing about this shape generalises to the child row.</p>
+ *
+ * <p>Alternatives Considered: this entity declares no optimistic-lock version member, and the
+ * omission is a decision rather than an oversight. The account, customer and card entities carry one
+ * because the reference programs for those records compare a before-image across a screen turn,
+ * which is the situation an optimistic check exists for. No before-image pattern exists anywhere in
+ * this context's programs; this row is updated only by the authorization consumer, inside the same
+ * transaction that reads it, under the row lock that consumer takes with a select-for-update; and,
+ * decisively, the migration that owns the table declares no such column, so adding one would leave
+ * this mapping asserting a column that does not exist. The migration is the source of truth for what
+ * this type maps, and where the two could disagree the migration wins.</p>
+ *
+ * <p>Alternatives Considered: the constructor and the accessors below are written out rather than
+ * generated. An accessor-generating annotation processor and a generated mapping library were both
+ * evaluated and declined for this tree, and {@code docs/CODE_DOCUMENTATION_STANDARD.md} records that
+ * decision with the two libraries named at its lines 439 and 443. The reason bites hardest exactly
+ * here: Rule 1 line 15 requires a docstring on every method, its Validation Gate at line 43 fails a
+ * method that lacks one, and a generated accessor carries no documentation for either a reviewer or
+ * the build to read. Explicit members give the same brevity with somewhere for that documentation to
+ * live, and the mapping decisions this type embodies -- a dropped padding field, a numeric regime
+ * chosen per field, an arity enforced by column count -- are each a place where a generator would
+ * have removed the one thing that had to be written down.</p>
+ *
+ * <p>Trade-offs: the table name on the annotation below is UNQUALIFIED, and it resolves through the
+ * connection {@code search_path} that this module's {@code application.yml} pins at its line 125 with
+ * {@code connection-init-sql: SET search_path TO "authorization"} -- the same unqualified form the
+ * migration itself uses for every object it creates. Naming the schema on the annotation instead would
+ * compile it into the mapping, and it would have to be spelled with embedded quotes at every
+ * occurrence, because {@code authorization} is a reserved word in this database and
+ * {@code CREATE SCHEMA AUTHORIZATION <role>} is valid syntax in its own right, so an unquoted
+ * qualification is a syntax error pointing nowhere near its cause rather than a wrong lookup;
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} records that trap at its lines 517 to 538,
+ * beside the quoted statement at its line 539. The same reasoning is why this module deliberately sets
+ * no provider default-schema property where peer modules do, which its {@code application.yml} states
+ * at lines 203 to 209. Resolving through one pinned {@code search_path} keeps the quoting concern in a
+ * single place instead of on every mapped type.</p>
  */
 @Entity
 @Table(name = "pending_auth_summary")
@@ -79,6 +140,34 @@ public class PendingAuthSummary {
      * signed decimal digits. {@link Long} is the target because eleven digits exceed what a
      * thirty-two-bit integer holds; the value is assigned by the caller rather than generated, because
      * an account identifier originates in the account context and is never minted here.</p>
+     *
+     * <p>Assumptions: the key is the account identifier ALONE, not a composite, and four independent
+     * readings of the reference material agree on that. The database description declares
+     * {@code FIELD NAME=(ACCNTID,SEQ,U),START=1,BYTES=6,TYPE=P} at
+     * {@code app/app-authorization-ims-db2-mq/ims/DBPAUTP0.dbd} line 30 -- a unique sequence field of
+     * six packed bytes beginning at offset one, with no second component named. The layout agrees,
+     * because {@code S9(11) COMP-3} occupies exactly those first six bytes and leaves none of them for
+     * anything else. The list program reads the segment on that field and on nothing else, at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} lines 973 to 977, whose qualification
+     * at line 976 is {@code WHERE (ACCNTID = PA-ACCT-ID)}; the alternative key move on the intervening
+     * line 972 is commented out, so it is dead scaffolding rather than a second access path. And the
+     * companion description at {@code ims/DBPAUTX0.dbd}, declared {@code ACCESS=(INDEX,VSAM,PROT)} at
+     * its line 18, is the HIDAM PRIMARY index over that same field: its six-byte {@code PAUTINDX}
+     * segment at lines 27 to 29 points back with {@code LCHILD NAME=(PAUTSUM0,DBPAUTP0)} and
+     * {@code INDEX=ACCNTID} at lines 30 and 31. One row per account is also what makes the child rows
+     * addressable by account plus their own key.</p>
+     *
+     * <p>Assumptions: there is NO secondary access path on this segment, and the negative finding is
+     * recorded because its absence is easy to mistake for an omission. A secondary index in this
+     * reference system would be declared with an {@code XDFLD} statement, and a search of the whole
+     * reference tree finds no {@code XDFLD} anywhere in it -- not in this context, not in any other.
+     * The migration therefore declares no index on this table beyond the primary key, and one on the
+     * account identifier would merely duplicate that key. The specification's warning that alternate
+     * indexes are access paths rather than decoration is about the record-file masters and their three
+     * alternate indexes -- {@code CARDAIX}, {@code CXACAIX} and {@code TRANSACT.VSAM.AIX} -- and not
+     * one of those three belongs to this context, which reaches its data hierarchically instead. A
+     * future reader who adds an index here believing one was missed would be adding a path the
+     * reference system never had.</p>
      */
     @Id
     @Column(name = "account_id", nullable = false, updatable = false)
@@ -86,6 +175,15 @@ public class PendingAuthSummary {
 
     /**
      * The customer the account belongs to, {@code PA-CUST-ID PIC 9(09)} at line 20.
+     *
+     * <p>Assumptions: this is the one plain DISPLAY field in the record and the only numeric that is
+     * UNSIGNED. Its picture carries no {@code S} and no {@code USAGE} clause, so its nine bytes are
+     * nine ordinary characters with NO sign overpunch -- unlike every amount here, whose sign travels
+     * in the low nibble of its final packed byte. The sign-overpunch decoder that the extract applies
+     * to the record-file masters must therefore not be applied to this field: reading a trailing
+     * character as an overpunch would turn the last digit into a sign and a customer identifier into a
+     * different one. {@link Long} is the target because nine digits identify rather than measure, and
+     * the migration declares the column {@code BIGINT} for the same reason.</p>
      */
     @Column(name = "customer_id", nullable = false)
     private Long customerId;
@@ -93,6 +191,16 @@ public class PendingAuthSummary {
     /**
      * The one-character authorization status of the account, {@code PA-AUTH-STATUS PIC X(01)} at
      * line 21.
+     *
+     * <p>Assumptions: this field has NO value domain to carry across, and neither this type nor the
+     * migration invents one. Line 21 declares it {@code PIC X(01)} and no {@code 88}-level condition
+     * name follows it -- the next line is {@code PA-ACCOUNT-STATUS} -- whereas the child segment closes
+     * both of its flags: {@code PA-MATCH-STATUS} at {@code cpy/CIPAUDTY.cpy} line 45 is followed by
+     * four condition names at lines 46 to 49, and {@code PA-AUTH-FRAUD} at line 50 by two at lines 51
+     * and 52. Those two closed domains become check constraints on the child table; this open one gets
+     * neither a constraint nor a Java enumeration, because a domain invented here would reject a value
+     * the reference program can legitimately produce. The absence is deliberate fidelity, and it is
+     * written down so that the missing constraint reads as a finding rather than as an oversight.</p>
      */
     // WHY : Alternatives Considered: relying on the declared length alone was evaluated and rejected,
     //       because a Java String otherwise selects the JDBC VARCHAR binding and schema validation then
@@ -109,6 +217,14 @@ public class PendingAuthSummary {
     /**
      * The first of the five two-character account-status slots at line 22.
      */
+    // WHY : Alternatives Considered: the table PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES is five
+    //       columns here, account_status_1 through account_status_5 at migration lines 186 to 190,
+    //       carrying exactly ten of the segment's hundred bytes. A single CHAR(2)[] array column was
+    //       the obvious alternative and was declined because the arity of exactly five is part of the
+    //       reference contract: five columns leave that arity enforced by the schema, whereas an array
+    //       would accept a sixth element that the fixed-length record cannot hold and the invariant
+    //       would survive only as a convention in application code. Five columns also keep the mapping
+    //       inside portable JPA, where an array column needs a provider-specific type.
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_1", length = 2)
     private String accountStatus1;
@@ -169,6 +285,16 @@ public class PendingAuthSummary {
     /**
      * How many authorizations have been approved against the account,
      * {@code PA-APPROVED-AUTH-CNT PIC S9(04) COMP} at line 27.
+     *
+     * <p>Assumptions: this and the field below are the record's second numeric regime, and they are
+     * the two fields a uniform codec would get wrong. {@code COMP} is a signed BINARY halfword here --
+     * two bytes for four digits or fewer -- so it is neither the packed decimal of the seven fields
+     * around it nor the plain DISPLAY of the customer identifier. {@link Short} is the exact Java
+     * counterpart of that halfword and {@code SMALLINT} the exact column type, so the mapping widens
+     * nothing and narrows nothing. The sign is load-bearing rather than decorative: the purge program
+     * DECREMENTS these counters at {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 287
+     * to 293 as each aged authorization is removed, so both are mutable running aggregates and an
+     * unsigned target would be wrong the first time a total was reduced.</p>
      */
     @Column(name = "approved_auth_cnt", nullable = false)
     private Short approvedAuthCount;
@@ -176,6 +302,11 @@ public class PendingAuthSummary {
     /**
      * How many authorizations have been declined against the account,
      * {@code PA-DECLINED-AUTH-CNT PIC S9(04) COMP} at line 28.
+     *
+     * <p>Assumptions: identical representation to the field above -- a signed two-byte binary halfword
+     * of at most four digits, mapped to {@code SMALLINT} -- and the range the picture allows is
+     * narrower than the halfword that stores it, which is why {@link #COUNTER_MIN} and
+     * {@link #COUNTER_MAX} bound the increment rather than the storage type's own limits.</p>
      */
     @Column(name = "declined_auth_cnt", nullable = false)
     private Short declinedAuthCount;
@@ -421,14 +552,34 @@ public class PendingAuthSummary {
     /**
      * Records an approved authorization against this summary.
      *
+     * <p>Assumptions: the three statements this performs are the approved branch of
+     * {@code 8400-UPDATE-SUMMARY} at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines
+     * 813 to 818, in the reference program's own order: add one to the approved count at line 814, add
+     * the approved amount to the approved total at line 815, and add the same amount to the credit
+     * balance at line 817.</p>
+     *
      * <p>Assumptions: the count, the approved total and the credit balance move TOGETHER, in one
      * method, because they are one accounting fact. Exposing three setters instead would let a caller
      * update the count and forget the balance, and the resulting row would be internally inconsistent
      * with nothing to detect it -- the same class of defect the baseline avoids by updating the segment
      * in one rewrite.</p>
      *
+     * <p>Assumptions: the fourth statement of that branch, {@code MOVE 0 TO PA-CASH-BALANCE} at line
+     * 818, is deliberately NOT reproduced, and the reason is a whole-tree reading rather than a local
+     * judgement: {@code PA-CASH-BALANCE} is written at that one line and nowhere else in the reference
+     * tree, and is read only for display at {@code cbl/COPAUS0C.cbl} line 794. Nothing ever adds to it,
+     * so the value the reference program leaves is zero and the value this type carries is the zero its
+     * constructor set. Re-assigning zero to a member already at zero would add a statement whose only
+     * effect is to invite the question of what else writes it. This is recorded because a reader
+     * comparing the two side by side will count four statements in the reference branch and three
+     * here, and the difference has to read as a finding rather than as an omission.</p>
+     *
      * @param amount the approved amount at scale two, added to both the approved total and the credit
      *     balance; must not be {@code null}
+     * @throws IllegalStateException if the approved count has already reached the four-digit maximum
+     *     that {@code PIC S9(04) COMP} can represent, propagated from
+     *     {@link #incremented(Short, String)}; the summary is left unchanged when that happens, so a
+     *     caller that catches it holds a row still consistent with the authorizations already recorded
      */
     public void recordApproved(BigDecimal amount) {
         this.approvedAuthCount = incremented(this.approvedAuthCount, "approvedAuthCount");
@@ -440,12 +591,19 @@ public class PendingAuthSummary {
      * Records a declined authorization against this summary.
      *
      * <p>Assumptions: a decline moves the count and the declined total and leaves the credit balance
-     * alone, because a declined authorization reserves nothing. That asymmetry with
-     * {@link #recordApproved(BigDecimal)} is the whole reason the two are separate methods rather than
-     * one method taking a flag.</p>
+     * alone, because a declined authorization reserves nothing. The reference program's declined branch
+     * at {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 819 to 821 carries exactly two
+     * statements against the approved branch's four -- add one to the declined count at line 820 and add
+     * the transaction amount to the declined total at line 821, with no balance statement of any kind --
+     * so the asymmetry is the reference program's and not an economy taken here. That asymmetry with
+     * {@link #recordApproved(BigDecimal)} is also the whole reason the two are separate methods rather
+     * than one method taking a flag.</p>
      *
      * @param amount the declined amount at scale two, added to the declined total only; must not be
      *     {@code null}
+     * @throws IllegalStateException if the declined count has already reached the four-digit maximum
+     *     that {@code PIC S9(04) COMP} can represent, propagated from
+     *     {@link #incremented(Short, String)}; as on the approved path, the summary is left unchanged
      */
     public void recordDeclined(BigDecimal amount) {
         this.declinedAuthCount = incremented(this.declinedAuthCount, "declinedAuthCount");

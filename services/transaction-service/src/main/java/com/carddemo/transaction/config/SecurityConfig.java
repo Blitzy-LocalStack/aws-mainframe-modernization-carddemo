@@ -15,7 +15,6 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
-import org.springframework.security.oauth2.core.OAuth2TokenValidator;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
@@ -34,6 +33,16 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * the ordinary user. That structure is storage the CLIENT hands back, so a client could in principle
  * assert its own user type; here the equivalent claim is signed by the identity provider and validated
  * on every request, so it cannot be asserted by the caller at all.</p>
+ *
+ * <p>Assumptions: the baseline performs no transaction-level authorization of its own, which is what
+ * makes the signed claim a change of mechanism rather than a tightening of policy. All four transactions
+ * of this context are defined with resource-level and command-level security switched off:
+ * {@code app/csd/CARDDEMO.CSD} carries {@code RESSEC(NO) CMDSEC(NO)} at line 426 for the transaction
+ * whose program is named at line 420, at line 436 for the one named at line 430, at line 446 for the one
+ * named at line 440, and at line 344 for the bill-payment transaction named at line 338. With the
+ * monitor's own two checks off, the user-type byte in that echoed structure is the entire access control
+ * the baseline applies to these four paths. The Java reaches the same admit-or-refuse outcome from a
+ * claim the caller cannot author, and the divergence is documented.</p>
  *
  * <p>Assumptions: this class has the same three responsibilities in every context of this repository --
  * a filter chain, the group-to-authority conversion, and the decoder that installs the token checks the
@@ -55,6 +64,62 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * does tighten is the TOKEN it accepts, and it tightens it for a specific reason: these are the
  * operations whose misuse moves money, so a request admitted on an identity token would post against a
  * real account.</p>
+ *
+ * <h2>Why the correlation filter is not registered here</h2>
+ *
+ * <p>Assumptions: the shared correlation filter has to run BEFORE anything in this chain can refuse a
+ * request, and it already does, so this class declares no registration for it. That was verified rather
+ * than assumed: {@code common-lib} ships
+ * {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}, which names
+ * {@code CardDemoCommonAutoConfiguration}, and that class contributes a registration bean placing one
+ * {@code CorrelationIdFilter} instance at {@code Ordered.HIGHEST_PRECEDENCE + 1} -- ahead of the servlet
+ * position the whole security chain occupies, and therefore ahead of the bearer-token filter.</p>
+ *
+ * <p>Alternatives Considered: registering the filter here, ordered before the authentication filter. It
+ * is rejected because the ordering it would buy is already held, and because a second registration is
+ * not idempotent by construction: the kernel guards its own registration on the NAME of its
+ * registration bean, so a differently named bean here does not suppress it and the framework adapts any
+ * unwrapped filter bean it finds into a further registration of its own. The filter carries a
+ * once-per-request guard, a request attribute set on entry and removed only by the pass that set it, so
+ * the duplicate would mint no second identity and would be invisible -- which is the reason to withdraw
+ * it deliberately rather than leave a reader to discover it.</p>
+ *
+ * <p>Assumptions: the position matters specifically because a request refused with 401 or 403 never
+ * reaches a controller. Were the identity established after authentication, the failures an operator
+ * most needs to trace would be the ones with no identifier on the response and no entry in the logging
+ * context. Ordering it first is what makes an authentication refusal correlatable at all, and the
+ * refusal bodies this chain renders are written by handlers that read the same request.</p>
+ *
+ * <h2>What this class deliberately does not declare</h2>
+ *
+ * <p>Assumptions: three configuration classes present in other contexts of this repository are absent
+ * here, each for a reason specific to this bounded context rather than by oversight. There is no SQS
+ * configuration because this context consumes no queue: the module declares no
+ * {@code io.awspring.cloud} and no {@code software.amazon.awssdk} dependency and
+ * {@code application.yml} defines no {@code spring.cloud.aws} key, so the types would not resolve --
+ * that configuration belongs to the authorization and batch contexts, which do consume queues. There is
+ * no batch configuration because the module declares no batch starter and no {@code spring.batch} key;
+ * the nightly chain is the batch context's. And there is no HTTP-client configuration because the
+ * client used for the cross-context cross-reference read is built with its timeouts in the service
+ * layer, at the point that owns the call, rather than as a context-wide bean here.</p>
+ *
+ * <p>Assumptions: the data source and the connection pool are declared by the sibling
+ * {@code DataSourceConfig}, and the API document metadata, the money codec registration and the error
+ * advice by {@code OpenApiConfig}. This file owns the chain, the group-to-authority conversion and the
+ * decoder, and nothing else, so the four files of this package do not overlap and a reader looking for
+ * one of those beans has exactly one place to look.</p>
+ *
+ * <h2>Assumptions: the two starters this class needs are not inherited</h2>
+ *
+ * <p>{@code common-lib} marks four starters {@code optional} -- web, validation, security and
+ * oauth2-resource-server -- so none of them reaches this module transitively, and
+ * {@code services/transaction-service/pom.xml} re-declares all four. This class needs two of them:
+ * without the security starter the chain builder and the session policy are missing, and without the
+ * resource-server starter the decoder, the converter and the validators are. The failure mode of
+ * dropping either is worth stating because it is asymmetric: the module still COMPILES, because
+ * compilation of this file only needs the types the declared dependencies already supply, and the
+ * absence surfaces as a {@code NoClassDefFoundError} when the application context starts. A dependency
+ * removed as unused would therefore pass the build that was meant to catch it.</p>
  *
  * @see CognitoAccessTokenValidator
  */
@@ -83,10 +148,15 @@ public class SecurityConfig {
     /**
      * The path the load balancer's health check and the container's own probe read.
      *
-     * <p>Assumptions: this path is reachable WITHOUT a token, and it has to be. The target group polls
-     * it with no credentials of any kind, so a chain that required one would fail every health check and
-     * the task would be replaced continuously while being perfectly healthy. Only the health group is
-     * opened; the remaining actuator endpoints stay behind the chain.</p>
+     * <p>Assumptions: exactly two components read this path and NEITHER of them can present a token, so
+     * requiring one here would break container orchestration and load-balancer registration at the same
+     * time. This module's {@code Dockerfile} declares a {@code HEALTHCHECK} that reads
+     * {@code /actuator/health} over the loopback address, so a refused probe marks the container itself
+     * unhealthy and it is replaced; the load balancer's target group polls the same path to decide
+     * whether the task receives traffic, so a refused poll withdraws a task that is serving correctly.
+     * One rule therefore governs two independent failure paths, and neither presents as a rejected
+     * business request. Only the health group is opened; the remaining actuator endpoints stay behind the
+     * chain.</p>
      */
     public static final String HEALTH_PATH = "/actuator/health/**";
 
@@ -189,11 +259,14 @@ public class SecurityConfig {
     /**
      * Builds the filter chain.
      *
-     * <p>Assumptions: sessions are STATELESS. The baseline is pseudo-conversational and carries its
-     * continuity in a structure the client echoes; the migrated form carries identity in the token and
-     * selection context in the request path, so there is nothing left for a server-side session to
-     * hold. Permitting one would reintroduce the sticky routing that horizontal scaling exists to
-     * avoid.</p>
+     * <p>Assumptions: sessions are STATELESS, and the baseline corroborates that this is the faithful
+     * mapping rather than a convenience. Every transaction of this context is defined with a zero
+     * transaction work area -- {@code TWASIZE(0)} in {@code app/csd/CARDDEMO.CSD} at line 420, line 430,
+     * line 440 and line 338 -- so the structure the client echoes was the only per-conversation storage
+     * these transactions had, and there is no second server-side store to reproduce. The migrated form
+     * carries identity in the token and selection context in the request path, so nothing remains for a
+     * session to hold. Permitting one would reintroduce the sticky routing that horizontal scaling
+     * exists to avoid.</p>
      *
      * <p>Trade-offs: cross-site request forgery protection is disabled, which for a cookie-authenticated
      * application would be a defect. It is not one here: every request authenticates with a bearer token
@@ -234,7 +307,17 @@ public class SecurityConfig {
     public SecurityFilterChain filterChain(HttpSecurity http,
             JwtAuthenticationConverter authenticationConverter, Clock clock) throws Exception {
         return http
+                // WHY : Trade-offs: no credential reaching this service travels in a cookie. Every
+                //       request authenticates with a bearer token that a browser does not attach on its
+                //       own, so the confused-deputy condition this protection defends against cannot
+                //       arise here, while leaving it enabled would refuse every non-idempotent call the
+                //       browser client makes.
                 .csrf(csrf -> csrf.disable())
+                // WHY : Assumptions: the zero transaction work area on all four transactions of this
+                //       context means the baseline kept no server-side per-conversation storage beyond
+                //       the structure the client echoed back, so statelessness reproduces what was there
+                //       rather than simplifying it -- and it is what lets tasks scale out behind the
+                //       load balancer with no sticky routing.
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests

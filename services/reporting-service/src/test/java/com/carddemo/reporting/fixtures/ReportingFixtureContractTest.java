@@ -82,9 +82,22 @@ class ReportingFixtureContractTest {
      * A directory assertion that only checked for the presence of expected files would pass after an
      * unrelated fixture was dropped in, and one that omitted the README would pass after the
      * provenance statement was deleted. Both are things this test exists to prevent.</p>
+     *
+     * <p>Assumptions: closing the set means each planned fixture must be admitted here by name as it
+     * lands, so this list grows by deliberate edit rather than on its own. {@code tcatbal.txt} is
+     * such an admission: it is the transaction-category-balance record of
+     * {@code app/cpy/CVTRA01Y.cpy}, which {@code app/jcl/PRTCATBL.jcl} reads at its declared
+     * 50-byte length, and it is a planned member of this directory rather than a stray file.</p>
+     *
+     * <p>Alternatives Considered: relaxing the assertion to a lower bound so that any newly added
+     * fixture passes without an edit here. Rejected because it would surrender the exact property
+     * the paragraph above is built on: an unrelated or accidentally committed file, or a fixture
+     * written against no descriptor at all, would then enter this directory silently. Naming each
+     * arrival costs one line and keeps the directory's contents an owned decision.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
-            List.of("README.md", "acctfile.txt", "custfile.txt", "trancatg.txt", "trantype.txt");
+            List.of("README.md", "acctfile.txt", "custfile.txt", "tcatbal.txt", "trancatg.txt",
+                    "trantype.txt");
 
     /**
      * Resolves the fixture directory on the test classpath.
@@ -148,7 +161,21 @@ class ReportingFixtureContractTest {
                 Arguments.of("acctfile.txt", "ACCOUNT", 300, 4),
                 Arguments.of("custfile.txt", "CUSTOMER", 500, 4),
                 Arguments.of("trantype.txt", "TRANTYPE", 60, 7),
-                Arguments.of("trancatg.txt", "TRANCAT", 60, 9));
+                Arguments.of("trancatg.txt", "TRANCAT", 60, 9),
+
+                // WHY : Assumptions: the balance fixture is registered last because it is the child
+                //       of the two reference fixtures above -- every one of its rows draws a type
+                //       code from trantype.txt and a type-and-category pair from trancatg.txt, which
+                //       is the shape the target preserves as a restricting foreign key. Declaring it
+                //       here subjects it to the same three structural assertions as its siblings
+                //       rather than leaving it merely present in the directory listing.
+                //       Trade-offs: the descriptor name TCATBAL differs from the file name
+                //       tcatbal.txt only in case, and the two are NOT interchangeable. The file is
+                //       named for the seed dataset because PRTCATBL.jcl STEP10R runs DFSORT with no
+                //       COBOL program and so has only generic SORTIN and SORTOUT names to offer,
+                //       while TCATBAL is the registry key. Passing either one in the other position
+                //       fails, which is the intended outcome.
+                Arguments.of("tcatbal.txt", "TCATBAL", 50, 8));
     }
 
     /**

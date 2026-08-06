@@ -47,6 +47,14 @@ is why the wider vector below is named `decode-only`.
 | `auth-request-canonical-wire169.csv` | 170 | 1 | The **canonical** request wire: 169 characters, eighteen fields, a 13-character money token `0000000250.00`. This is byte-for-byte what `CsvAuthCodec.encodeRequest` emits for that amount, so it is the encode oracle. |
 | `auth-request-copybook-wire170-decode-only.csv` | 171 | 1 | The copybook-arithmetic form: 170 characters with the 14-character token `+0000000250.00`. `decodeRequest` accepts it and yields the same 250.00; `encodeRequest` never emits it. It differs from the canonical vector in the money token and in the transaction identifier -- the identifier because every committed row is deliberately distinguishable by it -- so the pair is an A/B on the money width across the other seventeen positions. |
 | `auth-request-amount-variants.csv` | 510 | 3 | Three money boundaries at the canonical 13-character width: the negative form `-000000250.00` (sign plus nine integer digits), the widest positive `9999999999.99` (ten integer digits, no sign position), and zero `0000000000.00`. |
+| `auth-request-encode-oracle-170.bin` | 170 | 1 | The row above it with **no terminator at all** -- the same 170 characters as `auth-request-copybook-wire170-decode-only.csv` minus that file's single LF, so `wc -l` reports 0 and the wire length and the file length coincide. It is the only request fixture read through `bytesOf` rather than `linesOf`, because a `\n`-splitting reader cannot express the ABSENCE of a terminator, and absence is this file's whole contract: a byte comparison against it needs no trimming and therefore cannot pass for output carrying a trailing comma, a trailing pad or one byte too many. Byte 169 is the digit `0`, which is what makes the reply wire's trailing comma an assertable asymmetry rather than an assumption. |
+
+Assumptions: despite its name, this `.bin` is **not** what `CsvAuthCodec.encodeRequestBytes` emits --
+that is `auth-request-canonical-wire169.csv`, and `REQUEST_WIRE_LENGTH` is 169 for the truncation
+reason given above. It is the byte-level oracle for the **copybook-declared** 170-character form, and
+`AuthorizationFixtureContractTest` asserts that boundary in both directions: these bytes decode
+exactly, and re-encoding them yields 169 bytes that are not equal to them. Reading the name as the
+stronger claim is the one mistake this pairing exists to prevent.
 
 Assumptions: the negative form spends its sign on an integer digit position and the non-negative
 form does not, which is why both appear. A vector carrying only non-negative amounts would pass
@@ -139,3 +147,36 @@ print(encode_packed(Decimal('250.00'), 10, 2, True).hex())
 
 Review the resulting diff before committing: a change here is a change to the contract the
 consumer test asserts, so the two must move together.
+
+---
+
+## 5. The remaining eleven resources, and what asserts each
+
+Assumptions: sections 1 to 3 describe eighteen of the thirty resources in this directory. The eleven
+below arrived with the detail-segment work and are recorded here so the inventory in
+`AuthorizationFixtureContractTest` has a documented counterpart for every name it lists — that class
+states it is the consumer for all thirty, and a name it enumerates with nothing written about it
+would make that claim true only in the letter.
+
+Assumptions: every record count below is measured by dividing the file's byte length by the
+registered record length, 200 for `PAUTDTL`, rather than by reading a header. The `pautdtl1-` prefix
+distinguishes these from the `pautdtl-` family of section 3: both describe the same 200-byte segment,
+and the digit marks the later group.
+
+| File | Bytes | Records | What asserts it |
+|---|---|---|---|
+| `auth-reply-approved-wire63.csv` | 64 | 1 | Inventory only. The 63-character approved reply wire plus the one LF section 3.3 of the master fixture README mandates, carrying the six reply fields and the trailing comma the reference `STRING` emits after the last of them. |
+| `pautdtl1-canonical.bin` | 200 | 1 | Inventory, geometry and round trip. |
+| `pautdtl1-amount-ten-integer-digits.bin` | 200 | 1 | Inventory, geometry, round trip, and the maximum-amount assertions in the contract test: both money spans hold the widest value `PIC S9(10)V99 COMP-3` admits. |
+| `pautdtl1-auth-fraud-domain.bin` | 600 | 3 | Inventory, geometry and round trip — one image per admitted fraud-field state. |
+| `pautdtl1-match-status-domain.bin` | 800 | 4 | Inventory, geometry and round trip — one image per admitted match status, the same four-value domain section 3 records for `pautdtl-match-status-domain.bin`. |
+| `pautdtl1-merchant-name-notrim.bin` | 200 | 1 | `MerchantNameNoTrimFixtureTest`, which proves the trailing blanks of `PA-MERCHANT-NAME` are stored data and survive the load path rather than being trimmed. |
+| `pautdtl1-newyear-pair.bin` | 400 | 2 | `PendingAuthDetailNewYearFixtureTest`, plus geometry and round trip. Julian 23365 at 23:59:59.999 and Julian 24001 at 00:00:01.000 on one card — the year-boundary pair. |
+| `pautdtl1-order-same-day-times.bin` | 600 | 3 | `PendingAuthDetailOrderingFixtureTest`. Three same-day images whose file order is deliberately not chronological. |
+| `pautdtl1-time-leading-nines.bin` | 200 | 1 | `PendingAuthDetailComplementKeyFixtureTest`, plus geometry and round trip. All eight key bytes fall outside the ASCII digit range, which is the property the round trip is there to defend. |
+| `unload-gsam-detail-200.bin` | 800 | 4 | `PendingAuthDetailOrderingFixtureTest`, plus geometry and round trip. The GSAM unload form, whose records are the segment length exactly. |
+| `unload-prefixed-detail-206.bin` | 824 | 4 | Inventory only. The prefixed unload form: 206 bytes per record, being the 200-byte segment behind a six-byte record prefix. Trade-offs: it is not enrolled in the generic geometry check, because that check divides by the registered 200 and 824 is a whole number of 206-byte records rather than of 200-byte ones. A 206-byte layout is not registered, and inventing one to satisfy a check would assert a geometry no reader of this directory uses. |
+
+Assumptions: "inventory only" is stated plainly rather than left to be discovered, because it names
+the weakest coverage a fixture here has — presence and non-emptiness — and a reader deciding where to
+add an assertion should be able to find those rows without reading the test.

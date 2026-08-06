@@ -56,18 +56,27 @@ final class PendingAuthViewMapperTest {
     /** The adapter under test. */
     private PendingAuthViewMapper mapper;
 
+    /** The sealer the adapter was built over, retained so a sealed selector can be opened again. */
+    private CursorToken cursor;
+
     /**
      * Builds the adapter over a sealer with deterministic key material.
      *
      * <p>Assumptions: the key material is a fixed fill rather than a random value, so a failure is
      * reproducible. Nothing here asserts a particular token TEXT -- a sealed token carries an issue instant
      * -- only that the token has the sealed shape the contract's pattern accepts.</p>
+     *
+     * <p>Assumptions: the sealer is held on the instance as well as handed to the adapter, because the only
+     * way to prove a selector was sealed rather than merely rearranged is to open it again under the same
+     * binding. Rebuilding a second sealer here would key a different MAC and could not open what the
+     * adapter produced.</p>
      */
     @BeforeEach
     void setUp() {
         byte[] keyMaterial = new byte[CursorToken.MIN_KEY_LENGTH];
         Arrays.fill(keyMaterial, (byte) 0x3C);
-        this.mapper = new PendingAuthViewMapper(new CursorToken(keyMaterial, Duration.ofMinutes(5)));
+        this.cursor = new CursorToken(keyMaterial, Duration.ofMinutes(5));
+        this.mapper = new PendingAuthViewMapper(this.cursor);
     }
 
     /**
@@ -147,15 +156,33 @@ final class PendingAuthViewMapperTest {
 
     /**
      * A list row publishes the card number masked and the selector sealed, never the raw forms.
+     *
+     * <p>Refactoring Rationale: the selector assertion used to be
+     * {@code doesNotContain(String.valueOf(ACCOUNT_ID))}, a two-character digit probe over the WHOLE token.
+     * A sealed token ends in 43 base64url characters of a MAC taken over a payload that includes the issue
+     * instant, so those characters differ on every run, and {@code "11"} turns up inside them by chance
+     * roughly one run in a hundred. That is exactly how it failed here: the collision sat in the signature
+     * segment, not in the payload, and had nothing to do with the adapter. The probe also proved nothing
+     * about sealing, because it passed for any string of the right shape. This class's own contract, stated
+     * in {@link #setUp()}, is that no assertion here depends on the token's text.</p>
+     *
+     * <p>Assumptions: the deterministic replacement states the property directly. The cleartext selector
+     * {@code accountId:authDate:authTime} must not appear in the published token, and opening that token
+     * under {@link PendingAuthViewMapper#CURSOR_BINDING} must return exactly that selector -- so the row's
+     * identity travels only through the sealer, which is the property the weaker probe was reaching for.</p>
      */
     @Test
     @DisplayName("masks the card number and seals the selector on a list row")
     void rowMasksAndSeals() {
         PendingAuthRowView row = this.mapper.toRowView(detailWith("00"));
+        String cursorKey = ACCOUNT_ID + String.valueOf(PendingAuthViewMapper.KEY_PART_SEPARATOR)
+                + AUTH_DATE + String.valueOf(PendingAuthViewMapper.KEY_PART_SEPARATOR) + AUTH_TIME;
 
         assertThat(row.cardNum()).isEqualTo("************1111").doesNotContain("4111");
         assertThat(CursorToken.hasSealedShape(row.key())).isTrue();
-        assertThat(row.key()).doesNotContain(String.valueOf(ACCOUNT_ID));
+        assertThat(row.key()).isNotEqualTo(cursorKey).doesNotContain(cursorKey);
+        assertThat(this.cursor.open(PendingAuthViewMapper.CURSOR_BINDING, row.key()))
+                .isEqualTo(cursorKey);
     }
 
     /**

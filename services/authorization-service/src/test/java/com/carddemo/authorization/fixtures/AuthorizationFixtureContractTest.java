@@ -8,6 +8,7 @@ import com.carddemo.common.codec.CopybookLayout.RecordSpec;
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.codec.FixedWidthCodec;
+import com.carddemo.common.codec.PackedDecimalCodec;
 import com.carddemo.common.money.Money;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,7 +29,7 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Consumes every fixture in this module and asserts the contract each one carries.
  *
  * <p>Purpose: a fixture with no executable consumer is a file whose bytes can change while the whole
- * suite stays green. This class is the consumer for all sixteen resources under
+ * suite stays green. This class is the consumer for all thirty resources under
  * {@code src/test/resources/fixtures}, and it asserts for each one what
  * {@code src/test/resources/fixtures/README.md} states about it: the record width, the field values,
  * the final record, and the failure path where one exists.
@@ -68,9 +69,11 @@ class AuthorizationFixtureContractTest {
      */
     private static final List<String> EVERY_FIXTURE = List.of(
             "README.md",
+            "auth-reply-approved-wire63.csv",
             "auth-request-amount-variants.csv",
             "auth-request-canonical-wire169.csv",
             "auth-request-copybook-wire170-decode-only.csv",
+            "auth-request-encode-oracle-170.bin",
             "pautdtl-canonical.bin",
             "pautdtl-filler-nonblank.bin",
             "pautdtl-fraud-marked.bin",
@@ -78,13 +81,51 @@ class AuthorizationFixtureContractTest {
             "pautdtl-match-status-domain.bin",
             "pautdtl-negative-zero-decode-only.bin",
             "pautdtl-purge-children.bin",
+            "pautdtl1-amount-ten-integer-digits.bin",
+            "pautdtl1-auth-fraud-domain.bin",
+            "pautdtl1-canonical.bin",
+            "pautdtl1-match-status-domain.bin",
+            "pautdtl1-merchant-name-notrim.bin",
+            "pautdtl1-newyear-pair.bin",
+            "pautdtl1-order-same-day-times.bin",
+            "pautdtl1-time-leading-nines.bin",
             "pautsum0-canonical.bin",
             "pautsum0-filler-nonblank.bin",
             "pautsum0-line-terminator-bytes.bin",
             "pautsum0-negative-zero-decode-only.bin",
             "pautsum0-purge-parent.bin",
+            "unload-gsam-detail-200.bin",
             "unload-gsam-summary-100.bin",
+            "unload-prefixed-detail-206.bin",
             "unload-prefixed-summary-100.bin");
+
+    /**
+     * The detail fixture whose two money spans both hold the widest value their picture admits.
+     *
+     * <p>Assumptions: the record is 200 bytes laid out exactly as
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} lines 19 to 54 declare, which is the
+     * geometry the {@code PAUTDTL} registry entry reproduces. The two amounts sit at offsets 74 and 81,
+     * each seven bytes wide, and the seventeen-byte filler closes the record at 183.</p>
+     */
+    private static final String MAX_AMOUNT_FIXTURE = "pautdtl1-amount-ten-integer-digits.bin";
+
+    /**
+     * The largest value {@code PIC S9(10)V99 COMP-3} can represent.
+     *
+     * <p>Assumptions: ten integer digits and two decimals. This is a boundary read off the picture
+     * clause rather than an amount observed in data, which is why it is held as a named constant
+     * instead of being inlined at each use.</p>
+     */
+    private static final BigDecimal WIDEST_DETAIL_AMOUNT = new BigDecimal("9999999999.99");
+
+    /**
+     * The largest value the summary segment's {@code PIC S9(09)V99 COMP-3} money can represent.
+     *
+     * <p>Assumptions: nine integer digits and two decimals, one integer digit narrower than the
+     * detail. Both constants are held because the difference between them is the contract the
+     * maximum-amount tests below exercise.</p>
+     */
+    private static final BigDecimal WIDEST_SUMMARY_AMOUNT = new BigDecimal("999999999.99");
 
     /**
      * Supplies every binary fixture name paired with the layout it is written against.
@@ -117,6 +158,38 @@ class AuthorizationFixtureContractTest {
                 org.junit.jupiter.params.provider.Arguments.of(
                         "pautdtl-negative-zero-decode-only.bin", "PAUTDTL"),
                 org.junit.jupiter.params.provider.Arguments.of("pautdtl-purge-children.bin",
+                        "PAUTDTL"),
+                org.junit.jupiter.params.provider.Arguments.of(
+                        "pautdtl1-amount-ten-integer-digits.bin", "PAUTDTL"),
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-newyear-pair.bin",
+                        "PAUTDTL"),
+                // WHY : Assumptions: the near-midnight complement fixture is enrolled in the generic
+                //       geometry and round-trip checks like every other binary fixture, even though
+                //       PendingAuthDetailComplementKeyFixtureTest asserts its bytes field by field.
+                //       Its distinguishing property is that all eight key bytes fall outside the ASCII
+                //       digit range, and the generic round trip is what proves those bytes survive a
+                //       decode and re-encode unchanged -- which is a different claim from decoding to
+                //       the right values, and the one a reader of a hex dump would doubt first.
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-time-leading-nines.bin",
+                        "PAUTDTL"),
+                // WHY : Assumptions: the four below are enrolled on the same rule as every entry
+                //       above -- a binary fixture in this directory is enrolled here whatever else
+                //       asserts it -- and three of them previously had no executable consumer at
+                //       all, so their bytes could have changed with the whole suite staying green.
+                //       Their record counts are measured, not assumed: 200, 600, 800 and 800 bytes
+                //       divide by the registered PAUTDTL length of 200 into 1, 3, 4 and 4 images.
+                // WHY : Trade-offs: unload-prefixed-detail-206.bin is deliberately NOT enrolled
+                //       here. It is 824 bytes, which is 4 images of 206 rather than of 200, because
+                //       the prefixed unload form carries a six-byte record prefix ahead of every
+                //       segment. Enrolling it under PAUTDTL would assert 824 divides by 200 and
+                //       fail on a fixture that is correct; a 206-byte layout is not registered, so
+                //       the inventory assertion is the coverage it has until one is.
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-canonical.bin", "PAUTDTL"),
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-auth-fraud-domain.bin",
+                        "PAUTDTL"),
+                org.junit.jupiter.params.provider.Arguments.of("pautdtl1-match-status-domain.bin",
+                        "PAUTDTL"),
+                org.junit.jupiter.params.provider.Arguments.of("unload-gsam-detail-200.bin",
                         "PAUTDTL"));
     }
 
@@ -211,7 +284,7 @@ class AuthorizationFixtureContractTest {
         for (String name : EVERY_FIXTURE) {
             assertThat(bytesOf(name)).as("fixture %s", name).isNotEmpty();
         }
-        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(18);
+        assertThat(EVERY_FIXTURE).doesNotHaveDuplicates().hasSize(30);
     }
 
     /**
@@ -263,6 +336,288 @@ class AuthorizationFixtureContractTest {
         assertThat(reEmitted.split(",", -1)[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL])
                 .hasSize(CsvAuthCodec.REQUEST_MONEY_WIDTH)
                 .isEqualTo("0000000250.00");
+    }
+
+    /**
+     * Confirms {@code auth-request-encode-oracle-170.bin} is the terminator-free byte image of the
+     * copybook-declared request wire.
+     *
+     * <p>Assumptions: the layout is {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} lines
+     * 19 to 36. Its eighteen declared widths sum to <b>153</b> counting the money field at the
+     * fourteen positions {@code PIC +9(10).99} declares at line 27, and 153 plus seventeen interior
+     * delimiters is <b>170</b>. Three measurements are kept apart deliberately: 153 is the width sum,
+     * 170 is this file's byte length, and 171 is the byte length of the {@code .csv} sibling. This is
+     * the one request fixture whose wire length and file length <b>coincide</b>, because it carries no
+     * terminator, and that coincidence is what makes measuring the file a valid assertion here when
+     * the standing discipline for the {@code .csv} fixtures is to measure the payload instead.</p>
+     *
+     * <p>Assumptions: this file exists apart from {@code auth-request-copybook-wire170-decode-only.csv}
+     * because that sibling is 171 bytes -- 170 of wire plus the single LF that
+     * {@code tests/fixtures/README.md} section 3.3 mandates -- and a terminator is correct for a text
+     * fixture and wrong for a byte oracle. Asserting a codec's output against the terminated form
+     * offers only two outcomes and both are bad: comparing the raw 171 bytes fails on a terminator no
+     * encoder may emit, and stripping the terminator or comparing with a trimming or
+     * whitespace-tolerant matcher would also pass for output that carried a trailing comma, a
+     * trailing pad, or a byte more than it should. A terminator-free image removes that tolerance, so
+     * deleting this file as a duplicate of the sibling would silently weaken the suite rather than
+     * simplify it. Nothing in the bytes can say so, which is why it is said here.</p>
+     *
+     * <p>Assumptions: byte 169 is {@code 0x30}, the final digit of {@code TXN000000000100}, so the
+     * payload provably ends in a <b>digit</b> with no trailing delimiter and no trailing pad. In the
+     * terminated sibling that byte is followed by an LF, so what comes after field eighteen is
+     * ambiguous by construction. The reply wire is the deliberate counterexample: its
+     * {@code STRING} at lines 722 to 731 of {@code cbl/COPAUA0C.cbl} pairs a {@code ','} literal with
+     * every one of its six values including the sixth, so a reply <b>does</b> end in a comma. Pinning
+     * a digit here and a comma there is what makes that asymmetry assertable instead of assumed.</p>
+     *
+     * <p>Assumptions: the file contains no {@code 0x0A}, no {@code 0x0D} and no {@code 0x00}, and
+     * every byte is printable ASCII -- digits, capitals, {@code '+'}, {@code '.'}, {@code ','} and
+     * space. It is nevertheless read as a byte stream, and for the <b>inverse</b> reason to the packed
+     * {@code pautsum0-*} and {@code pautdtl-*} fixtures: those need byte reads because terminator- and
+     * NUL-shaped bytes occur legitimately <b>inside</b> their data, whereas this file needs byte reads
+     * because the <b>absence</b> of a terminator is itself the contract, and {@link #linesOf(String)}
+     * -- which splits on {@code \n} and strips {@code \r} -- cannot express absence. The {@code .bin}
+     * extension is the only in-band signal of that discipline a file carrying nothing but record bytes
+     * can offer.</p>
+     *
+     * <p>Assumptions: section 3.3 of {@code tests/fixtures/README.md} mandates a trailing newline and
+     * this file deliberately diverges; section 3.2's escape hatch of documenting a divergence in the
+     * scenario's own README is closed for this family, so the divergence is recorded in this Javadoc.
+     * Section 3.4's zoned-decimal sign overpunch is inapplicable -- no field here is zoned and the
+     * money is edited text -- so {@code ZonedDecimalCodec} is not the codec for this payload.</p>
+     *
+     * <p><b>Provenance.</b> Contract-derived from {@code cpy/CCPAURQY.cpy} and {@code cbl/COPAUA0C.cbl},
+     * not recorded from a run, and no golden master for it exists or could. {@code tests/README.md}
+     * lines 83 to 85 record that the online {@code CO*} CICS programs cannot run end to end without a
+     * CICS runtime the runner does not have, and {@code COPAUA0C} is a {@code CO*} program; the
+     * external request producer is not supplied by the baseline at all, only the stub at
+     * {@code tests/mocks/mq_request_stub.py}, so no recorded request message exists anywhere to copy.
+     * Every value is synthetic: {@code 4000123456789010} is a test-range primary account number that
+     * appears in no seed extract, and the merchant identity and postal code are invented.</p>
+     */
+    @Test
+    @DisplayName("the encode-oracle fixture is 170 terminator-free bytes ending in a digit")
+    void encodeOracleFixtureIsTheTerminatorFreeByteImage() {
+        byte[] image = bytesOf("auth-request-encode-oracle-170.bin");
+
+        // WHY Assumptions: the declared width table is DERIVED from the codec's emitted table rather
+        //     than re-declared here, because re-declaring eighteen widths in a test would be a second
+        //     transcription of CCPAURQY.cpy free to disagree with the registry it verifies. Exactly
+        //     one entry differs: the codec emits the money field at REQUEST_MONEY_WIDTH (13, the
+        //     PIC X(13) receiver at line 63 of COPAUA0C.cbl) while the copybook declares
+        //     MONEY_EDITED_WIDTH (14, the PIC +9(10).99 at line 27). Substituting that single entry
+        //     is what turns the emitted 152/169 arithmetic into the declared 153/170 arithmetic, so
+        //     the one-byte difference between the two payload widths is expressed here rather than
+        //     asserted as two unrelated literals.
+        List<Integer> declaredWidths = new ArrayList<>(CsvAuthCodec.REQUEST_FIELD_WIDTHS);
+        declaredWidths.set(CsvAuthCodec.REQUEST_AMOUNT_ORDINAL, CsvAuthCodec.MONEY_EDITED_WIDTH);
+        assertThat(declaredWidths).hasSize(CsvAuthCodec.REQUEST_FIELD_COUNT);
+
+        int declaredWidthSum = declaredWidths.stream().mapToInt(Integer::intValue).sum();
+        assertThat(declaredWidthSum)
+                .as("CCPAURQY.cpy lines 19 to 36 declare 153 bytes of fields")
+                .isEqualTo(153);
+        assertThat(CsvAuthCodec.REQUEST_DECLARED_WIDTH_SUM)
+                .as("the emitted sum is one less, and the one byte is the money field")
+                .isEqualTo(declaredWidthSum - 1);
+        assertThat(image)
+                .as("153 declared bytes plus 17 interior delimiters is 170")
+                .hasSize(declaredWidthSum + CsvAuthCodec.REQUEST_FIELD_COUNT - 1);
+        assertThat(image)
+                .as("this file is one byte longer than the wire the encoder emits")
+                .hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH + 1);
+
+        // WHY Assumptions: absence of a terminator is asserted three ways because each catches a
+        //     different mistake -- a stray LF anywhere, a CR from a Windows checkout, and a final
+        //     byte that is a delimiter or a pad rather than the transaction identifier's last digit.
+        assertThat(image).doesNotContain((byte) 0x0A).doesNotContain((byte) 0x0D)
+                .doesNotContain((byte) 0x00);
+        assertThat(image[image.length - 1]).isEqualTo((byte) 0x30);
+        assertThat(image[image.length - 1]).isNotIn((byte) 0x0A, (byte) 0x2C, (byte) 0x20);
+
+        for (byte value : image) {
+            assertThat(value).isBetween((byte) 0x20, (byte) 0x7E);
+        }
+
+        // WHY Assumptions: DELIMITED BY SIZE contributes every source field's FULL declared size
+        //     including its blanks, so the delimiters land at fixed offsets and the payload is a
+        //     POSITIONAL contract rather than merely a delimited one. Asserting the offsets is what
+        //     distinguishes the two: a trimmed payload would still split into eighteen tokens.
+        List<Integer> delimiterOffsets = new ArrayList<>();
+        for (int offset = 0; offset < image.length; offset++) {
+            if (image[offset] == (byte) 0x2C) {
+                delimiterOffsets.add(offset);
+            }
+        }
+        assertThat(delimiterOffsets).containsExactly(6, 13, 30, 35, 40, 47, 54, 61, 76, 81, 85, 88,
+                104, 127, 141, 144, 154);
+        assertThat(delimiterOffsets).doesNotContain(image.length - 1);
+    }
+
+    /**
+     * Confirms the encode-oracle bytes carry the eighteen declared fields and are re-emitted narrower.
+     *
+     * <p><b>Refactoring Rationale: the file's name says "encode-oracle" and that word needs bounding,
+     * because taken loosely it asserts something this repository has settled the other way.</b>
+     * {@link CsvAuthCodec#REQUEST_WIRE_LENGTH} is <b>169</b>, not 170, and its own Javadoc records 170
+     * as the figure the contract deliberately does not adopt: line 63 of {@code cbl/COPAUA0C.cbl}
+     * declares the receiving field {@code WS-TRANSACTION-AMT-AN PIC X(13)}, the {@code UNSTRING} at
+     * lines 354 to 374 hands request ordinal nine into it, and lines 376 and 377 evaluate
+     * {@code FUNCTION NUMVAL} over it -- so a fourteen-character token loses its <b>last</b>
+     * character, the second cents digit, and the consumer computes the amount sent divided by ten.
+     * {@code auth-request-canonical-wire169.csv} is therefore the oracle for what
+     * {@link CsvAuthCodec#encodeRequestBytes} emits, and this file is the oracle for the
+     * <b>copybook-declared</b> 170-character form at byte level. This method asserts that boundary in
+     * both directions so the name can never be read as the stronger claim: these bytes decode
+     * exactly, and re-encoding them yields 169 bytes that are <b>not</b> equal to them. The same
+     * stale-name correction is recorded for the same family at
+     * {@code AuthorizationWireFixtureTest.DECLARED_WIDTH_RESOURCE}.</p>
+     *
+     * <p>Assumptions: the two directions of the contract are not interchangeable and are asserted
+     * separately. Decode authority is the {@code UNSTRING ... DELIMITED BY ','} at lines 354 to 374,
+     * which is tolerant: {@code requireDeclaredTokenWidths} exempts the money ordinal, so the
+     * fourteen-character token here is accepted. Emission authority is the padded, positional form --
+     * and note that the baseline's only {@code STRING ... DELIMITED BY SIZE}, at lines 722 to 731,
+     * builds the <b>reply</b>; {@code COPAUA0C} is the consumer, and the request producer is not
+     * supplied by the baseline at all. A successful decode of these bytes therefore proves nothing
+     * whatever about the encoding, which is precisely why the re-emission is asserted here too.</p>
+     *
+     * <p>Assumptions: field nine is <b>edited numeric text</b> of invariant fourteen-character width
+     * in this form -- sign, ten zero-filled integer digits, the literal point, two decimals -- and it
+     * is carried as {@link Money} over {@link BigDecimal} at scale 2. A {@code double} or a JSON
+     * number would lose exactness at the boundary a reader actually sees, so neither appears on this
+     * path.</p>
+     *
+     * <p>Assumptions: fields eight and twelve are <b>digit text</b> and their leading zeros are
+     * significant, even though their Db2 counterparts are computational --
+     * {@code dcl/AUTHFRDS.dcl} line 71 declares {@code POS-ENTRY-MODE PIC S9(4) USAGE COMP} and
+     * {@code ddl/AUTHFRDS.ddl} line 16 makes the column {@code SMALLINT}. Decoding {@code "05"} to 5
+     * and re-emitting {@code "5"} would shorten the payload while every field still read plausibly.</p>
+     *
+     * <p>Assumptions: field ten's misspelling is <b>the contract</b>, not a defect to correct on the
+     * wire. {@code cpy/CCPAURQY.cpy} line 28 declares {@code PA-RQ-MERCHANT-CATAGORY-CODE} and
+     * {@code ddl/AUTHFRDS.ddl} line 14 misspells the column {@code MERCHANT_CATAGORY_CODE} to match;
+     * only the migrated persisted name is corrected, to {@code merchant_category_code}.</p>
+     *
+     * <p>Assumptions: field fourteen's trailing blanks must survive to the column rather than being
+     * trimmed and re-padded, and three independent sources say so. {@code dcl/AUTHFRDS.dcl} lines 73
+     * to 77 declare the host structure as a level-49 VARCHAR pair; {@code cbl/COPAUS2C.cbl} line 130
+     * sets its length prefix with {@code MOVE LENGTH OF PA-MERCHANT-NAME}, the compile-time constant
+     * 22, <b>unconditionally</b>; and {@code ddl/AUTHFRDS.ddl} line 18 declares
+     * {@code MERCHANT_NAME VARCHAR(22)}, the only VARCHAR in the table. A codec that trimmed and
+     * re-padded would round-trip the bytes while storing 13 characters where 22 belongs, so the
+     * padding is asserted on the raw slice rather than only on the decoded value.</p>
+     *
+     * <p>Assumptions: field one is client-supplied {@code YYMMDD} and is <b>not</b> the record's key.
+     * The key is clock-derived at lines 868 to 875 of {@code cbl/COPAUA0C.cbl}. The stored order is
+     * proved by {@code cbl/COPAUS2C.cbl} lines 103 to 105, which slice {@code (1:2)} to the year,
+     * {@code (3:2)} to the month and {@code (5:2)} to the day before displaying {@code MM/DD/YY}.
+     * Field five is {@code MMYY} and deliberately <b>future</b> where field one is <b>past</b>, so no
+     * single century pivot can serve both and neither may be inferred from the other. Field eighteen
+     * is the last fifteen bytes of the file, half of the 31-byte correlation identity that
+     * {@link CsvAuthCodec#CORRELATION_COMPOSITE_LENGTH} declares, and the FIFO deduplication
+     * identifier.</p>
+     *
+     * <p>Assumptions: the bytes are decoded twice, once bare and once from the head of a 500-byte
+     * blank-padded transport frame, because {@code 01 W01-GET-BUFFER PIC X(500)} at line 103 of
+     * {@code cbl/COPAUA0C.cbl} is the shape the reference consumer actually receives and it parses
+     * only {@code W01-GET-BUFFER(1:W01-DATALEN)}. The frame is assembled here from this fixture rather
+     * than committed as a second file, so the two can never drift; the property under test is that the
+     * payload length comes from the caller and is never inferred from the buffer.</p>
+     */
+    @Test
+    @DisplayName("the encode-oracle bytes decode exactly and re-emit at the narrower 169 width")
+    void encodeOracleBytesDecodeExactlyAndReEmitAtTheNarrowerWidth() {
+        byte[] image = bytesOf("auth-request-encode-oracle-170.bin");
+
+        // WHY Assumptions: the buffer overload is used with an EXPLICIT payload length, mirroring the
+        //     reference program's W01-DATALEN at line 354 rather than inferring the length from the
+        //     buffer. Reading the file in text mode and splitting it would defeat the fixture's point.
+        AuthRequest decoded = CsvAuthCodec.decodeRequest(image, image.length);
+
+        assertThat(decoded.authDate()).isEqualTo("240404");
+        assertThat(decoded.authTime()).isEqualTo("091500");
+        assertThat(decoded.cardNum()).isEqualTo("4000123456789010");
+        assertThat(decoded.authType()).isEqualTo("PURC");
+        assertThat(decoded.cardExpiryDate()).isEqualTo("1227");
+        assertThat(decoded.messageType()).isEqualTo("0100");
+        assertThat(decoded.messageSource()).isEqualTo("POS");
+        assertThat(decoded.processingCode()).isEqualTo("000000");
+        assertThat(decoded.merchantCategoryCode()).isEqualTo("5411");
+        assertThat(decoded.acquirerCountryCode()).isEqualTo("840");
+        assertThat(decoded.posEntryMode()).isEqualTo("05");
+        assertThat(decoded.merchantId()).isEqualTo("MERCH0000000001");
+        assertThat(decoded.merchantName()).isEqualTo("ACME HARDWARE");
+        assertThat(decoded.merchantCity()).isEqualTo("SEATTLE");
+        assertThat(decoded.merchantState()).isEqualTo("WA");
+        assertThat(decoded.merchantZip()).isEqualTo("98101");
+        assertThat(decoded.transactionId()).isEqualTo("TXN000000000100");
+
+        Money amount = decoded.transactionAmount();
+        assertThat(amount.amount()).isEqualByComparingTo(new BigDecimal("250.00"));
+        assertThat(amount.amount().scale()).isEqualTo(2);
+
+        // WHY Assumptions: the padding is asserted on the RAW SLICES because decoding strips trailing
+        //     blanks, so the decoded values above cannot distinguish a payload that was padded from
+        //     one that was trimmed. These five fields are the ones whose values are shorter than
+        //     their declared widths, so they are the only ones where the distinction is observable.
+        String payload = new String(image, StandardCharsets.US_ASCII);
+        String[] slices = payload.split(",", -1);
+        assertThat(slices).hasSize(CsvAuthCodec.REQUEST_FIELD_COUNT);
+        assertThat(slices[5]).isEqualTo("0100  ");
+        assertThat(slices[6]).isEqualTo("POS   ");
+        assertThat(slices[13]).isEqualTo("ACME HARDWARE         ");
+        assertThat(slices[14]).isEqualTo("SEATTLE      ");
+        assertThat(slices[16]).as("X(09) is text, so blanks and not zero fill").isEqualTo("98101    ");
+        assertThat(slices[CsvAuthCodec.REQUEST_AMOUNT_ORDINAL])
+                .isEqualTo("+0000000250.00")
+                .hasSize(CsvAuthCodec.MONEY_EDITED_WIDTH);
+        assertThat(payload.substring(62, 76)).isEqualTo("+0000000250.00");
+        assertThat(payload.substring(155)).isEqualTo("TXN000000000100");
+
+        // WHY Assumptions: re-emission is compared as BYTES and asserted to be unequal, which is the
+        //     strongest available statement that the emission contract has not widened to 170. A
+        //     character comparison would say the same thing less exactly, and a length check alone
+        //     would pass for a 169-byte payload whose money token had been mangled some other way.
+        byte[] reEmitted = CsvAuthCodec.encodeRequestBytes(decoded);
+        assertThat(reEmitted).hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH).isNotEqualTo(image);
+        assertThat(new String(reEmitted, StandardCharsets.US_ASCII).split(",", -1)
+                        [CsvAuthCodec.REQUEST_AMOUNT_ORDINAL])
+                .hasSize(CsvAuthCodec.REQUEST_MONEY_WIDTH)
+                .isEqualTo("0000000250.00");
+        assertThat(reEmitted).doesNotContain((byte) 0x0A).doesNotContain((byte) 0x0D);
+
+        // WHY Assumptions: the two 170-character forms are pinned to each other so they cannot drift.
+        //     This file must be the terminated sibling minus exactly its one LF and nothing else; if a
+        //     future edit changed either, a fixture pair that is supposed to differ ONLY in the
+        //     terminator would start differing in content with no test to notice.
+        byte[] terminated = bytesOf("auth-request-copybook-wire170-decode-only.csv");
+        assertThat(terminated).hasSize(image.length + 1);
+        assertThat(terminated[terminated.length - 1]).isEqualTo((byte) 0x0A);
+        assertThat(java.util.Arrays.copyOf(terminated, terminated.length - 1)).isEqualTo(image);
+
+        // WHY Assumptions: the same bytes are decoded again from the head of a blank-padded transport
+        //     frame, because that is the shape the reference program actually receives -- it declares
+        //     01 W01-GET-BUFFER PIC X(500) at line 103 of COPAUA0C.cbl and parses only
+        //     W01-GET-BUFFER(1:W01-DATALEN) at line 354. Asserting the framed decode equals the
+        //     unframed one is what proves the payload length is taken from the caller and never
+        //     inferred from the buffer; a codec that inferred it would read 430 bytes of pad as data.
+        // WHY Trade-offs: the frame is built here rather than committed as a 500-byte fixture. A
+        //     second file would duplicate these 170 bytes and could drift from them, whereas a frame
+        //     built from THIS fixture cannot -- and the property under test is the length argument,
+        //     not the pad bytes.
+        // WHY Assumptions: 500 is the literal width COPAUA0C.cbl line 103 declares for the get buffer,
+        //     written as itself rather than derived from MAX_PAYLOAD_LENGTH (512, the put buffer's
+        //     size), because the two are different buffers and arithmetic between them would imply a
+        //     relationship the baseline does not have.
+        byte[] frame = new byte[500];
+        java.util.Arrays.fill(frame, (byte) 0x20);
+        System.arraycopy(image, 0, frame, 0, image.length);
+        assertThat(frame.length).isLessThanOrEqualTo(CsvAuthCodec.MAX_PAYLOAD_LENGTH);
+        assertThat(CsvAuthCodec.decodeRequest(frame, image.length)).isEqualTo(decoded);
+        assertThat(CsvAuthCodec.encodeRequestBytes(CsvAuthCodec.decodeRequest(frame, image.length)))
+                .hasSize(CsvAuthCodec.REQUEST_WIRE_LENGTH)
+                .isEqualTo(reEmitted);
     }
 
     /**
@@ -500,6 +855,371 @@ class AuthorizationFixtureContractTest {
         assertThat(textField(fields, "PA-AUTH-FRAUD")).isEqualTo("F");
         assertThat(textField(fields, "PA-MATCH-STATUS")).isEqualTo("M");
         assertThat(textField(fields, "PA-FRAUD-RPT-DATE")).isEqualTo("20240405");
+    }
+
+    /**
+     * Confirms the maximum-amount detail fixture decodes to every value it was authored to carry.
+     *
+     * <p>Assumptions: the amount is 9999999999.99 in BOTH money spans, and that exact value is
+     * deliberate rather than placeholder-looking filler. It is the largest quantity
+     * {@code PIC S9(10)V99 COMP-3} admits, declared at {@code cpy/CIPAUDTY.cpy} lines 34 and 35 and
+     * corroborated independently by {@code ddl/AUTHFRDS.ddl} lines 12 and 13, which give both columns
+     * {@code DECIMAL(12,2)}, and by {@code dcl/AUTHFRDS.dcl} lines 66 and 67, which declare the host
+     * variables {@code PIC S9(10)V9(2) USAGE COMP-3}. The summary segment's money is one integer digit
+     * narrower at {@code cpy/CIPAUSMY.cpy} lines 23 to 26 and 29 to 30, so this value is representable
+     * in the detail table and NOT in the summary. Replacing it with a smaller, more realistic-looking
+     * merchant amount would satisfy both precisions and stop testing the split entirely, which is the
+     * single most likely way for this fixture to be quietly neutralised.</p>
+     *
+     * <p>Assumptions: the two key components carry the NINES COMPLEMENT and the columns carry the
+     * decoded values, so both are asserted here. {@code cbl/COPAUA0C.cbl} line 874 stores 99999 minus
+     * the five-digit Julian date and line 875 stores 999999999 minus the millisecond time;
+     * {@code cbl/CBPAUP0C.cbl} line 280 and {@code cbl/COPAUS2C.cbl} line 107 invert them. The stored
+     * pair is therefore 75859 and 886999999 while the business pair is Julian 24140, which is 19 May
+     * 2024, and 113000000, which is 11:30:00.000. Asserting only the stored pair would leave a
+     * transcription that forgot the complement looking correct.</p>
+     *
+     * <p>Assumptions: the originating date and time are client-supplied and are NOT asserted to agree
+     * with the complement pair. {@code cbl/COPAUA0C.cbl} lines 877 and 878 move them straight from the
+     * request payload while the complement pair is derived from the server clock at lines 868 to 875,
+     * so a disagreement between them is admissible data rather than a defect.</p>
+     *
+     * <p>Assumptions: {@code PA-POS-ENTRY-MODE} is two ASCII digits, not a binary halfword.
+     * {@code cpy/CIPAUDTY.cpy} line 38 declares {@code PIC 9(02)} with no {@code COMP}, so the span is
+     * DISPLAY; {@code dcl/AUTHFRDS.dcl} line 71 declares the Db2 host variable {@code S9(4) COMP} and
+     * {@code ddl/AUTHFRDS.ddl} line 16 the column {@code SMALLINT}, but that conversion happens on the
+     * way to Db2 at {@code cbl/COPAUS2C.cbl} line 128 and never inside the segment. A halfword written
+     * here would put 0x00 0x05 at offsets 95 and 96 and corrupt both.</p>
+     *
+     * <p>Assumptions: the misspelt {@code PA-MERCHANT-CATAGORY-CODE} is read by its copybook name.
+     * {@code cpy/CIPAUDTY.cpy} line 36 and {@code ddl/AUTHFRDS.ddl} line 14 both misspell it and only
+     * the target column is corrected, so three spellings coexist and the codec follows the copybook.</p>
+     *
+     * <p>Trade-offs: every amount is compared as a {@link BigDecimal} at scale two and never as a
+     * {@code double}. At this magnitude the distinction is not academic: 9999999999.99 has twelve
+     * significant digits and an IEEE-754 double carries about fifteen, so a value that survived one
+     * conversion could still lose a cent after an arithmetic step, and the loss would look like a
+     * rounding convention rather than a defect.</p>
+     *
+     * <p>Alternatives Considered: describing this fixture in the folder README alongside the other
+     * seven detail files, which is where the class Javadoc above says each contract is stated. The
+     * contract is carried in this Javadoc instead because a binary fixture admits no comment of its own
+     * -- a single comment byte would break the 200-byte closure the segment declares -- and because a
+     * Javadoc block is mechanically policed while prose is not: the Checkstyle documentation gate runs
+     * at Maven {@code validate} over the test sources, so this rationale cannot be deleted without
+     * failing the build, whereas a README paragraph could be.</p>
+     */
+    @Test
+    @DisplayName("the maximum-amount detail fixture decodes to the widest amount its picture admits")
+    void maximumAmountDetailFixtureDecodesToItsDocumentedValues() {
+        Map<String, Object> fields = FixedWidthCodec.decodeRecord(
+                bytesOf(MAX_AMOUNT_FIXTURE), CopybookLayout.layout("PAUTDTL"));
+
+        assertThat(amountField(fields, "PA-TRANSACTION-AMT"))
+                .isEqualByComparingTo(WIDEST_DETAIL_AMOUNT);
+        assertThat(amountField(fields, "PA-APPROVED-AMT"))
+                .isEqualByComparingTo(WIDEST_DETAIL_AMOUNT);
+        assertThat(amountField(fields, "PA-TRANSACTION-AMT").scale()).isEqualTo(2);
+        assertThat(amountField(fields, "PA-APPROVED-AMT").scale()).isEqualTo(2);
+
+        assertThat(amountField(fields, "PA-AUTH-DATE-9C")).isEqualByComparingTo("75859");
+        assertThat(amountField(fields, "PA-AUTH-TIME-9C")).isEqualByComparingTo("886999999");
+        assertThat(new BigDecimal("99999").subtract(amountField(fields, "PA-AUTH-DATE-9C")))
+                .isEqualByComparingTo("24140");
+        assertThat(new BigDecimal("999999999").subtract(amountField(fields, "PA-AUTH-TIME-9C")))
+                .isEqualByComparingTo("113000000");
+
+        assertThat(textField(fields, "PA-AUTH-ORIG-DATE")).isEqualTo("240519");
+        assertThat(textField(fields, "PA-AUTH-ORIG-TIME")).isEqualTo("113000");
+        assertThat(textField(fields, "PA-CARD-NUM")).isEqualTo("4000123456789010");
+        assertThat(textField(fields, "PA-AUTH-TYPE")).isEqualTo("PURC");
+        assertThat(textField(fields, "PA-CARD-EXPIRY-DATE")).isEqualTo("1227");
+        assertThat(textField(fields, "PA-AUTH-RESP-CODE")).isEqualTo("00");
+        assertThat(textField(fields, "PA-AUTH-RESP-REASON")).isEqualTo("0000");
+        assertThat(amountField(fields, "PA-PROCESSING-CODE")).isEqualByComparingTo("0");
+        assertThat(textField(fields, "PA-MERCHANT-CATAGORY-CODE")).isEqualTo("5411");
+        assertThat(textField(fields, "PA-ACQR-COUNTRY-CODE")).isEqualTo("840");
+        assertThat(amountField(fields, "PA-POS-ENTRY-MODE")).isEqualByComparingTo("5");
+        assertThat(textField(fields, "PA-TRANSACTION-ID")).isEqualTo("TXN000000000060");
+        assertThat(textField(fields, "PA-MATCH-STATUS")).isEqualTo("P");
+        assertThat(textField(fields, "PA-AUTH-FRAUD")).isEmpty();
+        assertThat(textField(fields, "PA-FRAUD-RPT-DATE")).isEmpty();
+        assertThat(fields)
+                .as("blank registered padding reaches no consumer, so FILLER is absent by design")
+                .doesNotContainKey("FILLER");
+    }
+
+    /**
+     * Confirms both money spans begin with a zero pad nibble rather than a ninth digit.
+     *
+     * <p>Assumptions: twelve digits occupy seven bytes, which is fourteen nibbles for thirteen used, so
+     * exactly one nibble pads and it sits at the FRONT. At this particular value the pad is the only
+     * nibble in the span that is not a nine, which makes {@code 99 99 99 99 99 99 9C} the natural
+     * mistake and {@code 09 99 99 99 99 99 9C} the correct bytes. The first byte is therefore asserted
+     * to be 0x09 and explicitly asserted not to be 0x99, at the exact offset where a hand edit would
+     * go wrong.</p>
+     *
+     * <p>Assumptions: the sign nibble is 0x0C in every packed span of this record, the signed-positive
+     * one, and uniformity across sibling fixtures matters beyond the decoded value.
+     * {@code ims/DBPAUTP0.dbd} line 37 declares the eight-byte key {@code TYPE=C}, so the database
+     * orders child twins byte-wise over the raw key bytes and the sign nibble participates in that
+     * comparison. Mixing 0x0C and the unsigned 0x0F across sibling records would perturb the order
+     * while leaving every decoded value unchanged, which is a failure no value assertion can see.</p>
+     *
+     * <p>Trade-offs: the summary segment obeys the OPPOSITE rule and the contrast is asserted here
+     * rather than merely described. Its {@code PIC S9(09)V99} money is eleven digits in six bytes,
+     * which is twelve nibbles for twelve used, so nothing pads and a leading zero nibble there would
+     * not be surplus at all -- it would be a digit position, and writing one would silently drop the
+     * high-order digit. Two segments in one folder with inverted rules is precisely the confusion worth
+     * pinning with an executable assertion.</p>
+     */
+    @Test
+    @DisplayName("both maximum money spans begin 0x09, the zero pad nibble, and never 0x99")
+    void maximumAmountMoneySpansBeginWithAZeroPadNibble() {
+        byte[] record = bytesOf(MAX_AMOUNT_FIXTURE);
+
+        assertThat(record).hasSize(200);
+        assertThat(record[74]).as("PA-TRANSACTION-AMT pad nibble at offset 74").isEqualTo((byte) 0x09);
+        assertThat(record[81]).as("PA-APPROVED-AMT pad nibble at offset 81").isEqualTo((byte) 0x09);
+        assertThat(record[74]).isNotEqualTo((byte) 0x99);
+        assertThat(record[81]).isNotEqualTo((byte) 0x99);
+
+        byte[] expectedSpan = PackedDecimalCodec.encodePacked(WIDEST_DETAIL_AMOUNT, 10, 2, true);
+        assertThat(expectedSpan).hasSize(7);
+        assertThat(java.util.Arrays.copyOfRange(record, 74, 81)).isEqualTo(expectedSpan);
+        assertThat(java.util.Arrays.copyOfRange(record, 81, 88)).isEqualTo(expectedSpan);
+
+        assertThat(PackedDecimalCodec.packedWidth(10, 2)).isEqualTo(7);
+        assertThat(PackedDecimalCodec.packedWidth(9, 2)).isEqualTo(6);
+        assertThat(PackedDecimalCodec.encodePacked(WIDEST_SUMMARY_AMOUNT, 9, 2, true))
+                .as("eleven digits fill six bytes exactly, so the summary geometry pads nothing")
+                .hasSize(6);
+    }
+
+    /**
+     * Confirms a non-zero pad nibble and a short span are both refused rather than decoded.
+     *
+     * <p>Assumptions: the pad rule has to be mechanical to be worth anything. A span of all nines
+     * decodes to a plausible-looking amount under a codec that skipped the pad instead of validating
+     * it, because every nibble would shift one place and the result would still be money. Feeding that
+     * exact byte pattern and requiring a refusal is what turns the rule from documentation into a
+     * gate.</p>
+     *
+     * <p>Assumptions: a six-byte span at a seven-byte geometry is refused on width and not padded back
+     * up. Accepting it would shift every field after offset 74 by one byte, and because the fields that
+     * follow are character data the record would still decode into readable-looking values.</p>
+     */
+    @Test
+    @DisplayName("a non-zero pad nibble and an under-width span are both refused")
+    void aNonZeroPadNibbleAndAnUnderWidthSpanAreRefused() {
+        byte[] allNines = {(byte) 0x99, (byte) 0x99, (byte) 0x99, (byte) 0x99, (byte) 0x99,
+            (byte) 0x99, (byte) 0x9C};
+        assertThatThrownBy(() -> PackedDecimalCodec.decodePacked(allNines, 0, 10, 2, true))
+                .as("a non-zero leading pad nibble must be refused, not skipped")
+                .isInstanceOf(PackedDecimalCodec.PackedDecimalException.class);
+
+        byte[] sixBytes = {(byte) 0x99, (byte) 0x99, (byte) 0x99, (byte) 0x99, (byte) 0x99,
+            (byte) 0x9C};
+        assertThatThrownBy(() -> PackedDecimalCodec.decodePacked(sixBytes, 0, 10, 2, true))
+                .as("a six-byte span cannot satisfy a seven-byte geometry")
+                .isInstanceOf(PackedDecimalCodec.PackedDecimalException.class);
+    }
+
+    /**
+     * Confirms the detail maximum is unrepresentable in the summary segment's narrower money.
+     *
+     * <p>Assumptions: this is the mechanical form of the precision split. The detail declares
+     * {@code PIC S9(10)V99} at {@code cpy/CIPAUDTY.cpy} lines 34 and 35 and the summary declares
+     * {@code PIC S9(09)V99} at {@code cpy/CIPAUSMY.cpy} lines 23 to 26 and 29 to 30, so the detail
+     * reaches 9999999999.99 and the summary stops at 999999999.99. Asserting that the summary geometry
+     * holds its own maximum and REFUSES the detail's is what makes the split a fact of the build rather
+     * than a remark in a comment.</p>
+     *
+     * <p>Alternatives Considered: asserting the split against the database instead, by attempting the
+     * insert into a {@code NUMERIC(11,2)} column and expecting SQLSTATE 22003. That is a truer
+     * end-to-end proof and it is rejected here only because it needs a live database, which this
+     * fixture-contract class deliberately does not take a dependency on. The codec geometry is the same
+     * boundary one layer earlier, and {@code V1__authorization.sql} already records the database half
+     * of the contract at its lines 71 to 74.</p>
+     */
+    @Test
+    @DisplayName("the detail maximum cannot be represented in the summary's narrower money picture")
+    void theDetailMaximumIsUnrepresentableInTheSummaryGeometry() {
+        assertThat(PackedDecimalCodec.encodePacked(WIDEST_SUMMARY_AMOUNT, 9, 2, true))
+                .as("the summary picture holds its own maximum")
+                .hasSize(6);
+
+        assertThatThrownBy(
+                () -> PackedDecimalCodec.encodePacked(WIDEST_DETAIL_AMOUNT, 9, 2, true))
+                .as("ten integer digits must not fit a nine-integer-digit picture")
+                .isInstanceOf(PackedDecimalCodec.PackedDecimalException.class);
+
+        assertThat(WIDEST_DETAIL_AMOUNT.precision()).isEqualTo(12);
+        assertThat(WIDEST_SUMMARY_AMOUNT.precision()).isEqualTo(11);
+    }
+
+    /**
+     * Confirms subtracting this detail amount from its parent summary overflows the accumulator.
+     *
+     * <p>Assumptions: the purge really does subtract a detail amount from a summary accumulator, which
+     * is the only reason a twelve-digit quantity ever meets an eleven-digit one.
+     * {@code cbl/CBPAUP0C.cbl} line 287 tests the response code, and on the approved branch line 288
+     * decrements the approved count while line 289 subtracts {@code PA-APPROVED-AMT} from
+     * {@code PA-APPROVED-AUTH-AMT}; the declined branch at lines 291 and 292 does the same with
+     * {@code PA-TRANSACTION-AMT} and {@code PA-DECLINED-AUTH-AMT}. This fixture carries response code
+     * {@code 00}, so it reaches the approved branch and the subtrahend is the maximum.</p>
+     *
+     * <p>Assumptions: the parent is {@code pautsum0-purge-parent.bin}, whose approved accumulator holds
+     * 300.00. The difference is therefore exactly -9999999699.99, which needs ten integer digits and so
+     * twelve digits of precision -- one more than a {@code NUMERIC(11,2)} accumulator can hold.</p>
+     *
+     * <p>Trade-offs: the assertion is that the overflow is EXPLICIT, and the exact difference is
+     * asserted first so that a silent truncation to the narrower precision, or a silent rounding into
+     * it, fails here rather than producing a smaller number that still looks like money. The declared
+     * behaviour of the target is a refusal: {@code V1__authorization.sql} lines 71 to 74 state that
+     * SQLSTATE 22003 is raised when a decoded packed quantity exceeds a declared precision and that
+     * rejecting is intended, and the encoder's own contract is lossless-or-raise. Widening the
+     * accumulator would have been the other admissible answer, and it is not the one this codebase
+     * took, so the refusal is what is pinned.</p>
+     */
+    @Test
+    @DisplayName("subtracting the maximum from its parent summary overflows the accumulator explicitly")
+    void subtractingTheMaximumFromItsParentSummaryOverflowsExplicitly() {
+        Map<String, Object> parent = FixedWidthCodec.decodeRecord(
+                bytesOf("pautsum0-purge-parent.bin"), CopybookLayout.layout("PAUTSUM0"));
+        Map<String, Object> child = FixedWidthCodec.decodeRecord(
+                bytesOf(MAX_AMOUNT_FIXTURE), CopybookLayout.layout("PAUTDTL"));
+
+        assertThat(textField(child, "PA-AUTH-RESP-CODE"))
+                .as("only an approved record reaches CBPAUP0C.cbl L288-L289")
+                .isEqualTo("00");
+
+        BigDecimal accumulator = amountField(parent, "PA-APPROVED-AUTH-AMT");
+        assertThat(accumulator).isEqualByComparingTo("300.00");
+
+        BigDecimal difference = accumulator.subtract(amountField(child, "PA-APPROVED-AMT"));
+        assertThat(difference)
+                .as("the exact difference, so a truncation or a rounding cannot pass")
+                .isEqualByComparingTo("-9999999699.99");
+        assertThat(difference.scale()).isEqualTo(2);
+        assertThat(difference.precision())
+                .as("twelve digits of precision against an eleven-digit accumulator")
+                .isEqualTo(12);
+
+        assertThatThrownBy(() -> PackedDecimalCodec.encodePacked(difference, 9, 2, true))
+                .as("the summary accumulator's own picture must refuse the overflowed difference")
+                .isInstanceOf(PackedDecimalCodec.PackedDecimalException.class);
+    }
+
+    /**
+     * Confirms the maximum-amount record round trips, carries no terminator byte and closes at 200.
+     *
+     * <p>Assumptions: the round trip is expected to be byte-identical because nothing in this record
+     * is representationally ambiguous. The filler is blank, every sign nibble is the signed-positive
+     * 0x0C, and neither amount is a negative zero, which is the one shape the encoder normalises and
+     * therefore the one shape a round trip cannot reproduce.</p>
+     *
+     * <p>Assumptions: no 0x0A and no 0x0D byte may appear, because a reader that split this file on
+     * either would report a different record count. The absence is a property of the content rather
+     * than of the record type, and the two bytes are not equally reachable: a {@code COMP-3} byte can
+     * never be 0x0A, since the low nibble A is neither a digit nor a valid sign, whereas 0x0D is the
+     * sign byte of a negative packed value whose final digit is zero. Negating this particular amount
+     * would produce 0x9D and not 0x0D, so the hazard tracks the trailing DIGIT rather than the sign --
+     * which is why the negative-money fixtures in this folder use trailing-zero amounts on purpose. A
+     * 0x0A could only arrive from a {@code COMP} binary field, and the only such fields in either
+     * segment are the two counters at {@code cpy/CIPAUSMY.cpy} lines 27 and 28, in the summary.</p>
+     *
+     * <p>Assumptions: the seventeen filler bytes reach no column while the record still reconciles to
+     * 200, and both halves of that are asserted. The decoded map carries no {@code FILLER} key at all,
+     * because the codec omits blank registered padding rather than handing consumers seventeen inert
+     * blanks; the round trip above then proves the same seventeen bytes are restored, which is what
+     * keeps the physical record 200 wide. The declared widths are summed here so the filler is shown to
+     * be the span that absorbs the difference between the mapped fields and the declared length.</p>
+     */
+    @Test
+    @DisplayName("the maximum-amount record round trips, holds no terminator byte and closes at 200")
+    void theMaximumAmountRecordRoundTripsAndHoldsNoTerminatorByte() {
+        RecordSpec spec = CopybookLayout.layout("PAUTDTL");
+        byte[] record = bytesOf(MAX_AMOUNT_FIXTURE);
+
+        assertThat(record).hasSize(spec.reclen()).hasSize(200);
+        Map<String, Object> decoded = FixedWidthCodec.decodeRecord(record, spec);
+        assertThat(decoded).doesNotContainKey("FILLER");
+        assertThat(FixedWidthCodec.encodeRecordPreservingSign(decoded, spec, record))
+                .as("the dropped filler is restored, so the physical record stays 200 bytes wide")
+                .isEqualTo(record);
+
+        assertThat(record).doesNotContain((byte) 0x0A).doesNotContain((byte) 0x0D);
+        assertThat(record[record.length - 1])
+                .as("the record ends inside its filler, not on a newline")
+                .isEqualTo((byte) 0x20);
+
+        assertThat(spec.fields().stream().mapToInt(CopybookLayout.FieldSpec::length).sum())
+                .as("every declared field width, filler included, reconciles to the record length")
+                .isEqualTo(200);
+        CopybookLayout.FieldSpec filler = spec.fields().stream()
+                .filter(field -> "FILLER".equals(field.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("PAUTDTL declares no FILLER span"));
+        assertThat(filler.length()).isEqualTo(17);
+        assertThat(filler.start()).isEqualTo(183);
+
+        byte[] tooShort = new byte[199];
+        byte[] tooLong = new byte[201];
+        System.arraycopy(record, 0, tooShort, 0, tooShort.length);
+        System.arraycopy(record, 0, tooLong, 0, record.length);
+        assertThatThrownBy(() -> FixedWidthCodec.decodeRecord(tooShort, spec))
+                .isInstanceOf(FixedWidthCodec.RecordLengthException.class);
+        assertThatThrownBy(() -> FixedWidthCodec.decodeRecord(tooLong, spec))
+                .isInstanceOf(FixedWidthCodec.RecordLengthException.class);
+    }
+
+    /**
+     * Confirms this record's key is distinct from every other detail record's key.
+     *
+     * <p>Assumptions: the target key is {@code (account_id, auth_date, auth_time)} and the segment
+     * carries no account identifier of its own -- the parent supplies it, which is why
+     * {@code cpy/CIPAUDTY.cpy} declares none. Every detail fixture in this folder is a child of the one
+     * account 10000000001, so the two stored key components are what has to differ, and this record's
+     * pair is 75859 and 886999999 against every sibling's 24095 and 91500 through 91507. Note that the
+     * summary's key is {@code account_id} ALONE while the detail's is the composite: the descriptor
+     * declares one key at each level, six bytes {@code TYPE=P} at {@code ims/DBPAUTP0.dbd} line 30 and
+     * eight bytes {@code TYPE=C} at line 37.</p>
+     *
+     * <p>Alternatives Considered: asserting global pairwise distinctness across every detail record in
+     * the folder. That is rejected because sibling scenario files reuse one key deliberately --
+     * {@code pautdtl-canonical.bin} and {@code pautdtl-fraud-marked.bin} are the same authorization
+     * before and after a fraud mark -- and each is loaded for its own scenario. The property that
+     * actually matters is that no file collides with itself and that this record collides with
+     * nothing, so those are the two assertions made.</p>
+     */
+    @Test
+    @DisplayName("the maximum-amount record's key collides with no other detail record")
+    void theMaximumAmountRecordKeyIsDistinctFromEverySibling() {
+        RecordSpec spec = CopybookLayout.layout("PAUTDTL");
+        List<String> siblingKeys = new ArrayList<>();
+
+        for (org.junit.jupiter.params.provider.Arguments row : everyBinaryFixture()) {
+            String name = String.valueOf(row.get()[0]);
+            if (!"PAUTDTL".equals(String.valueOf(row.get()[1]))) {
+                continue;
+            }
+            byte[] image = bytesOf(name);
+            List<String> withinFile = new ArrayList<>();
+            for (int ordinal = 0; ordinal < image.length / spec.reclen(); ordinal++) {
+                Map<String, Object> fields =
+                        FixedWidthCodec.decodeRecord(recordAt(image, ordinal, spec.reclen()), spec);
+                String key = amountField(fields, "PA-AUTH-DATE-9C").toBigIntegerExact()
+                        + "/" + amountField(fields, "PA-AUTH-TIME-9C").toBigIntegerExact();
+                assertThat(withinFile).as("%s repeats key %s", name, key).doesNotContain(key);
+                withinFile.add(key);
+                if (!MAX_AMOUNT_FIXTURE.equals(name)) {
+                    siblingKeys.add(key);
+                }
+            }
+        }
+
+        assertThat(siblingKeys).isNotEmpty().doesNotContain("75859/886999999");
     }
 
     /**

@@ -1,0 +1,2 @@
+060001Fraud reversal                                    0000
+060002Non-fraud reversal                                0000

@@ -173,8 +173,20 @@ class CardFixtureContractTest {
         //       tested from one side only passes equally against an off-by-one bound, which is the
         //       specific defect this arrangement rules out.
         assertThat(inclusive).containsExactly("2024-01-15", "2024-12-15", "1950-06-15", "2099-06-15");
-        assertThat(rejected).containsExactly("1949-05-19", "2100-06-04");
+        assertThat(rejected).containsExactly("1949-06-15", "2100-06-15");
         assertThat(inclusive).noneMatch(d -> d.startsWith("1949") || d.startsWith("2100"));
+
+        // WHY : Trade-offs: the four year-boundary rows deliberately share one month and day,
+        //       '-06-15', rather than each keeping the month and day of the seed record its
+        //       identity fields came from. Keeping the seed's own month and day would have left
+        //       1949-05-19 facing 1950-06-15, where three components differ at once, so a rule
+        //       that rejected on the MONTH or mis-read the date offset entirely would satisfy a
+        //       year assertion just as well. Pinning the background costs a date that no longer
+        //       matches its seed position component for component -- the same cost section 6.1 of
+        //       the README accepts for the inclusive fixture -- and buys the guarantee that the
+        //       year is the only variable, which is the whole point of the pairing.
+        assertThat(inclusive.subList(2, 4)).allMatch(d -> d.endsWith("-06-15"));
+        assertThat(rejected).allMatch(d -> d.endsWith("-06-15"));
     }
 
     /**

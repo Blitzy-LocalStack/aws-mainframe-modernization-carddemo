@@ -229,12 +229,12 @@ class TransactionFixtureContractTest {
     }
 
     /**
-     * Asserts that the category-balance rows carry the composed key and the template balance.
+     * Asserts that the category-balance rows carry the composed key and their declared balance.
      *
      * @throws IOException if a fixture cannot be read
      */
     @Test
-    @DisplayName("the category-balance rows carry the composed key and the template balance")
+    @DisplayName("the category-balance rows carry the composed key and their declared balance")
     void theCategoryBalanceRowsCarryTheComposedKey() throws IOException {
         for (String scenario : List.of("happy_path", "boundary_exact_limit", "boundary_expiry_equal",
                 "empty_input", "reject_100_card_missing", "reject_101_acct_missing",
@@ -243,16 +243,76 @@ class TransactionFixtureContractTest {
 
             // WHY : Assumptions: the key is the account plus the transaction type plus the
             //       category, and every populated scenario composes the same one, so a scenario
-            //       whose key drifted would take the create branch instead of the update branch and
-            //       would assert the opposite of what its README claims. The balance is held
-            //       identical across scenarios so that a consumer asserting balance arithmetic has
-            //       one prior value rather than nine.
+            //       whose key drifted would take the create branch at app/cbl/CBTRN02C.cbl L503
+            //       instead of the update branch at L526 and would assert the opposite of what its
+            //       README claims. The key is therefore asserted uniformly, and only the balance
+            //       varies by scenario below.
             assertThat(row.get("TRANCAT-ACCT-ID")).as("%s account", scenario).hasToString("7");
             assertThat(row.get("TRANCAT-TYPE-CD")).as("%s type", scenario).isEqualTo("01");
             assertThat(row.get("TRANCAT-CD")).as("%s category", scenario).hasToString("1");
+
+            // WHY : Refactoring Rationale: this assertion required 100.00 for all nine populated
+            //       scenarios, which contradicted the reference tree it mirrors. Under
+            //       tests/fixtures/posting/ the balance is 0.00 for boundary_exact_limit and for
+            //       every other populated scenario, and 100.00 only for happy_path; the uniform
+            //       expectation here was therefore pinning eight fixtures to the one value the
+            //       oracle does NOT give them. boundary_exact_limit has been aligned to its oracle
+            //       byte for byte, so its expectation moves to 0.00 while the siblings -- which are
+            //       authored elsewhere and still carry the template value -- keep theirs. Expressing
+            //       the expectation per scenario rather than as one constant is what lets each
+            //       fixture be reconciled with its oracle independently instead of forcing all nine
+            //       to move together.
+            //       Trade-offs: a per-scenario expectation is marginally less terse than a single
+            //       constant, and it no longer guarantees that a consumer asserting balance
+            //       arithmetic has one prior value across the tree. That guarantee is given up
+            //       deliberately: it was only ever true because the fixtures had been normalised
+            //       away from the oracle, and byte-parity with the reference tree is the stronger
+            //       property because it is the parity oracle the migration is verified against.
+            BigDecimal expectedBalance = "boundary_exact_limit".equals(scenario)
+                    ? new BigDecimal("0.00")
+                    : new BigDecimal("100.00");
             assertThat(row.get("TRAN-CAT-BAL")).as("%s balance", scenario)
-                    .isEqualTo(new BigDecimal("100.00"));
+                    .isEqualTo(expectedBalance);
         }
+    }
+
+    /**
+     * Asserts that the over-limit boundary's category balance is the zero the oracle declares.
+     *
+     * @throws IOException if a fixture cannot be read
+     */
+    @Test
+    @DisplayName("the over-limit boundary's category balance is the zero its oracle declares")
+    void theOverLimitBoundaryBalanceIsZero() throws IOException {
+        // WHY : Assumptions: the zero is the mechanism of this scenario rather than an incidental
+        //       value. The trial balance at app/cbl/CBTRN02C.cbl L403-L405 is the cycle credit less
+        //       the cycle debit plus the transaction amount, and with the seed account's two cycle
+        //       totals at zero it reduces to the amount alone -- which is what lets 2065.00 land
+        //       exactly on the 2065.00 credit limit tested at L407. Holding the category balance at
+        //       zero as well keeps the posted result provably 0.00 + 2065.00 and leaves the
+        //       arithmetic of the scenario with no second contributing term to reason about.
+        //       Asserting it in its own test, rather than only inside the loop above, means the
+        //       value cannot be quietly folded back into a uniform expectation without a failure.
+        Map<String, Object> row = first("boundary_exact_limit", "tcatbal.txt", "TCATBAL",
+                TCATBAL_RECLEN);
+        assertThat(row.get("TRAN-CAT-BAL")).isInstanceOf(BigDecimal.class)
+                .isEqualTo(new BigDecimal("0.00"));
+        assertThat(((BigDecimal) row.get("TRAN-CAT-BAL")).scale()).isEqualTo(2);
+
+        // WHY : Assumptions: the sign is carried by the low-order byte under the zoned-decimal
+        //       overpunch table, so a positive zero is the byte `{` and not the digit `0`. Asserting
+        //       the raw byte alongside the decoded value is what distinguishes a correctly signed
+        //       zero from an unsigned field that merely happens to decode to the same number.
+        byte[] raw = bytes("boundary_exact_limit", "tcatbal.txt");
+        assertThat(new String(raw, 17, 11, StandardCharsets.US_ASCII)).isEqualTo("0000000000{");
+        assertThat(raw[27]).isEqualTo((byte) 0x7B);
+
+        // WHY : Assumptions: the twenty-two trailing FILLER bytes of this record are ASCII zeros
+        //       rather than the spaces every other FILLER in the tree uses, which is the seed's own
+        //       convention for this layout. They are asserted here because they sit immediately
+        //       after the balance: a balance edited by hand that lost or gained one byte would push
+        //       into this run and be visible as a FILLER failure rather than as a silent shift.
+        assertThat(new String(raw, 28, 22, StandardCharsets.US_ASCII)).isEqualTo("0".repeat(22));
     }
 
     /**
@@ -270,6 +330,10 @@ class TransactionFixtureContractTest {
         //       was corrected rather than the sentence, because the folder convention requires a
         //       scenario to differ from the template only in the field that moves -- here the date --
         //       and the balance is immaterial to the expiration gate, which reads the account record.
+        //       Assumptions: that count is a statement about the moment of that change and must not
+        //       be read as a claim that every other scenario still matches the template today.
+        //       boundary_exact_limit has since been aligned to its own oracle at 0.00, so this
+        //       byte-identity holds for the expiry pair specifically and is asserted only for it.
         assertThat(bytes("boundary_expiry_equal", "tcatbal.txt"))
                 .isEqualTo(bytes("happy_path", "tcatbal.txt"));
     }
@@ -308,17 +372,59 @@ class TransactionFixtureContractTest {
     @Test
     @DisplayName("a negative amount is carried through its sign overpunch, not as text")
     void aNegativeAmountIsCarriedThroughItsSignOverpunch() throws IOException {
-        Map<String, Object> posted = first("reject_101_acct_missing", "transact.txt", "TRAN",
-                TRAN_RECLEN);
+        // WHY : Assumptions: these are the two fixtures in the tree carrying a NEGATIVE money
+        //       value, and both are asserted because the default sign convention silently misreads
+        //       a sign-overpunched negative as a positive with a letter in the low-order digit. A
+        //       decoder configured wrongly would return 9190 or fail, not -919.00, so these
+        //       assertions cover the whole class of sign-handling regressions for this module.
+        //       Refactoring Rationale: this test formerly read one fixture and its comment claimed
+        //       that fixture was the only negative one in the tree. reject_100_card_missing then
+        //       became the second, because it withholds the transaction its own card lookup
+        //       rejects and therefore carries seed row 2 -- the row whose amount is negative. The
+        //       loop was widened rather than the sentence rewritten, so the second fixture is
+        //       actually verified instead of merely described.
+        for (String scenario : List.of("reject_101_acct_missing", "reject_100_card_missing")) {
+            Map<String, Object> posted = first(scenario, "transact.txt", "TRAN", TRAN_RECLEN);
 
-        // WHY : Assumptions: this is the one fixture in the tree carrying a NEGATIVE money value,
-        //       and it is asserted because the default sign convention silently misreads a
-        //       sign-overpunched negative as a positive with a letter in the low-order digit. A
-        //       decoder configured wrongly would return 9190 or fail, not -919.00, so this single
-        //       assertion covers the whole class of sign-handling regressions for this module.
-        assertThat(posted.get("TRAN-AMT")).isInstanceOf(BigDecimal.class)
-                .isEqualTo(new BigDecimal("-919.00"));
-        assertThat(((BigDecimal) posted.get("TRAN-AMT")).signum()).isNegative();
-        assertThat(((BigDecimal) posted.get("TRAN-AMT")).scale()).isEqualTo(2);
+            assertThat(posted.get("TRAN-AMT")).as("%s amount", scenario)
+                    .isInstanceOf(BigDecimal.class).isEqualTo(new BigDecimal("-919.00"));
+            assertThat(((BigDecimal) posted.get("TRAN-AMT")).signum())
+                    .as("%s sign", scenario).isNegative();
+            assertThat(((BigDecimal) posted.get("TRAN-AMT")).scale())
+                    .as("%s scale", scenario).isEqualTo(2);
+        }
+    }
+
+    /**
+     * Asserts that the missing-card scenario withholds the transaction its lookup rejects.
+     *
+     * @throws IOException if a fixture cannot be read
+     */
+    @Test
+    @DisplayName("the missing-card scenario withholds the transaction its lookup rejects")
+    void theMissingCardScenarioWithholdsTheRejectedTransaction() throws IOException {
+        // WHY : Assumptions: the absence of this identifier is half the scenario's expected
+        //       outcome. In app/cbl/CBTRN02C.cbl line 211 reaches posting on line 212 only when
+        //       the reason is still zero, so a reason-100 reject never reaches the transaction
+        //       write, and the posted master must therefore hold no row for the rejected feed
+        //       record. Trade-offs: asserting on the identifier rather than on a row count is what
+        //       makes the check binary -- transaction_id is the primary key of the table these
+        //       bytes load, so a pre-loaded row carrying it would be indistinguishable from one an
+        //       insert had added, and an insert that did occur would fail on the key rather than
+        //       on the rule under test.
+        String rejected = first("reject_100_card_missing", "dailytran.txt", "DALYTRAN", TRAN_RECLEN)
+                .get("DALYTRAN-ID").toString();
+        String prior = first("reject_100_card_missing", "transact.txt", "TRAN", TRAN_RECLEN)
+                .get("TRAN-ID").toString();
+
+        assertThat(rejected).isEqualTo("0000000000683580");
+        assertThat(prior).isNotEqualTo(rejected).isEqualTo("0000000001774260");
+        assertThat(new String(bytes("reject_100_card_missing", "transact.txt"),
+                StandardCharsets.US_ASCII)).doesNotContain(rejected);
+
+        // WHY : Assumptions: the prior row still has to EXIST for "unchanged" to be assertable at
+        //       all. A table asserted to be unchanged needs contents, because a query over an
+        //       empty table returns nothing whether or not a write was suppressed.
+        assertThat(bytes("reject_100_card_missing", "transact.txt")).hasSize(TRAN_RECLEN + 1);
     }
 }

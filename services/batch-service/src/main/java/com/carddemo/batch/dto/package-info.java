@@ -149,29 +149,31 @@
  * audits this file against, which is why the three real authorities are named
  * instead.</p>
  *
- * <h2>The roster: eleven types, of which EIGHT are landed</h2>
+ * <h2>The roster: eleven types, of which NINE are landed</h2>
  *
  * <p>Eleven types, and no twelfth. The list is closed, so the question "which
  * type owns this contract" keeps a definite answer as the package fills.</p>
  *
- * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED. Eight
+ * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED. Nine
  * are authored at this checkpoint -- {@code BatchJobName}, {@code BusinessDate},
  * {@code BatchJobParameters}, {@code BatchReturnCode}, {@code BatchRunSummary},
- * {@code DisclosureGroupKey}, {@code DatasetGeneration} and {@code BatchErrorEvent} -- and
- * three are not: {@code RejectReason}, {@code PostingValidationResult} and
- * {@code InterestRateLookup}. Two earlier revisions of this paragraph were each wrong in the
+ * {@code DisclosureGroupKey}, {@code DatasetGeneration}, {@code BatchErrorEvent} and
+ * {@code InterestRateLookup} -- and two are not: {@code RejectReason} and
+ * {@code PostingValidationResult}. Earlier revisions of this paragraph were each wrong in the
  * opposite direction. The first stated all eleven in the present tense before they existed;
- * the second over-corrected to FOUR landed and left four authored types marked PLANNED. Both
- * failures have the same cost in opposite directions: a reader routing a question to a type
- * either looks for a file that is not there, or writes one that already is. The roster is
+ * the second over-corrected to FOUR landed and left four authored types marked PLANNED; the
+ * third counted eight and was accurate until {@code InterestRateLookup} landed beside it. All
+ * three failures have the same cost in opposite directions: a reader routing a question to a
+ * type either looks for a file that is not there, or writes one that already is. The roster is
  * still closed and still answers "which type owns this contract"; it now also answers "does
- * it exist yet" against the directory beside it.</p>
+ * it exist yet" against the directory beside it, which is a claim that has to be re-checked
+ * whenever a file is added to that directory.</p>
  *
- * <p>Assumptions: the three planned entries are NOT authored here as empty types to make the
+ * <p>Assumptions: the two planned entries are NOT authored here as empty types to make the
  * roster true. A type with no consumer cannot have its contract exercised, so it would be a
  * placeholder standing where a reviewed contract is supposed to be, and the migration
  * forbids exactly that. Each arrives with the job or service that consumes it -- which is
- * equally the reason the eight that are here were correct to author: each has a landed
+ * equally the reason the nine that are here were correct to author: each has a landed
  * consumer or is itself the argument contract a landed entry point decodes.</p>
  *
  * <dl>
@@ -243,14 +245,17 @@
  *       the 50-byte disclosure-group record.</dd>
  *
  *   <dt>{@code InterestRateLookup}</dt>
- *   <dd>PLANNED, not yet authored. The rate-lookup result, including the two outcomes that are easy to
+ *   <dd>The rate-lookup result, including the two outcomes that are easy to
  *       collapse into one and must not be: the fallback to the group named
  *       {@code DEFAULT}, and a genuine rate of zero. The fallback is at
  *       {@code app/cbl/CBACT04C.cbl:436-438}, where a status of {@code '23'} on
  *       the disclosure-group read moves {@code 'DEFAULT'} into the group
  *       identifier and re-reads. The rate itself is
  *       {@code DIS-INT-RATE PIC S9(04)V99} at
- *       {@code app/cpy/CVTRA02Y.cpy:9}.</dd>
+ *       {@code app/cpy/CVTRA02Y.cpy:9}. The zero rate is the third outcome and
+ *       the one a two-way model loses: {@code app/cbl/CBACT04C.cbl:214} gates
+ *       both the accrual and the fee on a non-zero rate, so a zero suppresses
+ *       the generated transaction rather than producing a zero-amount one.</dd>
  *
  *   <dt>{@code DatasetGeneration}</dt>
  *   <dd>The date-and-generation coordinate that locates one dataset generation

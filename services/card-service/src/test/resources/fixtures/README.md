@@ -299,7 +299,7 @@ taxonomy and never a presence flag.
 Two rows in that table deserve to be read against each other, because the
 contrast is the whole reason the A-R class exists.
 `card-rule-reject-expiry-year-out-of-range.txt` is Class A-R rather than Class B
-**because `1949-05-19` and `2100-06-04` -- the two dates the file actually
+**because `1949-06-15` and `2100-06-15` -- the two dates the file actually
 carries, measured -- are both perfectly valid PostgreSQL dates.** The `DATE` column stores them without objection; the rule that rejects
 them is `88 VALID-YEAR VALUES 1950 THRU 2099` at `app/cbl/COCRDUPC.cbl:99`,
 which lives in the validator and has no schema counterpart. Meanwhile
@@ -633,9 +633,26 @@ justify authoring anything at all:
     section 6. Day `15` is 28 or lower and month `06` has 30 days, so no authored
     combination can land on a date that does not exist; each of the four parses
     as a real calendar date and so is accepted by the `DATE` column.
-  - `card-rule-reject-expiry-year-out-of-range.txt` authors the YEAR only:
-    `1949-05-19` and `2100-06-04`, keeping seed 36's `05-19` and seed 37's
-    `06-04`.
+  - `card-rule-reject-expiry-year-out-of-range.txt` authors the whole date on
+    both records -- `1949-06-15` and `2100-06-15` -- and shares the fixed
+    background of month `06` and day `15` with the four rows above, because it is
+    the reject half of the same year-boundary pairing and has to vary the same
+    single component. Its year is the one component that moves: `1949` is one
+    below the inclusive lower bound and `2100` one above the inclusive upper
+    bound, against the `1950` and `2099` that rows 3 and 4 of the inclusive
+    fixture accept.
+    Trade-offs: keeping each seed record's own month and day instead -- seed 36's
+    `05-19` and seed 37's `06-04` -- would have left `1949-05-19` facing
+    `1950-06-15` with three components differing at once, so an implementation
+    that rejected on the month, or that read the date at the wrong offset, would
+    satisfy a year assertion just as convincingly as a correct one. The accepted
+    cost is a date that no longer matches its seed position component for
+    component, which is the identical cost paragraph one of this section accepts
+    for the inclusive fixture; every identity-shaped field on both rows still
+    traces to seed records 36-37 verbatim. Day `15` is valid in every month and
+    June has 30 days, so both authored dates parse as real calendar dates and are
+    accepted by the `DATE` column -- which is what keeps this fixture Class A-R
+    rather than Class B.
   - `card-schema-reject-expiry-month-out-of-range.txt` authors the MONTH only:
     `2025-00-12` and `2023-13-23`, keeping seed 39's year and day and seed 40's
     year and day.
