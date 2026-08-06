@@ -86,9 +86,15 @@ Folder section 7 mandates the three items below.
 
 1. **Synthetic and seed-derived.** `dailytran.txt` is record 1 of
    [`app/data/ASCII/dailytran.txt`](../../../../../../../app/data/ASCII/dailytran.txt)
-   with one field reshaped, per item 3. `transact.txt` and `tcatbal.txt` are
-   byte-identical to their `happy_path` counterparts, whose provenance is recorded
-   in [`../happy_path/README.md`](../happy_path/README.md) section 4.2.
+   with one field reshaped, per item 3. `transact.txt` has **no seed row at all** --
+   master section 4.2 item 7 records that `app/data/ASCII/` holds exactly nine files
+   and no `transact.txt`, because the posted-transaction master is an *output* of
+   `CBTRN02C` (line 562, writing at line 564) rather than an input -- so its bytes are
+   authored from the [`app/cpy/CVTRA05Y.cpy`](../../../../../../../app/cpy/CVTRA05Y.cpy)
+   layout and are synthetic in the strict sense. Its first 304 bytes are nonetheless
+   taken from this scenario's own `dailytran.txt`, for the reason given in item 3.
+   `tcatbal.txt` is byte-identical to its `happy_path` counterpart, whose provenance
+   is recorded in [`../happy_path/README.md`](../happy_path/README.md) section 4.2.
 2. **No real person and no real account.** Every account number, card number,
    name and address byte here comes from the published CardDemo demonstration
    seed. They are demonstration values, not credentials, and they identify no real
@@ -98,11 +104,21 @@ Folder section 7 mandates the three items below.
    moved from the seed's `2022-06-10` to `2024-12-13`. Four bytes change --
    positions 282, 284, 285 and 288, measured. The time-of-day tail
    ` 19:27:53.000000` at positions 289-304 is carried across from the seed
-   unchanged.
+   unchanged. In `transact.txt` the same date carries into **two** fields, so eight
+   bytes differ from the `happy_path` template: positions 282, 284, 285 and 288 in
+   the originating timestamp, and 308, 310, 311 and 314 in the processing timestamp
+   -- all measured, and all inside those two windows and nowhere else. Positions
+   1-304 of `transact.txt` are byte-for-byte identical to positions 1-304 of this
+   scenario's `dailytran.txt`, which is what lines 425-436 of
+   [`app/cbl/CBTRN02C.cbl`](../../../../../../../app/cbl/CBTRN02C.cbl) produce: twelve
+   one-to-one `MOVE` statements from `DALYTRAN-*` to `TRAN-*` covering exactly those
+   304 bytes. The processing timestamp at 305-330 is the one field the program does
+   not copy -- lines 437-438 supply it separately -- and section 5 records the value
+   chosen for it.
 
 ---
 
-## 5. Three decisions about this record
+## 5. Four decisions about this record
 
 Assumptions: the date must stay ISO-ordered. Because line 414 compares characters
 rather than dates, as section 2 sets out, rewriting the date in any other order --
@@ -129,3 +145,30 @@ on line 417 -- the last assignment winning. A fixture that moved both fields wou
 therefore still produce exactly one reject code, and which one it produced would
 depend on statement order rather than on anything the scenario meant to assert. One
 field moves; the other stays.
+
+Alternatives Considered: the processing timestamp in `transact.txt` at positions
+305-330 is `2024-12-13 00:00:00.000000`. The alternative was to carry the
+`happy_path` template's `2022-07-18 00:00:00.000000` across verbatim, which would
+have kept that literal uniform across every scenario folder and left this file
+byte-identical to the template. It was rejected because it would place the posting
+run roughly two and a half years *before* the transaction it posts originated, and
+that incoherence is not cosmetic here:
+[`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) declares the
+non-unique `idx_transactions_proc_ts` over this column at lines 291-292 as a real
+keyset access path -- the replacement for the alternate index whose key
+`KEYS(26 304)` is declared at line 27 of
+[`app/jcl/TRANIDX.jcl`](../../../../../../../app/jcl/TRANIDX.jcl), and whose 26 bytes
+at offset 304 are precisely this field -- so a row whose processing stamp preceded
+its own originating stamp would order nonsensically against its own business date.
+Uniformity of an unrelated literal is worth less than a coherent posted row on an
+indexed column. What the template actually establishes is the *form*, not the year:
+an injected literal at midnight with six zero microseconds, never a clock read. That
+form is preserved, and taking the date from the scenario's own boundary value keeps
+the folder single-axis -- `2024-12-13` is the one value that moves, and both
+timestamps follow from it.
+
+Assumptions: this field cannot simply be left blank the way `dailytran.txt` leaves
+it. `V1__ledger.sql` declares `ledger.transactions.proc_ts TIMESTAMP(6) NOT NULL` at
+line 245 against `ledger.daily_transactions.proc_ts` nullable at line 397, and
+folder section 3.2 records that asymmetry as the whole reason the two files exist
+separately rather than being collapsed into one shared record.

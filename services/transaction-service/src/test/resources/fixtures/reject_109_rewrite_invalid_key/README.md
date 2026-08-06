@@ -95,18 +95,60 @@ Folder section 7 mandates the three items below.
 
 1. **Synthetic and seed-derived.** `dailytran.txt` is byte-identical to record 1 of
    [`app/data/ASCII/dailytran.txt`](../../../../../../../app/data/ASCII/dailytran.txt),
-   measured. `transact.txt` and `tcatbal.txt` are byte-identical to their `happy_path`
-   counterparts, whose provenance is recorded in
+   measured. `transact.txt` carries the identity bytes of **line 114** of that same
+   file -- `TRAN-ID 0000000380632461`, amount `0000004283C`, merchant
+   `Beahan, Little and Sanford` -- on the card the primary input also uses, measured;
+   folder section 4.2 item 7 is the authority for there being no seeded
+   posted-transaction master to copy from, so the record is authored from the
+   `CVTRA05Y` layout over those bytes. `tcatbal.txt` is byte-identical to its
+   `happy_path` counterpart, whose provenance is recorded in
    [`../happy_path/README.md`](../happy_path/README.md) section 4.2.
+
+   Assumptions: `transact.txt` deliberately does **not** reuse the identifier the
+   primary input carries, and the reason is a schema fact rather than a preference.
+   [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) declares
+   `CONSTRAINT pk_transactions PRIMARY KEY (transaction_id)`, so seeding
+   `ledger.transactions` with the identifier the feed is about to post would make the
+   posting insert raise a unique violation -- a different failure from the account
+   rewrite on line 554 that this scenario exists to exercise, and one that would mask
+   it. It would also leave the scenario's central assertion unfalsifiable: a row
+   bearing that identifier would already be present before the run, so "the failed
+   attempt added no row for this transaction" could not fail. Holding a **different**
+   identifier on the **same** card keeps that assertion falsifiable while leaving the
+   table populated, so it is a genuine no-new-row check rather than an empty-table
+   check, and `idx_transactions_card_num` has data on the browse path.
+
+   Alternatives Considered: giving `transact.txt` the same bytes as
+   `happy_path/transact.txt`, which would have made the folder's three record files
+   uniform and saved a reader one comparison. Rejected for the two consequences
+   above -- uniformity here costs the scenario the property it exists to prove.
 2. **No real person and no real account.** Every account number, card number, customer
    name, merchant name and address byte here comes from the published CardDemo
    demonstration seed. They are demonstration values, not credentials, and they identify
    no real person and no real account.
 3. **Which bytes were reshaped away from the seed value.** In `dailytran.txt`, none --
    the record is the seed row unchanged, which is the point of the scenario. In
-   `transact.txt`, the processing timestamp at positions 305-330 only. In `tcatbal.txt`,
-   the account identifier at positions 1-11 and the balance at positions 18-28, as in
+   `transact.txt`, the processing timestamp at positions 305-330 only: measured against
+   line 114 of the seed, the two records differ nowhere else. In `tcatbal.txt`, the
+   account identifier at positions 1-11 and the balance at positions 18-28, as in
    `happy_path`.
+
+   Assumptions: that one field has to move because the two tables disagree on
+   nullability. `ledger.transactions.proc_ts` is `NOT NULL` while
+   `ledger.daily_transactions.proc_ts` is nullable -- folder section 3.2 records that
+   asymmetry as the reason these are two files rather than one -- so the 26 blanks the
+   seed carries at 305-330, correct for a feed record that has not been posted yet,
+   cannot stand in a table whose rows exist only once processing has happened. The
+   baseline mints the value at run time, performing `Z-GET-DB2-FORMAT-TIMESTAMP` on
+   line 437 and moving the result on line 438. A fixture cannot read a clock and stay
+   reproducible, so the literal `2022-07-18 00:00:00.000000` is used: it is the
+   business date the baseline injects as a job parameter at
+   [`app/jcl/INTCALC.jcl`](../../../../../../../app/jcl/INTCALC.jcl) line 22,
+   `PARM='2022071800'`, and it is the literal `happy_path/transact.txt` already
+   carries, so the folder stays internally consistent. Master section 6.3 pins
+   `PROC-TS` blank on **input** fixtures and this file is seeded prior state rather
+   than input, so the two are consistent in principle -- both insist a fixture hold a
+   fixed literal rather than a wall-clock read.
 
 ---
 

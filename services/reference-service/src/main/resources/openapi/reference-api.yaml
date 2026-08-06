@@ -1,0 +1,3892 @@
+# =============================================================================
+# services/reference-service/src/main/resources/openapi/reference-api.yaml
+# -----------------------------------------------------------------------------
+# Purpose: this document is the committed OpenAPI 3.1 contract of record for the
+#       CardDemo reference bounded context. It is the artifact every other piece
+#       of this context is written against, rather than each of those being
+#       written against a fresh reading of the baseline.
+#
+#       What has landed at this checkpoint, and is therefore already bound by
+#       what follows: config/SecurityConfig.java, which enforces by HTTP method
+#       the authority each operation below declares, and the two Flyway
+#       migrations that own the six tables. Planned and NOT yet authored: every
+#       controller, request shape, response shape, entity, repository and mapper
+#       of this module, the browser client ui/src/api/reference.ts and the shared
+#       types in ui/src/api/types.ts. So no operation below is served yet, and a
+#       reader should not expect to find a Java type implementing one -- this
+#       document is upstream of that code, not a description of it.
+#
+#       springdoc serves this exact file: application.yml sets
+#       springdoc.swagger-ui.url to /reference-api.yaml and includes
+#       classpath:/openapi/ among spring.web.resources.static-locations, so a
+#       difference between this document and what the running service does is a
+#       defect in whichever one moved, not a variation to reconcile at runtime.
+#
+#       The context owns the reference schema and its six tables, declared by
+#       the sibling db/migration/V1__reference.sql and populated by
+#       db/migration/V2__seed_reference.sql: transaction_types,
+#       transaction_categories, disclosure_groups, us_phone_area_codes,
+#       us_states and us_state_zip_prefixes. Those two migrations are the
+#       authoritative statement of column type and seeded content; every schema
+#       below mirrors them, and where this document and they disagree, they win.
+#
+#       The behaviour contracted here carries across four baseline programs. The
+#       reference-data browse and inline maintenance screen
+#       app/app-transaction-type-db2/cbl/COTRTLIC.cbl and the single-record
+#       maintenance screen COTRTUPC.cbl in the same tree supply the transaction
+#       type and category operations, their page boundaries and their message
+#       text. COBTUPDT.cbl in that tree supplies reference-data maintenance.
+#       app/app-vsam-mq/cbl/CODATE01.cbl and app/cbl/CSUTLDTC.cbl supply date
+#       evaluation, synchronously here and over a queue for the asynchronous
+#       path. app/cbl/CBACT04C.cbl is not migrated into this service -- it is
+#       batch-service work -- but it is the READER of the disclosure rate this
+#       context publishes, and it is cited below because it is what makes that
+#       rate an arithmetic operand rather than a value merely displayed.
+#
+#       Three baseline mechanisms are gone rather than reproduced. Session state
+#       is gone: those screens were pseudo-conversational and carried identity,
+#       selection and navigation in a buffer the terminal echoed back, so every
+#       operation here takes identity from a signed token and selection from the
+#       request path. The four-verb cursor browse becomes one keyset-paginated
+#       query per request. And the record before-image the maintenance screen
+#       carried across the gap between screen turns becomes one server-owned
+#       version token surfaced as HTTP 409.
+#
+# Structure: the purpose of every top-level block is stated here, in the one
+#       place a format with no docstring construct has available, so that each
+#       block below carries rationale and nothing else.
+#       - servers: a single relative entry, so no host, port or environment name
+#         is recorded anywhere in this file.
+#       - security: the bearer scheme, applied to every operation by default.
+#       - x-authority-model: the machine-readable statement of which authority
+#         each operation requires, and where that requirement is enforced.
+#       - tags: the three groupings -- authenticated reads, administrative
+#         writes, and the date utilities.
+#       - paths: the nineteen operations of this context across thirteen paths,
+#         ordered as a reader meets the data -- transaction types, then the
+#         categories that depend on them, then disclosure rates, then the three
+#         address lookups, then date evaluation, then reference-data
+#         maintenance.
+#       - components.securitySchemes: the single authentication scheme every
+#         operation requires.
+#       - components.parameters: the path, filter, paging and correlation
+#         parameters, declared once and referenced rather than re-typed.
+#       - components.headers: the correlation header every response returns.
+#       - components.responses: the six error responses shared across
+#         operations, so that no operation restates one.
+#       - components.schemas: the payload shapes of this context, the five page
+#         envelopes, the date evaluation shapes, and the error body every
+#         failing operation returns together with its nested shapes.
+#
+# WHY (non-obvious design decisions):
+#       (1) Assumptions: the comment conventions of this file, stated once so
+#       that no block below has to. Purpose is stated in this header block,
+#       which is the analogue of a docstring for a format that has none, and no
+#       statement-level "# WHAT:" comment appears anywhere below. That is not a
+#       stylistic preference: the "The `# WHAT:` / `# WHY :` idiom -- prose
+#       command blocks only" section of docs/CODE_DOCUMENTATION_STANDARD.md
+#       confines the twin form to fenced command blocks in prose and forbids it
+#       on a statement in a .yaml file, while recording that a file-header use
+#       inside a header block such as this one is correct. Rationale below is
+#       carried on lines opening with the comment marker, the word WHY, one
+#       space and a colon -- eight characters, so the label width matches the
+#       paired form the standard defines -- placed at the indentation of the
+#       element they explain and continued at the marker plus seven spaces,
+#       numbering multi-reason bodies (1), (2) and so on.
+#       Trade-offs: describing every block up here costs a reader
+#       one jump from a block back to this header, and buys the removal of a
+#       narrating line above every key, which the standard forbids outright.
+#
+#       (2) Assumptions: exactly four rationale labels appear anywhere in this
+#       file -- Alternatives Considered, Refactoring Rationale, Assumptions and
+#       Trade-offs -- written in that plural, unparenthesised, colon-terminated
+#       form with no emphasis markup, because those are the four the project's
+#       Explainability rule enumerates and its validation gate is the sentence a
+#       reviewer audits. Elsewhere in this repository the same four categories
+#       appear in a different shape -- singular rather than plural, and enclosed
+#       in brackets after the WHY marker rather than following it as plain text
+#       -- at several hundred sites across the code trees. The two spellings name
+#       the same four categories and neither carries a meaning the other does
+#       not; this file uses the plural bracket-free form throughout and never
+#       mixes them, so that a grep for a label finds every site in this file
+#       rather than an arbitrary subset of them. The other form is described here
+#       rather than quoted, so that searching this file for a label returns only
+#       real label uses.
+#
+#       (3) Alternatives Considered: OpenAPI 3.1.0 rather than 3.0.x, and this
+#       choice is load-bearing rather than a preference for the higher number.
+#       3.1 adopts JSON Schema as its schema dialect, which is what allows a
+#       monetary or rate value to be declared "type: string" and constrained by
+#       "pattern" in the same schema object, and allows absence to be declared
+#       as "type: 'null'" inside a "oneOf" rather than through a "nullable"
+#       keyword. Under 3.0 the money-as-string constraint of decision (4) below
+#       could not be expressed as a schema at all: 3.0's subset has no way to
+#       pair a numeric format constraint with a string type, so the rule would
+#       have degraded into prose that no generator or validator reads, and a
+#       generated client would have been free to emit a JSON number. 3.0 also
+#       lacks "type: 'null'", so every absent cursor would have needed the
+#       "nullable" extension keyword, which JSON Schema does not define and
+#       which some validators ignore. springdoc is configured to match, at
+#       springdoc.api-docs.version openapi_3_1 in application.yml, so the
+#       served document and this one declare the same dialect.
+#
+#       (4) Assumptions: every path below sits under /api/v1/reference, and that
+#       prefix is not chosen here -- it is the only one reachable on the
+#       provisioned environment. The load balancer publishes exactly
+#       ["/api/v1/reference", "/api/v1/reference/*"] for this service, at
+#       infra/envs/dev/main.tf line 119 and infra/envs/prod/main.tf line 119,
+#       and the edge declares the matching route keys "ANY /api/v1/reference"
+#       and "ANY /api/v1/reference/{proxy+}" at
+#       infra/modules/api-gateway-http/variables.tf lines 385 to 386. Publishing
+#       any other prefix would produce a contract whose operations answer
+#       nowhere, which the acceptance criterion that the business flows work end
+#       to end on the provisioned environment does not permit.
+#
+#       (5) Assumptions: this document declares no /actuator path. Health, info
+#       and prometheus are exposed operationally, by
+#       management.endpoints.web.exposure.include in application.yml, and are
+#       consumed by the load-balancer target group and the container health
+#       check rather than by an API client. Declaring them here would publish an
+#       operational surface as though it were part of the business contract, and
+#       would put the one unauthenticated path of this service -- the health
+#       path and everything beneath it, whose matcher SecurityConfig.java
+#       declares at its line 64 and permits at line 98 -- into a document whose
+#       every declared operation requires a token.
+# =============================================================================
+
+openapi: 3.1.0
+
+info:
+  title: CardDemo Reference Service API
+  version: 1.0.0
+  summary: >-
+    Reference data of the migrated CardDemo credit-card management application:
+    transaction types and their categories, disclosure-group interest rates, the
+    three United States address lookups, and date evaluation.
+  description: >-
+    The reference context owns the data every other context reads and none of
+    them writes. It publishes nineteen operations, across thirteen paths, over
+    six tables.
+
+
+    Transaction types and transaction categories are maintained here, and the
+    relationship between them is the one referential rule the baseline states
+    anywhere in this domain: a category references its type, and the type cannot
+    be deleted while a category still references it. That refusal is a
+    first-class user outcome in the baseline rather than a fault, and it is
+    reported here as 409 for the reason recorded on the Conflict response.
+
+
+    Disclosure-group rows carry the interest rate the nightly interest
+    calculation consumes. That rate is an arithmetic operand, not a display
+    value, so it is transported as a JSON string for the reason recorded on the
+    InterestRate schema, and the lookup operation documents the DEFAULT-group
+    fallback the baseline performs when an account's own group has no matching
+    row.
+
+
+    The three address lookups -- phone area codes, state codes and state and
+    postal-prefix combinations -- are seeded here and read from here, but they
+    are validated elsewhere: account-service queries them during account
+    maintenance. This context therefore exposes them for reading and offers no
+    operation that writes them.
+
+
+    Date evaluation is published twice over, and neither publication replaces
+    the other. A synchronous operation evaluates a date against a mask and
+    returns the structured verdict. A separate asynchronous contract, described
+    on the AsyncDateReplyContract schema, carries the same evaluation over a
+    queue and answers in a 1000-byte positional buffer, because that is the
+    reply shape the baseline's queue consumers already parse.
+
+
+    Identifiers and codes travel as strings throughout, never as JSON numbers,
+    and every code retains the declared width of the column behind it. The
+    reasoning is recorded once on the TransactionCategoryCode schema, where a
+    copybook and a set of table definitions genuinely disagree about the type of
+    one field.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+# WHY : Assumptions: one relative server entry, and deliberately no absolute
+#       URL. The same document is served from the development and production
+#       environments and from a developer's own machine, and every path below is
+#       appended to whatever origin served it. Recording a host here would name
+#       one environment inside an artifact committed to source control, and
+#       would go stale the moment a distribution or load-balancer address
+#       changed -- while a relative entry cannot go stale because it names
+#       nothing.
+servers:
+  - url: /
+    description: >-
+      The origin that served this document. Every path below is appended to it
+      unchanged, so no host, port, environment name or account identifier is
+      recorded in this file.
+
+# WHY : Assumptions: authorization is asserted once at the document level and
+#       inherited by every operation, rather than repeated on each one with the
+#       risk that a single omission passes review unnoticed. There is no
+#       unauthenticated operation in this context: SecurityConfig.java permits
+#       only the health path and what lies beneath it without a token, at its
+#       line 98, and closes with anyRequest().authenticated() at line 107. No
+#       operation below
+#       overrides this with an empty requirement, and none may be added that
+#       does -- a bearer requirement missing from one operation is invisible in
+#       review, whereas a document-level requirement has to be explicitly
+#       overridden to be lost.
+security:
+  - bearerAuth: []
+
+# WHY : Refactoring Rationale: the authority each operation requires is declared
+#       as a machine-readable field on the operation itself, and not only in
+#       prose and tag membership. Prose and tag membership are not checkable: a
+#       reviewer can read that a write is administrative, and a generator or a
+#       gateway cannot, so the restriction would be indistinguishable from any
+#       other authenticated route. Every operation below carries
+#       x-required-authority.
+# WHY : Assumptions: the value on each operation is not chosen here. It is
+#       derived from what SecurityConfig.java already enforces for this service:
+#       POST, PUT, PATCH and DELETE on every path each require
+#       JwtRoleConverter.ADMIN_AUTHORITY, at its lines 99 to 106, and every
+#       remaining request needs only authentication, at line 107. So every write
+#       below carries carddemo-admin and every read carries carddemo-user, and
+#       the document describes the filter chain rather than a second opinion
+#       about it. The two admitted values are exactly the two the shared token
+#       converter recognises, ADMIN_AUTHORITY and USER_AUTHORITY at
+#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java
+#       lines 250 and 260, which are the migrated form of the two SEC-USR-TYPE
+#       values 'A' and 'U'.
+# WHY : Alternatives Considered: expressing the authority as a security-scheme
+#       scope, by writing a populated scope list beside bearerAuth on the
+#       administrative operations. Rejected because the specification requires
+#       that list to be empty for a scheme that is not oauth2 or openIdConnect,
+#       and this scheme is type http, so a populated list there is invalid and a
+#       validating tool would either reject it or ignore it. Re-declaring the
+#       scheme as oauth2 purely to gain a scope list was rejected in turn,
+#       because these values are Cognito group names carried in a cognito:groups
+#       claim rather than OAuth scopes, and publishing them as scopes would
+#       state something untrue about how the token is issued.
+x-authority-model:
+  field: x-required-authority
+  values:
+    - carddemo-user
+    - carddemo-admin
+  enforcedBy: >-
+    services/reference-service/src/main/java/com/carddemo/reference/config/SecurityConfig.java
+  claim: cognito:groups
+  convertedBy: >-
+    services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java
+
+tags:
+  - name: reference-data
+    description: >-
+      Reading reference data. Any authenticated caller may reach these
+      operations, because every user of this system holds one of the two groups
+      and reference data carries no cardholder-identifying value. Each operation
+      in this group carries x-required-authority carddemo-user.
+  - name: admin-reference-data
+    description: >-
+      Creating, replacing and deleting reference data. Restricted to callers
+      holding the administrative authority, matching the baseline arrangement in
+      which reference-data maintenance is reached from the administrative menu
+      rather than the main one. Each operation in this group carries
+      x-required-authority carddemo-admin.
+  - name: date-utilities
+    description: >-
+      Evaluating a date against a mask. These are side-effect-free evaluations
+      rather than data operations, and they read no table, which is why they are
+      published as reads available to any authenticated caller. Each operation
+      in this group carries x-required-authority carddemo-user.
+
+paths:
+
+  /api/v1/reference/transaction-types:
+
+    description: >-
+      The collection of transaction types, addressable as a key-ordered sequence
+      of pages and as the place a new type is created. A type is the parent of
+      the categories beneath it, which is why it is the first collection in this
+      document and why its delete operation can be refused.
+
+    get:
+      tags:
+        - reference-data
+      operationId: listTransactionTypes
+      x-required-authority: carddemo-user
+      summary: List transaction types by key, one page at a time
+      description: >-
+        Returns one page of transaction types in ascending type-code order,
+        optionally narrowed by a type-code filter, a description filter or both.
+        This is the migrated form of the browse the baseline drives with a pair
+        of declared cursors at app/app-transaction-type-db2/cbl/COTRTLIC.cbl
+        lines 338 to 368, and it preserves those cursors' page boundaries
+        exactly, including the difference in strictness between reading forward
+        and reading backward that is set out on the cursor parameter.
+
+
+        Paging is by key and never by ordinal. Send no cursor to obtain the
+        opening page; thereafter copy lastKey from the page in hand and send
+        direction next to advance, or copy firstKey and send direction previous
+        to retreat. When the filters exclude every row the page is empty and
+        both cursors are null, which the baseline reports with the message text
+        recorded on the TransactionTypePage schema.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+        - $ref: '#/components/parameters/TypeCodeFilter'
+        - $ref: '#/components/parameters/DescriptionFilter'
+      responses:
+        '200':
+          description: >-
+            One page of transaction types, together with the two cursor
+            positions and the forward availability flag needed to walk the set.
+            An empty page is a success rather than a 404: a collection with no
+            matching row exists and is empty, and the baseline reports the same
+            condition on its own list screen rather than as a failure.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionTypePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - admin-reference-data
+      operationId: createTransactionType
+      x-required-authority: carddemo-admin
+      summary: Create a transaction type
+      description: >-
+        Creates one transaction type from a supplied code and description. This
+        is the migrated form of the add path of
+        app/app-transaction-type-db2/cbl/COTRTUPC.cbl, whose screen prompts for
+        the new details at its line 158 and asks for a confirming key press at
+        line 150 before writing.
+
+
+        The code is supplied by the caller rather than generated, because it is
+        a meaningful two-digit business code that appears in stored transaction
+        records and in the concatenated category key, not a surrogate. Creating
+        a code that already exists is refused with 409 rather than silently
+        replacing the existing row.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The code and description of the type to create. Both are required:
+          the description column is declared NOT NULL by
+          db/migration/V1__reference.sql, so there is no state in which a type
+          exists without one.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionTypeCreateRequest'
+      responses:
+        '201':
+          description: >-
+            The type was created, and the stored representation is returned so
+            that a caller sees the row as it now stands rather than assuming its
+            own request body was stored unchanged.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              description: >-
+                The path of the created type, formed from the code supplied in
+                the request body.
+              required: true
+              schema:
+                type: string
+                examples:
+                  - /api/v1/reference/transaction-types/08
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionType'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: >-
+            A type already exists with the supplied code. The primary key
+            declared by db/migration/V1__reference.sql refuses the duplicate,
+            PostgreSQL reports SQLSTATE 23505, and the shared advice inherited
+            from common-lib turns that into this status.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/transaction-types/{typeCd}:
+
+    description: >-
+      One transaction type, addressed by its own two-digit code. The code is the
+      primary key of reference.transaction_types and appears in the path
+      directly, because it is a business code a user reads off a screen and
+      types back in rather than an internal identifier that has to be concealed.
+
+    parameters:
+      - $ref: '#/components/parameters/TypeCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getTransactionType
+      x-required-authority: carddemo-user
+      summary: Read one transaction type
+      description: >-
+        Returns the transaction type stored under the supplied code, together
+        with the version token a subsequent replace must carry. This is the
+        migrated form of the single-record fetch
+        app/app-transaction-type-db2/cbl/COTRTUPC.cbl performs before it
+        displays a record for maintenance.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The stored transaction type, including its version token.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionType'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - admin-reference-data
+      operationId: replaceTransactionType
+      x-required-authority: carddemo-admin
+      summary: Replace the description of one transaction type
+      description: >-
+        Replaces the description of an existing type. The code itself is not
+        replaceable: it is the primary key and the value the category key is
+        built from, so changing it would orphan every category beneath it. A
+        caller that needs a different code creates a new type and deletes the
+        old one, which is exactly what the baseline requires of a user too.
+
+
+        The request must carry the version token read with the record. When the
+        stored row has moved on since that read the write is refused with 409
+        and the baseline's own wording, which is the migrated form of the
+        before-image comparison the maintenance screen performs across the gap
+        between screen turns -- see the Conflict response.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The replacement description together with the version token read with
+          the record.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionTypeReplaceRequest'
+      responses:
+        '200':
+          description: >-
+            The type was replaced, and the stored representation is returned
+            carrying its new version token, so that a caller can issue a further
+            replace without re-reading.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionType'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - admin-reference-data
+      operationId: deleteTransactionType
+      x-required-authority: carddemo-admin
+      summary: Delete one transaction type, unless categories still reference it
+      description: >-
+        Deletes the type stored under the supplied code. The delete is refused
+        with 409, and no row is removed, while any transaction category still
+        references the type. That refusal is the single load-bearing rule of
+        this context and it is not an incidental integrity error -- see the
+        Conflict response, which carries the baseline's own wording for it.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '204':
+          description: >-
+            The type was deleted. No body is returned, because the resource the
+            caller addressed no longer exists and there is nothing to represent.
+            The baseline reports the same outcome on its screens with the
+            wording recorded on the ReferenceMessageCatalogue schema.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+  /api/v1/reference/transaction-categories:
+
+    description: >-
+      The collection of transaction categories, each belonging to exactly one
+      transaction type. A category is identified by the pair of its type code and
+      its own four-digit code, which is why the single-category path below
+      carries two segments rather than one.
+
+    get:
+      tags:
+        - reference-data
+      operationId: listTransactionCategories
+      x-required-authority: carddemo-user
+      summary: List transaction categories by key, one page at a time
+      description: >-
+        Returns one page of transaction categories ordered by type code and then
+        by category code, optionally narrowed to a single type. That ordering is
+        the baseline's own: the composite key of reference.transaction_categories
+        is declared in that column order by db/migration/V1__reference.sql, and
+        the baseline index at
+        app/app-transaction-type-db2/ddl/XTRNTYCAT.ddl declares the same two
+        columns ascending in the same sequence.
+
+
+        Paging follows the identical keyset discipline as the transaction-type
+        list, over the composite key rather than a single column, so a cursor
+        from one collection is not interchangeable with a cursor from the other.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+        - $ref: '#/components/parameters/TypeCodeFilter'
+        - $ref: '#/components/parameters/DescriptionFilter'
+      responses:
+        '200':
+          description: >-
+            One page of transaction categories with the two cursor positions and
+            the forward availability flag.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionCategoryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - admin-reference-data
+      operationId: createTransactionCategory
+      x-required-authority: carddemo-admin
+      summary: Create a transaction category under an existing type
+      description: >-
+        Creates one category beneath an existing transaction type. The type must
+        already exist: the foreign key declared by
+        db/migration/V1__reference.sql refers to reference.transaction_types, so
+        a category naming an absent type is refused with 409 rather than stored
+        as an orphan. This is the same rule that refuses the parent's delete,
+        seen from the other side.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The type code, the category code and the description of the category
+          to create. All three are required, because all three columns are
+          declared NOT NULL.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionCategoryCreateRequest'
+      responses:
+        '201':
+          description: >-
+            The category was created, and the stored representation is returned.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+            Location:
+              description: >-
+                The path of the created category, formed from the two codes
+                supplied in the request body.
+              required: true
+              schema:
+                type: string
+                examples:
+                  - /api/v1/reference/transaction-categories/01/0006
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionCategory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: >-
+            Either a category already exists under the supplied pair of codes,
+            or the transaction type named does not exist. The two are
+            distinguished by the subordinate code in the body and never merged:
+            the first is a duplicate key reported by PostgreSQL as SQLSTATE
+            23505, the second a foreign-key violation reported as SQLSTATE
+            23503, and a caller acts differently on each -- the first by
+            choosing another code, the second by creating the type first.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/transaction-categories/{typeCd}/{catCd}:
+
+    description: >-
+      One transaction category, addressed by the pair of codes that forms its
+      composite key. Both segments are present because neither alone identifies
+      a row: the same four-digit category code recurs under different types, and
+      the baseline builds its key by positional concatenation of the two, which
+      is why the seed extract app/data/ASCII/trancatg.txt stores the pair as the
+      single six-character value "010001".
+
+    parameters:
+      - $ref: '#/components/parameters/TypeCdPath'
+      - $ref: '#/components/parameters/CatCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getTransactionCategory
+      x-required-authority: carddemo-user
+      summary: Read one transaction category
+      description: >-
+        Returns the category stored under the supplied pair of codes, together
+        with the version token a subsequent replace must carry.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The stored transaction category, including its version token.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionCategory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags:
+        - admin-reference-data
+      operationId: replaceTransactionCategory
+      x-required-authority: carddemo-admin
+      summary: Replace the description of one transaction category
+      description: >-
+        Replaces the description of an existing category. Neither code is
+        replaceable, for the same reason the type code is not: together they are
+        the primary key. The request must carry the version token read with the
+        record, and a stored row that has moved on since that read is reported as
+        409 with the baseline's own wording.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The replacement description together with the version token read with
+          the record.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionCategoryReplaceRequest'
+      responses:
+        '200':
+          description: >-
+            The category was replaced, and the stored representation is returned
+            carrying its new version token.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionCategory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - admin-reference-data
+      operationId: deleteTransactionCategory
+      x-required-authority: carddemo-admin
+      summary: Delete one transaction category
+      description: >-
+        Deletes the category stored under the supplied pair of codes. Nothing
+        references a category, so this delete is not refused on referential
+        grounds the way a type's delete can be: no table in the reference schema
+        declares a foreign key to reference.transaction_categories, and
+        db/migration/V1__reference.sql records why -- the disclosure-group table
+        carries the same type and category columns but the baseline states no
+        relationship between them, so none is asserted.
+
+
+        Deleting a category that no longer exists is reported as 404 rather than
+        as success, so that a caller can distinguish having removed the row from
+        never having found it.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '204':
+          description: >-
+            The category was deleted. No body is returned.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+  /api/v1/reference/disclosure-groups/{acctGroupId}/{tranTypeCd}/{tranCatCd}:
+
+    description: >-
+      One disclosure-group interest rate, addressed by the three-part key that
+      identifies it: the account group, the transaction type and the transaction
+      category. All three segments are required because all three form the
+      primary key of reference.disclosure_groups, which
+      db/migration/V1__reference.sql declares in that order.
+
+    parameters:
+      - $ref: '#/components/parameters/AcctGroupIdPath'
+      - $ref: '#/components/parameters/TranTypeCdPath'
+      - $ref: '#/components/parameters/TranCatCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getDisclosureGroupRate
+      x-required-authority: carddemo-user
+      summary: Look up an interest rate, falling back to the DEFAULT group
+      description: >-
+        Returns the interest rate that applies to the supplied combination of
+        account group, transaction type and transaction category.
+
+
+        The lookup has two stages, and the second is part of the contract rather
+        than an implementation detail. When no row exists for the account group
+        supplied, the lookup is retried against the account group DEFAULT and the
+        rate found there is returned. This reproduces
+        app/cbl/CBACT04C.cbl, which on a lookup miss -- file status 23 at its
+        line 436 -- moves the literal 'DEFAULT' into the group-id field at line
+        437 and re-reads through the paragraph at line 443. The response states
+        which of the two stages answered, in its appliedAcctGroupId and
+        defaultGroupApplied members, so a caller is never left inferring whether
+        the rate it received was the one it asked for.
+
+
+        The fallback rows are seeded and are not optional. There are seventeen of
+        them, inserted by db/migration/V2__seed_reference.sql, and they are
+        carried across from app/data/ASCII/discgrp.txt, in which exactly
+        seventeen of the fifty-one rows begin with the account group 'DEFAULT'
+        followed by three spaces to fill the ten-character column. When the
+        fallback itself finds nothing the baseline does not continue: it reports
+        the condition at line 455 and abends through the paragraph invoked at
+        line 458. The migrated form of that outcome is 404 carrying the abend
+        detail described on the AbendDetail schema, because an absent DEFAULT row
+        is a defect in the seeded reference data rather than a request a caller
+        can correct.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The applicable rate, together with the account group that actually
+            supplied it. A caller that asked for a group with no row of its own
+            receives the DEFAULT group's rate here with defaultGroupApplied
+            true, which is a success and not a partial answer.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisclosureGroupRate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Neither the account group supplied nor the DEFAULT group has a row
+            for this transaction type and category. This is the condition the
+            baseline treats as unrecoverable at app/cbl/CBACT04C.cbl lines 455
+            and 458, so the body carries abend detail alongside the ordinary
+            error members, naming the seeded reference data as the subject rather
+            than the caller's request.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-phone-area-codes:
+
+    description: >-
+      The seeded list of North American Numbering Plan area codes this platform
+      accepts, each carrying the classification that says which of the two
+      baseline sub-lists it belongs to. Read-only: this context seeds the list
+      and account-service queries it during address maintenance, so there is no
+      operation here that writes it.
+
+    get:
+      tags:
+        - reference-data
+      operationId: listUsPhoneAreaCodes
+      x-required-authority: carddemo-user
+      summary: List accepted phone area codes by key, one page at a time
+      description: >-
+        Returns one page of area codes in ascending code order, optionally
+        narrowed to a single classification. Four hundred and ninety codes are
+        seeded by db/migration/V2__seed_reference.sql, carried across from the
+        condition-name list at app/cpy/CSLKPCDY.cpy line 30, whose own comment at
+        lines 26 to 28 records the numbering-plan administrator's report as their
+        source.
+
+
+        The classification narrows the list to one of the two sub-lists the
+        copybook overlays on the same three-character field: four hundred and ten
+        general-purpose codes from its line 521, and eighty easily-recognisable
+        codes from its line 931. Omitting the filter returns the whole
+        four-hundred-and-ninety-code list, which is the only membership test
+        account-service performs.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+        - $ref: '#/components/parameters/CodeClassFilter'
+      responses:
+        '200':
+          description: >-
+            One page of accepted area codes with their classifications.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsPhoneAreaCodePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-phone-area-codes/{areaCd}:
+
+    description: >-
+      One accepted phone area code. Addressing a single code turns the
+      membership test the baseline performs against a condition-name list into a
+      primary-key probe, so a caller validating one value need not page the whole
+      list to do it.
+
+    parameters:
+      - $ref: '#/components/parameters/AreaCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getUsPhoneAreaCode
+      x-required-authority: carddemo-user
+      summary: Test whether one phone area code is accepted
+      description: >-
+        Returns the area code and its classification when the code is accepted,
+        and 404 when it is not. The 404 is the answer rather than a failure:
+        absence from this list is precisely what the baseline's condition-name
+        test reports when it evaluates false, and it is the outcome
+        account-service turns into a rejected address.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The code is accepted; its classification is returned with it.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsPhoneAreaCode'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-states:
+
+    description: >-
+      The seeded list of accepted two-character state codes. Read-only, for the
+      same reason as the area codes: this context seeds them and
+      account-service reads them.
+
+    get:
+      tags:
+        - reference-data
+      operationId: listUsStates
+      x-required-authority: carddemo-user
+      summary: List accepted state codes by key, one page at a time
+      description: >-
+        Returns one page of accepted state codes in ascending order. Fifty-six
+        codes are seeded by db/migration/V2__seed_reference.sql, carried across
+        from the condition-name list at app/cpy/CSLKPCDY.cpy line 1013 over the
+        two-character field declared on line 1012. The fifty-six are more than
+        the states alone: the baseline's list also admits the district, the
+        territories and the military mailing codes the postal service treats
+        alike, so a caller must not expect fifty.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+      responses:
+        '200':
+          description: >-
+            One page of accepted state codes.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsStatePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-states/{stateCd}:
+
+    description: >-
+      One accepted state code, addressed directly so that validating a single
+      value is a key probe rather than a scan of the list.
+
+    parameters:
+      - $ref: '#/components/parameters/StateCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getUsState
+      x-required-authority: carddemo-user
+      summary: Test whether one state code is accepted
+      description: >-
+        Returns the state code when it is accepted and 404 when it is not, with
+        the 404 carrying the same meaning as for an area code: absence from the
+        seeded list is the answer the baseline's membership test gives.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The state code is accepted.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-state-zip-prefixes:
+
+    description: >-
+      The seeded list of accepted state and postal-prefix combinations. Each
+      entry is one four-character value rather than two fields, because the
+      baseline builds the four bytes and tests the pair as a unit.
+
+    get:
+      tags:
+        - reference-data
+      operationId: listUsStateZipPrefixes
+      x-required-authority: carddemo-user
+      summary: List accepted state and postal-prefix combinations
+      description: >-
+        Returns one page of accepted combinations in ascending order. Two hundred
+        and forty are seeded by db/migration/V2__seed_reference.sql, carried
+        across from the condition-name list at app/cpy/CSLKPCDY.cpy line 1073
+        over the four-character field declared on line 1072, itself subordinate
+        to the group on line 1071.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PagingDirection'
+      responses:
+        '200':
+          description: >-
+            One page of accepted state and postal-prefix combinations.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsStateZipPrefixPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/us-state-zip-prefixes/{stateZipCd}:
+
+    description: >-
+      One accepted state and postal-prefix combination, addressed as the single
+      concatenated value the baseline tests.
+
+    parameters:
+      - $ref: '#/components/parameters/StateZipCdPath'
+
+    get:
+      tags:
+        - reference-data
+      operationId: getUsStateZipPrefix
+      x-required-authority: carddemo-user
+      summary: Test whether one state and postal-prefix combination is accepted
+      description: >-
+        Returns the combination when it is accepted and 404 when it is not. The
+        two leading postal digits are significant and are compared as characters,
+        so a combination whose postal half begins with a zero is a distinct value
+        from one that does not.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The combination is accepted.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsStateZipPrefix'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+  /api/v1/reference/date-evaluations:
+
+    description: >-
+      Evaluation of a date against a mask. This is a computation over the values
+      supplied in the request, not a resource that is stored, read or listed --
+      nothing is persisted and no table is consulted -- which is why the
+      collection carries a single read operation and no write.
+
+    # WHY : Assumptions: this is a GET carrying its inputs as query parameters,
+    #       and NOT a POST carrying them in a body, even though a POST would read
+    #       more naturally for something described as an evaluation. The reason
+    #       is that the authority tier is settled by HTTP method for this whole
+    #       service: SecurityConfig.java requires the administrative authority
+    #       for POST, PUT, PATCH and DELETE on every path, at its lines 99 to
+    #       106, and admits any authenticated caller only through
+    #       anyRequest().authenticated() at line 107. Publishing this as a POST
+    #       would therefore have put a side-effect-free date check behind the
+    #       administrative group, so the very users who edit dated fields on the
+    #       account and card screens -- the callers this evaluation exists for --
+    #       would each have received 403. A GET lands on the authenticated tier,
+    #       which is where the operation belongs.
+    # WHY : Trade-offs: the two inputs travel in a URL, so they appear in access
+    #       logs and in browser history, and the mask's literal separators must be
+    #       percent-encoded by the client. That is accepted because a date and a
+    #       date mask carry no cardholder-identifying value -- unlike the card
+    #       numbers and account identifiers that the sibling contracts keep out of
+    #       URLs deliberately -- and because being cacheable and safe to retry
+    #       matches what this operation actually is.
+    get:
+      tags:
+        - date-utilities
+      operationId: evaluateDate
+      x-required-authority: carddemo-user
+      summary: Evaluate a date against a mask and return the structured verdict
+      description: >-
+        Evaluates the supplied date text against the supplied mask and returns
+        the verdict as a structured result: a severity, a message number, the
+        verdict text, and the submitted date and mask echoed back.
+
+
+        This is the migrated form of app/cbl/CSUTLDTC.cbl, which takes exactly
+        these inputs and produces exactly this result. Its linkage declares the
+        date and the mask as ten-character fields and the result as eighty
+        characters, at lines 84 to 86, and receives all three at line 88; it
+        calls the platform date service through the five-line invocation at lines
+        116 to 120 and maps that service's feedback onto the outcome set
+        described on the DateFeedbackCode schema. The five components of this
+        response are the five variable fields of that eighty-character result,
+        interleaved there with the constant labels declared at its lines 45, 51
+        and 54.
+
+
+        The rules themselves are not restated here and are not implemented by
+        this service. They live in the shared kernel, at
+        services/common-lib/src/main/java/com/carddemo/common/validation/DateEditValidator.java,
+        whose entry point takes a date and a mask and returns this result. This
+        contract describes the request shape, the accepted masks and the result
+        shape, and nothing beyond that.
+
+
+        A mask this service does not recognise is not a request error: it is
+        answered with 200 carrying the verdict for an unusable mask pattern,
+        because the baseline date service declares a condition for exactly that
+        case and returns it like any other feedback. A date whose width does not
+        match the recognised mask it was sent with IS a request error, and is
+        answered with 400, because the components are read by offset and a
+        shorter text has no components to read.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/DateValueQuery'
+        - $ref: '#/components/parameters/DateMaskQuery'
+      responses:
+        '200':
+          description: >-
+            The verdict. A severity of zero means the date was accepted; any
+            other severity means it was rejected and the verdict text names the
+            reason. Note the trap recorded on the DateFeedbackCode schema: the
+            accepting outcome's own condition name in the baseline reads as
+            though it meant the opposite.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DateEvaluationResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/reference/maintenance-actions:
+
+    description: >-
+      Reference-data maintenance applied as one submitted batch of actions,
+      rather than as a sequence of individual requests. This is the migrated
+      surface of app/app-transaction-type-db2/cbl/COBTUPDT.cbl, the baseline's
+      reference-data maintenance program, which reads a stream of action records
+      and applies an insert, an update or a delete for each.
+
+    # WHY : Assumptions: this is an ordinary synchronous administrative
+    #       operation that applies the actions and answers with their outcomes.
+    #       It is NOT a job-launch API: it does not accept a schedule, return a
+    #       job or execution identifier, or offer anything to poll. That is not a
+    #       simplification of the baseline program but a consequence of how this
+    #       module is built -- pom.xml declares no batch starter and
+    #       application.yml declares no spring.batch configuration, so this
+    #       service has no job repository to record an execution in and no
+    #       launcher to start one. Contracting a job here would describe a
+    #       capability the module cannot provide.
+    # WHY : Alternatives Considered: leaving this program's function to the
+    #       individual create, replace and delete operations above, which between
+    #       them cover every action it performs. Rejected because the baseline
+    #       applies a whole submitted stream as one unit and reports per-record
+    #       outcomes, and driving the same work as a series of separate requests
+    #       would replace that with a partially-applied set on the first failure,
+    #       leaving a caller to work out which records had landed.
+    post:
+      tags:
+        - admin-reference-data
+      operationId: applyReferenceMaintenanceActions
+      x-required-authority: carddemo-admin
+      summary: Apply a batch of reference-data maintenance actions
+      description: >-
+        Applies the submitted actions in the order given and returns one outcome
+        per action, each carrying the baseline's own wording for what happened.
+        The four outcomes the baseline reports are an inserted record at
+        app/app-transaction-type-db2/cbl/COBTUPDT.cbl line 153, an updated record
+        at line 179, a deleted record at line 209, and an unmatched key at its
+        lines 181 and 211; a record naming a type the program will not accept is
+        reported at line 124. Those texts are reproduced character for character
+        on the MaintenanceActionOutcome schema.
+
+
+        The batch is applied as a single unit: either every action takes effect or
+        none does. A caller therefore reads the outcome list to learn what each
+        action would have done, and reads the response status to learn whether
+        the batch was applied at all.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        description: >-
+          The actions to apply, in the order they are to be applied.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceActionBatchRequest'
+      responses:
+        '200':
+          description: >-
+            Every action was applied and the batch was committed. One outcome is
+            returned per submitted action, in the submitted order.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceActionBatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: >-
+            The batch was refused and nothing was applied, because one action
+            conflicted with the stored state: a duplicate key, a category naming
+            an absent type, or a type whose delete is refused while categories
+            still reference it. The subordinate code names which, and the field
+            entries name the position in the submitted list, so a caller can
+            correct one action and resubmit the batch.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        A JSON Web Token issued by the configured identity provider and validated
+        as a resource-server token. Its cognito:groups claim is converted to
+        authorities by
+        services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
+        where the baseline user type 'A' becomes carddemo-admin and 'U' becomes
+        carddemo-user. Presenting no usable token yields 401; presenting a valid
+        token that lacks the authority an operation requires yields 403.
+
+  parameters:
+
+    TypeCdPath:
+      name: typeCd
+      in: path
+      required: true
+      description: >-
+        The two-digit transaction type code identifying the type, or the parent
+        type of the category, being addressed. Seven codes are seeded, '01'
+        through '07'.
+      schema:
+        $ref: '#/components/schemas/TransactionTypeCode'
+
+    CatCdPath:
+      name: catCd
+      in: path
+      required: true
+      description: >-
+        The four-digit transaction category code, unique only within its parent
+        type. Sent with its leading zeros exactly as stored.
+      schema:
+        $ref: '#/components/schemas/TransactionCategoryCode'
+
+    AcctGroupIdPath:
+      name: acctGroupId
+      in: path
+      required: true
+      description: >-
+        The account group whose rate is sought. Send it without trailing padding;
+        the stored column is ten characters and pads on comparison, so 'DEFAULT'
+        and its padded form address the same rows.
+      schema:
+        $ref: '#/components/schemas/AccountGroupId'
+
+    TranTypeCdPath:
+      name: tranTypeCd
+      in: path
+      required: true
+      description: >-
+        The two-digit transaction type code of the rate being sought. It is the
+        second component of the disclosure-group key.
+      schema:
+        $ref: '#/components/schemas/TransactionTypeCode'
+
+    TranCatCdPath:
+      name: tranCatCd
+      in: path
+      required: true
+      description: >-
+        The four-digit transaction category code of the rate being sought. It is
+        the third component of the disclosure-group key.
+      schema:
+        $ref: '#/components/schemas/TransactionCategoryCode'
+
+    AreaCdPath:
+      name: areaCd
+      in: path
+      required: true
+      description: >-
+        The three-digit phone area code whose acceptance is being tested.
+      schema:
+        $ref: '#/components/schemas/PhoneAreaCodeValue'
+
+    StateCdPath:
+      name: stateCd
+      in: path
+      required: true
+      description: >-
+        The two-character state code whose acceptance is being tested, in upper
+        case.
+      schema:
+        $ref: '#/components/schemas/StateCodeValue'
+
+    StateZipCdPath:
+      name: stateZipCd
+      in: path
+      required: true
+      description: >-
+        The four-character combination of a two-character state code and the two
+        leading digits of a postal code, in that order and with no separator.
+      schema:
+        $ref: '#/components/schemas/StateZipPrefixValue'
+
+    # WHY : Alternatives Considered: paging is by key and never by ordinal --
+    #       there is no page number, page size, offset or total-pages parameter
+    #       anywhere in this document, and none may be added. Offset paging was
+    #       rejected on a specific behavioural ground rather than a general
+    #       preference: under a concurrent insert or delete, a request for the
+    #       next window by ordinal SKIPS rows and REPEATS rows, because the rows
+    #       before the offset are re-counted after the set has changed. Browse by
+    #       key cannot do either, because the position it resumes from is a key in
+    #       the ordered set rather than a count of what preceded it. Reference
+    #       data is maintained through the very operations in this document, so a
+    #       page walked by one caller while another creates a type is not a
+    #       hypothetical case.
+    # WHY : Assumptions: the two positions the baseline maintains are what this
+    #       parameter carries, so the migration is one-to-one rather than an
+    #       approximation. app/app-transaction-type-db2/cbl/COTRTLIC.cbl declares
+    #       a forward cursor at its lines 338 to 352 and a backward cursor at
+    #       lines 354 to 368, and each is positioned by a single start-key host
+    #       variable rather than by any count of rows.
+    # WHY : Assumptions: the asymmetry between the two directions is PRESERVED
+    #       and must not be normalised. The forward cursor selects rows whose key
+    #       is greater than or EQUAL to the position it is given, at line 343, and
+    #       orders ascending at line 351; the backward cursor selects rows whose
+    #       key is STRICTLY LESS than the position it is given, at line 359, and
+    #       orders descending at line 367. The two therefore treat the position
+    #       they are handed differently -- inclusive going forward, exclusive
+    #       going back -- and that difference is what makes the pages meet exactly
+    #       once each. Rewriting both to one convention would shift which record
+    #       begins each page by one row, so a caller walking the set forward and
+    #       then back would see a row twice or not at all.
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        The paging position to continue from: copy the lastKey member of the page
+        in hand to advance past it, or the firstKey member to retreat from it, and
+        state the matching direction. Omit it, and the direction, to obtain the
+        opening page. The value is opaque and must be echoed exactly as received;
+        it is not a type code, a category code or a row ordinal, and it cannot be
+        constructed, parsed or compared by a client. A cursor that cannot be
+        opened, or one replayed against a different filter, a different collection
+        or the direction it was not minted for, is reported as 400 rather than
+        answered with the wrong page.
+      schema:
+        $ref: '#/components/schemas/CursorToken'
+
+    PagingDirection:
+      name: direction
+      in: query
+      required: false
+      description: >-
+        Which way to move from the supplied cursor. It is meaningful only
+        alongside a cursor, and the two are sent together or not at all. Reading
+        next takes rows from the cursor's position forward in ascending key order;
+        reading previous takes rows before it in descending key order and presents
+        them ascending, which is the migrated form of the backward cursor at
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl lines 354 to 368. The two
+        differ in whether the cursor's own position is included, as recorded on
+        the cursor parameter.
+      schema:
+        $ref: '#/components/schemas/PageDirection'
+
+    TypeCodeFilter:
+      name: typeCode
+      in: query
+      required: false
+      description: >-
+        Narrows the page to the single transaction type whose code equals this
+        value. This is the migrated form of the optional equality predicate the
+        baseline carries in both cursors, at
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl lines 344 to 345 going
+        forward and 360 to 361 going back, each gated on an edit flag whose
+        unset state passes every row through -- the pass-through arms at lines 346
+        and 362. Omitting this parameter is that unset state. A value that is not
+        two digits is reported as 400 carrying the baseline's own wording, which
+        is recorded on the ReferenceMessageCatalogue schema.
+      schema:
+        $ref: '#/components/schemas/TransactionTypeCode'
+
+    DescriptionFilter:
+      name: description
+      in: query
+      required: false
+      description: >-
+        Narrows the page to rows whose description matches this pattern. The
+        baseline semantic is a SQL LIKE against the trimmed pattern, at
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl lines 347 to 349 going
+        forward and 363 to 365 going back, gated on a second edit flag with the
+        same pass-through arrangement at lines 350 and 366. Because the predicate
+        is LIKE rather than equality, the pattern's wildcards are significant: a
+        value with no wildcard matches only a description equal to it after
+        trimming.
+      schema:
+        $ref: '#/components/schemas/ReferenceDescription'
+
+    CodeClassFilter:
+      name: codeClass
+      in: query
+      required: false
+      description: >-
+        Narrows the page to one of the two phone-area-code classifications.
+        Omitting it returns the whole seeded list, which is the membership test
+        account-service actually performs.
+      schema:
+        $ref: '#/components/schemas/PhoneAreaCodeClass'
+
+    DateValueQuery:
+      name: date
+      in: query
+      required: true
+      description: >-
+        The date text to evaluate. Its width must match the mask it is sent with:
+        eight characters for the unseparated mask and ten for the separated one,
+        and where the mask declares separators those positions must hold a hyphen.
+        A width that does not match the mask is reported as 400, because the
+        components are read by offset.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 10
+        description: >-
+          Eight or ten characters of date text, matching the mask sent with it.
+        examples:
+          - '2022-07-18'
+          - '20220718'
+
+    DateMaskQuery:
+      name: mask
+      in: query
+      required: false
+      description: >-
+        The mask describing the date text. Defaults to the separated ten-character
+        mask when omitted. A mask this service does not recognise is answered with
+        200 carrying the unusable-pattern verdict rather than 400, for the reason
+        given on the evaluation operation.
+      schema:
+        $ref: '#/components/schemas/DateMask'
+
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Identity of the unit of work this request belongs to, propagated into the
+        service log record and echoed on the response. Supply a value to tie this
+        request to work already in progress upstream; omit it and the service
+        mints one. A value that does not fit the published bound and character set
+        is refused with 400 before any handler runs.
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+
+  headers:
+
+    XCorrelationId:
+      description: >-
+        Identity of the unit of work that produced this response. Echoed from the
+        request where the caller supplied a conforming value, and minted by the
+        service where it did not. Quote it when reporting a failure, because it is
+        the route from this response to the operational record.
+      required: true
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+
+  responses:
+
+    BadRequest:
+      description: >-
+        The request could not be accepted as supplied. This covers a malformed or
+        out-of-range path or query value, a body that fails a declared constraint,
+        a cursor that cannot be opened or was replayed against the wrong filter,
+        collection or direction, and a correlation header outside the published
+        bound. The fieldErrors array names every offending field rather than only
+        the first, for the reason recorded on the FieldError schema.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Unauthorized:
+      description: >-
+        No usable bearer token was presented: the header was absent, the token was
+        malformed, its signature or issuer did not validate, or it had expired.
+        This is distinct from 403 and from 409, and the distinction is not
+        cosmetic -- a caller acts on 401 by obtaining a token, on 403 by obtaining
+        a different one, and on 409 by changing its request. No body member names
+        the group the caller lacks, because at this point no verified identity
+        exists to compare against one.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    Forbidden:
+      description: >-
+        A valid token was presented, but it does not carry the authority this
+        operation requires. In practice this is a token holding only carddemo-user
+        sent to one of the administrative write operations, which
+        SecurityConfig.java restricts by method at its lines 99 to 106. The
+        identity is established and the request is well formed; only the authority
+        is missing, which is why this is neither 401 nor 400.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotFound:
+      description: >-
+        No row exists under the key addressed. For the three address lookups this
+        is an ANSWER rather than a failure -- absence from a seeded allow-list is
+        what the baseline's membership test reports when it evaluates false -- and
+        for the maintained collections it is the migrated form of the baseline
+        message recorded on the ReferenceMessageCatalogue schema. An empty list
+        page is never reported this way: a collection with no matching row exists
+        and is empty, so it is a 200 carrying an empty page.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    # WHY : Refactoring Rationale: the referential refusal is reported as 409 and
+    #       never as 500, and this reproduces the baseline's own treatment of it
+    #       rather than introducing a lenient one. The baseline does not regard
+    #       the refusal as a fault: at
+    #       app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1914 it branches on
+    #       the specific database code for a restricted delete, sets its
+    #       delete-requested state at line 1915, moves an instruction to the user
+    #       at line 1919 and leaves through the NORMAL exit at line 1925 --
+    #       whereas its catch-all arm at line 1926 reports a failed delete at line
+    #       1929 instead. COTRTUPC.cbl takes the same distinguished branch at its
+    #       line 1638. Two outcomes, separated by the baseline, and therefore
+    #       separated here. A 500 carrying a driver stack trace would collapse the
+    #       two and would tell a user that the system had broken when in fact it
+    #       had declined, which is the one reading the baseline rules out.
+    # WHY : Assumptions: the mapping from database state to this status is
+    #       INHERITED and is not implemented in this service. Every link of the
+    #       chain is determined elsewhere: the foreign key declared ON DELETE
+    #       RESTRICT by
+    #       db/migration/V1__reference.sql -- stated in the baseline at
+    #       app/app-transaction-type-db2/ddl/TRNTYCAT.ddl lines 6 to 7 and again
+    #       as an ALTER TABLE at that tree's ctl/DB2CREAT.ctl lines 96 to 99 --
+    #       raises SQLSTATE 23503, Spring surfaces that as
+    #       DataIntegrityViolationException, and the GlobalExceptionHandler in
+    #       common-lib turns it into this status. reference-service declares no
+    #       controller advice of its own, so the mapping cannot drift per service.
+    # WHY : Alternatives Considered: 412 for the optimistic-lock conflict, and it
+    #       was rejected. 412 states that a precondition the CLIENT supplied in a
+    #       request header was not met, which would oblige every caller to send a
+    #       conditional header and would make the version an HTTP-level entity tag
+    #       rather than a member of the record. The baseline's contract is neither
+    #       of those: it compares a before-image it captured itself and reports the
+    #       result as an ordinary screen message. 409 says what actually happened
+    #       -- the request conflicts with the stored state -- without inventing a
+    #       header contract the baseline never had.
+    # WHY : Assumptions: the two near-identical no-change sentences are BOTH
+    #       carried and must never be merged into one. The single-record screen
+    #       ends its sentence "values fetched." at
+    #       app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 180, and the list
+    #       screen ends its own "database values." at COTRTLIC.cbl line 262. They
+    #       differ by four words and by which program a user was on when they saw
+    #       one, and the migration reproduces user-visible text verbatim keyed by
+    #       the program that owns it, so collapsing them would silently retire one
+    #       of two strings the baseline distinguishes.
+    Conflict:
+      description: >-
+        The request conflicts with the state already stored. Four distinct
+        conditions reach this status and are never merged, each carrying its own
+        subordinate code and its own sentence reproduced character for character
+        from the program that owns it: a transaction type whose delete is refused
+        while categories still reference it; a row that changed after the caller
+        read it; a row that could not be taken for update; and a key that already
+        exists on create. A caller acts differently on each, which is why the
+        subordinate code is required rather than optional -- the sentence alone
+        cannot always discriminate, because the baseline carries byte-identical
+        text for conditions it nonetheless treats separately.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReferenceConflictError'
+          examples:
+            childRecordsExist:
+              summary: The type still has categories beneath it
+              description: >-
+                The referential refusal. The sentence is reproduced character for
+                character from app/app-transaction-type-db2/cbl/COTRTLIC.cbl line
+                1919, retaining its closing colon, which the baseline leaves in
+                place because it prefixes the database diagnostic that follows.
+                The field entry names the type code, so that a browser client can
+                mark the row it refused to delete.
+              value:
+                code: CARDDEMO-0409
+                secondaryCode: REFERENCE-CHILD-RECORDS-EXIST
+                message: 'Please delete associated child records first:'
+                severity: WARNING
+                subsystem: RELATIONAL
+                status: 409
+                correlationId: 4F1C0E423A554D219B7E6C0F
+                path: /api/v1/reference/transaction-types/01
+                timestamp: '2026-08-06 09:16:44.902355'
+                fieldErrors:
+                  - field: typeCd
+                    state: NOT_OK
+                    message: 'Please delete associated child records first:'
+                abend: null
+                conflictingVersion: null
+            recordChangedByAnotherCaller:
+              summary: The row changed after the caller read it
+              description: >-
+                The optimistic-concurrency conflict. The sentence is reproduced
+                character for character from
+                app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 184, retaining
+                its two-word 'some one' and its absence of a closing full stop.
+                The version now stored is returned in conflictingVersion so that
+                a caller can re-read, compare and resubmit without guessing.
+              value:
+                code: CARDDEMO-0409
+                secondaryCode: REFERENCE-DATA-CHANGED
+                message: Record changed by some one else. Please review
+                severity: WARNING
+                subsystem: RELATIONAL
+                status: 409
+                correlationId: 6D3E88B17C024A94B5DF1E47
+                path: /api/v1/reference/transaction-types/01
+                timestamp: '2026-08-06 09:17:02.114820'
+                fieldErrors:
+                  - field: version
+                    state: NOT_OK
+                    message: Record changed by some one else. Please review
+                abend: null
+                conflictingVersion: 4
+            noChangeDetected:
+              summary: The submitted values matched the values already stored
+              description: >-
+                The no-change outcome, carried with the wording of the
+                single-record maintenance screen at
+                app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 180 and its
+                closing full stop. The list screen's near-identical sentence at
+                COTRTLIC.cbl line 262 is a DIFFERENT string and is published
+                separately on the ReferenceMessageCatalogue schema; the two are
+                not interchangeable.
+              value:
+                code: CARDDEMO-0409
+                secondaryCode: REFERENCE-NO-CHANGE-DETECTED
+                message: No change detected with respect to values fetched.
+                severity: WARNING
+                subsystem: APPLICATION
+                status: 409
+                correlationId: 9A2B41CE77D0463FA0C5E8B1
+                path: /api/v1/reference/transaction-types/01
+                timestamp: '2026-08-06 09:18:20.550013'
+                fieldErrors:
+                  - field: description
+                    state: NOT_OK
+                    message: No change detected with respect to values fetched.
+                abend: null
+                conflictingVersion: 3
+
+    InternalServerError:
+      description: >-
+        The request could not be completed for a reason the service does not
+        attribute to the caller. Nothing in the body names an internal detail: the
+        correlation identifier is the route to the operational record, which is
+        where diagnostic information lives. None of the outcomes the baseline
+        distinguishes reaches this status -- the referential refusal, the
+        concurrency conflict, the failed lock and the unmatched key are each
+        reported with their own status above -- so a response here means an
+        unclassified fault and not a business outcome.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+
+  schemas:
+
+    # WHY : Assumptions: two digits held as CHARACTERS, and every source in the
+    #       baseline agrees, so unlike the category code below there is no tension
+    #       to resolve here. The copybook declares it alphanumeric at
+    #       app/cpy/CVTRA03Y.cpy line 5; the Db2 table declares CHAR(2) at
+    #       app/app-transaction-type-db2/ddl/TRNTYPE.ddl line 2; and the generated
+    #       host structure carries it as a character field at that tree's
+    #       dcl/DCLTRTYP.dcl line 38. The digits-only pattern is not an invention
+    #       either: the baseline refuses a non-numeric filter value with the
+    #       message at app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1116,
+    #       which names a two-digit number outright.
+    TransactionTypeCode:
+      type: string
+      minLength: 2
+      maxLength: 2
+      pattern: '^[0-9]{2}$'
+      description: >-
+        A transaction type code: exactly two digits, retaining any leading zero.
+        Seven values are seeded, '01' through '07', mapping to purchase, payment,
+        credit, authorization, refund, reversal and adjustment.
+      examples:
+        - '01'
+        - '07'
+
+    # WHY : Assumptions: four digits held as a STRING with a digits-only pattern,
+    #       never an integer, and this is the one field in this context where the
+    #       baseline's own sources disagree about type. The VSAM-lineage copybooks
+    #       declare it NUMERIC -- app/cpy/CVTRA04Y.cpy line 7 and
+    #       app/cpy/CVTRA02Y.cpy line 8 both give it a numeric picture of four
+    #       digits -- while the Db2 objects that the two programs this service
+    #       replaces actually operate on declare it as CHARACTER, and they are
+    #       taken as authoritative here for that reason. Four sources carry the
+    #       character form: (1) app/app-transaction-type-db2/ddl/TRNTYCAT.ddl line
+    #       3 declares CHAR(4) NOT NULL; (2) that tree's ctl/DB2CREAT.ctl restates
+    #       the same width when it creates the table; (3) its dcl/DCLTRCAT.dcl
+    #       declares CHAR(4) in the SQL at line 30 and generates the COBOL host
+    #       variable as an alphanumeric field at lines 42 to 43 -- a character host
+    #       variable, which is what the programs read and write through; and (4)
+    #       the sibling db/migration/V1__reference.sql declares cat_cd CHAR(4),
+    #       recording six corroborating reasons of its own at that column.
+    #       An integer would drop the leading zeros every one of those sources
+    #       depends on, turning '0001' into 1, and the seed extract
+    #       app/data/ASCII/trancatg.txt would then no longer locate its own rows,
+    #       because it stores the key by positional concatenation as '010001'. The
+    #       divergence between the copybook picture and the type used here is
+    #       recorded in docs/architecture/cobol-to-service-traceability.md.
+    TransactionCategoryCode:
+      type: string
+      minLength: 4
+      maxLength: 4
+      pattern: '^[0-9]{4}$'
+      description: >-
+        A transaction category code: exactly four digits, retaining leading zeros,
+        and unique only within its parent transaction type. It is a character
+        field whose content happens to be digits, and it is never arithmetic --
+        nothing in the migrated system adds to it or compares it numerically.
+      examples:
+        - '0001'
+        - '0005'
+
+    AccountGroupId:
+      type: string
+      minLength: 1
+      maxLength: 10
+      pattern: '^[A-Z0-9]{1,10}$'
+      description: >-
+        An account group identifier, up to ten characters, naming the pricing
+        group whose rates apply to an account. Send it unpadded: the stored column
+        is ten characters and ignores trailing blanks on comparison, so 'DEFAULT'
+        and its blank-filled form address the same rows. The value 'DEFAULT' is
+        reserved for the fallback group described on the rate lookup.
+      examples:
+        - A000000000
+        - DEFAULT
+
+    ReferenceDescription:
+      type: string
+      minLength: 1
+      maxLength: 50
+      description: >-
+        The descriptive text of a transaction type or category, up to fifty
+        characters. Trailing blanks are not part of the value: the baseline holds
+        it in a fifty-byte field padded to a positional record length, and the
+        stored column is variable-length for exactly that reason, so a description
+        is returned trimmed. The baseline restricts this text to letters and
+        spaces on its maintenance screen, reporting the wording recorded on the
+        ReferenceMessageCatalogue schema when a value fails that test.
+      examples:
+        - Purchase
+        - Regular Sales Draft
+
+    # WHY : Alternatives Considered: the rate is a JSON STRING, and a JSON number
+    #       was rejected outright. Most clients parse a JSON number into an
+    #       IEEE-754 binary double, and a rate such as 15.00 or 2.50 has no exact
+    #       binary representation, so a value that left this service exact would
+    #       arrive slightly wrong -- and it would arrive wrong at the boundary a
+    #       user actually sees. A string is parsed by the client into whatever
+    #       decimal type it chooses and cannot lose a digit in transit.
+    # WHY : Assumptions: this rate is an arithmetic OPERAND and not a value merely
+    #       displayed, which is what raises the cost of that inexactness from
+    #       cosmetic to monetary. app/cbl/CBACT04C.cbl consumes it in the interest
+    #       computation at its lines 464 to 465, multiplying a category balance by
+    #       this rate and only then dividing by twelve hundred -- multiply first,
+    #       divide second, at full precision -- and accumulates the outcome at line
+    #       467 into an amount that is written as a generated interest transaction
+    #       and posts to a balance a statement reports. An error introduced here
+    #       enters that multiplication before the division and settles into money
+    #       a customer is charged.
+    # WHY : Assumptions: the scale is not chosen here. app/cpy/CVTRA02Y.cpy line 9
+    #       declares the rate with four integer digits and two fractional, which
+    #       db/migration/V1__reference.sql carries as NUMERIC(6,2) and the Java
+    #       layer as a BigDecimal of scale 2; the serialisation is centralised in
+    #       services/common-lib/src/main/java/com/carddemo/common/money/MoneyModule.java
+    #       so that no service can emit a different form. The pattern below admits
+    #       exactly that shape and no other, so a value of a third scale is a
+    #       contract violation rather than a rounding question.
+    # WHY : Assumptions: even the seed data is already exact decimal rather than a
+    #       readable number, which is independent reinforcement rather than a
+    #       coincidence. app/data/ASCII/discgrp.txt stores each rate as zoned
+    #       decimal with a sign overpunch in its trailing byte, so the six
+    #       characters '00150{' denote positive fifteen and no cents; read as text
+    #       it is not a number at all.
+    InterestRate:
+      type: string
+      pattern: '^-?[0-9]{1,4}\.[0-9]{2}$'
+      description: >-
+        An annual interest rate as an exact decimal string, with up to four
+        integer digits and always exactly two fractional digits. The two
+        fractional digits are always present, so fifteen percent is '15.00' and
+        never '15' or '15.0'. A leading minus sign is admitted because the stored
+        column is signed, matching the signed picture the baseline declares. Parse
+        it into a decimal type, never into a float or a double.
+      examples:
+        - '15.00'
+        - '25.00'
+
+    PhoneAreaCodeValue:
+      type: string
+      minLength: 3
+      maxLength: 3
+      pattern: '^[0-9]{3}$'
+      description: >-
+        A three-digit North American Numbering Plan area code, retaining leading
+        zeros. Held as characters rather than as a number because the baseline
+        compares a three-byte field against three-byte literals.
+      examples:
+        - '201'
+        - '800'
+
+    PhoneAreaCodeClass:
+      type: string
+      enum:
+        - G
+        - E
+      description: >-
+        Which of the two baseline sub-lists an area code belongs to. 'G' is the
+        general-purpose list of four hundred and ten codes at
+        app/cpy/CSLKPCDY.cpy line 521; 'E' is the easily-recognisable list of
+        eighty codes at line 931. The two partition the four-hundred-and-ninety
+        code list at line 30 exactly -- they sum to it and share no member -- which
+        is why one classification suffices where a pair of independent flags would
+        have admitted rows that are in both lists or neither, states the copybook
+        cannot express. Every accepted code carries one of these two values and
+        none carries a third; db/migration/V1__reference.sql enforces that with a
+        check constraint.
+      examples:
+        - G
+        - E
+
+    StateCodeValue:
+      type: string
+      minLength: 2
+      maxLength: 2
+      pattern: '^[A-Z]{2}$'
+      description: >-
+        A two-character state code in upper case. The seeded list of fifty-six
+        admits the states, the district, the territories and the military mailing
+        codes the postal service treats alike, so it is longer than the fifty a
+        reader might expect.
+      examples:
+        - AL
+        - 'NY'
+
+    StateZipPrefixValue:
+      type: string
+      minLength: 4
+      maxLength: 4
+      pattern: '^[A-Z]{2}[0-9]{2}$'
+      description: >-
+        A state code followed by the two leading digits of a postal code, as one
+        four-character value with no separator, in that order. It is one value
+        rather than two fields because the baseline builds the four bytes and tests
+        the pair as a unit at app/cpy/CSLKPCDY.cpy line 1073; splitting it would
+        oblige every reader to reassemble it before comparing. The postal digits
+        are characters, so a prefix beginning with zero is preserved.
+      examples:
+        - AL35
+        - NY10
+
+    RecordVersion:
+      type: integer
+      format: int64
+      minimum: 0
+      description: >-
+        The version of the stored row, incremented by the service on every
+        successful replace. Read it with a record and send it back with the
+        replace, so that a write against a row someone else has moved on is
+        refused rather than silently overwriting their change. It is a version
+        counter and not a timestamp: comparing two values tells a caller only that
+        they differ, never when or by whom.
+      examples:
+        - 1
+        - 4
+
+    CursorToken:
+      type: string
+      maxLength: 256
+      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
+      description: >-
+        An opaque paging position minted by this service. It stands for a key in
+        the ordered set without disclosing it, and it is sealed to the collection,
+        the filters and the direction it was issued for, so replaying it against a
+        different collection, a changed filter or the opposite direction is refused
+        with 400 rather than answered with a page the caller did not ask for. Treat
+        it as a value to echo back unchanged and never parse, construct or
+        compare: no part of it is a type code, a category code or a row ordinal.
+
+    PageDirection:
+      type: string
+      enum:
+        - next
+        - previous
+      default: next
+      description: >-
+        Which side of a supplied cursor to read. These two lower-case values are
+        the single paging vocabulary of this migration -- the sibling service
+        contracts publish the same pair, and the browser client sends it -- so a
+        client written against one collection pages every other one the same way.
+      examples:
+        - next
+        - previous
+
+    CorrelationId:
+      type: string
+      maxLength: 24
+      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      description: >-
+        Identity of one unit of work. At most twenty-four characters drawn from the
+        ASCII letters, the digits, the hyphen, the underscore and the full stop. A
+        value this service mints is twenty-four upper-case hexadecimal characters;
+        a value a caller supplies need only fit the bound and the character set, so
+        that an identity already carried from an upstream system can be propagated
+        rather than replaced. The empty string appears only inside an error body,
+        and only for a failure raised before any identity had been established.
+      examples:
+        - 4F1C0E423A554D219B7E6C0F
+
+
+    TransactionType:
+      type: object
+      description: >-
+        One transaction type as stored: its code, its description and the version
+        token a replace must carry. This is the migrated form of the sixty-byte
+        record app/cpy/CVTRA03Y.cpy declares, less the eight-byte trailing filler
+        at its line 7 -- the one filler of that record, dropped because it is
+        padding to a positional record length rather than data.
+      required:
+        - typeCd
+        - description
+        - version
+      additionalProperties: false
+      properties:
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The code identifying this type, and the value a category's parent
+            reference carries.
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            What this transaction type means to a user, trimmed of the padding the
+            baseline record carries.
+        version:
+          allOf:
+            - $ref: '#/components/schemas/RecordVersion'
+          description: >-
+            The version of this row when it was read. Send it back on a replace.
+      examples:
+        - typeCd: '01'
+          description: Purchase
+          version: 1
+
+    TransactionTypeCreateRequest:
+      type: object
+      description: >-
+        The type to create. No version member appears, because a row that does not
+        yet exist has no version to compare against -- the create is refused on a
+        duplicate key instead.
+      required:
+        - typeCd
+        - description
+      additionalProperties: false
+      properties:
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The code to create. Supplied rather than generated, because it is a
+            meaningful business code that appears in stored transaction records.
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            What the new type means to a user.
+      examples:
+        - typeCd: '08'
+          description: Chargeback
+
+    TransactionTypeReplaceRequest:
+      type: object
+      description: >-
+        The replacement description together with the version read with the
+        record. The code is absent by design: it is the primary key and the value
+        the category key is built from, so it is addressed in the path and cannot
+        be changed by a replace.
+      required:
+        - description
+        - version
+      additionalProperties: false
+      properties:
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            The description to store in place of the one currently held.
+        version:
+          allOf:
+            - $ref: '#/components/schemas/RecordVersion'
+          description: >-
+            The version read with the record. A value that no longer matches the
+            stored row is reported as 409 rather than overwriting the change
+            someone else made.
+      examples:
+        - description: Purchase of goods
+          version: 1
+
+    TransactionCategory:
+      type: object
+      description: >-
+        One transaction category as stored: the pair of codes that identifies it,
+        its description and its version token. This is the migrated form of the
+        sixty-byte record app/cpy/CVTRA04Y.cpy declares, less the four-byte
+        trailing filler at its line 9 -- the one filler of that record. The two
+        code members correspond to the fields the copybook groups together at its
+        line 5, which is why they form the composite key rather than either one
+        standing alone.
+      required:
+        - typeCd
+        - catCd
+        - description
+        - version
+      additionalProperties: false
+      properties:
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The transaction type this category belongs to. It must name an
+            existing type, which the foreign key enforces.
+        catCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionCategoryCode'
+          description: >-
+            The category code, unique within its type rather than globally.
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            What this category means to a user.
+        version:
+          allOf:
+            - $ref: '#/components/schemas/RecordVersion'
+          description: >-
+            The version of this row when it was read. Send it back on a replace.
+      examples:
+        - typeCd: '01'
+          catCd: '0001'
+          description: Regular Sales Draft
+          version: 1
+
+    TransactionCategoryCreateRequest:
+      type: object
+      description: >-
+        The category to create, including the type it belongs beneath. The type
+        must already exist: a category naming an absent type is refused with 409
+        rather than stored as an orphan.
+      required:
+        - typeCd
+        - catCd
+        - description
+      additionalProperties: false
+      properties:
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The existing transaction type to create this category beneath.
+        catCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionCategoryCode'
+          description: >-
+            The category code to create, unique within that type.
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            What the new category means to a user.
+      examples:
+        - typeCd: '01'
+          catCd: '0006'
+          description: Contactless Sales Draft
+
+    TransactionCategoryReplaceRequest:
+      type: object
+      description: >-
+        The replacement description together with the version read with the
+        record. Neither code appears, for the same reason the type code is absent
+        from its own replace request: together they are the primary key and are
+        addressed in the path.
+      required:
+        - description
+        - version
+      additionalProperties: false
+      properties:
+        description:
+          allOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+          description: >-
+            The description to store in place of the one currently held.
+        version:
+          allOf:
+            - $ref: '#/components/schemas/RecordVersion'
+          description: >-
+            The version read with the record.
+      examples:
+        - description: Regular Sales Draft Adjusted
+          version: 2
+
+    DisclosureGroupRate:
+      type: object
+      description: >-
+        The interest rate that applies to a combination of account group,
+        transaction type and category, together with a statement of which account
+        group actually supplied it. This is the migrated form of the fifty-byte
+        record app/cpy/CVTRA02Y.cpy declares, less the twenty-eight-byte trailing
+        filler at its line 10 -- the one filler of that record -- with two members
+        added that the baseline has no room for, because the baseline conveys the
+        same information by having overwritten its own key field before re-reading.
+      required:
+        - requestedAcctGroupId
+        - appliedAcctGroupId
+        - tranTypeCd
+        - tranCatCd
+        - interestRate
+        - defaultGroupApplied
+      additionalProperties: false
+      properties:
+        requestedAcctGroupId:
+          allOf:
+            - $ref: '#/components/schemas/AccountGroupId'
+          description: >-
+            The account group the caller asked about, echoed back unchanged.
+        # WHY : Refactoring Rationale: the group that answered is reported
+        #       EXPLICITLY, where the baseline leaves it implicit. On a miss
+        #       app/cbl/CBACT04C.cbl overwrites its own group-id field with the
+        #       literal 'DEFAULT' at line 437 before re-reading, so after the
+        #       second read the field no longer records which group was asked for
+        #       and nothing downstream can tell a fallback rate from a specific
+        #       one. Returning both values keeps the same rate selection while
+        #       making the substitution visible, so a caller reconciling a charge
+        #       against a rate table is not left inferring it. The divergence is
+        #       recorded in docs/architecture/cobol-to-service-traceability.md.
+        appliedAcctGroupId:
+          allOf:
+            - $ref: '#/components/schemas/AccountGroupId'
+          description: >-
+            The account group whose row supplied the rate returned. Equal to
+            requestedAcctGroupId when that group had a row of its own, and
+            'DEFAULT' when the fallback answered.
+        tranTypeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The transaction type of the rate returned, echoed back unchanged. The
+            fallback substitutes only the account group, never this.
+        tranCatCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionCategoryCode'
+          description: >-
+            The transaction category of the rate returned, echoed back unchanged.
+        interestRate:
+          allOf:
+            - $ref: '#/components/schemas/InterestRate'
+          description: >-
+            The annual rate that applies, as an exact decimal string. It is the
+            operand of the interest computation, so parse it into a decimal type.
+        defaultGroupApplied:
+          type: boolean
+          description: >-
+            Whether the fallback answered. True exactly when appliedAcctGroupId is
+            'DEFAULT' and the caller asked about a different group; false when the
+            requested group had its own row, including when the caller asked about
+            'DEFAULT' directly.
+      examples:
+        - requestedAcctGroupId: A000000000
+          appliedAcctGroupId: A000000000
+          tranTypeCd: '01'
+          tranCatCd: '0001'
+          interestRate: '15.00'
+          defaultGroupApplied: false
+        - requestedAcctGroupId: Z999999999
+          appliedAcctGroupId: DEFAULT
+          tranTypeCd: '01'
+          tranCatCd: '0002'
+          interestRate: '25.00'
+          defaultGroupApplied: true
+
+    UsPhoneAreaCode:
+      type: object
+      description: >-
+        One accepted phone area code and its classification. The presence of the
+        row is the whole of the contract: the baseline holds these as a
+        condition-name list over a three-byte field rather than as records, so
+        membership is the only property there is to report.
+      required:
+        - areaCd
+        - codeClass
+      additionalProperties: false
+      properties:
+        areaCd:
+          allOf:
+            - $ref: '#/components/schemas/PhoneAreaCodeValue'
+          description: >-
+            The accepted area code.
+        codeClass:
+          allOf:
+            - $ref: '#/components/schemas/PhoneAreaCodeClass'
+          description: >-
+            Which of the two baseline sub-lists this code belongs to.
+      examples:
+        - areaCd: '201'
+          codeClass: G
+        - areaCd: '800'
+          codeClass: E
+
+    UsState:
+      type: object
+      description: >-
+        One accepted state code. A single-member object rather than a bare string,
+        so that the shape stays stable if the seeded list ever carries an attribute
+        the way the area-code list carries its classification.
+      required:
+        - stateCd
+      additionalProperties: false
+      properties:
+        stateCd:
+          allOf:
+            - $ref: '#/components/schemas/StateCodeValue'
+          description: >-
+            The accepted state code.
+      examples:
+        - stateCd: AL
+
+    UsStateZipPrefix:
+      type: object
+      description: >-
+        One accepted state and postal-prefix combination, carried as the single
+        concatenated value the baseline tests.
+      required:
+        - stateZipCd
+      additionalProperties: false
+      properties:
+        stateZipCd:
+          allOf:
+            - $ref: '#/components/schemas/StateZipPrefixValue'
+          description: >-
+            The accepted combination of state code and two leading postal digits.
+      examples:
+        - stateZipCd: AL35
+
+
+    # WHY : Assumptions: every page envelope in this document carries exactly the
+    #       FOUR members the shared response type declares -- items, firstKey,
+    #       lastKey and hasNext, at
+    #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
+    #       -- in that order, and every one of them is required. Publishing a fifth
+    #       would describe a body this service cannot send: the shared type has no
+    #       such component, so a serialisation of it omits the member, a generated
+    #       client would receive an accessor that is always absent, and a strict
+    #       client would reject every valid response for missing a member the
+    #       contract declared. Absence of a boundary is spelled as a null value on
+    #       a present member, never as a missing member, which is why all four are
+    #       required and not only items.
+    # WHY : Alternatives Considered: adding a hasPrev member beside hasNext, for
+    #       symmetry. Rejected because it would be derivable from firstKey being
+    #       non-null and would therefore be a second statement of one fact -- and
+    #       two members that must agree are exactly what allows a page to report a
+    #       direction it cannot actually supply. Backward availability is read from
+    #       firstKey; there is one source for it.
+    # WHY : Alternatives Considered: a total row count or page count. Rejected
+    #       because neither is knowable without a second query over the whole
+    #       filtered set, and neither would stay true while it travelled: the set
+    #       is maintained through the write operations in this document. Forward
+    #       availability is settled the way the baseline settles it, by reading one
+    #       row beyond the page and reporting only whether that row existed.
+    TransactionTypePage:
+      type: object
+      description: >-
+        One page of transaction types together with everything needed to walk the
+        ordered set by key in either direction. When the filters match no row the
+        page is empty and both cursors are null; the baseline reports that
+        condition with two different sentences depending on which of its screens a
+        user was on, both published on the ReferenceMessageCatalogue schema.
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: >-
+            The transaction types of this page, in ascending type-code order.
+            Empty, never null, when the set is exhausted or the filters matched
+            nothing. Its length must not be used to infer the end of the set --
+            read hasNext for that.
+          items:
+            $ref: '#/components/schemas/TransactionType'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            Names the first row actually returned in items, or null exactly when
+            items is empty. It is also the position a caller pages backward from:
+            send it as the cursor with direction previous. Null here means there is
+            no backward position to send, which is the one case a caller handles
+            rather than retries.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            Names the last row actually returned in items -- never the extra row
+            read to settle hasNext -- or null exactly when items is empty. It is
+            also the position a caller pages forward from: send it as the cursor
+            with direction next.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page follows this one, settled by reading one row
+            beyond the page and observing whether that row exists, never from any
+            tally. When it is true, lastKey is present. When it is false, a caller
+            that presses forward anyway receives the baseline's own end-of-set
+            wording, published on the ReferenceMessageCatalogue schema.
+      examples:
+        - items:
+            - typeCd: '01'
+              description: Purchase
+              version: 1
+            - typeCd: '02'
+              description: Payment
+              version: 1
+          firstKey: v1.dHJhbnNhY3Rpb24tdHlwZXM.Zmlyc3RLZXlUb2tlblNhbXBsZVZhbHVlXzAwMDAwMDAx
+          lastKey: v1.dHJhbnNhY3Rpb24tdHlwZXM.bGFzdEtleVRva2VuU2FtcGxlVmFsdWVfXzAwMDAwMDAy
+          hasNext: true
+
+    TransactionCategoryPage:
+      type: object
+      description: >-
+        One page of transaction categories, ordered by type code and then by
+        category code. The envelope carries the same four members as every other
+        page in this document, and its cursors are sealed to this collection, so a
+        cursor issued here cannot be replayed against the transaction-type list.
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: >-
+            The categories of this page, ordered by type code and then category
+            code. Empty, never null, when the set is exhausted or the filters
+            matched nothing.
+          items:
+            $ref: '#/components/schemas/TransactionCategory'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The backward paging position over the composite key, or null when items
+            is empty.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The forward paging position over the composite key, or null when items
+            is empty.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page follows, settled by reading one row beyond the
+            page.
+      examples:
+        - items:
+            - typeCd: '01'
+              catCd: '0001'
+              description: Regular Sales Draft
+              version: 1
+          firstKey: v1.dHJhbnNhY3Rpb24tY2F0ZWdvcmllcw.Zmlyc3RDYXRLZXlTYW1wbGVWYWx1ZV8wMDAwMDE
+          lastKey: v1.dHJhbnNhY3Rpb24tY2F0ZWdvcmllcw.bGFzdENhdEtleVNhbXBsZVZhbHVlXzAwMDAwMDE
+          hasNext: true
+
+    UsPhoneAreaCodePage:
+      type: object
+      description: >-
+        One page of accepted phone area codes with their classifications, in
+        ascending code order. Four hundred and ninety codes are seeded in total, so
+        a caller reading the whole list walks several pages.
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: >-
+            The area codes of this page, in ascending order. Empty, never null,
+            when the set is exhausted or the classification filter matched nothing.
+          items:
+            $ref: '#/components/schemas/UsPhoneAreaCode'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The backward paging position, or null when items is empty.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The forward paging position, or null when items is empty.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page of area codes follows.
+      examples:
+        - items:
+            - areaCd: '201'
+              codeClass: G
+          firstKey: v1.dXMtcGhvbmUtYXJlYS1jb2Rlcw.Zmlyc3RBcmVhS2V5U2FtcGxlVmFsdWVfXzAwMDIwMQ
+          lastKey: v1.dXMtcGhvbmUtYXJlYS1jb2Rlcw.bGFzdEFyZWFLZXlTYW1wbGVWYWx1ZV9fXzAwMDIxMg
+          hasNext: true
+
+    UsStatePage:
+      type: object
+      description: >-
+        One page of accepted state codes in ascending order. Fifty-six are seeded
+        in total.
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: >-
+            The state codes of this page, in ascending order. Empty, never null,
+            when the set is exhausted.
+          items:
+            $ref: '#/components/schemas/UsState'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The backward paging position, or null when items is empty.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The forward paging position, or null when items is empty.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page of state codes follows.
+      examples:
+        - items:
+            - stateCd: AL
+            - stateCd: AK
+          firstKey: v1.dXMtc3RhdGVz.Zmlyc3RTdGF0ZUtleVNhbXBsZVZhbHVlX19fX19fX19fX0FL
+          lastKey: v1.dXMtc3RhdGVz.bGFzdFN0YXRlS2V5U2FtcGxlVmFsdWVfX19fX19fX19fQVo
+          hasNext: true
+
+    UsStateZipPrefixPage:
+      type: object
+      description: >-
+        One page of accepted state and postal-prefix combinations in ascending
+        order. Two hundred and forty are seeded in total.
+      required:
+        - items
+        - firstKey
+        - lastKey
+        - hasNext
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: >-
+            The combinations of this page, in ascending order. Empty, never null,
+            when the set is exhausted.
+          items:
+            $ref: '#/components/schemas/UsStateZipPrefix'
+        firstKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The backward paging position, or null when items is empty.
+        lastKey:
+          oneOf:
+            - $ref: '#/components/schemas/CursorToken'
+            - type: 'null'
+          description: >-
+            The forward paging position, or null when items is empty.
+        hasNext:
+          type: boolean
+          description: >-
+            Whether a further page of combinations follows.
+      examples:
+        - items:
+            - stateZipCd: AL35
+          firstKey: v1.dXMtc3RhdGUtemlwLXByZWZpeGVz.Zmlyc3RaaXBLZXlTYW1wbGVWYWx1ZUFMMzU
+          lastKey: v1.dXMtc3RhdGUtemlwLXByZWZpeGVz.bGFzdFppcEtleVNhbXBsZVZhbHVlX0FMMzY
+          hasNext: true
+
+
+    # WHY : Assumptions: the mask is a genuine PARAMETER rather than a constant,
+    #       and that is inherited from the baseline rather than introduced. The
+    #       date utility app/cbl/CSUTLDTC.cbl receives the mask as its second
+    #       argument, declared beside the date at its lines 84 to 86 and taken in
+    #       at line 88, and hands it to the platform date service through the
+    #       invocation at lines 116 to 120. A service that hard-coded one mask
+    #       could not be the migrated form of a utility whose caller chooses one.
+    # WHY : Assumptions: a mask parameter exists at all because the baseline
+    #       carries TWO INCOMPATIBLE ten-character date shapes, and neither is
+    #       privileged over the other. app/app-vsam-mq/cbl/CODATE01.cbl formats
+    #       its system date through the platform call at its lines 347 to 353,
+    #       requesting the month-day-year ordering at line 349 with a hyphen
+    #       separator at line 350, which yields a US-ordered value in the
+    #       ten-character field declared at its line 37. The reference-data
+    #       maintenance screen
+    #       app/app-transaction-type-db2/cbl/COTRTUPC.cbl instead slices its own
+    #       ten-character field year-first, through the redefinition at its lines
+    #       108 to 114. The same width carries two different orderings, so a value
+    #       moved between the two without conversion would be misread rather than
+    #       rejected -- which is the whole reason date conversion is a published
+    #       operation in this context.
+    # WHY : Assumptions: the two admitted values are exactly the two the shared
+    #       validator publishes, and are not chosen here. They are DATE_FORMAT_MASK
+    #       and BASELINE_DATE_FORMAT_MASK at
+    #       services/common-lib/src/main/java/com/carddemo/common/validation/DateEditValidator.java
+    #       lines 627 and 635. Admitting a third here -- the US ordering above, for
+    #       instance -- would document a request that validator answers as an
+    #       unusable pattern, so the contract would promise a conversion the
+    #       migrated system does not perform. The US ordering is not lost: it
+    #       survives as the rendering of the asynchronous reply, described on the
+    #       AsyncDateReplyContract schema.
+    DateMask:
+      type: string
+      enum:
+        - YYYY-MM-DD
+        - YYYYMMDD
+      default: YYYY-MM-DD
+      description: >-
+        The mask describing a date text. The separated form is ten characters and
+        requires a hyphen at each separator position; the unseparated form is eight
+        characters of digits. The date sent with a mask must be that mask's width,
+        and a width that does not match is a request error. A mask outside this set
+        is not a request error: it is answered with the unusable-pattern verdict,
+        because the baseline date service declares a condition for exactly that
+        case and returns it like any other feedback.
+      examples:
+        - YYYY-MM-DD
+        - YYYYMMDD
+
+    DateFeedbackCode:
+      type: string
+      enum:
+        - INVALID_DATE
+        - INSUFFICIENT_DATA
+        - BAD_DATE_VALUE
+        - INVALID_ERA
+        - UNSUPP_RANGE
+        - INVALID_MONTH
+        - BAD_PIC_STRING
+        - NON_NUMERIC_DATA
+        - YEAR_IN_ERA_ZERO
+        - OTHER
+      description: >-
+        The outcome of a date evaluation, named as the baseline names it.
+
+
+        There is a trap in the first value and it is the baseline's own, carried
+        across unaltered: INVALID_DATE is the ACCEPTING outcome. It corresponds to
+        the all-zero feedback the platform date service returns when a date is
+        usable, and its severity is zero, but the condition name the baseline
+        attaches to that feedback reads as though it meant the opposite. Read the
+        severity, or read the verdict text, and never read acceptance off this
+        name. The naming is preserved rather than improved so that this contract,
+        the shared validator and the baseline all use one vocabulary; the hazard is
+        recorded in docs/architecture/cobol-to-service-traceability.md.
+
+
+        OTHER is declared because the shared validator declares it, but this
+        operation does not report it: it arises only where a coarser stand-in
+        returns feedback matching none of the nine real outcomes.
+      examples:
+        - INVALID_DATE
+        - INVALID_MONTH
+
+    DateEvaluationResult:
+      type: object
+      description: >-
+        The structured verdict of one date evaluation. Its five members are the
+        five variable fields of the eighty-character result
+        app/cbl/CSUTLDTC.cbl returns, which that program declares at its lines 42
+        to 55 interleaved with constant labels at lines 45, 51 and 54; the labels
+        are not reproduced, because they are presentation for a positionally
+        addressed field rather than data. The submitted date and mask are echoed
+        back so that
+        a verdict remains interpretable after it has been logged away from the
+        request that produced it.
+      required:
+        - feedbackCode
+        - severity
+        - messageNumber
+        - verdict
+        - date
+        - mask
+      additionalProperties: false
+      properties:
+        feedbackCode:
+          allOf:
+            - $ref: '#/components/schemas/DateFeedbackCode'
+          description: >-
+            Which outcome the evaluation reached. Note the naming trap recorded on
+            that schema before branching on this value.
+        severity:
+          type: integer
+          format: int32
+          description: >-
+            Zero when the date was accepted, three when it was rejected, and twelve
+            for feedback the shared validator does not recognise. These three
+            values are the baseline's own severity ladder, published as
+            SEVERITY_VALID, SEVERITY_ERROR and SEVERITY_UNRECOGNISED at
+            DateEditValidator.java lines 651 to 653. This is the member to branch
+            on: zero means usable and anything else means not.
+          examples:
+            - 0
+            - 3
+        messageNumber:
+          type: integer
+          format: int32
+          description: >-
+            The message number the platform date service reported, zero when the
+            date was accepted. The rejecting numbers run from 2507 to 2521 and each
+            pairs with exactly one feedback code, so this member and feedbackCode
+            never disagree.
+          examples:
+            - 0
+            - 2517
+        verdict:
+          type: string
+          maxLength: 15
+          description: >-
+            The verdict text for this outcome, as the baseline words it -- for
+            example the accepting outcome's own wording, or a named reason for a
+            rejection. Fifteen characters is the declared width of the field the
+            baseline carries it in, at app/cbl/CSUTLDTC.cbl line 49, so the longer
+            texts occupy it exactly and the shorter ones are returned without the
+            padding that field would hold.
+          examples:
+            - Date is valid
+            - Invalid month
+        date:
+          type: string
+          minLength: 8
+          maxLength: 10
+          description: >-
+            The date text submitted, echoed back unchanged, matching the field the
+            baseline echoes at app/cbl/CSUTLDTC.cbl line 52.
+          examples:
+            - '2022-07-18'
+        mask:
+          allOf:
+            - $ref: '#/components/schemas/DateMask'
+          description: >-
+            The mask the evaluation used, echoed back so that a caller which
+            omitted it learns which default applied. It matches the field the
+            baseline echoes at app/cbl/CSUTLDTC.cbl line 55.
+      examples:
+        - feedbackCode: INVALID_DATE
+          severity: 0
+          messageNumber: 0
+          verdict: Date is valid
+          date: '2022-07-18'
+          mask: YYYY-MM-DD
+        - feedbackCode: INVALID_MONTH
+          severity: 3
+          messageNumber: 2517
+          verdict: Invalid month
+          date: '2022-13-18'
+          mask: YYYY-MM-DD
+
+    # WHY : Assumptions: this schema DOCUMENTS a message contract rather than
+    #       declaring an HTTP payload, and it is published alongside the
+    #       synchronous operation above rather than instead of it, because the
+    #       baseline offers both and retiring either would strand a caller.
+    #       app/app-vsam-mq/cbl/CODATE01.cbl answers over a queue, and the
+    #       consumers already written against it parse a positional buffer of a
+    #       known width; the browser client needs JSON over HTTP. The two carry the
+    #       same evaluation and neither is derived from the other.
+    # WHY : Assumptions: the width is one thousand bytes and never varies.
+    #       CODATE01.cbl declares its reply buffer at that width on its line 107,
+    #       alongside three sibling buffers of the same width at lines 105, 106 and
+    #       108, and on replying it moves the buffer and then states the length as
+    #       a literal thousand, at lines 371 and 372 -- so the length is a constant
+    #       of the contract rather than the length of the text placed in it. A
+    #       consumer reads a thousand bytes and finds the content left-justified
+    #       with the remainder blank.
+    # WHY : Trade-offs: publishing a positional layout in a JSON contract document
+    #       describes something no operation here returns, which costs a reader the
+    #       moment it takes to see that this schema is documentation. It is
+    #       accepted because the alternative -- describing this contract only in
+    #       prose elsewhere -- is what allows a wire format and its consumers to
+    #       drift apart, and the two verbatim prefixes below are exactly the kind
+    #       of detail that drifts silently.
+    AsyncDateReplyContract:
+      type: object
+      description: >-
+        The asynchronous system-date reply, carried over a standard queue rather
+        than over HTTP, described here so that the one wire format has one written
+        definition. It is not the body of any operation in this document.
+
+
+        The reply is a single one-thousand-byte positional buffer. Its content is
+        two labelled values concatenated in order and left-justified, with the
+        remainder of the buffer blank: the date, prefixed by the text given on
+        datePrefix below, then the time, prefixed by the text given on timePrefix.
+        Both prefixes end in a space and both are reproduced character for
+        character from app/app-vsam-mq/cbl/CODATE01.cbl lines 355 and 356, where
+        the program concatenates them with its formatted values.
+
+
+        The date value is rendered month-first with hyphen separators, because that
+        is what the platform call at that program's lines 347 to 353 produces --
+        the month-day-year request at line 349 with the separator at line 350 --
+        and the time value is the eight-character field declared at its line 38.
+        This is the one place the US ordering survives in the migrated system; the
+        synchronous operation admits only the two masks published on the DateMask
+        schema.
+
+
+        The transport is a standard queue and not an ordered one, because a date
+        inquiry has no ordering requirement: two replies are independent and
+        neither depends on the other having been delivered first. The consumer waits
+        five seconds for a message, which is the migrated form of the wait interval
+        the baseline sets at CODATE01.cbl line 286 -- five thousand milliseconds,
+        as that program's own comment on the preceding line records -- and matches
+        the listener poll timeout configured in application.yml, so the two agree
+        rather than merely resembling each other.
+
+
+        Correlation is preserved as a message attribute. The baseline clears the
+        correlation and message identifiers before receiving, at CODATE01.cbl lines
+        287 and 288, and restores the saved pair before replying, at lines 373 and
+        374, so a reply is matched to its request by those values rather than by
+        arrival order. No queue name, URL or identifier appears in this document:
+        they are supplied to the service through the environment, and application
+        .yml resolves each from a variable rather than a literal.
+      required:
+        - bufferLength
+        - datePrefix
+        - timePrefix
+        - dateFormat
+        - timeFormat
+      additionalProperties: false
+      properties:
+        bufferLength:
+          type: integer
+          format: int32
+          const: 1000
+          description: >-
+            The invariant width of the reply buffer in bytes. Declared as a
+            constant because a consumer reads exactly this many bytes regardless of
+            how much of them the content occupies.
+          examples:
+            - 1000
+        datePrefix:
+          type: string
+          const: 'SYSTEM DATE : '
+          description: >-
+            The verbatim label preceding the date value, including its trailing
+            space. Reproduced character for character from
+            app/app-vsam-mq/cbl/CODATE01.cbl line 355.
+          examples:
+            - 'SYSTEM DATE : '
+        timePrefix:
+          type: string
+          const: 'SYSTEM TIME : '
+          description: >-
+            The verbatim label preceding the time value, including its trailing
+            space. Reproduced character for character from
+            app/app-vsam-mq/cbl/CODATE01.cbl line 356.
+          examples:
+            - 'SYSTEM TIME : '
+        dateFormat:
+          type: string
+          const: MM-DD-YYYY
+          description: >-
+            The ordering of the date value in this reply: month, day then year,
+            hyphen-separated, in ten characters. It is deliberately NOT one of the
+            masks the synchronous operation admits, and the difference is the point
+            -- this reply reproduces what the baseline's platform call renders.
+          examples:
+            - MM-DD-YYYY
+        timeFormat:
+          type: string
+          const: HH:MM:SS
+          description: >-
+            The shape of the time value in this reply, in the eight characters the
+            baseline field declared at app/app-vsam-mq/cbl/CODATE01.cbl line 38
+            holds.
+          examples:
+            - HH:MM:SS
+      examples:
+        - bufferLength: 1000
+          datePrefix: 'SYSTEM DATE : '
+          timePrefix: 'SYSTEM TIME : '
+          dateFormat: MM-DD-YYYY
+          timeFormat: HH:MM:SS
+
+
+    MaintenanceActionType:
+      type: string
+      enum:
+        - INSERT
+        - UPDATE
+        - DELETE
+      description: >-
+        Which operation a maintenance action performs. These are the three the
+        baseline program applies per input record, each reporting its own outcome
+        at app/app-transaction-type-db2/cbl/COBTUPDT.cbl lines 153, 179 and 209.
+      examples:
+        - INSERT
+        - DELETE
+
+    MaintenanceAction:
+      type: object
+      description: >-
+        One reference-data maintenance action: what to do, and to which transaction
+        type or category. The target is named by its codes rather than by a path,
+        because a batch addresses many rows in one request.
+      required:
+        - action
+        - typeCd
+      additionalProperties: false
+      properties:
+        action:
+          allOf:
+            - $ref: '#/components/schemas/MaintenanceActionType'
+          description: >-
+            The operation to apply to the row this action names.
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The transaction type this action applies to, or the parent type when
+            catCd is also present. Required on every action, because every row this
+            program maintains is keyed by a type.
+        catCd:
+          oneOf:
+            - $ref: '#/components/schemas/TransactionCategoryCode'
+            - type: 'null'
+          description: >-
+            The category code when the action targets a category, and null when it
+            targets the type itself. Presence of this member is what selects between
+            the two tables, so an action carrying it addresses
+            reference.transaction_categories and one omitting it addresses
+            reference.transaction_types.
+        description:
+          oneOf:
+            - $ref: '#/components/schemas/ReferenceDescription'
+            - type: 'null'
+          description: >-
+            The description to store, required for INSERT and UPDATE and ignored
+            for DELETE. Null on a DELETE action rather than absent, so that every
+            action in a batch has the same member set and a caller can build them
+            uniformly.
+      examples:
+        - action: INSERT
+          typeCd: '08'
+          catCd: null
+          description: Chargeback
+        - action: DELETE
+          typeCd: '01'
+          catCd: '0005'
+          description: null
+
+    MaintenanceActionBatchRequest:
+      type: object
+      description: >-
+        The actions to apply, as one unit. Either every action takes effect or none
+        does, so the order matters only where two actions in the same batch depend
+        on each other -- creating a type and then a category beneath it, for
+        instance, which must appear in that order because the foreign key is checked
+        as each action is applied.
+      required:
+        - actions
+      additionalProperties: false
+      properties:
+        actions:
+          type: array
+          minItems: 1
+          maxItems: 500
+          description: >-
+            The actions, in the order they are to be applied. At least one, because
+            an empty batch has no effect to report, and at most five hundred, which
+            bounds the transaction a single request holds open rather than expressing
+            any limit the baseline states.
+          items:
+            $ref: '#/components/schemas/MaintenanceAction'
+      examples:
+        - actions:
+            - action: INSERT
+              typeCd: '08'
+              catCd: null
+              description: Chargeback
+            - action: INSERT
+              typeCd: '08'
+              catCd: '0001'
+              description: Chargeback Received
+
+    MaintenanceActionOutcome:
+      type: object
+      description: >-
+        What one submitted action did, carrying the baseline's own wording for it.
+        The four messages below are reproduced character for character from
+        app/app-transaction-type-db2/cbl/COBTUPDT.cbl: an inserted record at its
+        line 153, an updated record at line 179, a deleted record at line 209, and
+        an unmatched key at lines 181 and 211 -- the last stated twice in that
+        program, once on the update path and once on the delete path, with identical
+        text.
+      required:
+        - position
+        - action
+        - typeCd
+        - catCd
+        - applied
+        - message
+      additionalProperties: false
+      properties:
+        position:
+          type: integer
+          format: int32
+          minimum: 0
+          description: >-
+            The zero-based index of the action this outcome describes, in the
+            submitted list. Present so that a caller can pair outcomes with actions
+            without relying on the array orders matching, and so that a 409 can name
+            the offending position.
+          examples:
+            - 0
+        action:
+          allOf:
+            - $ref: '#/components/schemas/MaintenanceActionType'
+          description: >-
+            The operation this action requested, echoed back.
+        typeCd:
+          allOf:
+            - $ref: '#/components/schemas/TransactionTypeCode'
+          description: >-
+            The transaction type this action addressed, echoed back.
+        catCd:
+          oneOf:
+            - $ref: '#/components/schemas/TransactionCategoryCode'
+            - type: 'null'
+          description: >-
+            The category this action addressed, or null when it addressed the type
+            itself.
+        applied:
+          type: boolean
+          description: >-
+            Whether this action changed a row. False for an action whose key matched
+            nothing, which the baseline reports rather than treating as a failure --
+            so a batch can be entirely applied and still contain an action that
+            found no row.
+          examples:
+            - true
+        message:
+          type: string
+          maxLength: 75
+          description: >-
+            The baseline's wording for this outcome, carried verbatim and keyed to
+            the program that owns it. A client displays it rather than composing its
+            own sentence, so that the migrated screens read as the baseline screens
+            did.
+          examples:
+            - RECORD INSERTED SUCCESSFULLY
+            - No records found.
+      examples:
+        - position: 0
+          action: INSERT
+          typeCd: '08'
+          catCd: null
+          applied: true
+          message: RECORD INSERTED SUCCESSFULLY
+
+    MaintenanceActionBatchResponse:
+      type: object
+      description: >-
+        One outcome per submitted action, in the submitted order, returned only when
+        the whole batch was committed.
+      required:
+        - outcomes
+      additionalProperties: false
+      properties:
+        outcomes:
+          type: array
+          description: >-
+            The outcomes, one per submitted action and in the same order. Its length
+            always equals the length of the submitted action list, because the batch
+            is all-or-nothing and a committed batch ran every action.
+          items:
+            $ref: '#/components/schemas/MaintenanceActionOutcome'
+      examples:
+        - outcomes:
+            - position: 0
+              action: INSERT
+              typeCd: '08'
+              catCd: null
+              applied: true
+              message: RECORD INSERTED SUCCESSFULLY
+
+    # WHY : Assumptions: this schema mirrors the shared failure type
+    #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java
+    #       member for member, because that type is what the inherited
+    #       GlobalExceptionHandler serialises for every failing operation in this
+    #       service. Declaring a narrower shape here would describe a body this
+    #       service cannot send, and declaring a wider one would promise members no
+    #       advice populates.
+    # WHY : Assumptions: two independent channels, and a client must not treat
+    #       either as derived from the other. The message member is one aggregate
+    #       sentence latched to the first failure detected, and fieldErrors
+    #       accumulates an entry for EVERY offending field. Joining the array does
+    #       not reconstruct the sentence, and the array is not guaranteed to hold
+    #       exactly one entry.
+    ApiError:
+      type: object
+      description: >-
+        The single failure shape every operation in this service returns, at every
+        status. It carries a machine-readable identifier, an aggregate sentence for
+        a person to read, the per-field detail described on the FieldError schema,
+        and the correlation identifier that leads to the operational record.
+      required:
+        - code
+        - secondaryCode
+        - severity
+        - subsystem
+        - status
+        - correlationId
+        - path
+        - timestamp
+        - fieldErrors
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: >-
+            The stable machine-readable identifier of the failure, matched on by
+            clients and by operational tooling and never reworded. The shared
+            identifiers of the kernel are used, whose numeric suffix aligns with the
+            HTTP status the shared advice assembles.
+          examples:
+            - CARDDEMO-0409
+        secondaryCode:
+          type: string
+          description: >-
+            A subordinate identifier qualifying code, or the empty string when the
+            failure has no second identifier. This is what discriminates the four
+            conditions that share the 409 status, and it is required for that
+            purpose because the sentence alone cannot always do it -- the baseline
+            carries byte-identical text for conditions it nonetheless treats
+            separately.
+          examples:
+            - REFERENCE-CHILD-RECORDS-EXIST
+        message:
+          type:
+            - string
+            - 'null'
+          maxLength: 75
+          description: >-
+            The aggregate sentence, carried verbatim from the baseline program that
+            owns it wherever one does. Deliberately nullable: null is the migrated
+            form of no-message and the empty string the migrated form of an empty
+            message, two states the baseline distinguishes and this shape therefore
+            does not merge. Bounded at seventy-five characters, the declared width of
+            the message fields the baseline screens carry -- for instance the field
+            at app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 249, which every
+            sentence on that screen is moved into.
+          examples:
+            - 'Please delete associated child records first:'
+        severity:
+          allOf:
+            - $ref: '#/components/schemas/Severity'
+          description: >-
+            How serious this failure is, on the baseline's own four-level ladder.
+            Every client-correctable outcome in this context is at the warning level,
+            because each is something a caller may act on; the unclassified failure
+            reported as 500 is at the critical level. That difference is why this
+            member is worth reading rather than assuming.
+        subsystem:
+          allOf:
+            - $ref: '#/components/schemas/Subsystem'
+          description: >-
+            Which part of the platform the failure arose in, on the baseline's own
+            six-value ladder. This service produces only the application and
+            relational values; a response naming any of the other four would
+            misattribute the failure.
+        status:
+          type: integer
+          format: int32
+          description: >-
+            The HTTP status this response carries, restated inside the body so that a
+            payload logged or archived away from its response envelope is still
+            self-describing. It always equals the status of the response carrying it.
+          examples:
+            - 409
+        correlationId:
+          allOf:
+            - $ref: '#/components/schemas/CorrelationId'
+          description: >-
+            Identifies the unit of work that failed, inherited from the inbound
+            request rather than generated here, and the empty string when the request
+            carried none and none had been minted. It is the intended route from this
+            response to the operational record, which is where diagnostic detail
+            lives.
+        path:
+          type: string
+          description: >-
+            The request path that produced this failure, as received. Carried so that
+            a logged body identifies its own request without the surrounding access
+            record.
+          examples:
+            - /api/v1/reference/transaction-types/01
+        timestamp:
+          type: string
+          description: >-
+            When the failure was assembled, to microsecond resolution in the
+            twenty-six-character form the migration uses throughout -- the same form
+            the baseline writes into its transaction records, so that a failure and a
+            posted record can be ordered against each other without converting
+            either.
+          examples:
+            - '2026-08-06 09:16:44.902355'
+        fieldErrors:
+          type: array
+          description: >-
+            One entry per offending field, empty when the failure is not attributable
+            to particular fields. Always present, never null, so a client can iterate
+            it without a presence test.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        abend:
+          oneOf:
+            - $ref: '#/components/schemas/AbendDetail'
+            - type: 'null'
+          description: >-
+            The structured abend detail when the failure corresponds to a condition
+            the baseline treats as unrecoverable, and null otherwise -- which is the
+            usual case. In this context the one operation that populates it is the
+            rate lookup, when neither the requested group nor the DEFAULT group has a
+            row.
+
+
+    ReferenceConflictError:
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+        - type: object
+          description: >-
+            The additional member a conflict carries.
+          properties:
+            conflictingVersion:
+              oneOf:
+                - $ref: '#/components/schemas/RecordVersion'
+                - type: 'null'
+              description: >-
+                The version the row now holds, present only for the
+                optimistic-concurrency conflict and null for the other three
+                conditions that share this status. It is present for that one
+                because a current representation exists to report, and null for the
+                referential refusal because nothing about the addressed row changed.
+                A caller re-reads, compares and resubmits against this version
+                rather than guessing, which is the migrated form of the re-snapshot
+                the baseline maintenance screen performs before offering the record
+                again.
+      description: >-
+        The failure shape a 409 carries: every member of the shared error body,
+        plus the version now stored when the conflict was a concurrency one. The
+        four conditions that reach this status are distinguished by secondaryCode
+        and are never merged -- see the Conflict response, where each is given with
+        its own verbatim sentence.
+
+    # WHY : Refactoring Rationale: field-level failures are reported as a
+    #       STRUCTURED ARRAY, replacing a mechanism that had no data form at all.
+    #       The baseline marks a bad field by writing a colour attribute into the
+    #       screen map: the templated copybook app/cpy/CSSETATY.cpy moves a red
+    #       attribute into the field's own attribute byte at its lines 21 to 22 when
+    #       either the not-ok or the blank flag is set, tested at lines 18 to 19. A
+    #       colour in a terminal buffer cannot be returned to a browser or asserted
+    #       in a test, so the same information is carried as one entry per field --
+    #       which the browser client renders as a form item in the error state with
+    #       help text beneath it.
+    # WHY : Refactoring Rationale: the target SEVERS a coupling the baseline has,
+    #       and this is the substantive behavioural difference rather than a change
+    #       of representation. The baseline gates the highlight on a
+    #       pseudo-conversational re-entry flag at app/cpy/CSSETATY.cpy line 20, so
+    #       whether a bad field is marked depends on whether the program believes it
+    #       is being re-entered after a screen turn -- state that survived between
+    #       turns in a buffer the terminal echoed back. There is no such flag here
+    #       and no turn to count: every operation is stateless, so the marking is
+    #       driven purely by the response body. A caller therefore sees field
+    #       detail on the first failing request, where the baseline would have
+    #       shown none. The divergence is recorded in
+    #       docs/architecture/cobol-to-service-traceability.md.
+    # WHY : Assumptions: the blank case stays DISTINGUISHABLE from the merely
+    #       invalid case, because the baseline distinguishes them. Beyond setting
+    #       the colour, it writes a literal asterisk into the field itself when the
+    #       blank flag is set, at app/cpy/CSSETATY.cpy lines 23 to 25 -- so a user
+    #       could see which fields were empty as against which were wrong. The state
+    #       member below preserves that distinction, and the asterisk is published
+    #       as a constant on the FieldValidationState schema rather than left for
+    #       each client to hard-code.
+    FieldError:
+      type: object
+      description: >-
+        One offending field: which field, in what way, and the sentence to show
+        beside it. Mirrors
+        services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java's
+        nested field-error type member for member.
+      required:
+        - field
+        - state
+        - message
+      additionalProperties: false
+      properties:
+        field:
+          type: string
+          description: >-
+            The name of the offending member, spelled exactly as it appears in the
+            request or response schema it belongs to, so that a client can bind the
+            entry to the input it rendered without a translation table. For a
+            failure attributable to a submitted batch action rather than to a named
+            member, this is the member path including the action's index.
+          examples:
+            - typeCd
+            - description
+        state:
+          allOf:
+            - $ref: '#/components/schemas/FieldValidationState'
+          description: >-
+            Whether the field was absent or present but unacceptable. The two are
+            reported separately because the baseline marks them differently.
+        message:
+          type: string
+          maxLength: 75
+          description: >-
+            The sentence to show beside this field, carried verbatim from the
+            baseline program that owns it wherever one does -- for instance the
+            wording the maintenance screen gives when a description carries
+            characters it will not accept, published on the
+            ReferenceMessageCatalogue schema.
+          examples:
+            - Name can only contain alphabets and spaces
+      examples:
+        - field: description
+          state: BLANK
+          message: No input received
+
+    FieldValidationState:
+      type: string
+      enum:
+        - VALID
+        - NOT_OK
+        - BLANK
+      description: >-
+        The state of one validated field, on the baseline's own three-way
+        distinction. These are the three constants the shared kernel publishes at
+        services/common-lib/src/main/java/com/carddemo/common/validation/FieldValidationFlag.java,
+        the migrated form of the two condition names the templated highlight
+        copybook tests together at app/cpy/CSSETATY.cpy lines 18 to 19 plus the
+        passing state neither of them describes.
+
+
+        NOT_OK means the field was supplied and is unacceptable. BLANK means it was
+        not supplied at all, and it is the state the baseline additionally marks
+        with a literal asterisk written into the field, at app/cpy/CSSETATY.cpy
+        lines 23 to 25; a client reproducing that marker uses that single character.
+        VALID does not appear inside a failure body, since a passing field
+        contributes no entry, and is published only so that the enumeration matches
+        the shared type rather than a subset of it.
+      examples:
+        - NOT_OK
+        - BLANK
+
+    Severity:
+      type: string
+      enum:
+        - LOG
+        - INFO
+        - WARNING
+        - CRITICAL
+      description: >-
+        How serious a failure is, on the baseline's four-level ladder as published
+        by the shared error type. LOG and INFO are recorded rather than shown;
+        WARNING is an outcome a caller may act on, which is every
+        client-correctable failure in this context; CRITICAL is an unclassified
+        fault, which in this context reaches a caller only as a 500 or as the
+        abend-carrying rate-lookup failure.
+      examples:
+        - WARNING
+
+    Subsystem:
+      type: string
+      enum:
+        - APPLICATION
+        - CICS
+        - IMS
+        - RELATIONAL
+        - QUEUE
+        - OBJECT_STORE
+      description: >-
+        Which part of the platform a failure arose in, on the baseline's six-value
+        ladder as published by the shared error type. This service produces only
+        APPLICATION, for a failure in its own validation or business rules, and
+        RELATIONAL, for one the database reported -- the referential refusal and the
+        duplicate key among them. The remaining four are published so that the
+        enumeration matches the shared type; a response from this service naming one
+        of them would misattribute the failure.
+      examples:
+        - RELATIONAL
+
+    AbendDetail:
+      type: object
+      description: >-
+        Structured detail for a condition the baseline treats as unrecoverable. Its
+        four members and their declared widths are the four fields of the abend
+        group app/cpy/CSMSG02Y.cpy declares at its lines 21 to 29, each of which
+        that copybook initialises to spaces on the line following its declaration.
+        It mirrors
+        services/common-lib/src/main/java/com/carddemo/common/error/AbendDetail.java
+        member for member.
+
+
+        The copybook's own internal banner at its line 2 names the file
+        differently from its path on disk. The path is the citation used here and
+        throughout; the banner is a baseline naming quirk, cited as it stands and
+        not altered, because app is read as reference only.
+      required:
+        - abendCode
+        - abendCulprit
+        - abendReason
+        - abendMsg
+      additionalProperties: false
+      properties:
+        abendCode:
+          type: string
+          maxLength: 4
+          description: >-
+            The four-character condition code, from the field at
+            app/cpy/CSMSG02Y.cpy line 22. Spaces where the baseline would have left
+            it unset.
+          examples:
+            - RDG1
+        abendCulprit:
+          type: string
+          maxLength: 8
+          description: >-
+            The eight-character name of the component that raised the condition,
+            from the field at app/cpy/CSMSG02Y.cpy line 24. It names a migrated
+            component rather than a load module.
+          examples:
+            - DISCGRP
+        abendReason:
+          type: string
+          maxLength: 50
+          description: >-
+            The fifty-character reason, from the field at app/cpy/CSMSG02Y.cpy line
+            26.
+          examples:
+            - DEFAULT DISCLOSURE GROUP ROW NOT PRESENT
+        abendMsg:
+          type: string
+          maxLength: 72
+          description: >-
+            The seventy-two-character message, from the field at
+            app/cpy/CSMSG02Y.cpy line 28. This is the widest of the four and is the
+            one intended for display.
+          examples:
+            - ERROR READING DEFAULT DISCLOSURE GROUP
+      examples:
+        - abendCode: RDG1
+          abendCulprit: DISCGRP
+          abendReason: DEFAULT DISCLOSURE GROUP ROW NOT PRESENT
+          abendMsg: ERROR READING DEFAULT DISCLOSURE GROUP
+
+    # WHY : Assumptions: the user-visible sentences of this context are published
+    #       as CONSTANTS in one schema, rather than left scattered across the
+    #       operations that emit them. The migration reproduces this text character
+    #       for character keyed by the program that owns it, and a sentence written
+    #       out at each of several sites is a sentence that can differ between two
+    #       of them without anything noticing. Gathering them here gives the browser
+    #       client one place to read from and a reviewer one place to check against
+    #       the baseline.
+    # WHY : Assumptions: the irregularities in this text are the baseline's and are
+    #       carried across UNALTERED -- a missing space after a full stop, a comma
+    #       with no space after it, a trailing space, a capital letter mid-sentence,
+    #       four consecutive dots, a two-word spelling of a word usually written as
+    #       one. Each is reproduced because a user of the migrated screens should
+    #       read what the baseline screens showed, and because normalising them
+    #       would make this catalogue disagree with the source it is cited against.
+    #       Individual quirks are noted on the members that carry them.
+    # WHY : Assumptions: the two near-identical no-change sentences are BOTH
+    #       published as separate members and must never be collapsed. They differ
+    #       by four words and by which baseline program a user was on --
+    #       noChangeDetectedSingleRecord ends "values fetched." at COTRTUPC.cbl line
+    #       180, noChangeDetectedList ends "database values." at COTRTLIC.cbl line
+    #       262 -- so keeping one would silently retire a string the baseline
+    #       distinguishes. The same applies to the two spellings of the deadlock
+    #       and data-changed wording: COTRTLIC.cbl line 1874 writes "Someone" as
+    #       one word while COTRTUPC.cbl line 184 writes "some one" as two, and both
+    #       are correct as declared.
+    ReferenceMessageCatalogue:
+      type: object
+      description: >-
+        The user-visible sentences of this context, each carried verbatim from the
+        baseline program and line that owns it. This schema declares constants and
+        is not the body of any operation: it exists so that the one wire text has
+        one written definition, referenced by the browser client and checkable by a
+        reviewer against the sources cited on each member.
+      additionalProperties: false
+      properties:
+        noRecordsFoundForSearch:
+          type: string
+          const: 'No records found for this search condition.'
+          description: >-
+            Shown when a search matches nothing. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 254; it ends with a
+            full stop and spells "records" in lower case, unlike the filter sentence
+            below.
+        noRecordsFoundForFilters:
+          type: string
+          const: 'No Records found for these filter conditions'
+          description: >-
+            Shown when the supplied filters match nothing. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1264; it capitalises
+            "Records" and carries no closing full stop, and both differences from
+            the sentence above are the baseline's.
+        noMorePagesForSearch:
+          type: string
+          const: 'No more pages for these search conditions'
+          description: >-
+            Shown when a caller pages forward past the end of a filtered set. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 256; no closing full
+            stop.
+        noMorePages:
+          type: string
+          const: 'No more pages to display'
+          description: >-
+            Shown when a caller pages forward from a page whose hasNext is false.
+            From app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1539.
+        noPreviousPages:
+          type: string
+          const: 'No previous pages to display'
+          description: >-
+            Shown when a caller pages backward from a page whose firstKey names the
+            start of the set. From app/app-transaction-type-db2/cbl/COTRTLIC.cbl
+            line 1534.
+        typeCodeFilterMustBeTwoDigits:
+          type: string
+          const: 'TYPE CODE FILTER,IF SUPPLIED MUST BE A 2 DIGIT NUMBER'
+          description: >-
+            Shown when the type-code filter is present but not two digits, and
+            returned as a field entry on the 400. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1116; note there is
+            no space after the comma.
+        childRecordsExist:
+          type: string
+          const: 'Please delete associated child records first:'
+          description: >-
+            Shown when a transaction type's delete is refused because categories
+            still reference it, and carried as the 409 message. Declared identically
+            in both baseline programs, at
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1919 and
+            COTRTUPC.cbl line 1641; the closing colon is retained because the
+            baseline prefixes a database diagnostic with it.
+        deleteFailed:
+          type: string
+          const: 'Delete failed with message:'
+          description: >-
+            Shown for a delete that failed for a reason other than the referential
+            refusal -- the catch-all arm at
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1929 and
+            COTRTUPC.cbl line 1654. The two arms are distinguished in the baseline
+            and so map to different statuses here: this text belongs to a 500, while
+            the sentence above belongs to a 409.
+        recordNotFoundDeletedByOthers:
+          type: string
+          const: 'Record not found. Deleted by others ? '
+          description: >-
+            Shown when an update finds no row because another user removed it. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1864; it ends with a
+            space after the question mark, which is preserved.
+        deadlockSomeoneElseUpdating:
+          type: string
+          const: 'Deadlock. Someone else updating ?'
+          description: >-
+            Shown when the database reports a deadlock during an update. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1874; "Someone" is one
+            word here, unlike the two-word spelling in the data-changed sentence
+            below.
+        recordChangedBySomeOneElse:
+          type: string
+          const: 'Record changed by some one else. Please review'
+          description: >-
+            Shown when the row moved on between the read and the replace, and carried
+            as the 409 message for the concurrency conflict. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 184; "some one" is two
+            words and there is no closing full stop.
+        couldNotLockRecordForUpdate:
+          type: string
+          const: 'Could not lock record for update'
+          description: >-
+            Shown when the row could not be taken for update. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 182. It is a distinct
+            409 condition from the data-changed one and carries its own subordinate
+            code.
+        noChangeDetectedSingleRecord:
+          type: string
+          const: 'No change detected with respect to values fetched.'
+          description: >-
+            Shown when a replace submits values identical to those read. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 180, the
+            single-record maintenance screen; ends with a full stop. Distinct from
+            noChangeDetectedList and not interchangeable with it.
+        noChangeDetectedList:
+          type: string
+          const: 'No change detected with respect to database values.'
+          description: >-
+            The list screen's own wording for the same situation, from
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 262. It differs from
+            noChangeDetectedSingleRecord by four words; both are published because
+            the baseline declares both.
+        recordNotFoundForKey:
+          type: string
+          const: 'No record found for this key in database'
+          description: >-
+            Shown when a read finds no row under the supplied key, and carried as
+            the 404 message for the maintained collections. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 176; no closing full
+            stop.
+        noInputReceived:
+          type: string
+          const: 'No input received'
+          description: >-
+            Shown when a required value was not supplied, and carried as a field
+            entry whose state is BLANK. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 178.
+        nameMustBeAlphabetic:
+          type: string
+          const: 'Name can only contain alphabets and spaces'
+          description: >-
+            Shown when a description carries characters the maintenance screen will
+            not accept. From app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 174.
+        deleteConfirmPrompt:
+          type: string
+          const: 'Delete this record ? Press F4 to confirm'
+          description: >-
+            The single-record screen's delete confirmation prompt, from
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 152; note the space
+            before the question mark. The key it names is the one that screen uses,
+            which differs from the list screen's -- see deleteHighlightedPrompt.
+        deleteSuccessful:
+          type: string
+          const: 'Delete successful.'
+          description: >-
+            Shown after a successful delete on the single-record screen, and the
+            wording a client displays for a 204 from either delete operation. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 154.
+        changesValidatedPrompt:
+          type: string
+          const: 'Changes validated.Press F5 to save'
+          description: >-
+            Shown when submitted changes passed validation and await confirmation.
+            From app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 161; there is no
+            space after the full stop.
+        changesCommitted:
+          type: string
+          const: 'Changes committed to database'
+          description: >-
+            Shown after a successful replace, and the wording a client displays for a
+            200 from either replace operation. From
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 163.
+        deleteHighlightedPrompt:
+          type: string
+          const: 'Delete HIGHLIGHTED row ? Press F10 to confirm'
+          description: >-
+            The list screen's delete confirmation prompt, from
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 242. It names a
+            different key from the single-record screen's prompt, so a client
+            reproducing either must use the one belonging to the screen it renders.
+        updateHighlightedPrompt:
+          type: string
+          const: 'Update HIGHLIGHTED row. Press F10 to save'
+          description: >-
+            The list screen's inline update prompt, from
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 244. It names the same
+            key as the delete prompt above, which is the list screen's convention.
+        highlightedRowDeleted:
+          type: string
+          const: 'HIGHLIGHTED row deleted.Hit Enter to continue'
+          description: >-
+            Shown after an inline delete on the list screen. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 246; there is no space
+            after the full stop.
+        highlightedRowUpdated:
+          type: string
+          const: 'HIGHLIGHTED row was updated'
+          description: >-
+            Shown after an inline update on the list screen. From
+            app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 248.
+        maintenanceRecordInserted:
+          type: string
+          const: 'RECORD INSERTED SUCCESSFULLY'
+          description: >-
+            The maintenance outcome for an applied insert, from
+            app/app-transaction-type-db2/cbl/COBTUPDT.cbl line 153. Upper case, as
+            that program declares it.
+        maintenanceRecordUpdated:
+          type: string
+          const: 'RECORD UPDATED SUCCESSFULLY'
+          description: >-
+            The maintenance outcome for an applied update, from
+            app/app-transaction-type-db2/cbl/COBTUPDT.cbl line 179.
+        maintenanceRecordDeleted:
+          type: string
+          const: 'RECORD DELETED SUCCESSFULLY'
+          description: >-
+            The maintenance outcome for an applied delete, from
+            app/app-transaction-type-db2/cbl/COBTUPDT.cbl line 209.
+        maintenanceNoRecordsFound:
+          type: string
+          const: 'No records found.'
+          description: >-
+            The maintenance outcome for an action whose key matched nothing. Declared
+            twice in app/app-transaction-type-db2/cbl/COBTUPDT.cbl with identical
+            text, at lines 181 and 211 -- once on the update path and once on the
+            delete path -- so one member serves both.
+        maintenanceTypeNotValid:
+          type: string
+          const: 'ERROR: TYPE NOT VALID'
+          description: >-
+            The maintenance outcome for an action naming a type the program will not
+            accept, from app/app-transaction-type-db2/cbl/COBTUPDT.cbl line 124.
+        defaultDisclosureGroupUnreadable:
+          type: string
+          const: 'ERROR READING DEFAULT DISCLOSURE GROUP'
+          description: >-
+            Carried as the abend message when a rate lookup finds neither the
+            requested group nor the DEFAULT group. From app/cbl/CBACT04C.cbl line
+            455, which the baseline reports immediately before abending through the
+            paragraph invoked at line 458.
+

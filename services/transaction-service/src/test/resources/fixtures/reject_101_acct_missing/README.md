@@ -105,22 +105,75 @@ Folder section 7 mandates the three items below.
 
 1. **Synthetic and seed-derived.** `dailytran.txt` is byte-identical to record 1 of
    [`app/data/ASCII/dailytran.txt`](../../../../../../../app/data/ASCII/dailytran.txt),
-   measured rather than asserted, with no field reshaped. `transact.txt` and
-   `tcatbal.txt` are byte-identical to their `happy_path` counterparts -- also measured
-   -- whose provenance is recorded in
+   measured rather than asserted, with no field reshaped. `transact.txt` derives from
+   **record 2** of that same seed file -- positions 1-304 are that row verbatim,
+   measured -- and section 4.3 records why it derives from a different seed row than
+   `dailytran.txt` does. `tcatbal.txt` is byte-identical to its `happy_path`
+   counterpart -- also measured -- whose provenance is recorded in
    [`../happy_path/README.md`](../happy_path/README.md) section 4.2.
 2. **No real person and no real account.** Every account number, card number, name and
    address byte here comes from the published CardDemo demonstration seed. They are
    demonstration values, not credentials, and they identify no real person and no real
-   account. Every byte of all three files is a published seed byte, so the attestation
-   here rests on the same measurement as `happy_path`'s and adds no value of its own.
+   account. Every identity byte of all three files is a published seed byte; the only
+   bytes that are not are the generated processing timestamp and the two `tcatbal.txt`
+   fields item 3 names, none of which carries identity.
 3. **Which bytes were reshaped away from the seed value.** In `dailytran.txt`, none --
    the record is the seed row unchanged, and `cmp` against `../happy_path/dailytran.txt`
    reports the two as identical, measured. In `transact.txt`, the processing timestamp
-   at positions 305-330 only, and in `tcatbal.txt` the account identifier and balance,
-   exactly as `happy_path` item 3 records for those two files. This scenario's
-   discriminator is not a byte of any of the three, so nothing here is attested as
-   reshaped for its sake; section 5 records where the discriminator lives instead.
+   at positions 305-330 only: seed record 2 carries 26 spaces there and this file
+   carries the literal `2022-07-18 00:00:00.000000`, the same instant `happy_path`
+   pins. In `tcatbal.txt`, the account identifier and balance, exactly as `happy_path`
+   item 3 records for that file. This scenario's discriminator is not a byte of any of
+   the three, so nothing here is attested as reshaped for its sake; section 5 records
+   where the discriminator lives instead.
+
+### 4.3 Why `transact.txt` holds prior ledger state rather than a posted outcome
+
+Assumptions: `transact.txt` loads `ledger.transactions`, the **posted**-transaction
+table, and section 3 states this scenario's expected outcome as **no posted
+transaction**. Those two facts together decide what the row may contain. In
+`happy_path` the row is the posted image of that scenario's daily record, because there
+the record posts. Here the record is rejected, so a posted image of it would assert the
+opposite of the scenario -- and the objection is structural rather than rhetorical:
+`transaction_id` is the primary key of that table at
+[`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) line 255, so
+a pre-loaded row keyed `0000000000683580` would be indistinguishable from one an insert
+had added, and an insert that did occur would fail on the key rather than on the rule
+under test. The row is therefore a **different** transaction, one already on the ledger
+before the run: seed record 2, identifier `0000000001774260`. Measured, no byte of this
+file carries `0000000000683580`.
+
+What that buys is an assertable statement, which an empty table cannot give. A table
+asserted to be unchanged has to have contents to be unchanged, so the reject is
+checkable twice over: the row count is one before and one after, and the rejected
+identifier is absent at both points.
+
+Alternatives Considered: shipping no `transact.txt`, or an empty one. Both were
+rejected. An absent file breaks the three-file composition folder section 3.1 fixes as
+this folder's shape, and an empty table makes "unchanged" vacuous -- a query returning
+nothing proves nothing about whether a write was suppressed, because it returns nothing
+either way.
+
+Trade-offs: this is the one `transact.txt` in the folder that is not byte-identical to
+`happy_path`'s, so an author comparing the ten with `cmp` meets a difference here and
+nowhere else. The cost is accepted because the alternative is a fixture whose bytes
+contradict the outcome its own section 3 states, and this section is where the
+difference is accounted for.
+
+Assumptions: the card at positions 263-278 is `0927987108636232` because it arrives
+with seed record 2, not because it was selected, and it is **not** a reintroduction of
+the card section 5 records as withdrawn. That withdrawal governs `dailytran.txt`, whose
+card `CBTRN02C` resolves through the cross-reference to choose a reason code; nothing
+resolves the card on a row that is already posted, so the concern does not reach this
+file. `dailytran.txt` here carries `4859452612877065`, measured, and section 5 stands
+unqualified.
+
+The processing timestamp is populated here and blank in `dailytran.txt` for a reason
+that is a schema constraint rather than a house convention: `proc_ts` is `NOT NULL` on
+this table at line 245 of the same migration and nullable on
+`ledger.daily_transactions`, so 26 spaces are the correct bytes there and would be
+rejected at insert here. Folder section 3.2 carries that reasoning in full and is the
+authority for it; item 3 above records the positions it moves.
 
 ---
 

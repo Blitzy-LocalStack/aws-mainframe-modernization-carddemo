@@ -599,20 +599,40 @@ justify authoring anything at all:
   `00000000903`, used only in `card-by-account-corpus.txt`. They sit
   deliberately outside the seed's `00000000001` to `00000000050` range so they
   can never be confused with a seed account or collide with one loaded from it.
-- **Status bytes**, two values in three places, per measurement 1. `N` on the
-  single record of `card-valid-inactive.txt` and on fixture rows 3, 10 and 17 of
-  `card-list-page-corpus.txt`; `X` on the single record of
-  `card-schema-reject-status-out-of-domain.txt`. Every other status byte in this
-  directory is the seed's own `Y`.
-- **Expiry dates, component by component.** Only the components a scenario needs
-  are authored, and each record keeps every other component of its seed date --
-  which is what makes an authored date checkable against the seed position it
-  came from rather than merely plausible:
-  - `card-boundary-expiry-inclusive.txt` authors the YEAR and MONTH of all four
-    records and keeps each seed record's own DAY: `1950-01-20`, `1950-12-10`,
-    `2099-01-23` and `2099-12-19` from seed days 20, 10, 23 and 19. All four days
-    are 28 or lower, so no authored combination can land on a date that does not
-    exist.
+- **Status bytes**, two values in four places, per measurement 1. `N` on the
+  single record of `card-valid-inactive.txt`, on fixture rows 3, 10 and 17 of
+  `card-list-page-corpus.txt`, and on fixture rows 2 and 4 of
+  `card-boundary-expiry-inclusive.txt`; `X` on the single record of
+  `card-schema-reject-status-out-of-domain.txt`. Measured directory-wide with
+  `cut -c91 *.txt | sort | uniq -c`, that is **six** `N`, **one** `X` and
+  **thirty-three** `Y` across the 40 records. Every status byte not named here
+  is the seed's own `Y`.
+- **Expiry dates, component by component.** Two fixtures author only the
+  component their scenario needs and keep every other component of their seed
+  date, which is what makes those authored dates checkable against the seed
+  position they came from rather than merely plausible. The other two author the
+  whole date, and each says below why its scenario cannot be expressed any other
+  way. All four are enumerated, so a reader can check every authored date rather
+  than only the ones that happen to be partial:
+  - `card-boundary-expiry-inclusive.txt` authors the whole date on all four
+    records -- `2024-01-15`, `2024-12-15`, `1950-06-15` and `2099-06-15` -- and
+    is one of the two fixtures that does. Each record varies **exactly one**
+    component away from a fixed background of year `2024`, month `06` and day
+    `15`: row 1 carries month `01` and row 2 month `12`, the two inclusive month
+    bounds, both at year `2024`; row 3 carries year `1950` and row 4 year
+    `2099`, the two inclusive year bounds, both at month `06`. The day is `15`
+    on every record and is never the varying component.
+    Trade-off, and the reason the day is not sampled from the seed here: keeping
+    each seed record's own day would have let a single record carry a boundary
+    year *and* a boundary month *and* a distinct day at once, so a failing
+    assertion could not name which component caused it. Pinning the background
+    buys unambiguous attribution at the cost of a date that no longer matches
+    its seed position component for component -- an acceptable cost, because
+    every identity-shaped field on these rows still traces to seed records 23-26
+    verbatim, and day coverage is `card-expiry-day-preserved.txt`'s job under
+    section 6. Day `15` is 28 or lower and month `06` has 30 days, so no authored
+    combination can land on a date that does not exist; each of the four parses
+    as a real calendar date and so is accepted by the `DATE` column.
   - `card-rule-reject-expiry-year-out-of-range.txt` authors the YEAR only:
     `1949-05-19` and `2100-06-04`, keeping seed 36's `05-19` and seed 37's
     `06-04`.
@@ -620,13 +640,14 @@ justify authoring anything at all:
     `2025-00-12` and `2023-13-23`, keeping seed 39's year and day and seed 40's
     year and day.
   - `card-expiry-day-preserved.txt` authors the whole date on all three records
-    -- `2025-06-01`, `2025-06-15` and `2025-06-28` -- and is the one fixture that
-    does. Section 6 is the reason: the fixture must hold one FIXED month and year
-    with three DIFFERENT days, and measurement 2 shows the seed offers no month
-    and year pair with three such records to sample. The year and month are
-    inside the seed's own observed ranges (2025 and 06 both occur in the seed),
-    and the three days are 01, 15 and 28, each valid in every month, so the
-    fixture tests day preservation rather than calendar arithmetic.
+    -- `2025-06-01`, `2025-06-15` and `2025-06-28` -- and is the other of the
+    two that does. Section 6 is the reason: the fixture must hold one FIXED
+    month and year with three DIFFERENT days, and measurement 2 shows the seed
+    offers no month and year pair with three such records to sample. The year
+    and month are inside the seed's own observed ranges (2025 and 06 both occur
+    in the seed), and the three days are 01, 15 and 28, each valid in every
+    month, so the fixture tests day preservation rather than calendar
+    arithmetic.
 
   Every other expiry date in this directory -- the whole of the page corpus, the
   by-account corpus, `card-valid-active.txt`, `card-valid-inactive.txt`, and both

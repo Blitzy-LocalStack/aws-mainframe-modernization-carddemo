@@ -1,0 +1,7 @@
+01Purchase at point of sale terminals, batch settled        
+02Payment applied                                           
+03Credit to account after merchant chargeback filed.        
+04Auth hold only                                            
+05Refund credit issued to the cardholder in full now        
+06Reversal entered                                          
+07Adjustment raised by operations after reconcile ok        

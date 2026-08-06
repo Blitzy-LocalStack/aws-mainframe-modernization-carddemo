@@ -229,15 +229,18 @@ long-established, which keeps [ADR-002](ADR-002-compute-platform.md) and
 [ADR-003](ADR-003-datastore-targets.md) free of language-specific workarounds;
 and the framework's own core now supplies the retry capability that would
 otherwise be an added dependency, which is why this migration adds no
-resilience library at all. That decision is recorded as item 9 of
-[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) and in
-the dependency rationale in [`services/pom.xml`](../../services/pom.xml)
-**L125–L145**, where the two candidate libraries are named and rejected — one
+resilience library at all. That decision belongs to
+[ADR-002](ADR-002-compute-platform.md), which records it in full alongside the
+container base-image pin; it appears as item 9 of
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) as a
+worked example of a documented non-obvious choice, and again at its point of use
+in the dependency rationale in [`services/pom.xml`](../../services/pom.xml)
+**L125–L150**, where the two candidate libraries are named and rejected — one
 because its published artifact targets the previous framework generation, the
 other as superseded by the core relocation — and where the deliberate absence of
-a circuit breaker is recorded alongside them. It is **not** recorded in
-[ADR-002](ADR-002-compute-platform.md); that record covers the compute platform
-and says nothing about retry, so a reader sent there would find nothing.
+a circuit breaker is recorded alongside them. This record states only the
+consequence for the language choice: the framework generation that arrives with
+the chosen parent is what makes the added dependency unnecessary.
 
 Trade-offs: a language with a lighter runtime footprint would reduce container
 memory and start-up time, and that cost is real and is accepted. It was

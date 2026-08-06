@@ -622,8 +622,19 @@ folder and is worth stating in the folder that the authors work in:
   which is exactly what the `boundary_expiry_equal` and `reject_103_expired` pair
   moves by one day. It is not a runtime value and must never be blanked.
 - The **processing timestamp at positions 305-330 is the only runtime-varying
-  range in an input record here, and must be blank** -- 26 spaces, as the seed
-  carries it.
+  range**, and in every `dailytran.txt` here it **must be blank** -- 26 spaces, as
+  the seed carries it. In every `transact.txt` it must instead be **filled**, with
+  the fixed literal `2022-07-18 00:00:00.000000`. That is not an exception to
+  master section 6.3 so much as the other side of it: the master's blank-bytes
+  clause governs an input to a compiled program, where the processing timestamp is
+  the field the program **writes**, which is precisely why no `transact.txt`
+  exists in the oracle fixture tree at all. These `transact.txt` files are a
+  different class of artifact -- an already-posted row loaded into PostgreSQL
+  ahead of a test rather than a feed presented to `CBTRN02C` -- and
+  `transactions.proc_ts` is `NOT NULL` where `daily_transactions.proc_ts` is not,
+  which is Decision B in section 3.2. The determinism the master is protecting is
+  honoured by the value being a fixed literal and never a clock reading; each
+  scenario README records the provenance of that literal at its own point of use.
 - Any date a program **consumes** is injected as a parameter rather than read
   from the wall clock, so that a rerun produces identical output. The pinned clock
   named in section 5 is the target-side counterpart of that discipline.

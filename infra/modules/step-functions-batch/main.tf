@@ -235,6 +235,18 @@ locals {
 
   daily_definition = {
     Comment = "CardDemo nightly batch chain migrated from JCL/JES2"
+
+    # WHY : Assumptions: a per-state timeout does not bound the execution as a
+    #       whole. An execution can stall between states, or inside a Map's own
+    #       bookkeeping, where no single state's TimeoutSeconds applies, and an
+    #       unbounded execution there holds the online write path quiesced
+    #       because ResumeOnlineWrites runs only once the chain finishes or
+    #       fails. This top-level ceiling is what guarantees the quiesce bracket
+    #       is released at all rather than held until an operator intervenes;
+    #       variables.tf derives its floor from the longest per-state ceiling so
+    #       it can never be set below one.
+    TimeoutSeconds = var.state_machine_timeout_seconds
+
     StartAt = "ValidateExecutionInput"
     States = merge(
       local.batch_task_states,
@@ -308,7 +320,19 @@ locals {
           Parameters = {
             FunctionName = var.quiesce_function_arn
             Payload = {
-              action            = "quiesce"
+              action = "quiesce"
+
+              # WHY : Alternatives Considered: relying only on the parameter name
+              #       the environment root bakes into the function's own
+              #       environment variables, which would make this field
+              #       unnecessary. Rejected because it leaves the definition
+              #       showing a quiesce call with no subject: which flag the
+              #       bracket toggles would be discoverable only by opening a
+              #       different resource in a different file. Naming it in the
+              #       payload puts it in the execution history beside the
+              #       transition that set it.
+              readOnlyFlagParameter = var.read_only_flag_parameter_name
+
               "businessDate.$"  = "$.businessDate"
               "executionName.$" = "$$.Execution.Name"
             }
@@ -509,7 +533,16 @@ locals {
           Parameters = {
             FunctionName = var.resume_function_arn
             Payload = {
-              action            = "resume"
+              action = "resume"
+
+              # WHY : Assumptions: the resume call names the same parameter the
+              #       quiesce call set, so the bracket is symmetric in the
+              #       execution history as well as in effect. Passing the name on
+              #       both ends is what makes a mismatched pair visible in one
+              #       place instead of requiring the two functions' environments
+              #       to be compared.
+              readOnlyFlagParameter = var.read_only_flag_parameter_name
+
               "businessDate.$"  = "$.businessDate"
               "executionName.$" = "$$.Execution.Name"
             }
@@ -554,7 +587,16 @@ locals {
           Parameters = {
             FunctionName = var.resume_function_arn
             Payload = {
-              action            = "resume"
+              action = "resume"
+
+              # WHY : Assumptions: the failure path clears the SAME parameter as
+              #       the success path, and naming it here rather than inheriting
+              #       it is what keeps that true if the two ever diverge. This is
+              #       the invocation that matters most: a chain that failed
+              #       without clearing the flag it set would leave the online
+              #       services read-only after the window ended.
+              readOnlyFlagParameter = var.read_only_flag_parameter_name
+
               failedExecution   = true
               "executionName.$" = "$$.Execution.Name"
             }
@@ -580,6 +622,15 @@ locals {
 
   adhoc_definition = {
     Comment = "CardDemo ad-hoc report workflow"
+
+    # WHY : Trade-offs: a separate ceiling from the daily chain's rather than one
+    #       shared value, because a single on-demand report is a far smaller unit
+    #       of work than the whole nightly chain. One shared value would have to
+    #       be sized for the larger of the two, which would let a stuck report
+    #       hold a Fargate task for the length of a full batch window before
+    #       anything terminated it.
+    TimeoutSeconds = var.adhoc_report_timeout_seconds
+
     StartAt = "ValidateReportRequest"
     States = {
       ValidateReportRequest = {

@@ -1343,10 +1343,19 @@ module "step_functions" {
   quiesce_function_arn        = aws_lambda_function.quiesce.arn
   resume_function_arn         = aws_lambda_function.resume.arn
   analyze_tables_function_arn = aws_lambda_function.database_admin.arn
-  notification_topic_arn      = module.observability.notification_topic_arn
-  dataset_bucket_name         = module.s3_datasets.bucket_name
-  log_retention_days          = var.log_retention_days
-  kms_key_arn                 = module.kms.s3_key_arn
+
+  # WHY : Assumptions: the same parameter the two functions already receive
+  #       through their own environment variables is named again here, so the
+  #       state machine's definition records which flag its quiesce bracket
+  #       toggles instead of leaving that discoverable only from the function
+  #       resources above. One owner, referenced twice, rather than two
+  #       independently maintained spellings.
+  read_only_flag_parameter_name = aws_ssm_parameter.online_writes_enabled.name
+
+  notification_topic_arn = module.observability.notification_topic_arn
+  dataset_bucket_name    = module.s3_datasets.bucket_name
+  log_retention_days     = var.log_retention_days
+  kms_key_arn            = module.kms.s3_key_arn
 }
 
 module "eventbridge_scheduler" {

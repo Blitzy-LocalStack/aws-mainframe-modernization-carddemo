@@ -112,7 +112,31 @@ Folder section 7 mandates the three items below.
    `tcatbal.txt`, two fields: the account identifier at positions 1-11 moved from
    the seed's `00000000001` to `00000000007` so the row sits on the key this
    scenario's card resolves to, and the balance at positions 18-28 moved from
-   `0000000000{` to `0000001000{`, which is +10.00.
+   `0000000000{` to `0000001000{`, which is +100.00.
+
+Assumptions: the balance field is `TRAN-CAT-BAL PIC S9(09)V99` at positions 18-28,
+so its 11 bytes `0000001000{` decode to exactly **+100.00** and to nothing else. The
+derivation is mechanical under the two master rules: section 3.4 reads the trailing
+`{` as a **positive-zero overpunch supplying the low-order digit as well as the
+sign**, making the digit string `0000001000` + `0` = `00000010000`; section 3.5's
+implied `V99` then takes the last two of those eleven digits as cents, splitting them
+into `000000100` and `00`. The distinction is recorded because the field is easy to
+misread by one decimal place: taking the leading ten characters as the whole value and
+treating `{` as a bare sign understates the row tenfold, and `+10.00` would in fact be
+the different byte string `0000000100{`.
+
+Two independent measurements confirm that reading rather than restating it. The decode
+is asserted executably by `categoryBalanceRecordRoundTripsByteIdentically` in
+[`FixedWidthCodecTest`](../../../../../../common-lib/src/test/java/com/carddemo/common/codec/FixedWidthCodecTest.java),
+which builds this exact 50-byte image and expects `new BigDecimal("100.00")`; and
+[`tcatbal.expected`](../../../../../../../tests/golden/posting/happy_path/tcatbal.expected)
+carries `0000006047G` in the same field, which decodes to 604.77 and equals this
+balance plus the +504.77 `DALYTRAN-AMT` of the sibling `dailytran.txt` -- a +10.00
+reading would instead require 514.77 there and does not match the byte. WHY this is
+written down at all: 100.00 and 10.00 differ by a single character at position 24, the
+balance is the only field distinguishing the two arms of the category-balance fork, and
+a decode stated once in prose is the value every later reader trusts, so the derivation
+is recorded beside the bytes instead of being left to be re-derived.
 
 Assumptions: `transact.txt` needs a filled processing timestamp because
 `ledger.transactions.proc_ts` is declared `NOT NULL` while
@@ -123,11 +147,79 @@ from the `CVTRA05Y` layout rather than copied from a seed row; deriving them fro
 the daily record is sound because folder section 2 measures the two 350-byte
 layouts as field-for-field identical in picture and order.
 
-Trade-offs: the balance moved to +10.00 rather than being left at the seed's
+Assumptions: that layout identity licenses the same offsets in both records, but
+what licenses copying the *values* is the program.
+[`app/cbl/CBTRN02C.cbl`](../../../../../../../app/cbl/CBTRN02C.cbl) opens
+`2000-POST-TRANSACTION` at line 424, and lines 425-436 are twelve consecutive
+`MOVE DALYTRAN-x TO TRAN-x` statements -- identifier, type code, category code,
+source, description, amount, merchant identifier, merchant name, merchant city,
+merchant zip, card number, originating timestamp -- with nothing reformatted,
+rounded or recomputed on the way across. Positions 1-304 here are therefore a
+projection of that paragraph rather than a resemblance to a neighbouring file,
+which is what makes byte equality with `dailytran.txt` over exactly that range
+the correct assertion to write. Of the fourteen fields the program derives only
+one: line 437 performs `Z-GET-DB2-FORMAT-TIMESTAMP` and line 438 moves its
+result into `TRAN-PROC-TS`, which is why that single field is the only one this
+file cannot inherit.
+
+Assumptions: the date in that literal is traceable rather than invented.
+[`app/jcl/INTCALC.jcl`](../../../../../../../app/jcl/INTCALC.jcl) line 22 reads
+`EXEC PGM=CBACT04C,PARM='2022071800'`, and it is the only business-date
+injection in the baseline batch chain --
+[`app/jcl/POSTTRAN.jcl`](../../../../../../../app/jcl/POSTTRAN.jcl) invokes
+`CBTRN02C` at its line 23 with no `PARM` at all, so posting supplies no date to
+borrow. A zero time of day is the honest widening of a date parameter to a
+`TIMESTAMP(6)`, and `.000000` follows the seed, where every originating
+timestamp carries zero microseconds. The interior shape is the space-and-colon
+form folder section 2.2 fixes from `CSDAT01Y`, not the dash-and-dot form
+`CBTRN02C` spells for its own working field at lines 160-174; that one is DB2's
+character representation of a timestamp, which PostgreSQL does not parse into
+`TIMESTAMP(6)`.
+
+Alternatives Considered: two other values for positions 305-330 were evaluated
+and both rejected. The first was 26 spaces copied from
+[`tranfile.expected`](../../../../../../../tests/golden/posting/happy_path/tranfile.expected),
+which carries this same `CVTRA05Y` shape and does hold 26 blanks there --
+measured, not assumed. Those blanks are a comparator artifact rather than a
+value: master section 6.3 states the rule as masking only the runtime processing
+timestamp in place, preserving every other byte, so that field is pinned blank on
+input and masked on output while the originating timestamp is left alone.
+Reusing them here loads nothing, because the `NOT NULL` above refuses that column
+empty. It would also misread what that file is -- a comparison baseline for a
+batch program, and nothing in this module is compared against it.
+The second candidate was reusing the originating timestamp verbatim. It loads,
+but it makes the two columns indistinguishable: a test that read `orig_ts` where
+it meant `proc_ts` would pass, and the non-unique `idx_transactions_proc_ts`
+ordering would be exercised as though it were originating order. The literal
+chosen sits more than a month after the originating timestamp, so the two values
+are independently observable and neither can stand in for the other.
+
+Trade-offs: positions 331-350 hold 20 spaces, matching `dailytran.txt`. The same
+`tranfile.expected` holds 20 `0x00` bytes there instead -- also measured -- and
+that is a record-area artifact rather than a value, because a compiled program
+never writes into this `FILLER` and leaves those bytes at the low values its
+record area was initialised to. Spaces are chosen at the cost of differing from a
+program-written record in every one of those 20 positions, and they buy a file
+that is wholly 7-bit ASCII and so can be diffed, grepped and read in a terminal;
+a run of 20 low values is invisible in precisely the tools a reviewer uses, and
+folder section 10 gates this tree on printable ASCII for that reason. Nothing
+downstream can observe the difference either way:
+[`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) maps
+this `FILLER` to no column and records that omission at its lines 109-113, so
+these bytes exist only to reach the declared record length of 350.
+
+Trade-offs: the balance moved to +100.00 rather than being left at the seed's
 +0.00 so that this scenario's category row is unmistakably present and non-zero,
 which keeps it distinguishable at a glance from the deliberately absent row in
 `zero_balance`. A reader comparing the two scenarios sees a populated row against
-an empty file rather than two rows that differ only in a sign-overpunch byte.
+an empty file rather than two rows that differ only in a sign-overpunch byte. The
+non-zero choice also earns its keep in the arithmetic: because
+`2700-B-UPDATE-TCATBAL-REC` adds the transaction amount to the balance it read,
+a non-zero starting value makes the update result 604.77 -- provably distinct
+from the 504.77 a create-from-zero would produce -- so a consuming test cannot
+pass while silently taking the create arm. A zero starting balance would have
+left the two arms indistinguishable by result, which is the failure this byte
+exists to prevent.
 
 ---
 
