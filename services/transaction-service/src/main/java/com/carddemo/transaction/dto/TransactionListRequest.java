@@ -1,6 +1,8 @@
 package com.carddemo.transaction.dto;
 
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
@@ -21,14 +23,6 @@ import jakarta.validation.constraints.Size;
  * migrated behaviour differs the divergence is stated here rather than introduced silently. The
  * repository states that same discipline for its own suite at {@code tests/README.md} lines 555 and
  * 556, which encode the specification rather than redefine it.
- *
- * <p><b>Parameters, return values, exceptions or errors at the type level.</b> The three record
- * components are this type's parameters and each carries its own at-clause below. A type
- * declaration returns no value and raises nothing, so no return or exception at-clause appears at
- * this level; the three methods declared in the body carry their own. The inapplicability is stated
- * rather than left silent, because the Explainability rule lists a docstring that omits parameters
- * or return values among its forbidden patterns at line 39, and a reader must be able to tell a
- * declared inapplicability from an oversight.
  *
  * <h2>Positioning the browse: the three states this record can express</h2>
  *
@@ -237,49 +231,6 @@ import jakarta.validation.constraints.Size;
  * exactly that information across. The minus one itself is a terminal mechanism and is not a
  * component of this record.
  *
- * <h2>The documentation contract this record is held to</h2>
- *
- * <p>One user-specified rule governs this migration: Explainability. Its line 15 requires a
- * docstring on every function, class and module entry point and attaches no visibility qualifier, so
- * no visibility narrows it -- which is why the nested enumeration below carries a block of its own
- * and each of its constants carries one. Line 19 requires a name, a type and a description for each
- * parameter, line 20 a described return value for each returning method, and line 21 an exception
- * at-clause where one can actually be raised. Line 22 names Javadoc as the format for Java. The
- * quartet those lines enumerate is the same quartet the house convention names at
- * {@code tests/README.md} lines 544 to 549 -- purpose, parameters, returns and exceptions -- which
- * that convention calls a hard review gate at line 549.
- *
- * <p>Every non-obvious decision above and below carries one of exactly four labels, in the single
- * accepted spelling: {@code Alternatives Considered:}, {@code Refactoring Rationale:},
- * {@code Assumptions:} and {@code Trade-offs:}. Plural where the rule writes it plural,
- * unparenthesised, colon retained, and with no emphasis markup, because the label is read by a
- * literal search before it is read by a person and a second accepted spelling is a rationale that
- * reads as documented to a human and as absent to the search. The rule's validation gate at line 43
- * is conjunctive: a complete docstring and a labelled rationale are each independently fatal when
- * absent, so this record is not compliant merely by being thorough. Conflicts: none. Rule 1 agrees
- * with the convention this repository already documents for its own suite, so this file extends an
- * established house convention rather than introducing a competing one, and nothing had to be traded
- * away to satisfy both.
- *
- * <p>Assumptions: the twin comment idiom appears below on the component declarations and never on a
- * statement inside a method body, and the split is deliberate rather than inconsistent.
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} scopes that idiom to fenced command blocks in prose
- * and forbids a statement-level purpose comment in a Java source file, on the ground that such a
- * line restates what the statement already says -- the rule's first forbidden pattern at line 38. A
- * component declaration is a declaration rather than a statement, and its accompanying line states
- * a provenance the token cannot show; the in-package sibling
- * {@code TransactionDetailResponse} sets that precedent. Inside a method body the rationale is
- * carried by a labelled why-line alone, which is the form the standard prescribes there and the form
- * the shared kernel uses.
- *
- * <p>This file is pure ASCII with no byte-order mark, and the restriction is load-bearing rather
- * than cosmetic. The house convention cited above is written at {@code tests/README.md} line 548
- * with a non-breaking hyphen where an ordinary one is expected. That character is indistinguishable
- * from an ordinary hyphen on screen yet behaves differently in a search, so copying the fourth label
- * from there would turn it into a token that a search for the label fails to find. Every label here
- * is retyped with the ordinary hyphen-minus the rule itself uses, and restricting the whole file to
- * ASCII makes that failure mode unreachable.
- *
  * @param transactionIdFilter the optional identifier the browse starts from, borne as a string of at
  *     most sixteen digits; it is the target of the reference screen field
  *     {@code TRNIDINI PIC X(16)} declared at line 66 of {@code app/cpy-bms/COTRN00.CPY}, and its
@@ -291,15 +242,14 @@ import jakarta.validation.constraints.Size;
  *     preceding {@code com.carddemo.common.web.PageResponse} supplied it and never parsed,
  *     decoded, split or incremented by a client; null, empty or entirely blank means no position was
  *     supplied, which is the opening request for the ordered set
- * @param direction the direction {@code cursor} is read in, {@link Direction#FORWARD} for the
+ * @param direction the direction {@code cursor} is read in, {@link Direction#NEXT} for the
  *     ascending continuation the eighth function key drives at lines 257 to 274 of
- *     {@code app/cbl/COTRN00C.cbl} and {@link Direction#BACKWARD} for the descending one the seventh
+ *     {@code app/cbl/COTRN00C.cbl} and {@link Direction#PREVIOUS} for the descending one the seventh
  *     drives at lines 234 to 252; null is admitted and resolves to
- *     {@link Direction#FORWARD} through {@link #effectiveDirection()}, which is the direction the
+ *     {@link Direction#NEXT} through {@link #effectiveDirection()}, which is the direction the
  *     reference program takes on an entry that pressed neither key
  */
 public record TransactionListRequest(
-    // WHAT: the starting transaction identifier, constrained to digits and to the key width.
     // WHY : Assumptions: the width is not chosen. Transformation rule T1 makes the reference
     //       copybook normative, so the sixteen comes from TRNIDINI PIC X(16) at COTRN00.CPY line
     //       66 and from TRAN-ID PIC X(16) at CVTRA05Y line 5, which agree. A value longer than the
@@ -334,9 +284,18 @@ public record TransactionListRequest(
     //       reference program as a pad byte; over HTTP the same field arrives absent or empty
     //       instead, which the digit arm already matches. Admitting control characters into a
     //       published contract buys nothing and the OpenAPI document would carry them.
-    @Pattern(regexp = "[0-9]*|[ ]+", message = "Tran ID must be Numeric ...")
+    // WHY : Refactoring Rationale: the digit run is EXACT at sixteen and an earlier revision of
+    //       this component admitted any number of digits. Sixteen is the whole key -- TRAN-ID
+    //       PIC X(16) at line 5 of app/cpy/CVTRA05Y.cpy -- and the committed extract is
+    //       zero-padded to it, so a shorter run is not a prefix of a key but a value that matches
+    //       none, and the published contract declares the same exact width. The empty string keeps
+    //       its own arm because line 206 routes an unfilled field to the start of the key space.
+    // WHY : Alternatives Considered: admitting a run of spaces as a third arm, which an earlier
+    //       revision did. Over HTTP a padded screen field has no counterpart: absence arrives as an
+    //       omitted member or as the empty string, both of which the first arm matches, so the
+    //       space arm described a value no client sends while widening what this component accepts.
+    @Pattern(regexp = "|[0-9]{16}", message = "Tran ID must be Numeric ...")
     String transactionIdFilter,
-    // WHAT: the paging position, opaque to every holder including this record.
     // WHY : Alternatives Considered: a size constraint naming the sealed token's own ceiling was
     //       evaluated and rejected. The ceiling and the token shape are owned by
     //       com.carddemo.common.web.CursorToken, and restating either here as a literal would be a
@@ -345,7 +304,6 @@ public record TransactionListRequest(
     //       belongs where the token is opened, which is the only place holding the key that can
     //       tell a genuine token from a well-formed forgery.
     String cursor,
-    // WHAT: the reading direction, nullable so that an opening request need not state one.
     // WHY : Assumptions: nullability is the reference behaviour rather than laxity. An entry that
     //       pressed neither paging key reaches the forward fill at COTRN00C line 297 without
     //       having stated a direction, so requiring one here would reject the reference program's
@@ -389,7 +347,7 @@ public record TransactionListRequest(
          * direction an opening request takes, which is why {@link #effectiveDirection()} resolves an
          * unstated direction to this constant and not to its companion.
          */
-        FORWARD,
+        NEXT("next"),
 
         /**
          * Read the page before the cursor: keys strictly less than it, in descending order.
@@ -400,7 +358,70 @@ public record TransactionListRequest(
          * backward page at line 246. Its analogue is the read-previous verb at line 660, and the
          * descending order is what that verb does rather than an ordering this migration chose.
          */
-        BACKWARD
+        PREVIOUS("previous");
+
+        /** The lower-case token this constant is spelled as on the wire. */
+        private final String wireValue;
+
+        /**
+         * Binds one constant to the wire token that selects it.
+         *
+         * @param wireValue the lower-case token published for this constant; never {@code null} and
+         *     never blank, both being properties of the two literals above rather than of any input
+         */
+        Direction(String wireValue) {
+            this.wireValue = wireValue;
+        }
+
+        /**
+         * Returns the token this constant is spelled as on the wire.
+         *
+         * @return the published lower-case token, {@code next} or {@code previous}; never
+         *     {@code null}
+         */
+        @JsonValue
+        public String wireValue() {
+            return wireValue;
+        }
+
+        /**
+         * Resolves a wire token to the constant it names.
+         *
+         * <p>Refactoring Rationale: this factory exists because the Java identifier and the wire
+         * token differ in case and an earlier revision had them differ in WORD too, naming the
+         * constants {@code FORWARD} and {@code BACKWARD} while the published contract and the
+         * already-authored browser client both carried {@code next} and {@code previous}. A query
+         * parameter is a string on both sides, so neither build could report the mismatch and it
+         * would have surfaced only as a refused request. The words now agree and only the case
+         * differs, which Java's constant convention forces; this method is where that one remaining
+         * difference is crossed, and it is the entry point a controller binds the query parameter
+         * through rather than relying on any framework converter's case policy.
+         *
+         * <p>Alternatively the constants could have been spelled in lower case so that the default
+         * converter matched them exactly. That was rejected because a lower-case constant reads as a
+         * field at every use site, and the mismatch it avoids is avoided here anyway.
+         *
+         * @param wireValue the token as received, which may be {@code null} when the caller stated
+         *     no direction
+         * @return the constant the token names, or {@code null} when {@code wireValue} is
+         *     {@code null}, absence being resolved by {@link #effectiveDirection()} rather than here
+         * @throws IllegalArgumentException when the token is neither published value, so that an
+         *     unrecognised direction is refused rather than silently read as the default
+         */
+        @JsonCreator
+        public static Direction fromWireValue(String wireValue) {
+            if (wireValue == null) {
+                return null;
+            }
+            for (Direction candidate : values()) {
+                if (candidate.wireValue.equals(wireValue)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException(
+                "direction must be \"next\" or \"previous\"; received a value of length "
+                    + wireValue.length());
+        }
     }
 
     /**
@@ -449,7 +470,7 @@ public record TransactionListRequest(
      * here leaves the component optional on the wire, as the published contract shows it, and
      * removes a null a caller would otherwise have to test for.
      *
-     * @return the stated direction when one was supplied, otherwise {@link Direction#FORWARD};
+     * @return the stated direction when one was supplied, otherwise {@link Direction#NEXT};
      *     never {@code null}
      */
     public Direction effectiveDirection() {
@@ -458,7 +479,7 @@ public record TransactionListRequest(
         //       sent. A constructor that substituted a value would make the record report a
         //       direction that was never on the wire, which no reader of a logged request could
         //       reconcile with what the client transmitted.
-        return direction == null ? Direction.FORWARD : direction;
+        return direction == null ? Direction.NEXT : direction;
     }
 
     /**

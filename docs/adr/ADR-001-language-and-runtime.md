@@ -47,7 +47,7 @@ and the shape of the asset base bound what a rewrite can be asked to cover.
 
 | Asset | Count | Where |
 |---|---|---|
-| COBOL programs, base tree | **31** — 12 batch `CB*`, 18 online `CO*`, 1 date utility `CSUTLDTC` | `app/cbl` |
+| COBOL programs, base tree | **31** — 12 batch `CB*`, 18 `CO*` members of which **17 are online and one is a batch utility** (`COBSWAIT`), 1 date utility `CSUTLDTC` | `app/cbl` |
 | COBOL programs, all trees | **44** under `app/**` — the base 31 plus 13 in the three extension trees (8 authorization, 3 transaction-type, 2 VSAM/MQ) | `app/**` |
 | Copybooks | **30** in `app/cpy`; **62** under `app/**` | `app/cpy`, extension trees |
 | BMS mapsets | **17** in `app/bms`; **21** under `app/**` | `app/bms`, extension trees |
@@ -57,10 +57,19 @@ and the shape of the asset base bound what a rewrite can be asked to cover.
 Two properties of that inventory decide more than its size does.
 
 **The online and batch tiers are coupled to the platform very differently.**
-Across the eighteen `CO*` programs there are 174 `EXEC CICS` occurrences — among
+Across the eighteen `CO*` members there are 174 `EXEC CICS` occurrences — among
 them 10 `XCTL`, 31 `SEND`, 17 `RECEIVE`, 30 `READ`, and the
 `STARTBR`/`READNEXT`/`READPREV`/`ENDBR` browse quartet — and seventeen of the
-eighteen files contain at least one. The twelve `CB*` batch programs contain
+eighteen files contain at least one. The exception is
+[`COBSWAIT`](../../app/cbl/COBSWAIT.cbl), which carries the online filename
+prefix, contains **zero** `EXEC CICS` verbs, declares itself a batch program in
+its own header, and is driven by
+[`app/jcl/WAITSTEP.jcl`](../../app/jcl/WAITSTEP.jcl) — so the *functional* split
+of the eighteen is **17 online plus one batch utility**, and the filename prefix
+is not a reliable guide to it. The register at
+[`docs/architecture/cobol-to-service-traceability.md`](../architecture/cobol-to-service-traceability.md)
+is the authority for that split and this record follows it.
+The twelve `CB*` batch programs contain
 **zero**, which [`tests/README.md`](../../tests/README.md) §1 records as the
 reason they "run standalone under GnuCOBOL". The online tier's dependence on
 CICS is therefore pervasive and the batch tier's is absent, and any option that
@@ -76,8 +85,8 @@ nothing about the repository pre-selects an answer.
 ```mermaid
 graph LR
     subgraph REF["z/OS runtime — REFERENCE-ONLY, unchanged by this migration"]
-        A["18 online programs<br/>EXEC CICS command level"] --> B["CICS region"]
-        C["12 batch programs<br/>zero EXEC CICS verbs"] --> D["JCL / JES2"]
+        A["17 online programs<br/>EXEC CICS command level"] --> B["CICS region"]
+        C["12 batch programs + COBSWAIT<br/>zero EXEC CICS verbs"] --> D["JCL / JES2"]
         B --> E[("VSAM KSDS")]
         D --> E
     end
@@ -220,8 +229,15 @@ long-established, which keeps [ADR-002](ADR-002-compute-platform.md) and
 [ADR-003](ADR-003-datastore-targets.md) free of language-specific workarounds;
 and the framework's own core now supplies the retry capability that would
 otherwise be an added dependency, which is why this migration adds no
-resilience library at all — recorded in
-[ADR-002](ADR-002-compute-platform.md) rather than here.
+resilience library at all. That decision is recorded as item 9 of
+[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) and in
+the dependency rationale in [`services/pom.xml`](../../services/pom.xml)
+**L125–L145**, where the two candidate libraries are named and rejected — one
+because its published artifact targets the previous framework generation, the
+other as superseded by the core relocation — and where the deliberate absence of
+a circuit breaker is recorded alongside them. It is **not** recorded in
+[ADR-002](ADR-002-compute-platform.md); that record covers the compute platform
+and says nothing about retry, so a reader sent there would find nothing.
 
 Trade-offs: a language with a lighter runtime footprint would reduce container
 memory and start-up time, and that cost is real and is accepted. It was
@@ -287,15 +303,15 @@ the edge rather than repaired behind it. The invariant is centralised so it is
 decided once: `Money` in the shared kernel fixes the scale at 2 and the general
 rounding mode at half-up, and its companion Jackson module renders the value
 through its plain-string accessor rather than as a number. The prohibition on
-`float` and `double` in the money path is chartered as an executable
-architecture rule in one owned location — the `architecture` test package of the
-shared kernel — with its enforcement site wired into every module by the
-`architecture-rules` execution in
-[`services/pom.xml`](../../services/pom.xml), which selects rules by a reserved
-class name. That charter is explicit that a named type or test with no
-file yet is planned rather than present, so the honest statement today is that
-the invariant has one owner and a prepared gate, not that a gate already
-rejects a violation on every build.
+`float` and `double` in the money path is enforced as an executable architecture
+rule owned in one location — the `architecture` test package of the shared kernel
+— and applied to every module by the `architecture-rules` execution in
+[`services/pom.xml`](../../services/pom.xml), which selects those rules by a
+reserved class name and scans each module against the kernel's test artifact.
+Expressing the invariant as a rule the build runs, rather than as a convention a
+reviewer checks, is what makes it a decision this record can stand behind: a
+violation fails the module that introduces it, and extending the rule set needs
+no change to any module's build.
 
 **One formula must be bit-exact**, and it is worth naming because the failure
 mode is an ordering mistake rather than a typing mistake.
@@ -692,6 +708,32 @@ baseline features, not as gaps.
 - The copybook layouts remain the normative contract for database columns, API
   payloads and ETL field offsets, per
   [`docs/architecture/data-model-and-schema-mapping.md`](../architecture/data-model-and-schema-mapping.md).
+- **The framework minor line has to be tracked, and the runtime does not.** The
+  two halves of this decision carry very different maintenance obligations, and
+  recording only the choice would leave the asymmetry invisible. Amazon Corretto
+  21 is a long-term-support release with vendor support stated to **October 2030**,
+  so the Java half needs no scheduled action inside any plausible horizon for this
+  work. Spring Boot carries no long-term-support designation of that kind: its
+  minor line advances on a roughly six-month cadence and each minor carries a
+  stated minimum of twelve months of open-source support from its own release, so
+  the pinned 4.1.0 — a June 2026 release — leaves open-source support around the
+  middle of 2027, and a minor upgrade is a recurring obligation rather than a
+  one-off. Staying put past that point is possible only under a paid extended
+  support arrangement, so the standing choice is an upgrade cadence or a
+  subscription and not a third option. Two consequences follow and belong to
+  whoever operates the system. A minor upgrade must be treated as a first-class
+  change with the parity oracle re-run against it, because the framework supplies
+  the retry capability this record relies on in place of a resilience library, and
+  an annotation or attribute rename there is a source change in every service. And
+  the `typescript` ceiling recorded in
+  [`ui/package.json`](../../ui/package.json) **L46–L49** is an unrelated pin with
+  the same shape — held below the newest major by `typescript-eslint`'s declared
+  peer range, where crossing the bound silently stops the documentation gate rather
+  than failing — so neither pin should be advanced on currency alone. No date
+  beyond the two above is quoted here, for the reason
+  [Cost Implications](#cost-implications) gives for quoting no figures: a published
+  support window can move without anything in this repository changing, and a
+  stale date in an architecture record is worse than a stated cadence.
 - A later implementation change that conflicts with this record requires a
   superseding ADR rather than a silent edit to the decision.
 
@@ -739,4 +781,3 @@ baseline features, not as gaps.
 "What is" overview, in the AWS Mainframe Modernization User Guide — the source
 of the availability fact recorded under
 [Option 1](#option-1--managed-replatform-on-aws-mainframe-modernization).
-

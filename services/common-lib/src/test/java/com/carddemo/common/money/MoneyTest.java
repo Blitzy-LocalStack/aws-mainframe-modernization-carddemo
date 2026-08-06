@@ -61,7 +61,6 @@ final class MoneyTest {
     @Test
     @DisplayName("general normalization uses HALF_UP on both sides of zero")
     void normalizesGeneralAmountsWithHalfUpAtMidpoints() {
-        // WHAT: Exercise the same discarded midpoint digit on both sides of zero.
         // WHY : Assumptions: Signed COBOL money pictures make both signs part of the domain, so
         //       a positive-only vector would leave the negative HALF_UP contract unproved.
         Money positive = Money.of(new BigDecimal("1.005"));
@@ -100,7 +99,6 @@ final class MoneyTest {
     void pinsDefaultFallbackGroupKeyContentAndWidth() {
         String fixtureRecord = "DEFAULT   01000100150{0000000000000000000000000000";
 
-        // WHAT: Read only the X(10) group component from the quoted fixture record.
         // WHY : Assumptions: CBACT04C.cbl:436-439 moves DEFAULT into the CVTRA02Y X(10) field;
         //       quoting discgrp.txt:1 pins its padding without inventing a lookup implementation.
         String fallbackGroupKey = fixtureRecord.substring(0, 10);
@@ -156,7 +154,6 @@ final class MoneyTest {
     void rejectsSyntheticMissingDefaultRate() {
         Money balance = Money.of("1000.00");
 
-        // WHAT: Exercise the absent resolved-rate boundary that the Money API actually exposes.
         // WHY : Assumptions: CBACT04C.cbl:422 and 436-458 require the second read to return 00;
         //       default_fallback/discgrp.txt contains all 17 rows, so this null case is synthetic.
         NullPointerException failure = assertThrows(
@@ -180,7 +177,6 @@ final class MoneyTest {
         BigDecimal fixtureRate = new BigDecimal("25.00");
         BigDecimal syntheticRate = new BigDecimal("2.50");
 
-        // WHAT: Retain the fixture rate and the tempting synthetic rate as negative controls.
         // WHY : Alternatives Considered: The synthetic 2.50 rate was rejected as a rounding
         //       regression discriminator because both supported modes produce 2.08 here.
         assertThat(balance.monthlyInterestTruncated(fixtureRate))
@@ -248,7 +244,6 @@ final class MoneyTest {
         Money balance = Money.of("-1000.00");
         BigDecimal rate = new BigDecimal("2.71");
 
-        // WHAT: Compare the production helper with the nearest plausible signed alternative.
         // WHY : Alternatives Considered: FLOOR agrees with DOWN for positive amounts but yields
         //       -2.26 here, while the signed receiving field truncates toward zero to -2.25.
         Money production = balance.monthlyInterestTruncated(rate);
@@ -273,7 +268,6 @@ final class MoneyTest {
         BigDecimal rate = new BigDecimal("2.71");
         Money production = balance.monthlyInterestTruncated(rate);
 
-        // WHAT: Contrast the authored formula with an intentionally reordered calculation.
         // WHY : Assumptions: CBACT04C.cbl:465 parenthesizes the product, and the scale-two
         //       CVTRA01Y/CVTRA02Y operands form a scale-four raw product before division.
         BigDecimal divideFirstCounterfactual = balance.amount()
@@ -301,7 +295,6 @@ final class MoneyTest {
         BigDecimal rate = new BigDecimal("2.71");
         Money reducedItem = balance.monthlyInterestTruncated(rate);
 
-        // WHAT: Compare source-order accumulation with one reduction after aggregating raw input.
         // WHY : Trade-offs: CBACT04C.cbl:467 adds WS-MONTHLY-INT after its scale-two receive;
         //       reducing only once after summing would instead produce the divergent 6.77 value.
         Money perItemTotal = Money.total(reducedItem, reducedItem, reducedItem);
@@ -331,7 +324,6 @@ final class MoneyTest {
         Money cycleDebit = Money.of("0.00");
         Money transactionAmount = Money.of("2065.00");
 
-        // WHAT: Preserve the fixture current balance as a sentinel outside the projected formula.
         // WHY : Assumptions: CBTRN02C.cbl:403-405 names only cycle credit, cycle debit, and amount;
         //       including the deliberately different 193.00 value would expose a 2258.00 result.
         Money projectedBalance = cycleCredit.minus(cycleDebit).plus(transactionAmount);
@@ -357,7 +349,6 @@ final class MoneyTest {
         Money creditLimit = Money.of("2065.00");
         Money projectedBalance = cycleCredit.minus(cycleDebit).plus(transactionAmount);
 
-        // WHAT: Exercise equality and pair it with the one-cent-over sibling test.
         // WHY : Alternatives Considered: A value well below the limit would also pass but could
         //       not distinguish CBTRN02C.cbl:407 inclusive >= from an exclusive comparison.
         assertThat(projectedBalance.isWithinLimit(creditLimit)).isTrue();
@@ -381,7 +372,6 @@ final class MoneyTest {
         Money creditLimit = Money.of("2065.00");
         Money projectedBalance = cycleCredit.minus(cycleDebit).plus(transactionAmount);
 
-        // WHAT: Stop at the final money predicate exposed by the authored common-lib API.
         // WHY : Assumptions: CBTRN02C.cbl:407-420 evaluates expiration after over-limit and lets
         //       103 overwrite 102; treating this boolean as a final reason or if/else-if is invalid.
         assertThat(projectedBalance.isWithinLimit(creditLimit)).isFalse();
@@ -400,7 +390,6 @@ final class MoneyTest {
     void writesQuotedScaleTwoWireValuesWithoutReparse() {
         ObjectMapper objectMapper = mapper();
 
-        // WHAT: Assert the emitted token bytes before any decoder can coerce their representation.
         // WHY : Alternatives Considered: Reparsing first would hide a JSON number-versus-string
         //       defect because both token forms could then become the same in-memory amount.
         String canonicalJson = objectMapper.writeValueAsString(Money.of("1234.56"));
@@ -475,7 +464,6 @@ final class MoneyTest {
     void rejectsUnquotedJsonNumericToken() {
         ObjectMapper objectMapper = mapper();
 
-        // WHAT: Submit the same decimal glyphs without the required JSON string quotes.
         // WHY : Alternatives Considered: Accepting a numeric token cannot reveal whether its
         //       producer already reduced the amount, so MoneyModule requires plain decimal text.
         MismatchedInputException failure = assertThrows(
@@ -500,7 +488,6 @@ final class MoneyTest {
         ObjectMapper objectMapper = mapper();
         String json = objectMapper.writeValueAsString(Money.of("9999999999.99"));
 
-        // WHAT: Inspect string payload characters directly without numeric reparsing.
         // WHY : Assumptions: CCPAURQY.cpy:27 and CCPAURLY.cpy:24 define one sign, ten integer
         //       digits, one point, and two fractional digits; JSON omits only the positive sign.
         String payload = json.substring(1, json.length() - 1);
@@ -510,6 +497,411 @@ final class MoneyTest {
         assertThat(payload).matches("[0-9]{10}\\.[0-9]{2}");
         assertThat(editedDisplay).isEqualTo("+9999999999.99");
         assertThat(editedDisplay).hasSize(14);
+    }
+
+    /**
+     * Verifies the text factory refuses an over-length amount before it reaches a parser.
+     *
+     * <p>The test accepts no parameters and returns normally after capturing the expected
+     * {@link NumberFormatException}. The exception stays inside the assertion and does not escape.
+     *
+     * <p>Assumptions: the refusal is bounded by {@link Money#MAX_INPUT_LENGTH} rather than by the
+     * domain bound, and the ceiling is checked first because the order is what makes it useful. The
+     * exact decimal type's own text constructor accepts a digit count limited only by the length of
+     * the text, so a caller-supplied string is the one input to this type whose cost is unbounded;
+     * measuring its length costs one comparison and happens before any digit is examined. The vector
+     * is one character over the ceiling rather than a large multiple of it, because the boundary is
+     * what a wrong comparison operator moves and a long vector would pass under either.
+     */
+    @Test
+    @DisplayName("text longer than MAX_INPUT_LENGTH is refused before parsing")
+    void rejectsMonetaryTextLongerThanTheDeclaredInputCeiling() {
+        String oneOverTheCeiling = "1".repeat(Money.MAX_INPUT_LENGTH + 1);
+
+        NumberFormatException failure = assertThrows(
+                NumberFormatException.class,
+                () -> Money.of(oneOverTheCeiling));
+
+        assertThat(failure)
+                .isExactlyInstanceOf(NumberFormatException.class)
+                .hasMessageContaining("monetary text is 33 characters")
+                .hasMessageContaining("exceeding the " + Money.MAX_INPUT_LENGTH);
+
+        // WHY : Assumptions: text of exactly the ceiling length must be admitted, so the refusal above
+        //       is a boundary rather than a blanket rejection of long text. The control has to satisfy
+        //       the grammar and the domain as well as the length, which is why it is padded with zeros
+        //       on both sides of the point rather than being 32 digits: 32 significant digits would be
+        //       refused for magnitude and 32 fractional digits for scale, so either would pass this
+        //       assertion for the wrong reason. Zeros make the value itself trivial and leave the
+        //       LENGTH as the only property under test. It is composed from the two constants so it
+        //       tracks them if either moves.
+        String atTheCeiling = "0".repeat(Money.MAX_INPUT_LENGTH - Money.MAX_INPUT_SCALE - 1)
+                + "." + "0".repeat(Money.MAX_INPUT_SCALE);
+        assertThat(atTheCeiling).hasSize(Money.MAX_INPUT_LENGTH);
+        assertThat(Money.of(atTheCeiling)).isEqualTo(Money.ZERO);
+    }
+
+    /**
+     * Verifies the text factory refuses exponent notation rather than expanding it.
+     *
+     * <p>The test accepts no parameters and returns normally after capturing the expected
+     * {@link NumberFormatException}. The exception stays inside the assertion and does not escape.
+     *
+     * <p>Assumptions: {@code 1.2E3} is a value the exact decimal type would accept and expand to
+     * 1200, so this refusal is a deliberate narrowing of that type rather than a syntax error being
+     * reported. Two properties make the narrowing necessary. A few characters of exponent can declare
+     * an arbitrary number of digit positions, so admitting the notation would reintroduce through the
+     * grammar exactly the unbounded cost the length ceiling removes. And the wire form of this
+     * contract is a plain decimal string, so a producer emitting an exponent has a defect that is
+     * cheaper to report here than to discover as a balance three services away.
+     */
+    @Test
+    @DisplayName("exponent notation is refused by the plain-decimal grammar")
+    void rejectsExponentNotationBecauseTheGrammarAdmitsPlainDecimalOnly() {
+        NumberFormatException failure = assertThrows(
+                NumberFormatException.class,
+                () -> Money.of("1.2E3"));
+
+        assertThat(failure)
+                .isExactlyInstanceOf(NumberFormatException.class)
+                .hasMessageContaining("not a plain decimal amount")
+                .hasMessageContaining("with no exponent");
+
+        // WHY : Assumptions: the plainly written equivalent of the refused text must be admitted,
+        //       because naming the accepted spelling of the same quantity is what shows the refusal is
+        //       about notation and not about the value, so a reader cannot mistake this for a domain
+        //       bound.
+        assertThat(Money.of("1200.00").toPlainString()).isEqualTo("1200.00");
+    }
+
+    /**
+     * Verifies the text factory admits exactly MAX_INPUT_SCALE fractional digits and no more.
+     *
+     * <p>The test accepts no parameters and returns normally after capturing the expected
+     * {@link NumberFormatException}. The exception stays inside the assertion and does not escape.
+     *
+     * <p>Assumptions: both vectors are built from {@link Money#MAX_INPUT_SCALE} rather than from the
+     * literal fifteen, so the pair remains a boundary if the constant ever moves. The admitted side
+     * is asserted alongside the refused one because a fractional input is REDUCED to
+     * {@link Money#SCALE} rather than rejected for carrying more than two places, and a test that
+     * showed only the refusal would read as though any third decimal place were an error.
+     */
+    @Test
+    @DisplayName("more fractional digits than MAX_INPUT_SCALE are refused, that many are reduced")
+    void rejectsMoreFractionalDigitsThanTheInputGrammarAdmits() {
+        String oneFractionalDigitTooMany = "0." + "1".repeat(Money.MAX_INPUT_SCALE + 1);
+        String theWidestAdmittedFraction = "0." + "1".repeat(Money.MAX_INPUT_SCALE);
+
+        NumberFormatException failure = assertThrows(
+                NumberFormatException.class,
+                () -> Money.of(oneFractionalDigitTooMany));
+
+        assertThat(failure)
+                .isExactlyInstanceOf(NumberFormatException.class)
+                .hasMessageContaining("at most " + Money.MAX_INPUT_SCALE + " digits after a single"
+                        + " decimal point");
+
+        // WHY : Assumptions: the widest admitted fraction must be reduced to cents instead of being
+        //       refused. 0.111111111111111 reduces to 0.11 under HALF_UP because the first discarded
+        //       digit is one, so this vector also shows the reduction is a rounding decision taken by
+        //       the general contract rather than a truncation performed by the grammar.
+        assertThat(Money.of(theWidestAdmittedFraction).toPlainString()).isEqualTo("0.11");
+    }
+
+    /**
+     * Verifies an amount above the reference money domain is refused by both factories.
+     *
+     * <p>The test accepts no parameters and returns normally after capturing the two expected
+     * {@link ArithmeticException} instances. Both stay inside their assertions and neither escapes.
+     *
+     * <p>Assumptions: the bound is {@link Money#MAX_MAGNITUDE}, which is the largest value the
+     * twelve-byte zoned picture {@code ACCT-CURR-BAL PIC S9(10)V99} at line 7 of
+     * {@code app/cpy/CVACT01Y.cpy} can hold. An amount one cent past it is not merely large, it is
+     * unrepresentable in the record the migration has to write back, so admitting it would defer the
+     * failure from a factory call to an encode that has already committed to a row.
+     *
+     * <p>Trade-offs: the refusal message reports the integer-digit COUNT and the bound, never the
+     * offending amount. That is asserted here rather than assumed, because the value reaching this
+     * guard is caller-supplied text and an exception message becomes a log line; a test that accepted
+     * either message shape would let the value be reintroduced into the diagnostic silently.
+     */
+    @Test
+    @DisplayName("magnitude past MAX_MAGNITUDE is refused with a digit count and no amount")
+    void rejectsAmountsAboveTheReferenceMoneyDomain() {
+        String oneCentPastTheDomain = "10000000000.00";
+
+        ArithmeticException fromText = assertThrows(
+                ArithmeticException.class,
+                () -> Money.of(oneCentPastTheDomain));
+        ArithmeticException fromDecimal = assertThrows(
+                ArithmeticException.class,
+                () -> Money.of(new BigDecimal(oneCentPastTheDomain)));
+
+        for (ArithmeticException failure : List.of(fromText, fromDecimal)) {
+            assertThat(failure)
+                    .isExactlyInstanceOf(ArithmeticException.class)
+                    .hasMessageContaining("an amount declaring 11 integer digits")
+                    .hasMessageContaining("exceeds the reference money domain of "
+                            + Money.MAX_MAGNITUDE.toPlainString());
+            assertThat(failure).hasMessageNotContaining(oneCentPastTheDomain);
+        }
+
+        // WHY : Assumptions: the boundary value itself must be admitted and must render at scale two.
+        //       The pair differs by one cent, which is what an inclusive comparison written exclusively
+        //       would move, so the admitted side is what makes the refusal a boundary rather than an
+        //       approximate limit.
+        assertThat(Money.of(Money.MAX_MAGNITUDE).toPlainString()).isEqualTo("9999999999.99");
+        assertThat(Money.of(Money.MAX_MAGNITUDE.negate()).toPlainString())
+                .isEqualTo("-9999999999.99");
+    }
+
+    /**
+     * Verifies declared scale and precision are bounded before any reduction is attempted.
+     *
+     * <p>The test accepts no parameters and returns normally after capturing the three expected
+     * {@link ArithmeticException} instances. None escapes its assertion.
+     *
+     * <p>Assumptions: this guard is reachable only through {@link Money#of(BigDecimal)}, because the
+     * text factory's grammar refuses these shapes first, so covering it needs a value constructed
+     * directly rather than parsed. Three shapes are used because the guard has three clauses that a
+     * partial condition would leave open: a scale above {@link Money#MAX_INPUT_SCALE}, a precision
+     * above {@link Money#MAX_INPUT_PRECISION}, and a NEGATIVE scale, which is how exponent notation
+     * arrives once it has already been parsed into a decimal and which no positive-only bound would
+     * catch.
+     *
+     * <p>Trade-offs: the message reports the declared scale and precision and never the digits, and
+     * that is asserted. The two numbers identify the defect -- a scale of nine figures came from a
+     * mis-parsed exponent rather than from a record -- while the digits could be an unbounded
+     * quantity of caller-chosen text heading for a log.
+     */
+    @Test
+    @DisplayName("declared scale and precision are bounded before the value is reduced")
+    void rejectsDeclaredScaleAndPrecisionBeforeAnyReduction() {
+        BigDecimal scaleOnePastTheBound =
+                new BigDecimal("0." + "1".repeat(Money.MAX_INPUT_SCALE + 1));
+        BigDecimal precisionOnePastTheBound =
+                new BigDecimal("1".repeat(Money.MAX_INPUT_PRECISION + 1));
+        BigDecimal negativeScaleFromAnExponent = new BigDecimal("1E+30");
+
+        ArithmeticException byScale = assertThrows(
+                ArithmeticException.class,
+                () -> Money.of(scaleOnePastTheBound));
+        ArithmeticException byPrecision = assertThrows(
+                ArithmeticException.class,
+                () -> Money.of(precisionOnePastTheBound));
+        ArithmeticException byNegativeScale = assertThrows(
+                ArithmeticException.class,
+                () -> Money.of(negativeScaleFromAnExponent));
+
+        String admittedRange = "outside the admitted scale of at most " + Money.MAX_INPUT_SCALE
+                + " and precision of at most " + Money.MAX_INPUT_PRECISION;
+
+        assertThat(byScale)
+                .isExactlyInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("value declares scale " + (Money.MAX_INPUT_SCALE + 1))
+                .hasMessageContaining(admittedRange);
+        assertThat(byPrecision)
+                .isExactlyInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("precision " + (Money.MAX_INPUT_PRECISION + 1))
+                .hasMessageContaining(admittedRange);
+        assertThat(byNegativeScale)
+                .isExactlyInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("value declares scale -30")
+                .hasMessageContaining(admittedRange);
+
+        // WHY : Assumptions: none of the three messages may carry the offending digits. The precision
+        //       vector is twenty-eight ones, a string that would be unmistakable in a message, so its
+        //       absence is checkable rather than merely intended.
+        assertThat(byPrecision).hasMessageNotContaining(precisionOnePastTheBound.toPlainString());
+
+        // WHY : Assumptions: a value sitting exactly ON both admitted bounds must clear this guard and
+        //       then be refused by the DOMAIN guard instead, while a value inside both is simply
+        //       reduced. The precision bound is deliberately looser than the domain, being
+        //       MAX_INPUT_SCALE plus twelve, so no value can be refused BY precision while still
+        //       fitting the ten integer digits of the reference picture -- a value at precision 27 with
+        //       scale 15 necessarily carries twelve integer digits. Showing that such a value fails
+        //       with the domain message rather than the scale-and-precision message is what proves the
+        //       two guards are distinct and correctly ordered; a single merged condition would report
+        //       the earlier message here and this assertion would catch it.
+        BigDecimal onBothAdmittedBounds =
+                new BigDecimal("1".repeat(12) + "." + "1".repeat(Money.MAX_INPUT_SCALE));
+        assertThat(onBothAdmittedBounds.scale()).isEqualTo(Money.MAX_INPUT_SCALE);
+        assertThat(onBothAdmittedBounds.precision()).isEqualTo(Money.MAX_INPUT_PRECISION);
+        assertThat(assertThrows(ArithmeticException.class, () -> Money.of(onBothAdmittedBounds)))
+                .hasMessageContaining("an amount declaring 12 integer digits")
+                .hasMessageNotContaining(admittedRange);
+
+        BigDecimal insideBothBounds = new BigDecimal("1." + "1".repeat(Money.MAX_INPUT_SCALE));
+        assertThat(insideBothBounds.scale()).isEqualTo(Money.MAX_INPUT_SCALE);
+        assertThat(Money.of(insideBothBounds).toPlainString()).isEqualTo("1.11");
+    }
+
+    /**
+     * Verifies the three sign predicates partition the domain with no value satisfying two.
+     *
+     * <p>The test accepts no parameters and returns normally after its void assertions. It expects no
+     * exception because all three vectors are inside the documented money domain.
+     *
+     * <p>Assumptions: the three predicates are asserted together on the same three vectors rather
+     * than one at a time, because what has to hold is that they PARTITION the domain: the failure
+     * they guard against is a positive test written with a comparison that also admits zero, which a
+     * test of that predicate alone would pass. The smallest non-zero cent is used on both sides
+     * because it is the value nearest the divide.
+     */
+    @Test
+    @DisplayName("isPositive, isNegative and isZero partition the domain at one cent")
+    void partitionsTheDomainAcrossTheThreeSignPredicates() {
+        Money smallestPositive = Money.of("0.01");
+        Money smallestNegative = Money.of("-0.01");
+
+        assertThat(smallestPositive.isPositive()).isTrue();
+        assertThat(smallestPositive.isNegative()).isFalse();
+        assertThat(smallestPositive.isZero()).isFalse();
+
+        assertThat(Money.ZERO.isPositive()).isFalse();
+        assertThat(Money.ZERO.isNegative()).isFalse();
+        assertThat(Money.ZERO.isZero()).isTrue();
+
+        assertThat(smallestNegative.isPositive()).isFalse();
+        assertThat(smallestNegative.isNegative()).isTrue();
+        assertThat(smallestNegative.isZero()).isFalse();
+    }
+
+    /**
+     * Verifies multiplication and division reduce under the general contract and refuse bad inputs.
+     *
+     * <p>The test accepts no parameters and returns normally after its void assertions and after
+     * capturing four expected exceptions. Every expected exception stays inside its assertion.
+     *
+     * <p>Assumptions: the rounding vectors are chosen to land exactly on a half cent, because that is
+     * the only input at which {@link Money#GENERAL_ROUNDING} is distinguishable from truncation. Both
+     * signs are asserted, since HALF_UP rounds AWAY from zero and a mode that rounded toward it would
+     * agree on the positive vector and differ on the negative one.
+     *
+     * <p>Alternatives Considered: asserting only that the operations return the arithmetically
+     * obvious product and quotient. Rejected because these two methods carry a rounding decision that
+     * the accrual path must not use -- {@link Money#monthlyInterest(BigDecimal, RoundingMode)} exists
+     * because reducing the intermediate product changes the result -- so a test that never rounds
+     * would not distinguish the general contract from the accrual one at all.
+     */
+    @Test
+    @DisplayName("multipliedBy and dividedBy reduce with HALF_UP away from zero")
+    void reducesProductsAndQuotientsUnderTheGeneralContract() {
+        assertThat(Money.of("100.00").multipliedBy(new BigDecimal("0.125")).toPlainString())
+                .isEqualTo("12.50");
+        assertThat(Money.of("0.03").multipliedBy(new BigDecimal("0.5")).toPlainString())
+                .isEqualTo("0.02");
+        assertThat(Money.of("-0.03").multipliedBy(new BigDecimal("0.5")).toPlainString())
+                .isEqualTo("-0.02");
+
+        assertThat(Money.of("10.00").dividedBy(new BigDecimal("3")).toPlainString())
+                .isEqualTo("3.33");
+        assertThat(Money.of("0.05").dividedBy(new BigDecimal("2")).toPlainString())
+                .isEqualTo("0.03");
+        assertThat(Money.of("-0.05").dividedBy(new BigDecimal("2")).toPlainString())
+                .isEqualTo("-0.03");
+
+        // WHY : Assumptions: a zero divisor must raise rather than yield zero, and both operations must
+        //       refuse an absent operand by name. A zero divisor in a monetary calculation means the
+        //       caller's own inputs are inconsistent, so substituting zero would post a real amount of
+        //       nothing to a real account while reporting success. Naming the parameter in the refusal
+        //       is what lets a caller tell which of two arguments was absent.
+        assertThat(assertThrows(ArithmeticException.class,
+                () -> Money.of("1.00").dividedBy(BigDecimal.ZERO)))
+                .hasMessageContaining("zero");
+        assertThat(assertThrows(NullPointerException.class,
+                () -> Money.of("1.00").dividedBy(null)))
+                .hasMessageContaining("divisor must not be null");
+        assertThat(assertThrows(NullPointerException.class,
+                () -> Money.of("1.00").multipliedBy(null)))
+                .hasMessageContaining("factor must not be null");
+
+        // WHY : Assumptions: a product that leaves the domain must be refused rather than carried, so
+        //       the domain bound is enforced on the RESULT of an operation and not only on a factory
+        //       input, and doubling the boundary value is the shortest way to reach it from two
+        //       operands that are each admissible.
+        assertThat(assertThrows(ArithmeticException.class,
+                () -> Money.of(Money.MAX_MAGNITUDE).multipliedBy(new BigDecimal("2"))))
+                .hasMessageContaining("exceeds the reference money domain");
+    }
+
+    /**
+     * Verifies sign inversion and magnitude are exact at both ends of the signed domain.
+     *
+     * <p>The test accepts no parameters and returns normally after its void assertions. It expects no
+     * exception, because the reference picture is signed and its domain is symmetric about zero.
+     *
+     * <p>Assumptions: both operations are asserted at {@link Money#MAX_MAGNITUDE} deliberately. The
+     * domain is symmetric, so negating or taking the magnitude of an admissible value cannot produce
+     * an inadmissible one; asserting it at the boundary is what proves that symmetry holds rather
+     * than assuming it, and an asymmetric bound would fail here and nowhere else.
+     *
+     * <p>Trade-offs: negated zero is asserted to render as positive zero. The signed zoned form does
+     * carry a distinct negative-zero byte, which the codec package preserves on the wire; this type
+     * deliberately has no negative zero, so the two contracts differ at exactly one value and the
+     * difference is pinned here so it cannot be discovered as a byte mismatch instead.
+     */
+    @Test
+    @DisplayName("negated and absoluteValue stay exact at the signed domain boundary")
+    void invertsAndStripsSignWithoutLeavingTheDomain() {
+        assertThat(Money.of("1234567890.12").negated().toPlainString())
+                .isEqualTo("-1234567890.12");
+        assertThat(Money.of(Money.MAX_MAGNITUDE).negated().toPlainString())
+                .isEqualTo("-9999999999.99");
+        assertThat(Money.ZERO.negated().toPlainString()).isEqualTo("0.00");
+
+        assertThat(Money.of("-0.01").absoluteValue().toPlainString()).isEqualTo("0.01");
+        assertThat(Money.of("0.01").absoluteValue().toPlainString()).isEqualTo("0.01");
+        assertThat(Money.of(Money.MAX_MAGNITUDE.negate()).absoluteValue().toPlainString())
+                .isEqualTo("9999999999.99");
+        assertThat(Money.ZERO.absoluteValue().toPlainString()).isEqualTo("0.00");
+    }
+
+    /**
+     * Verifies numeric equality, its hash-code contract and ordering agree with one another.
+     *
+     * <p>The test accepts no parameters and returns normally after its void assertions. It expects no
+     * exception, including from the comparison against {@code null} and against a foreign type, both
+     * of which are contracted to report inequality rather than to raise.
+     *
+     * <p>Assumptions: the three amounts are written at three different scales -- one, three and two
+     * decimal places -- and every one of them is canonical at {@link Money#SCALE} by the time it is
+     * compared, which is what makes them a real test of the override. The underlying decimal's own
+     * equality is scale-sensitive and would report these as three distinct values, so a class that
+     * inherited it, or that derived its hash from the decimal instead of from cents, would place two
+     * equal amounts in different buckets of a hash-based collection and pass every test that only
+     * ever compared them directly.
+     */
+    @Test
+    @DisplayName("equal amounts written at different scales are equal, hash alike and compare zero")
+    void honoursTheEqualObjectsEqualHashContractAtScaleTwo() {
+        Money fromOnePlace = Money.of("1.5");
+        Money fromThreePlaces = Money.of(new BigDecimal("1.500"));
+        Money fromTwoPlaces = Money.of("1.50");
+
+        assertThat(fromOnePlace).isEqualTo(fromThreePlaces).isEqualTo(fromTwoPlaces);
+        assertThat(fromOnePlace.hashCode())
+                .isEqualTo(fromThreePlaces.hashCode())
+                .isEqualTo(fromTwoPlaces.hashCode());
+        assertThat(fromOnePlace.compareTo(fromTwoPlaces)).isZero();
+
+        // WHY : Assumptions: the hash must be the one derived from cents rather than from the decimal,
+        //       and naming the expected value pins WHICH consistent hash is implemented, so a later
+        //       change to a different-but-still-consistent derivation is visible as a failure here
+        //       instead of as a silent change to every collection's bucket distribution.
+        assertThat(fromOnePlace.unscaledCents()).isEqualTo(150L);
+        assertThat(fromOnePlace.hashCode()).isEqualTo(Long.hashCode(150L));
+
+        // WHY : Assumptions: ordering must be antisymmetric across one cent, and inequality must be
+        //       reported rather than raised for null and for a foreign type. An ordering asserted in
+        //       one direction only passes for a comparison that returns the same sign both ways, which
+        //       is the shape a subtraction of unscaled values can take when one side is negated by
+        //       mistake.
+        Money oneCentMore = Money.of("1.51");
+        assertThat(fromOnePlace.compareTo(oneCentMore)).isNegative();
+        assertThat(oneCentMore.compareTo(fromOnePlace)).isPositive();
+        assertThat(fromOnePlace.equals(null)).isFalse();
+        assertThat(fromOnePlace.equals("1.50")).isFalse();
     }
 
     /**

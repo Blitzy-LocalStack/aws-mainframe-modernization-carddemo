@@ -3207,6 +3207,21 @@ PENDING_AUTH_SUMMARY_LAYOUT: Final[RecordSpec] = RecordSpec(
 #   flattened into its two leaves below and the eight-byte composite survives as the key
 #   length, which is what the target decomposes into the two integer columns forming its
 #   composite primary key.
+# Assumptions: those two leaves decode to the NINES COMPLEMENT that the segment stores,
+#   and a loader must invert them before writing the target columns -- auth_date is
+#   99999 minus this field and auth_time is 999999999 minus the next one, which are the
+#   two constants app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl lines 874 and 875
+#   apply on the way in. This descriptor decodes the physical bytes and deliberately does
+#   not invert them, because a layout describes a record rather than a target column.
+# WHY : the inversion is stated here because the target chose the DECODED representation:
+#   services/authorization-service/src/main/resources/db/migration/V1__authorization.sql
+#   stores the ordinal date and the time of day as they read, and expresses the baseline's
+#   newest-first order as a descending index instead, so the same service writes decoded
+#   values for every authorization it decides. A loader that wrote the complement would put
+#   two incompatible representations in one column, and every paging comparison and every
+#   sealed row selector over that column would then order extract-loaded rows against
+#   service-written rows backwards -- a defect no row-count or checksum verification would
+#   detect, because both representations are the right width and the right type.
 # Refactoring Rationale: PA-MERCHANT-CATAGORY-CODE at line 36 is the third of the three
 #   baseline misspellings and is transcribed with it; its target name is
 #   merchant_category_code, recorded in MISSPELLED_FIELDS above.

@@ -8,6 +8,8 @@ import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * A posted transaction, mapping one row of {@code ledger.transactions} to one migrated
@@ -149,6 +151,31 @@ import java.util.Objects;
  * {@code app/data/ASCII/tcatbal.txt} the trailing twenty-two bytes are ASCII zero digits. A column
  * holding either would store a writer's padding convention and nothing about the transaction.
  *
+ * <h2>Fixed-width columns are bound as CHAR explicitly</h2>
+ *
+ * <p>Assumptions: every member below whose column {@code db/migration/V1__ledger.sql} declares CHAR(n) carries
+ * {@code @JdbcTypeCode(SqlTypes.CHAR)} beside its {@code @Column}. There are six such members here --
+ * the transaction identifier, the two-character type code, the four-character
+ * category code, the source, the merchant postal code and the card number -- and the annotation is not decoration. A Java String otherwise selects the JDBC
+ * VARCHAR binding, so the driver sends a varying-length parameter for a column the database
+ * has blank padded to its declared width; the two are then compared under padding rules the
+ * reference programs never relied on, and a lookup by a value shorter than the declared width
+ * can miss a row that is present. This is the same annotation the batch and authorization
+ * contexts already carry on their own fixed-width columns, so one mechanism spans the
+ * migration rather than one per context.
+ *
+ * <p>Alternatives Considered: {@code columnDefinition = "CHAR(n)"} on each member, which
+ * would also fix the binding. Rejected because it embeds vendor DDL in a mapping that has no
+ * authority to create this table -- {@code db/migration/V1__ledger.sql} does -- so the physical width would then be
+ * stated in two places able to disagree. The declared length together with the standard CHAR
+ * type code says the same thing without a second definition.
+ *
+ * <p>Trade-offs: a binding is only verifiable where something verifies it, and
+ * {@code ddl-auto: none} on the deployed profiles deliberately verifies nothing because the
+ * migration owns the schema. {@code src/test/resources/application-test.yml} therefore sets
+ * {@code ddl-auto: validate}, so a repository test running against a migrated database fails
+ * on a type or width disagreement instead of a deployed environment discovering it.
+ *
  * <h2>No member is renamed</h2>
  *
  * <p>Assumptions: every member below spells its record contract exactly, and a reader arriving from
@@ -202,6 +229,7 @@ public class Transaction {
     //       equals numeric order. That is what makes the baseline's own backward and forward browse
     //       on this key, and therefore a keyset query over it, well defined.
     @Id
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String tranId;
 
@@ -222,6 +250,7 @@ public class Transaction {
     //       charter fixes that boundary, and this file's strict dependency whitelist admits only
     //       com.carddemo.common as shared Java code, so all three stay plain scalars and cross-
     //       context data is reached over HTTP rather than by import.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "type_cd", length = 2)
     private String tranTypeCd;
 
@@ -242,6 +271,7 @@ public class Transaction {
     //       app/app-transaction-type-db2/ddl/TRNTYCAT.ddl line 3 declares TRC_TYPE_CATEGORY
     //       CHAR(4) NOT NULL. Where a width-only derivation and the migration disagree the
     //       migration governs, because it is the physical contract this type answers to.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "category_cd", length = 4)
     private String tranCatCd;
 
@@ -258,6 +288,7 @@ public class Transaction {
     //       app/data/ASCII/dailytran.txt, 'OPERATOR' and 'POS TERM', are shorter than ten
     //       characters and blank-padded there. Under a varying column 'POS TERM' and 'POS TERM   '
     //       would be two values where the baseline has one.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "source", length = 10)
     private String tranSource;
 
@@ -353,6 +384,7 @@ public class Transaction {
     //       significant: 27 of the 300 values in app/data/ASCII/dailytran.txt begin with a zero.
     //       Keeping it fixed width preserves the blank-padded comparison the reference programs
     //       perform on it.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_zip", length = 10)
     private String merchantZip;
 
@@ -374,6 +406,7 @@ public class Transaction {
     //       in source prose even when it comes from a seed extract, and it is the aggregate count
     //       that the type decision rests on. See also the report job's ZD typing of this field,
     //       addressed against the copybook in the class documentation above.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_num", length = 16)
     private String cardNum;
 

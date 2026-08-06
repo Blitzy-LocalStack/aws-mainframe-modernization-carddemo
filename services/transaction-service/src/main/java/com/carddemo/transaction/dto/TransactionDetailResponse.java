@@ -15,16 +15,6 @@ import com.carddemo.common.money.Money;
  * encodes the field set, the widths and the scale that specification already states rather than
  * redefining them.
  *
- * <p><b>Return values, exceptions or errors.</b> A record declaration returns no value and raises
- * nothing, so this docstring carries no {@code @return} and no {@code @throws} at-clause. The
- * inapplicability is declared rather than left silent, because the Explainability rule's line 39
- * forbids a docstring that omits return values, and a reader has to be able to tell a declared
- * inapplicability from an oversight. The record's components are the parameters of its canonical
- * constructor, so the parameters element of that rule is answered by the fourteen
- * {@code @param} at-clauses below and not by a separate paragraph. Nothing here declares a
- * checked exception: a component is a carrier, and the validation that can fail belongs to the
- * request side of this package and to the shared error type named further down.
- *
  * <h2>Where the component set comes from, and where the order comes from</h2>
  *
  * <p>Two different questions have two different answers, and conflating them is what makes the
@@ -241,16 +231,10 @@ import com.carddemo.common.money.Money;
  * discriminator, so error presentation there depended on a remembered turn count. Here it is
  * driven by the response body alone.
  *
- * <p>Alternatives Considered: Lombok was evaluated and rejected because its generated accessors
- * cannot carry the Javadoc the Explainability rule requires at its line 15, and the repository
- * ruleset grants no annotation-based exemption that would excuse a generated member, so a
- * Lombok-built type either fails the documentation gate or has to be suppressed out of it -- and
- * no suppression is available to source under this directory. A Java 21 record gives the same
- * brevity with members that can be documented. MapStruct was rejected on a separate ground:
- * mapping the reference record onto this shape is not mechanical. It drops {@code FILLER}, masks
- * the primary account number to its last four digits, suppresses a card verification value
- * entirely, encrypts protected identifiers and renames misspelled baseline fields, and each of
- * those needs a justification at the mapping site that a generated mapper has nowhere to hold.
+ * <p>Alternatives Considered: Lombok and MapStruct were both evaluated and both rejected for this
+ * package as a whole; {@code com.carddemo.transaction.dto}'s package charter carries the reasoning,
+ * which turns on generated members being undocumentable and on copybook-to-transfer-object mapping
+ * being non-mechanical. A Java 21 record with hand-written mapping is what replaces them.
  *
  * <p>Assumptions: no component here is an ordinal position of any kind, and this type imports no
  * persistence entity from {@code com.carddemo.transaction.domain}. A detail read addresses one
@@ -264,14 +248,6 @@ import com.carddemo.common.money.Money;
  * size constraint is evaluated on a value entering the application, and this record only leaves
  * it, so a constraint here would never be exercised; the request types in this package are where
  * the copybook widths become constraint values.
- *
- * <p>Assumptions: one user-specified rule governs this migration, Explainability, and it does not
- * conflict with the repository's own convention or with the migration plan. The four rationale
- * categories it names at its lines 31 to 34 are the same four the house convention at
- * {@code tests/README.md} lines 544 to 549 already names, and that convention names the same
- * docstring quartet of purpose, parameters, returns and exceptions at its lines 545 and 546. No
- * resolution between them was necessary, and the labels above are written in the single accepted
- * form: plural, unparenthesised, colon-terminated and unemphasised.
  *
  * @param transactionId the key identifying this transaction, echoed back from the read, from
  *     {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}; borne as digit
@@ -318,8 +294,6 @@ public record TransactionDetailResponse(
     String categoryCode,
     String source,
     String description,
-    // WHAT: the transaction amount, typed as the shared exact-decimal value rather than as a
-    //       general-purpose decimal or a primitive.
     // WHY : Assumptions: the shared Jackson module binds its serialiser to this exact type, so
     //       the declared type is what selects the quoted-string wire form. Substituting a bare
     //       decimal here compiles and runs and silently emits a JSON number instead.
@@ -328,7 +302,6 @@ public record TransactionDetailResponse(
     String merchantName,
     String merchantCity,
     String merchantZip,
-    // WHAT: the card number in masked form only.
     // WHY : Assumptions: masking happens upstream in the mapper, so this component never holds
     //       the sixteen characters the reference record declares at CVTRA05Y line 15. Declaring
     //       it here as an ordinary string is deliberate: the constraint is the contract of the
@@ -336,7 +309,6 @@ public record TransactionDetailResponse(
     String cardNumber,
     String originTimestamp,
     String processTimestamp,
-    // WHAT: the return message, and the only nullable component of the fourteen.
     // WHY : Assumptions: CVCRD01Y line 30 attaches a low-values sentinel to this field alone,
     //       and line 28's error message carries none, so absence is representable for this one
     //       field and null is what represents it. Spaces are a different state and are not

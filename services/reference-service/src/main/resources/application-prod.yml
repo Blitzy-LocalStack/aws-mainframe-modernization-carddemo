@@ -1,0 +1,266 @@
+# =============================================================================
+# services/reference-service/src/main/resources/application-prod.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The production profile overlay for the CardDemo reference bounded context, the
+#   migration target of COBOL programs COTRTLIC, COTRTUPC, COBTUPDT, CODATE01 and
+#   CSUTLDTC. It overrides VALUES ONLY, on keys that application.yml beside it
+#   already declares, and it adds exactly one key that the base deliberately
+#   leaves to a profile - springdoc.swagger-ui.enabled, for the reason recorded at
+#   it. Nine leaf values are set, and every one of them sits on one of the four
+#   axes the base document's closing block names: connection-pool sizing, log
+#   levels, actuator exposure breadth, and the Swagger UI's reachability.
+#
+#   This file differs from application-dev.yml in SIZING, RETENTION and DIAGNOSTIC
+#   VERBOSITY only, never in topology, protocol or security posture. The listener
+#   still serves TLS on the same port, the datasource is still the Aurora writer
+#   endpoint resolved from the platform, the same six tables are reached through
+#   the same pinned search path under the same carddemo_reference role, both Flyway
+#   migrations still run, and identity still arrives as a signed token whose
+#   token_use, client and scope claims config/SecurityConfig.java checks before
+#   common-lib's JwtRoleConverter maps its groups to authorities. A profile that
+#   turned off TLS or opened a write endpoint "just for prod triage" would make dev
+#   stop being a rehearsal for prod, which is the only reason to have a dev
+#   environment at all.
+#
+#   Five of the nine values below RESTATE a base value rather than changing it,
+#   and that is deliberate in each case: restating a value is what makes a dev
+#   value read as if it applied everywhere unable to move production without a
+#   visible diff in this file. Two of the five matter more than the rest - the
+#   bind-parameter logger and the actuator exposure list - because this module's
+#   dev overlay is the one place in this repository where both are widened. Each
+#   records that reason at its own key.
+#
+#   No endpoint, credential, identifier, queue name, region or bucket appears
+#   below, and no stand-in for one. Every such value stays an unresolved
+#   placeholder in application.yml and is injected by the platform at deployment.
+#
+# Parameters:
+#   Each property key is the YAML analogue of a parameter. This overlay consumes
+#   NO environment variable of its own, and the reason is recorded in the closing
+#   block: this module carries no Parameter Store config-data resolver, so it
+#   declares no configuration import.
+#
+# Return values:
+#   The effective configuration handed to the Spring application context after
+#   this overlay is merged over src/main/resources/application.yml and the
+#   carddemo-common-defaults.yml that the base document imports.
+#
+# Exceptions or errors:
+#   A misspelled Spring property is silently ignored rather than reported, so a
+#   typo here does not fail startup - it leaves the base value in force and the
+#   intended change simply never happens. In production that silence is the whole
+#   risk this file carries, because four of its nine values exist to CLOSE
+#   something the dev overlay opens: a mis-typed logger name or endpoint
+#   identifier would leave the dev-shaped setting in force with nothing reporting
+#   it. That is why the four are restated explicitly rather than inherited, and
+#   why each names what it closes.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
+#     values and Exceptions on a module entry point. YAML has no docstring
+#     construct, so the mapping is: this header states Purpose; property keys are
+#     Parameters; the merged Spring Environment is the Return value; and each
+#     adjacent rationale states what a wrong value silently admits.
+#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
+#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
+#     same limit for YAML. No linter in this project inspects this file, so the
+#     obligation rests on that written standard and on review.
+#   - Assumptions: production capacity has a NON-ZERO minimum, so the cluster never
+#     pauses. That single difference from dev is what justifies both the larger pool
+#     and the shorter acquisition timeout below; neither number would be right
+#     against a cluster that sleeps.
+#   - Trade-offs: nothing here re-enables a diagnostic the base document
+#     suppresses, and nothing here keeps a diagnostic the dev overlay adds. This
+#     module is the one whose dev overlay legitimately raises the bind-parameter
+#     logger, because its own tables hold no cardholder data; that argument does
+#     not extend to production, where the cost is log-storage volume at request
+#     rate on the lookup path every other context calls into.
+#   - Alternatives Considered: widening the actuator health detail here so an
+#     on-call reader can see which contributor is failing. Rejected: the probe path
+#     is unauthenticated by deployment necessity, so a detail payload would
+#     describe the data tier to anything able to reach the port. The base document
+#     closes it at never and this file leaves that closed rather than restating it,
+#     because health detail is not one of this module's four permitted axes.
+# =============================================================================
+
+spring:
+  datasource:
+    hikari:
+      # WHY : Trade-offs: twenty connections per task rather than the base
+      #       document's ten. This context is the lookup path every other bounded
+      #       context calls into - address validation for account-service,
+      #       disclosure-group rates for batch-service, date conversion for the
+      #       inquiry flow - so its read concurrency is the sum of its callers'
+      #       rather than its own. Twenty gives those callers, the reference-write
+      #       endpoints and the inquiry listener headroom without one task claiming
+      #       a disproportionate share of the cluster's budget: the quantity that
+      #       has to fit that budget is this number multiplied by the task count and
+      #       summed across all eight services, which is why it is raised here
+      #       rather than in the base document where every environment would
+      #       inherit it.
+      maximum-pool-size: 20
+
+      # WHY : Trade-offs: a floor of five rather than the base document's two.
+      #       Production capacity has a non-zero minimum so the cluster never
+      #       pauses, which removes the reason the base keeps the floor low; what
+      #       remains is the cost of a cold connection inside a lookup that another
+      #       service is already waiting on, and five covers the steady-state
+      #       concurrency of the lookup path so that only a genuine burst pays a
+      #       handshake.
+      minimum-idle: 5
+
+      # WHY : Assumptions: ten seconds, restating the base document's value rather
+      #       than inheriting it. Production capacity has a non-zero minimum, so the
+      #       cluster never pauses and the base value is right here; it is restated
+      #       so that the thirty-second value application-dev.yml sets for a pausing
+      #       cluster cannot be mistaken for a change that applies everywhere. The
+      #       base note records what the longer wait would cost under real load:
+      #       each waiting request occupies its servlet thread, the thread pool
+      #       saturates, the health endpoint stops answering, and a database
+      #       slowdown becomes a task replacement loop.
+      connection-timeout: 10000
+
+logging:
+  level:
+    # WHY : Trade-offs: INFO on the project package, restating the base value so
+    #       that the dev overlay's DEBUG cannot be read as applying anywhere else.
+    #       At INFO the two decisions this context exists to make are recorded by
+    #       outcome - a refused transaction-type delete, a disclosure-group lookup
+    #       falling through to DEFAULT - which is the audit trail. DEBUG would add a
+    #       line per lookup on the path every other service calls into, which is
+    #       the highest-volume logging surface in the system and is billed by the
+    #       gigabyte.
+    com.carddemo: INFO
+
+    # WHY : Assumptions: the root logger returns to WARN, narrower than the base
+    #       document's INFO and narrower than dev. The one thing the base INFO buys
+    #       - the framework lines recording which configuration sources loaded and
+    #       which migrations applied - is a startup diagnostic a deployment pipeline
+    #       reads once, whereas at production request rates root INFO is framework
+    #       narration on every call. Flyway's own migration line survives by
+    #       omission, because the base pins org.flywaydb separately at INFO and this
+    #       file does not restate it, so the durable record that V1__reference.sql
+    #       and V2__seed_reference.sql ran is preserved.
+    root: WARN
+
+    # WHY : Assumptions: the statement logger returns to WARN, restating the base
+    #       value against the dev overlay's DEBUG. The text alone is a per-statement
+    #       cost on the busiest read path in the system and offers nothing the
+    #       database's own statement statistics do not, since the questions worth
+    #       asking in production are about plans and waits rather than syntax.
+    org.hibernate.SQL: WARN
+
+    # WHY : (1) Assumptions: pinned at WARN rather than inherited, and this is the
+    #       most important line in the file. application-dev.yml raises this logger
+    #       to TRACE, which is unique to this module and is justified there by the
+    #       data: these six tables hold reference codes, interest rates and the
+    #       address allow-lists from app/cpy/CSLKPCDY.cpy, none of it cardholder
+    #       data. That argument does not carry into production, where the cost is
+    #       volume rather than disclosure - TRACE writes a line per bound parameter
+    #       on the lookup path every other bounded context calls into.
+    #       (2) Trade-offs: restating it here rather than omitting it is what stops
+    #       a broader level change from raising it, and stops a reader who saw the
+    #       dev value from assuming it applies everywhere. The base pins it at WARN
+    #       too, so this line changes nothing today; it exists so that the pair of
+    #       overlays states the same axis at both ends.
+    org.hibernate.orm.jdbc.bind: WARN
+
+  # WHY : Assumptions: only the log LEVELS are touched. The console pattern that
+  #       carries the correlation, trace and span identifiers arrives from the
+  #       shared defaults document the base imports, and is not restated here -
+  #       giving one pattern two sources is how one environment's logs silently
+  #       lose their identifiers.
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # WHY : (1) Assumptions: the base document's three endpoints, restated
+        #       against the dev overlay's five. This is the second value in this
+        #       file that CLOSES something dev opens, and it is not cosmetic: dev
+        #       adds flyway, which lists applied migrations, and loggers, which is a
+        #       WRITE endpoint able to change a logging level at runtime. An
+        #       unauthenticated write endpoint reachable from anything inside the
+        #       private network could raise the bind-parameter logger that the line
+        #       above exists to pin, which would defeat the control rather than
+        #       merely widen the surface.
+        #       (2) Trade-offs: the accepted cost is that an operator cannot read
+        #       the applied-migration list from the running task and cannot raise a
+        #       level without a redeployment. Both are available by other means -
+        #       the Flyway history table is queryable, and Flyway's own INFO line
+        #       survives in the task logs by the omission recorded above - so
+        #       nothing is lost except the shortest route to them.
+        #       (3) Assumptions: health, info and prometheus are each load-bearing
+        #       and none may be dropped: two unauthenticated pollers consume health,
+        #       info is what makes a defect report attributable to a build, and
+        #       prometheus is the scrape path the Terraform observability module's
+        #       dashboards and alarms read. Dropping the last of those would report
+        #       healthy silence rather than an error.
+        include: health,info,prometheus
+
+springdoc:
+  swagger-ui:
+    # WHY : (1) Assumptions: false here, which is the narrowing the base document
+    #       anticipates when it records the UI as reachable in the base
+    #       configuration and says the profiles may narrow it. This is the key that
+    #       axis requires and the one key in this overlay the base does not itself
+    #       declare, because springdoc's autoconfiguration matches when the
+    #       property is missing - the reachable state is produced by a condition
+    #       rather than by a value, so the axis has no base value to override.
+    #       Declaring it in BOTH overlays turns it into a real value a reader can
+    #       compare, rather than one environment carrying a line and the other
+    #       carrying an absence that looks like an oversight.
+    #       (2) Trade-offs: the UI itself discloses nothing - it renders
+    #       reference-api.yaml and issues requests the resource server
+    #       authenticates exactly as it would any other caller. What it does is
+    #       publish a complete, machine-readable description of every route,
+    #       parameter and schema of a write-capable service to anything that
+    #       reaches the port, and in production that description is reconnaissance
+    #       rather than documentation. The contract itself remains available where
+    #       it belongs, in this repository and in the generated document at
+    #       /v3/api-docs, which the base document leaves served.
+    #       (3) Alternatives Considered: leaving the UI reachable and relying on the
+    #       API Gateway route table not to expose /swagger-ui.html. Rejected because
+    #       that places the control in a different module from the surface it
+    #       protects: a route added at the edge for another purpose could expose it
+    #       without anyone editing this service, whereas a disabled UI is not
+    #       reachable however the edge is configured.
+    enabled: false
+
+# =============================================================================
+# Closing notes: three deliberate absences
+# -----------------------------------------------------------------------------
+#   Each entry is a key a reader would reasonably expect in a production overlay.
+#   They are recorded together because an absent key has no line of its own to sit
+#   beside.
+#
+# Assumptions: no spring.config.import. Every other production overlay in this
+#   repository declares one - re-naming the shared defaults document and adding an
+#   optional:aws-parameterstore: location for its own subtree - so this absence is
+#   the one most likely to read as an oversight. Two reasons it is not. First, a
+#   profile's import list REPLACES the base document's, so an overlay that adds
+#   nothing must not declare the key at all: declaring it would restate what the
+#   base already imports and create a second place for the shared defaults
+#   document to be named. Second, this module carries no Parameter Store
+#   config-data resolver. services/reference-service/pom.xml declares
+#   spring-cloud-aws-starter-sqs and NOT spring-cloud-aws-starter-parameter-store,
+#   verified by dependency:list rather than by reading the POM, so an
+#   aws-parameterstore: location here would be handled by the standard resource
+#   resolver, resolve to nothing, and - being optional - be skipped in silence. In
+#   production a line that silently supplies nothing is the worst kind: an operator
+#   would place a parameter in that subtree, see the service ignore it, and look
+#   for the fault in the parameter rather than in the missing resolver.
+#
+# Assumptions: no spring.jpa.show-sql override. The base already holds it false,
+#   and the dev overlay does not change it either - the statement text is obtained
+#   there through the org.hibernate.SQL logger, which this file restates at WARN
+#   above. Restating a flag neither overlay moves would suggest the pair disagree
+#   about it when they do not.
+#
+# Assumptions: no spring.flyway.clean-disabled override. The base document already
+#   pins it true, unlike some sibling contexts whose base leaves it to the
+#   production overlay alone. Restating it here would create a second place for the
+#   most destructive setting in the file to be decided, and the failure mode of two
+#   places is that one of them is edited.
+# =============================================================================

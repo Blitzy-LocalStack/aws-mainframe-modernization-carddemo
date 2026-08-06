@@ -297,8 +297,50 @@ data "aws_iam_policy_document" "access_logs" {
 # Access-log storage -- owned with the producer so delivery is deployable.
 # -----------------------------------------------------------------------------
 
+# WHY : Assumptions: the suppression below is a statement about a SERVICE LIMIT and
+#       not a preference between two available encryption options, which is worth
+#       stating separately because the rule the suppression names reads as though a
+#       customer-managed key were simply the stricter of two choices here. It is
+#       not available at all: Elastic Load Balancing accepts exactly one
+#       server-side encryption option on an access-log destination, store-managed
+#       keys, and validates the destination when logging is enabled. Pointing this
+#       bucket at the observability customer-managed key does not produce a
+#       stricter deployment; it produces a load balancer that reports the bucket
+#       unusable and delivers no logs at all, which trades an encryption-key
+#       boundary for the loss of the audit record itself.
+# WHY : Alternatives Considered: (1) encrypting with the observability
+#       customer-managed key and widening that key's policy to the delivery
+#       service principal -- not available, for the reason above, and the policy
+#       widening would have been the lesser cost of the two. (2) delivering to a
+#       separately owned central logging bucket under its own key -- rejected
+#       because the destination would then be owned outside this module while this
+#       module is what enables delivery to it, so a teardown here would leave a
+#       bucket receiving from a load balancer that no longer exists. (3) disabling
+#       access logging so no destination is needed -- rejected outright: the
+#       delivered record is the only per-request evidence at the load-balancer
+#       tier, and the requirement is centralised logging rather than less of it.
+# WHY : Assumptions: the suppression's premise -- that this bucket holds no
+#       application record -- is a claim about the REQUEST TARGETS the delivered
+#       lines carry, and it is now true by construction rather than by hope. A
+#       delivered line records the request line, query string included, so the
+#       premise fails the moment any published route puts a card number in a
+#       target. None does: the card contract selects a card by an opaque
+#       server-issued token and carries its one card-number criterion in a
+#       request body, and that decision is recorded at item 8 of
+#       services/card-service/src/main/resources/openapi/card-api.yaml with this
+#       destination named as the reason for it. A route that reintroduced a card
+#       number into a path or a query would falsify this premise and invalidate
+#       the suppression, so the two must be reviewed together.
+# WHY : Trade-offs: the compensating controls carry the weight that a
+#       customer-managed key would otherwise carry, and they are named so a
+#       reviewer can check each one rather than take the set on trust: store-side
+#       encryption at rest, public-access blocking, enforced bucket ownership,
+#       versioning, and a bucket policy that admits only the exact source load
+#       balancer. What is genuinely given up is the key-level revocation and the
+#       independent audit trail of key use that a customer-managed key provides;
+#       nothing else about the objects' protection changes.
 resource "aws_s3_bucket" "access_logs" {
-  #checkov:skip=CKV_AWS_145:Elastic Load Balancing log delivery writes this destination through a service principal that is not a grantee on the observability KMS key; encrypting it with that key would require widening the key policy to a delivery service for a bucket that holds no application record. AES256 keeps the objects encrypted at rest, and public-access blocking, enforced bucket ownership, versioning and the exact-source bucket policy are the compensating controls.
+  #checkov:skip=CKV_AWS_145:Elastic Load Balancing supports store-managed keys as the ONLY server-side encryption option for an access-log destination, so a customer-managed key is not an available alternative here -- configuring one makes the load balancer reject the bucket and deliver no logs. The delivered lines hold no application record: no published route carries a card number in a request target, which card-api.yaml item 8 records with this destination as its reason. Store-side encryption at rest plus public-access blocking, enforced bucket ownership, versioning and the exact-source bucket policy are the compensating controls; see the rationale above this resource.
   count = local.create_access_logs_bucket ? 1 : 0
 
   bucket = local.access_logs_bucket_name
@@ -419,8 +461,16 @@ resource "aws_lb" "this" {
   #       Assumptions: because this load balancer is internal, the policy scan's
   #       requirement that a PUBLIC-facing load balancer sit behind a
   #       web-application firewall does not apply to it. That is coverage by
-  #       construction rather than an exception -- no check is skipped and no
-  #       suppression is written anywhere in this module.
+  #       construction rather than an exception: THIS check needs no suppression
+  #       because its precondition is false, not because it is waived. The claim
+  #       is deliberately narrow. This module does carry exactly one scanner
+  #       suppression -- `CKV_AWS_145` on `aws_s3_bucket.access_logs` above,
+  #       where log delivery cannot write a bucket whose default encryption is
+  #       SSE-KMS -- and its rationale and compensating controls are written on
+  #       that resource. An earlier revision of this comment claimed no
+  #       suppression existed anywhere in the module, which stopped being true
+  #       the moment that exception was added; a blanket claim is unmaintainable
+  #       because it is invalidated by a change made elsewhere in the file.
   internal = true
 
   # WHY : Assumptions: routing here is decided per REQUEST PATH, and a path
@@ -499,6 +549,31 @@ resource "aws_lb" "this" {
   #       above in this same module. That ownership closes the former gap where
   #       logging was mandatory but no IaC resource was responsible for the
   #       bucket or the principal grant ALB validates while enabling it.
+  #       Trade-offs: an access-log record carries the full request line, so any
+  #       value a caller places in a URI PATH is persisted here verbatim. That is
+  #       the residue this module accepts in exchange for having any record of
+  #       who reached which service, and it is bounded in three ways rather than
+  #       left implicit. First, the field format is fixed by the service and this
+  #       module cannot filter or redact a field, so the bound has to be applied
+  #       upstream: the migrated services carry no unmasked primary account
+  #       number into a path they log, which is enforced in
+  #       services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java
+  #       where the request path is narrowed before it reaches either a log line
+  #       or a response body. Second, the destination is not a general log
+  #       bucket: it is created above with public access blocked, bucket-owner
+  #       enforced ownership, versioning, an exact-source delivery policy and no
+  #       read grant to any service task, so the records are reachable only by an
+  #       operator identity. Third, the request line is the only field that can
+  #       carry a caller-supplied value at all -- the header set ALB records does
+  #       not include Authorization or Cookie, so no bearer credential reaches
+  #       this destination. Alternatives Considered: disabling access logging to
+  #       remove the residue entirely. Rejected because the baseline already had
+  #       that property and it is the defect this resource exists to correct: all
+  #       eight file definitions in app/csd/CARDDEMO.CSD are RECOVERY(NONE)
+  #       JOURNAL(NO), so nothing recorded who reached what and nothing could be
+  #       reconstructed afterwards. Removing the only admission record to avoid a
+  #       masked-field residue trades an audit capability for a hazard already
+  #       closed at its source.
   access_logs {
     bucket  = local.access_logs_target_bucket
     prefix  = var.access_logs_prefix

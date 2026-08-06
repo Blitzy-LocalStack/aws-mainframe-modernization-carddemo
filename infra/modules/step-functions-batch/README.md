@@ -53,7 +53,7 @@ module "step_functions_batch" {
 }
 ```
 
-**Assumptions:** the environment root is the only composition boundary. This
+Assumptions: the environment root is the only composition boundary. This
 module does not look up sibling resources by name or remote state, so every
 producer-to-consumer edge remains visible in one root plan.
 
@@ -115,7 +115,7 @@ predicate. The sense must therefore be inverted.
   becomes a reporting query predicate. It is not represented as a workflow
   Choice.
 
-**Refactoring Rationale:** treating code 4 as failure would report a correctly
+Refactoring Rationale: treating code 4 as failure would report a correctly
 posted night with business rejects as an infrastructure incident and skip
 backup, statements, and reports. The explicit numeric Choice preserves the
 baseline's graded outcome rather than collapsing it to binary success/failure.
@@ -134,7 +134,7 @@ Container overrides name the target container explicitly; an incorrect name
 would leave the baked-in command running, so every container name is a validated
 module input rather than an assumed constant.
 
-**Assumptions:** state 2 runs `python -m carddemo_migration.cli` with the
+Assumptions: state 2 runs `python -m carddemo_migration.cli` with the
 `stage-dataset` subcommand and per-item dataset/business-date arguments. States
 8 and 9 use reporting-service commands because the batch-service job list has
 no statement or report job.
@@ -161,7 +161,7 @@ balances, transaction types, transaction categories, and users. These correspond
 to the ten IDCAMS master-load jobs. `DALYTRAN.PS` is absent because posting reads
 it directly as a sequential input.
 
-**Trade-offs:** `MaxConcurrency` defaults to three. One would serialise
+Trade-offs: `MaxConcurrency` defaults to three. One would serialise
 independent loads; ten would burst every branch against the same Aurora
 connection budget and Fargate quota. The value is a sizing input and does not
 change the workflow topology.
@@ -174,7 +174,7 @@ replayed: they reach a Choice and either continue or fail. A daily failure
 publishes to the supplied SNS topic, invokes the idempotent resume function, and
 then enters the terminal Fail state.
 
-**Refactoring Rationale:** restart is an improvement, not a port. The only
+Refactoring Rationale: restart is an improvement, not a port. The only
 `RESTART=` in the baseline is commented out at `app/jcl/DEFGDGD.jcl:2`, and no
 active checkpoint contract exists. STANDARD-workflow redrive resumes from the
 failed state, while the `batch.batch_run` ledger makes an already-completed

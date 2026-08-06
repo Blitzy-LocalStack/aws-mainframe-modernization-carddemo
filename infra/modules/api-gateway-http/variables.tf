@@ -368,7 +368,7 @@ variable "alb_security_group_id" {
 
 
 variable "route_keys" {
-  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts as a matched pair of keys apiece -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module."
+  description = "HTTP API route keys to create, each attached to the JWT authorizer AND given var.route_authorization_scopes by main.tf. Every key is versioned under the published `/api/v1` path prefix. The default exposes the SEVEN online bounded contexts, most as a matched pair of keys -- the bare collection prefix and the greedy subtree beneath it -- under path segments matching the SPA's API client modules. One context publishes a SECOND top-level segment because its own OpenAPI contract does: transaction-service serves its single bill-payment operation at `/api/v1/billpay`, which is consequently a bare key with no greedy sibling. auth-service needs no second segment -- it serves sign-on, the challenge and renewal exchanges and all five user-administration operations beneath `/api/v1/auth`, which the greedy auth key already covers. batch-service is deliberately absent: it has no ALB target to route to. An environment root may extend the list without editing the module."
   type        = list(string)
   nullable    = false
   default = [
@@ -381,6 +381,7 @@ variable "route_keys" {
     "ANY /api/v1/cards/{opaqueCardId}/{proxy+}",
     "ANY /api/v1/transactions",
     "ANY /api/v1/transactions/{proxy+}",
+    "ANY /api/v1/billpay",
     "ANY /api/v1/reference",
     "ANY /api/v1/reference/{proxy+}",
     "ANY /api/v1/authorizations",
@@ -388,6 +389,43 @@ variable "route_keys" {
     "ANY /api/v1/reports",
     "ANY /api/v1/reports/{proxy+}",
   ]
+
+  # WHY : Refactoring Rationale: this list is derived from the service CONTRACTS,
+  #       key by key, because a key missing from it makes a published operation
+  #       unreachable and a key present in it without a contract publishes an
+  #       address nothing answers. Both failures are silent in the worst way: the
+  #       first has the API answer its own 404 with no integration attempted, so
+  #       the service is running, healthy and correct while the operation appears
+  #       not to exist; the second forwards a request to a service that 404s it,
+  #       so a caller cannot tell an unimplemented operation from a misrouted one.
+  #       The bare `/api/v1/billpay` key was ADDED for the first reason:
+  #       transaction-service publishes one bill-payment operation at exactly that
+  #       path and this list did not name it.
+  # WHY : Refactoring Rationale: a `/api/v1/users` pair was WITHDRAWN for the
+  #       second reason. auth-service serves its five user-administration
+  #       operations at `/api/v1/auth/users` and `/api/v1/auth/users/{userId}` --
+  #       which is what its OpenAPI contract publishes, what
+  #       `SecurityConfig.USER_COLLECTION_PATH_PATTERN` and
+  #       `USER_SUBTREE_PATH_PATTERN` gate, and what its contract test asserts the
+  #       two agree on -- and the greedy `/api/v1/auth/{proxy+}` key above already
+  #       reaches every one of them. A second top-level `/api/v1/users` segment
+  #       named an address no contract publishes and no filter-chain rule gates, so
+  #       a request to it authenticated at the edge and was then refused by a
+  #       service that has no handler for it. Removing it also removes the only
+  #       path in this table that no contract could be checked against.
+  # WHY : Assumptions: a context's own prefix contains everything it serves. That
+  #       is now true of every context in this list, and it is the property that
+  #       makes this table checkable against the contracts rather than merely
+  #       consistent with them.
+  # WHY : Trade-offs: `/api/v1/billpay` is a BARE key with no greedy sibling,
+  #       deliberately. The contract publishes exactly one operation at exactly
+  #       that path and nothing beneath it, so a greedy key would publish a subtree
+  #       with nothing behind it -- the same defect this list removed by deleting
+  #       `/batch`. The pairing validation below is one-directional precisely so
+  #       that a bare key may stand alone. The load balancer rule for
+  #       transaction-service does additionally carry `/api/v1/billpay/*`, and the
+  #       asymmetry is the safe direction: the edge is the narrower gate, so a
+  #       subtree the load balancer would forward is one the edge never admits.
 
   # WHY : (1) Assumptions: the version travels in the PATH, and every key carries
   #       the same `/api/v1` prefix. The route table is the published contract at
@@ -439,13 +477,24 @@ variable "route_keys" {
   #       only the EDGE -- a caller already inside the private application tier
   #       reaches a listener without traversing it. That half is closed in the
   #       service itself, and closed more completely than a filter chain closes
-  #       it: services/batch-service/pom.xml declares neither
-  #       spring-boot-starter-web nor spring-boot-starter-actuator, so the batch
-  #       container starts no servlet container and opens no listening port at
-  #       all. There is no in-VPC HTTP surface left to authorize, which is also
-  #       why the edge route had nothing to integrate with. Neither half is
-  #       redundant: this list keeps the prefix unpublished, and the absent web
-  #       starters keep there being nothing to publish.
+  #       it. It is closed by the BIND ADDRESS and not by the absence of a
+  #       servlet container: services/batch-service/pom.xml declares
+  #       spring-boot-starter-web and spring-boot-starter-actuator so that the
+  #       image HEALTHCHECK has a health endpoint to probe, so the batch task
+  #       does open a port while a job runs. What it does not do is offer that
+  #       port to the network -- the server.address key of
+  #       services/batch-service/src/main/resources/application.yml binds the
+  #       listener to the loopback address, so it is reachable only from inside
+  #       the task's own network namespace and not on the task's elastic network
+  #       interface. The only route behind it is the framework's health endpoint,
+  #       with details suppressed. There is therefore no in-VPC HTTP surface to
+  #       authorize, which is also why the edge route had nothing to integrate
+  #       with. Neither half is redundant: this list keeps the prefix unpublished,
+  #       and the loopback bind keeps there being nothing to publish.
+  #       An earlier version of this note claimed the module declared neither
+  #       starter. That claim was overtaken by the commit that added both and is
+  #       corrected here rather than deleted, so that a reader who has seen it
+  #       elsewhere knows which statement to trust.
   # WHY : (1) Alternatives Considered: enumerating every operation at the edge,
   #       one route key per method and path. Rejected because each service
   #       already publishes an OpenAPI 3.1 contract that IS the authoritative
@@ -491,11 +540,15 @@ variable "route_keys" {
   #       integrate, which presents as an edge fault rather than as the missing
   #       target it is. Its only invocation path is the Step Functions
   #       synchronous run-task call, which passes job selection and the business
-  #       date as container overrides and never traverses this API. The seven
-  #       remaining prefixes correspond one-to-one with
+  #       date as container overrides and never traverses this API. The remaining
+  #       prefixes correspond to
   #       ui/src/api/{auth,accounts,cards,transactions,reference,authorization,
   #       reporting}.ts, so a path is written once and reads the same way on
-  #       both sides of the edge.
+  #       both sides of the edge. The correspondence is one-to-one for five of
+  #       the seven and one-to-two for the other two, because auth-service also
+  #       serves `/api/v1/users` and transaction-service also serves
+  #       `/api/v1/billpay`; a client module is the unit of ownership, not of
+  #       path prefix.
   #       (5) Refactoring Rationale: each context now carries a BARE key
   #       alongside its greedy one, because a greedy `{proxy+}` matches one or
   #       more trailing segments and therefore does NOT match the collection
@@ -613,12 +666,27 @@ variable "route_keys" {
   }
 }
 
-# WHY : (1) Assumptions: sign-on cannot require the token sign-on issues, and
-#       every other route on this API can. The authorizer above rejects a request
-#       carrying no bearer token before any integration runs, so with it attached
-#       to the sign-on path the only way to obtain a token is to already hold one.
-#       That is a deadlock rather than a hardening: no user could ever
-#       authenticate, and the failure is total rather than partial.
+# WHY : (1) Assumptions: none of the THREE token-issuing operations can require the
+#       token they issue, and every other route on this API can. The authorizer
+#       above rejects a request carrying no bearer token before any integration
+#       runs, so with it attached to any of these three paths the only way to
+#       obtain a token is to already hold one. That is a deadlock rather than a
+#       hardening: no user could ever authenticate, and the failure is total rather
+#       than partial. The same reasoning covers all three and not only sign-on: a
+#       first sign-on that returns a forced-credential-change challenge is
+#       completed at the challenge path, and a caller whose access token has
+#       expired holds no usable token to reach the refresh path with -- so
+#       requiring one there would make an expired session unrecoverable except by
+#       re-entering credentials, which is the behaviour the refresh token exists to
+#       avoid.
+#       Refactoring Rationale: the description of this input formerly said it
+#       "defaults to the single sign-on route" while the default held three keys
+#       and the validation admitted three. That is worse than an undercount: the
+#       description is the text terraform-docs renders into the module README, so
+#       the module's own published documentation understated its unauthenticated
+#       surface by two routes -- the one number a reviewer of an edge module reads
+#       first. The count is now stated as three in the description, in this
+#       rationale and in the README generated from them.
 #       (2) Assumptions: the browser never speaks to the user pool, which is what
 #       makes the exception unavoidable rather than a shortcut. The app client
 #       infra/modules/cognito provisions is CONFIDENTIAL -- it is created with a
@@ -630,19 +698,25 @@ variable "route_keys" {
 #       put an identity endpoint in the browser's origin and give up the
 #       server-side control of the three verbatim sign-on replies the baseline
 #       program at app/cbl/COSGN00C.cbl produces at its L242, L243, L249 and L254.
-#       (3) Trade-offs: the exception is one METHOD on one PATH, not a prefix and
-#       not a subtree. `POST /api/v1/auth/signon` is unauthenticated; every other
-#       path under `/api/v1/auth`, including the user administration endpoints,
-#       stays on the JWT route because the greedy key in var.route_keys covers
-#       them. An HTTP API selects the MOST SPECIFIC matching route, and a greedy
-#       `{proxy+}` key is the least specific of all, so a concrete method with a
-#       literal final segment always wins over `ANY /api/v1/auth/{proxy+}` without
-#       the two contending. What is given up is one internet-reachable path with no
-#       credential check at the edge; what is bought is a system that can be signed
-#       in to at all. The residual is bounded three ways: the validation below
-#       refuses any key that is not that exact sign-on path, the route is given its
-#       own tighter throttle rather than inheriting the account-level allowance,
-#       and auth-service itself is what decides whether the credentials are good.
+#       (3) Trade-offs: each exception is one METHOD on one exact PATH, never a
+#       prefix and never a subtree. The three POST paths above are
+#       unauthenticated; every other path under `/api/v1/auth` stays on the JWT
+#       route because the greedy key in var.route_keys covers it. An HTTP API
+#       selects the MOST SPECIFIC matching route, and a greedy `{proxy+}` key is
+#       the least specific of all, so a concrete method with a literal final
+#       segment always wins over `ANY /api/v1/auth/{proxy+}` without the two
+#       contending. Note that the user administration endpoints are NOT among the
+#       paths this reasoning has to cover: they are published at `/api/v1/users`,
+#       a segment no key in this list touches, so their authorization does not
+#       depend on specificity ordering at all -- it depends only on their own
+#       authorized keys in var.route_keys. What is given up is three
+#       internet-reachable paths with no credential check at the edge; what is
+#       bought is a system that can be signed in to, that can complete a forced
+#       credential change, and that can renew a session. The residual is bounded
+#       three ways: the validation below refuses any key that is not one of those
+#       exact three paths, each route is given its own tighter throttle rather
+#       than inheriting the account-level allowance, and auth-service itself is
+#       what decides whether the credentials are good.
 #       (4) Alternatives Considered: putting the sign-on route on the same
 #       for_each as the authorized routes and switching the authorizer per key with
 #       a conditional. Rejected because it makes the presence or absence of
@@ -655,8 +729,31 @@ variable "route_keys" {
 #       all. A root with a different sign-on arrangement should be able to publish
 #       none, and an empty list is the honest way to say so -- unlike a sentinel
 #       value, it creates nothing.
+#       (6) Alternatives Considered: narrowing this default to the single sign-on
+#       key, on the reasoning that auth-api.yaml declares only that one operation
+#       and the other two therefore publish routes nothing describes. Rejected,
+#       and the reason is written down rather than assumed: auth-api.yaml states
+#       at its header item 3 that exactly six operations are contracted there
+#       while the edge additionally publishes the challenge and renewal routes,
+#       that the two are held outside that document deliberately because their
+#       request and reply shapes are a separate contract, and that the omission is
+#       recorded so a reader comparing the file against this route table "sees a
+#       decision rather than an oversight". Trimming the list would delete an
+#       intended part of the pre-token surface to make two artifacts agree on a
+#       count they already explain, and it would do so in the one place where the
+#       cost of being wrong is an operation that cannot answer. What WAS wrong here
+#       was this variable's own description, which claimed the default was "the
+#       single sign-on route" while the default below has always held three keys;
+#       that sentence is corrected rather than deleted, because a reader who saw
+#       it needs to know which statement to trust.
+#       Assumptions: the three keys are pre-token operations, not a general public
+#       surface. Each is a POST that a caller reaches precisely because it has no
+#       usable access token yet -- to obtain one, to answer a challenge raised
+#       while obtaining one, or to renew one -- and the validation below pins the
+#       exact method and path of all three so a fourth cannot be added by editing
+#       a value.
 variable "public_route_keys" {
-  description = "Route keys created WITHOUT the JWT authorizer, for paths that must be reachable before a token exists. Defaults to the single sign-on route POST /api/v1/auth/signon, which auth-service answers by calling the Cognito user pool with the confidential app client's secret. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route_keys and carries the authorizer."
+  description = "Route keys created WITHOUT the JWT authorizer, for paths that must be reachable before a usable token exists. Defaults to the THREE pre-token operations of auth-service -- POST /api/v1/auth/signon, POST /api/v1/auth/challenge and POST /api/v1/auth/refresh -- because a caller cannot present the token these operations exist to issue or renew. All three are contracted as public operations in services/auth-service/src/main/resources/openapi/auth-api.yaml -- each declares an empty security requirement and x-required-authority none -- and the same three are the chain's open list in that service's SecurityConfig, which its contract test asserts equals the contract's own public set. The three lists are therefore the same three keys in all three places, and a route published here that is not open in both of the others would be reachable at the edge and refused by the service. The validation below admits those three keys and nothing else. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route_keys and carries the authorizer."
   type        = list(string)
   nullable    = false
   default = [

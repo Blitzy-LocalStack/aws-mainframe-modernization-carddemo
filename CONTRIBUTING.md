@@ -47,7 +47,9 @@ Every contribution to the migrated code in this repository must document both *w
 
 The authoritative, per-language form of this convention -- with a conforming example for each language in the tree -- is [docs/CODE_DOCUMENTATION_STANDARD.md](docs/CODE_DOCUMENTATION_STANDARD.md). This section states the obligation; that document is where the worked examples live. Read the two together, and read the linters as a floor rather than a ceiling: they implement only the subset of the convention a tool can decide, so passing them is necessary but never sufficient. Review still owns whether the prose is accurate and the rationale genuine, because no linter can determine whether a sentence is true.
 
-The convention itself is not new. It generalises the rule the COBOL test suite already applies, recorded in [tests/README.md](tests/README.md), which asks for exactly the same docstring elements and exactly the same four rationale categories. We extended that existing gate to the other languages rather than writing a second one, because two overlapping conventions would let a contributor or a reviewer satisfy whichever of them happened to be weaker. There is one convention here, and it now covers every language in the repository.
+The convention itself is not new. It generalises the rule the COBOL test suite already applies, recorded in [tests/README.md](tests/README.md), which asks for exactly the same docstring elements and exactly the same four rationale categories.
+
+Alternatives Considered: writing a second, separate convention for the migrated trees. We extended the existing one instead, because two overlapping conventions would let a contributor or a reviewer satisfy whichever of them happened to be weaker, and a rule that can be satisfied by picking the weaker of two readings is not a gate. There is one convention here, and it now covers every language in the repository.
 
 **Where it applies.** All newly authored code and configuration:
 
@@ -60,7 +62,9 @@ The convention itself is not new. It generalises the rule the COBOL test suite a
 * the migration workflows `.github/workflows/services-ci.yml`, `.github/workflows/ui-ci.yml`, `.github/workflows/infra-ci.yml` and `.github/workflows/deploy.yml`
 * the migration documentation under `docs/**`
 
-**Where it does not apply.** The COBOL baseline under `app/**` -- programs, copybooks, BMS mapsets, JCL, the CSD (CICS resource definitions), and the seed data -- is reference-only and is never modified, so no retrofitting of Javadoc-equivalent commentary into `app/cbl/*.cbl` is required -- or permitted. That baseline is the behavioural oracle against which functional parity is verified, and it has to stay byte-identical for the comparison to mean anything; it carries no documentation obligation because it is authoritative source material to be cited by path and line, not because it is deprecated. The convention likewise changes nothing under `tests/**` or `scripts/**`: the existing test suite already satisfies the equivalent house convention, keeps its pinned dependencies exactly as they are, and continues to run unchanged on its own pipeline, `.github/workflows/tests.yml`.
+**Where it does not apply.** The COBOL baseline under `app/**` -- programs, copybooks, BMS mapsets, JCL, the CSD (CICS resource definitions), and the seed data -- is reference-only and is never modified, so no retrofitting of Javadoc-equivalent commentary into `app/cbl/*.cbl` is required -- or permitted. The convention likewise changes nothing under `tests/**` or `scripts/**`.
+
+Assumptions: that baseline is the behavioural oracle against which functional parity is verified, and it has to stay byte-identical for the comparison to mean anything. It carries no documentation obligation because it is authoritative source material to be cited by path and line, not because it is deprecated -- which is also why a citation into `app/**` may safely use a line number while a citation into a sibling of the file you are editing should name a stable anchor instead. The existing test suite is excluded on the same reasoning: it already satisfies the equivalent house convention, keeps its pinned dependencies exactly as they are, and continues to run unchanged on its own pipeline, `.github/workflows/tests.yml`, so re-typing it under this section would risk the oracle for no gain in coverage.
 
 **Docstrings and API comments.** Every new or modified function, class, and module entry point must carry a docstring -- expressed in the language's standard API-comment form where applicable -- containing all of these elements:
 
@@ -77,12 +81,25 @@ Use the language's standard format:
 * TypeScript and TSX use JSDoc/TSDoc-compatible comments (`/** ... */`) with `@param` and `@returns`.
 * Python uses module, class, and function docstrings with `Args:`, `Returns:`, and `Raises:` sections where applicable.
 
-**Inline rationale.** Place comments adjacent to the code they explain, and use them to explain *why* a decision was made rather than *what* the code already says. Every non-obvious decision must document at least one of the same four categories the COBOL suite already uses:
+**Inline rationale.** Place comments adjacent to the code they explain, and use them to explain *why* a decision was made rather than *what* the code already says. Statement-level comments that merely narrate what the next line does do not satisfy the rule. Every non-obvious decision must document at least one of the same four categories the COBOL suite already uses:
 
 * **Alternatives Considered** -- which other approaches were evaluated and why this one was chosen
 * **Refactoring Rationale** -- when replacing code, what was wrong with the old approach
 * **Assumptions** -- which external contracts, data formats, or behaviours the decision depends on
 * **Trade-offs** -- which compromises were accepted and why
+
+The bold in the four bullets above is this document's typography for naming the categories, and it is not part of a label's written form. When you actually tag a rationale, write the label character-for-character as one of these four and in no other form:
+
+```text
+Alternatives Considered:
+Refactoring Rationale:
+Assumptions:
+Trade-offs:
+```
+
+Four properties of that form are load-bearing, and each is a way the label has actually been written wrongly in this repository. It is **plural** where the rule writes it plural, so `Assumption:` and `Trade-off:` are not accepted abbreviations. It is **unparenthesised**, so `WHY (Assumptions):` and a bare `(Trade-offs)` are wrong -- the label opens the rationale itself. It **keeps its colon**, so `Assumptions.` names the category without reading as a label. And it carries **no emphasis markup**, so `**Assumptions:**` is wrong in Markdown exactly as it is in code. Assumptions: the label is read by a literal search before it is read by a person, because no linter parses prose in a Dockerfile, a `.tf` file or a SQL migration, so a cross-language audit has nothing but text search to work with; one spelling makes that search complete, while four spellings of one category make it silently partial. Never mix two forms inside one file. Using these words as ordinary English -- "the assumptions this rests on" -- is not a label and needs no special form.
+
+**Purpose goes in the docstring, not on the statement.** The `# WHAT:` / `# WHY :` pair belongs to fenced command blocks in prose -- this file, every `README.md`, and `docs/runbooks/**` -- and nowhere else. No `.java`, `.ts`, `.tsx`, `.py`, `.tf`, `.hcl`, `.sql`, `.xml`, `.yml`, `.yaml`, `.json`, `.gitignore`, `.env.example`, `Dockerfile` or `pom.xml` may carry a statement-level `WHAT:` comment. A `WHAT:` inside a file-header or module-header comment block is the documented exception and stays: that header *is* the docstring analogue for a format that has none. Assumptions: a `WHAT:` line above a statement restates what the statement already says, which is the first forbidden pattern below; a shell command in a fenced block is the different case that earns the pair, having no docstring construct available and often being a pipeline whose effect is genuinely not evident from its tokens. In code and configuration, therefore, purpose lives in the Javadoc, JSDoc, docstring or header block, and an inline comment carries one canonical label, the reason, and what differs under the alternative.
 
 **Formats without docstrings.** Where a language or file format has no docstring construct, provide the analogous information in its native comments or metadata:
 
@@ -101,13 +118,13 @@ Use the language's standard format:
 
 **Mechanical validation gates.** The prose requirement is enforced mechanically at five points:
 
-1. Java uses `config/checkstyle/checkstyle.xml` and `config/checkstyle/suppressions.xml` through `services/pom.xml`, where Checkstyle is bound to Maven's `validate` phase. Binding the gate to `validate` makes it run on every local build rather than only in CI, so a contributor sees missing Javadoc before pushing; the trade-off is a marginally slower local build in exchange for faster feedback.
+1. Java uses `config/checkstyle/checkstyle.xml` and `config/checkstyle/suppressions.xml` through `services/pom.xml`, where Checkstyle is bound to Maven's `validate` phase. Trade-offs: binding the gate to `validate` rather than to a CI-only step costs a marginally slower local build, and buys a contributor seeing missing Javadoc before pushing rather than after a pipeline round trip.
 2. TypeScript and TSX use `eslint-plugin-jsdoc` through `ui/eslint.config.js`, requiring JSDoc on exported components and functions.
 3. Python's documentation gate is the pydocstyle `D` family selected under `[tool.ruff.lint]` in `data-migration/pyproject.toml`.
 4. Terraform/HCL uses `infra/.tflint.hcl` for documented variables and outputs and `infra/.terraform-docs.yml` for generated-documentation drift checks.
 5. CI repeats the gates as required steps in `.github/workflows/services-ci.yml`, `.github/workflows/ui-ci.yml`, and `.github/workflows/infra-ci.yml`. The existing `.github/workflows/tests.yml` remains unchanged because the test suite already carries the equivalent convention.
 
-Do not bump the TypeScript pin in `ui/package.json` without first checking the upper bound on the compiler version accepted by the type-aware lint toolchain. Crossing that bound can leave the manifest installable while silently preventing the type-aware ESLint pass, and therefore the JSDoc gate, from running; verify the compatible range and upgrade procedure in [the documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md) before changing the pin.
+Do not bump the TypeScript pin in `ui/package.json` without first checking the upper bound on the compiler version accepted by the type-aware lint toolchain. Trade-offs: the pin is deliberately held below the newest compiler release, giving up its build-speed improvement to keep gate 2 above running at all. Crossing that bound leaves the manifest installable while silently preventing the type-aware ESLint pass, and therefore the JSDoc gate, from running -- a documentation rule failing open with no error to read. Verify the compatible range and upgrade procedure in [the documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md) before changing the pin.
 
 
 ## Finding contributions to work on

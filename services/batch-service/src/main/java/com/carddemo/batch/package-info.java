@@ -21,7 +21,7 @@
  * runs; the task then exits and the invoking state reads the process status
  * described under <em>The exit-status contract</em> below.</p>
  *
- * <p><strong>Trade-offs:</strong> {@code spring-boot-starter-web} and
+ * <p>Trade-offs: {@code spring-boot-starter-web} and
  * {@code spring-boot-starter-actuator} are carried only so the Dockerfile probe
  * can detect an unreachable datasource during a run. A process-only probe was
  * rejected because a live JVM says nothing about whether the selected job can
@@ -42,26 +42,6 @@
  * under {@code services/} is held to its transcribed rules; this one is
  * additionally held to committed bytes, and where prose and committed bytes
  * disagree the bytes are right.</p>
- *
- * <h2>Parameters, return values and exceptions: declared inapplicable</h2>
- *
- * <p>A package declaration accepts no parameter, yields no value and raises
- * nothing, so this charter deliberately carries no parameter, return or
- * exception at-clause, and no authorship, availability or revision at-clause
- * either.</p>
- *
- * <p><strong>Assumptions:</strong> the inapplicability is stated rather than
- * left silent because the user-specified Explainability rule -- the single
- * rule governing this project, and the reason this file exists -- names at its
- * line 39 a docstring that omits parameters, return values or purpose among
- * its forbidden patterns, and a reader has to be able to distinguish a
- * declared inapplicability from an oversight. Inventing the at-clauses instead
- * would be worse than useless: Javadoc has no parameter, return or exception
- * concept for a package, and the repository rule set audits at-clause bodies
- * for emptiness, so a fabricated clause would either be discarded or flagged.
- * Of the four docstring elements the rule enumerates at its lines 18 to 21,
- * exactly one applies to this compilation unit, and the paragraphs above
- * account for the other three.</p>
  *
  * <h2>What each subpackage owns</h2>
  *
@@ -103,15 +83,13 @@
  * </ul>
  *
  * <p>Each of those seven carries its own package charter, so this subtree
- * holds eight charter files including this one. Every one of the eight exists
- * for the same reason this one does: the user-specified Explainability rule
- * attaches at its line 15 the docstring duty to every module entry point, a
- * Java package declaration is that entry point, and a package declaration can
- * carry a docstring only in a {@code package-info.java}. The Javadoc block is
- * not decoration on this file; it is the file's entire reason to exist, and a
- * bare {@code package} statement would be a failure rather than a minimum.</p>
+ * holds eight charter files including this one. A Java package declaration is
+ * a module entry point and can carry documentation only in a
+ * {@code package-info.java}, so the Javadoc block is not decoration on this
+ * file; it is the file's entire reason to exist, and a bare {@code package}
+ * statement would be a failure rather than a minimum.</p>
  *
- * <p><strong>Assumptions:</strong> no charter file exists at {@code com/} or
+ * <p>Assumptions: no charter file exists at {@code com/} or
  * at {@code com/carddemo/}, and none belongs there. The repository's
  * charter-presence check is a file-set check in
  * {@code config/checkstyle/checkstyle.xml}: it fires only for a directory that
@@ -217,7 +195,7 @@
  * on {@code ledger} and {@code account} and on nothing else, so the posting
  * unit of work stays a single atomic commit.</p>
  *
- * <p><strong>Alternatives Considered:</strong> two decompositions were
+ * <p>Alternatives Considered: two decompositions were
  * evaluated for that unit of work and both were rejected on the same concrete
  * ground. A saga would replace one atomic commit with a sequence of committed
  * steps plus compensating reversals; a transactional outbox with compensating
@@ -235,7 +213,7 @@
  * grant keeps the commit atomic and needs no coordinator at all, so it is both
  * the lower-risk option and the one that preserves observable behaviour.</p>
  *
- * <p><strong>Assumptions:</strong> the grants themselves are not created here.
+ * <p>Assumptions: the grants themselves are not created here.
  * They are created by {@code data-migration/sql/V0__schemas_and_roles.sql}
  * together with the schemas and the per-service roles. The schema definitions
  * are not created here either: {@code ledger} migrations are owned by
@@ -244,7 +222,7 @@
  * service's schema, and it owns migrations for the {@code batch} schema
  * alone.</p>
  *
- * <p><strong>Assumptions:</strong> the only intra-repository Maven dependency
+ * <p>Assumptions: the only intra-repository Maven dependency
  * this module declares is {@code common-lib}. It does not depend on
  * {@code transaction-service} and it does not depend on
  * {@code account-service}. This module and {@code transaction-service} agree
@@ -271,14 +249,14 @@
  * {@code infra/modules/api-gateway-http} creates none and refuses one by
  * validation.</p>
  *
- * <p><strong>Assumptions:</strong> application configuration exposes only
+ * <p>Assumptions: application configuration exposes only
  * actuator health and suppresses its details. The absent security configuration
  * is therefore not permission to invoke work: no HTTP path selects a job, and
  * the only operation that changes state remains the command-driven task entry
  * point. Adding authentication to the health probe would require a credential in
  * the Dockerfile while protecting no business operation.</p>
  *
- * <p><strong>Alternatives Considered:</strong> an administrative endpoint that
+ * <p>Alternatives Considered: an administrative endpoint that
  * would let an operator trigger a job over HTTP was evaluated and rejected,
  * and {@code services/batch-service/pom.xml} records that rejection alongside
  * the API documentation starter it declines to declare. The only invocation
@@ -289,7 +267,7 @@
  * defend, for no operational gain -- and it would give the same job two
  * argument sources that could disagree.</p>
  *
- * <p><strong>Trade-offs:</strong> the web stack is deliberately narrower than
+ * <p>Trade-offs: the web stack is deliberately narrower than
  * the online services' surface. It provides health during a run but no controller
  * contract, and the infrastructure creates no long-running service, target group
  * or edge route for this module. Process exit status remains the authoritative
@@ -301,11 +279,9 @@
  * {@code .gitignore}.</p>
  *
  * <p><b>Libraries deliberately not adopted, each for a stated reason.</b>
- * Lombok is not used, because generated accessors and constructors cannot
- * carry the Javadoc the user-specified Explainability rule requires, so a
- * Lombok-built class either fails the documentation gate or has to be
- * suppressed out of it; Java 21 {@code record} types with explicit
- * constructors give the same brevity with members that can be documented.
+ * Lombok is not used, because generated accessors and constructors cannot be
+ * documented at all; Java 21 {@code record} types with explicit constructors
+ * give the same brevity with members that can be documented.
  * MapStruct is not used, because copybook-to-transfer-object mapping is not
  * mechanical -- it drops {@code FILLER}, masks the primary account number to
  * its last four digits, suppresses the card verification value entirely,
@@ -329,7 +305,7 @@
  * forbidden in the money path, and the prohibition is asserted by the
  * architecture test rather than requested in prose. A JSON number is parsed
  * into an IEEE-754 double by most clients, which destroys exactness at
- * precisely the boundary a user sees.</p> * <p><strong>Assumptions:</strong>
+ * precisely the boundary a user sees.</p> * <p>Assumptions:
  * two precisions meet in this module and a reader has to know which is which.
  * Account-side money is {@code PIC S9(10)V99}, twelve display bytes, mapping
  * to {@code NUMERIC(12,2)} -- for example {@code ACCT-CURR-BAL} at
@@ -353,7 +329,7 @@
  * {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. It multiplies before it
  * divides and it carries no {@code ROUNDED} phrase.</p>
  *
- * <p><strong>Assumptions:</strong> the Java therefore forms the product at
+ * <p>Assumptions: the Java therefore forms the product at
  * full precision and only then divides, applying scale 2 with
  * {@code RoundingMode.HALF_UP} at that single point. The arithmetic order is
  * part of the behavioural contract and not an implementation detail: dividing
@@ -361,7 +337,7 @@
  * and the golden-master comparison would report it as a parity failure --
  * correctly, but only after the fact.</p>
  *
- * <p><strong>Assumptions:</strong> the rounding mode is pinned by the migration
+ * <p>Assumptions: the rounding mode is pinned by the migration
  * plan's transformation rule T3, which fixes Java money at scale 2 with
  * {@code RoundingMode.HALF_UP} and admits no exception, and it is stated for
  * this accrual specifically in
@@ -387,7 +363,7 @@
  * {@code PARM-DATE PIC X(10)} at line 178. Injection is what makes a rerun
  * reproducible and a golden comparison possible at all.</p>
  *
- * <p><strong>Assumptions:</strong> the token is an opaque ten-character
+ * <p>Assumptions: the token is an opaque ten-character
  * passthrough, not a validated calendar date in a single canonical layout. The
  * declared picture is {@code X(10)}, alphanumeric, and both the ISO form and
  * the compact form the driver injects appear among the committed golden
@@ -409,7 +385,7 @@
  * own words: never duplicate a layout, keep it single-sourced from
  * {@code app/cpy/}.</p>
  *
- * <p><strong>Assumptions:</strong> the worked example is the posting program,
+ * <p>Assumptions: the worked example is the posting program,
  * which draws five contracts through five {@code COPY} statements:
  * {@code CVTRA06Y} at {@code app/cbl/CBTRN02C.cbl:102}, {@code CVTRA05Y} at
  * line 107, {@code CVACT03Y} at line 112, {@code CVACT01Y} at line 121 and
@@ -441,7 +417,7 @@
  *
  * <h2>Two platform replacements this module makes</h2>
  *
- * <p><strong>Refactoring Rationale:</strong> index building is retired
+ * <p>Refactoring Rationale: index building is retired
  * outright. The baseline rebuilds the transaction alternate index with an
  * {@code IDCAMS BLDINDEX} step, at {@code app/jcl/TRANIDX.jcl:52}, because a
  * VSAM alternate index is a separate object that a bulk load leaves stale. The
@@ -452,7 +428,7 @@
  * inventing work with no effect and then explaining why it never changes
  * anything.</p>
  *
- * <p><strong>Refactoring Rationale:</strong> restart capability is net-new
+ * <p>Refactoring Rationale: restart capability is net-new
  * here, and it is worth being precise about what it replaces, because a reader
  * may assume a checkpoint contract existed and was ported. None did. The only
  * {@code RESTART=} anywhere in the thirty-eight jobs of {@code app/jcl/} is
@@ -469,7 +445,7 @@
  * accurate, and the distinction matters when someone asks which behaviour
  * parity testing is entitled to assume.</p>
  *
- * <p><strong>Assumptions:</strong> generation-dataset retention is a real
+ * <p>Assumptions: generation-dataset retention is a real
  * contract and its arity is easy to understate. Ten generation bases exist,
  * not six: six are defined in {@code app/jcl/DEFGDGB.jcl}, three in
  * {@code app/jcl/DEFGDGD.jcl} and one in {@code app/jcl/DALYREJS.jcl}, every
@@ -506,7 +482,7 @@
  * write and read, so the round trip is byte-identical in both directions, and
  * the divergence is registered.</p>
  *
- * <p><strong>Refactoring Rationale:</strong> that single baseline defect is
+ * <p>Refactoring Rationale: that single baseline defect is
  * the sole cause of the repository's aggregate warn-level green state, and it
  * must never be reported as a regression introduced by this migration.
  * {@code tests/README.md:53} records that only ten of the twelve batch
@@ -536,7 +512,7 @@
  * documented and empirically verified and placing any change to it outside
  * scope.</p>
  *
- * <p><strong>Refactoring Rationale:</strong> the omission compounds, which is
+ * <p>Refactoring Rationale: the omission compounds, which is
  * why the migrated job flushes two things and not one.
  * {@code 1050-UPDATE-ACCOUNT} does more than add interest: alongside
  * {@code ADD WS-TOTAL-INT  TO ACCT-CURR-BAL} at
@@ -591,7 +567,7 @@
  *       {@code 16} is the end-of-file sentinel rather than a severity.</li>
  * </ul>
  *
- * <p><strong>Assumptions:</strong> the warn tier belongs to posting alone.
+ * <p>Assumptions: the warn tier belongs to posting alone.
  * {@code app/cbl/CBACT04C.cbl} contains no {@code RETURN-CODE} statement
  * anywhere, and neither does {@code app/cbl/CBTRN01C.cbl}, so for every job in
  * this package other than {@code PostTransactionsJob} the warn tier is
@@ -601,7 +577,7 @@
  * accrual would be inventing a tier the baseline has no statement to
  * produce.</p>
  *
- * <p><strong>Trade-offs:</strong> the graded numeric scale belongs to the
+ * <p>Trade-offs: the graded numeric scale belongs to the
  * parity oracle and to the batch container's exit status, and nowhere else in
  * this module. The oracle's rubric under {@code tests/} grades 0, 2, 4, 8 and
  * 16, and treats a warn-level aggregate as its green state. The Java build
@@ -642,7 +618,7 @@
  *
  * <h2>Authoring notes</h2>
  *
- * <p><strong>Trade-offs:</strong> this file is restricted to ASCII. Where the
+ * <p>Trade-offs: this file is restricted to ASCII. Where the
  * cited sources carry a non-breaking hyphen or an em dash, this charter uses
  * an ASCII hyphen-minus or a pair of ASCII hyphens; wording is otherwise
  * unchanged and only those punctuation code points are normalised.
@@ -654,40 +630,12 @@
  * typographically plainer prose; the gain is that every label and every quoted
  * phrase in this file is byte-predictable.</p>
  *
- * <p><strong>Assumptions:</strong> the four labels used throughout --
- * {@code Alternatives Considered:}, {@code Refactoring Rationale:},
- * {@code Assumptions:} and {@code Trade-offs:} -- are spelled as the
- * Explainability rule presents them at its lines 31 to 34: plural,
- * unparenthesised, each followed immediately by a colon. The rule's own
- * emphasis markers sit outside the colon, which is why the colon is part of
- * the label and not part of the sentence after it.
- * {@code Refactoring Rationale:} is reserved for the four genuine platform
- * replacements above -- retired index building, the net-new restart ledger,
- * and divergences D-1 and D-3 -- because the rule defines that label at line
- * 32 as applying when existing code is replaced, and the Java in this subtree
- * replaces nothing: the COBOL stays byte-identical and keeps running.
- * Labelling an ordinary COBOL-versus-Java difference that way would be false,
- * so those are labelled {@code Alternatives Considered:} or
- * {@code Assumptions:} instead.</p>
- *
- * <p><strong>Assumptions:</strong> the documentation gate that audits this
- * file is {@code config/checkstyle/checkstyle.xml} with its companion
- * {@code config/checkstyle/suppressions.xml}, bound to the Maven
- * {@code validate} phase in {@code services/pom.xml} under the execution id
- * {@code checkstyle-documentation-gate}, so it runs before compilation on
- * every local build and not only in continuous integration. Two of its checks
- * bear on this file and they are a deliberate pair: one asserts that a
- * {@code package-info.java} exists in a directory holding compilation units,
- * and the other asserts that the file carries Javadoc. A file holding nothing
- * but a {@code package} statement satisfies the first and fails the second,
- * which is exactly the outcome the pairing is designed to produce. The rule
- * set admits no in-code bypass -- no comment-based or annotation-based
- * suppression filter is configured -- and the suppression file is loaded
- * fail-closed and scoped to generated sources and test fixtures, so nothing
- * under {@code src/main/java} can be suppressed out of the gate. The
- * Explainability rule's validation gate at line 43 is conjunctive: it closes
- * by stating that code missing either the docstring or the decision rationale
- * fails review, so the two obligations are independently fatal and neither
- * compensates for the other.</p>
+ * <p>Assumptions: {@code Refactoring Rationale:} is reserved for the four
+ * genuine platform replacements above -- retired index building, the net-new
+ * restart ledger, and divergences D-1 and D-3. That label applies when
+ * existing code is replaced, and the Java in this subtree replaces nothing:
+ * the COBOL stays byte-identical and keeps running. Labelling an ordinary
+ * COBOL-versus-Java difference that way would be false, so those are labelled
+ * {@code Alternatives Considered:} or {@code Assumptions:} instead.</p>
  */
 package com.carddemo.batch;

@@ -47,8 +47,11 @@
 > rather than buried: **no Figma or other design source was supplied**, so the
 > Figma-to-token mapping a reader might look for here is **not applicable** — see
 > [§1](#1-there-is-no-figma-source--gap-g6). A second boundary is equally plain:
-> **nothing in this document has been rendered in a browser**; see
-> [§11](#11-caveats-and-boundaries).
+> **this mapping is not verified by any test that renders it.** Individual claims
+> have been checked by hand in a browser against a throwaway harness, but there is
+> **no visual regression test, no accessibility audit and no conformance claim** of
+> any kind; see [§11](#11-caveats-and-boundaries) for exactly what was and was not
+> established that way.
 >
 > **Convention.** This document follows
 > [`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md),
@@ -386,7 +389,7 @@ online programs.
 | Source design value | Measured count | Token | Resolution, and the rejected alternative |
 |---|---|---|---|
 | `COLOR=BLUE` | **384** (base 17: 289) — the dominant label and frame colour; plus **2** in-program `DFHBLUE` | `colorPrimary` | **Exact match in role.** The most-used colour in the source is the one that frames and labels the application, which is what the primary token denotes. The two in-program references are both in `COTRTLIC` (lines 1449 and 1465), restoring a filter field to blue after an error highlight — the reset counterpart of the red in [§5](#5-the-field-error-contract). |
-| `COLOR=TURQUOISE` | **157** (base 17: 127) — informational values | `colorInfo` | **Snap.** *Alternative: a bespoke turquoise token.* **Rejected** because the system has no turquoise semantic, so a bespoke token would carry a literal colour value — the one thing [§7](#7-the-three-non-negotiable-rules) forbids — and a literal is invisible to the CSS-variables theme, so the field would keep its turquoise through a theme change while everything around it moved. The original value is recorded alongside the snap in the theme module so the decision stays auditable. |
+| `COLOR=TURQUOISE` | **157** (base 17: 127) — informational values | `colorInfo` | **Snap, plus one seed separation the snap alone does not achieve.** *Alternative: a bespoke turquoise token.* **Rejected** because the system has no turquoise semantic, so a bespoke token would carry a literal colour value — the one thing [§7](#7-the-three-non-negotiable-rules) forbids — and a literal is invisible to the CSS-variables theme, so the field would keep its turquoise through a theme change while everything around it moved. **The name is necessary but not sufficient:** the library ships `colorInfo` and `colorPrimary` with the **same** seed value (`es/theme/themes/seed.js` lines 23 and 27), so on the shipped seed these 157 fields rendered identically to the 384 blue ones and the migrated distinction was erased. `ui/src/theme/antdTheme.ts` therefore separates the informational **seed**, per the rule in [§3.0](#30-what-is-settable-and-what-merely-has-a-default) that the bridge sets the seed layer wherever a seed token expresses the role — taking the hue from the system's **own** `cyan` palette anchor (`es/theme/themes/seed.js` line 4) rather than from a literal, and pinning `colorLink` to the `blue` anchor because the link colour otherwise derives from the informational seed and no mapset contains a hyperlink. The original value is recorded alongside the snap in the theme module so the decision stays auditable. |
 | `COLOR=NEUTRAL` | **90** (base 17: 60), plus **9** in-program `DFHNEUTR` | `colorTextSecondary` | **Snap.** *Alternative: `colorText`.* **Rejected** because 3270 "neutral" is a **de-emphasis** role — it is what a field is given to make it recede relative to the coloured fields around it — whereas `colorText` is the base role that everything else is measured against. Mapping a de-emphasis role onto the base role would erase the distinction the source draws 90 times. |
 | `COLOR=GREEN` | **84** (base 17: 76), plus **10** in-program `DFHGREEN` | `colorSuccess` | **Exact match in role.** Green marks accepted or completed state in the source and success state in the system. |
 | `COLOR=YELLOW` | **70** (base 17: 55) — warnings | `colorWarning` | **Exact match in role.** |
@@ -687,7 +690,7 @@ No element in the CardDemo interface required step 4 — see
 |---|---|---|---|
 | **G1** | No equivalent of the fixed 24×80 character grid | `SIZE=(24,80)` in every one of the **21** mapsets; absolute `POS=(row,column)` positioning on all **1166** fields | **An intentional, documented deviation.** Resolved with a responsive layout, description lists for detail views and tables for lists. Two specific reasons, neither of them a preference: reproducing absolute character positioning would be **hostile to assistive technology**, because a screen reader follows DOM order and a grid-coordinate layout has no reliable DOM order — fields adjacent on screen can be arbitrarily far apart in the document; and it would be **impossible to make responsive**, because a fixed character grid has no reflow behaviour to fall back on and can only be scaled or clipped. **Preserved:** field grouping, reading order and tab order. **Not preserved:** pixel-for-character positioning. |
 | **G2** | `DRK` (non-display) is one attribute carrying **five unrelated jobs**, and they do not share a resolution | The `DRK` attribute, **18** field definitions across five operand lists — itemised in [§8.1](#81-g2-in-detail-the-five-jobs-of-drk) | **Five separate resolutions, one per job.** Only one of the five is the password case that a single "non-display" gap statement implies. Two of the five are not rendered at all, one becomes component state rather than a field, and one leaves the presentation layer entirely. See [§8.1](#81-g2-in-detail-the-five-jobs-of-drk). |
-| **G3** | No semantic token for turquoise, for 3270 "neutral", or for pink | `COLOR=TURQUOISE` (**157**), `COLOR=NEUTRAL` (**90**), `COLOR=PINK` (**4**) | Snapped to `colorInfo`, `colorTextSecondary` and `colorTextHeading` respectively, each with its rejected alternative recorded in [§4.2](#42-colour-and-attribute-mapping). **Both original values are recorded alongside the snap in the theme module**, so a reader who wants to know what the source actually said does not have to re-measure the baseline to find out. |
+| **G3** | No semantic token for turquoise, for 3270 "neutral", or for pink | `COLOR=TURQUOISE` (**157**), `COLOR=NEUTRAL` (**90**), `COLOR=PINK` (**4**) | Snapped to `colorInfo`, `colorTextSecondary` and `colorTextHeading` respectively, each with its rejected alternative recorded in [§4.2](#42-colour-and-attribute-mapping). **Both original values are recorded alongside the snap in the theme module**, so a reader who wants to know what the source actually said does not have to re-measure the baseline to find out. **One of the three snaps additionally required a seed separation to render as a distinction at all:** the library ships `colorInfo` with the same value as `colorPrimary`, so turquoise and blue derived one colour until `ui/src/theme/antdTheme.ts` separated the informational seed onto the system's own `cyan` anchor — see the turquoise row of [§4.2](#42-colour-and-attribute-mapping). The other two snaps need no override, because `colorTextSecondary` and `colorTextHeading` already derive values distinct from every other token in the mapping. |
 | **G4** | `HILIGHT=UNDERLINE` has no token | **175** occurrences | **No token is needed** — the input component's own border carries the affordance. Recorded here precisely so that the absence of an underline token is not mistaken for an oversight in the mapping. |
 | **G5** | The 3270 has no radius, elevation or motion vocabulary at all | — | `borderRadiusLG`, `boxShadowSecondary` and the `motionDuration*` family are **purely additive**. They are applied **through tokens** rather than as literals, so the additions remain inside the theme and stay subject to rule 1 of [§7](#7-the-three-non-negotiable-rules). |
 | **G6** | No Figma design source exists | — | **Not a system gap.** The Figma-to-token mapping table is **not applicable**; the BMS attributes are the design source and were measured exhaustively. See [§1](#1-there-is-no-figma-source--gap-g6). |
@@ -877,29 +880,78 @@ messages go to `WS-MESSAGE` instead.
 
 ## 10. Where the tokens are applied
 
-The bridge is applied in **exactly one place**: a theme configuration passed to
-the library's configuration provider at the root of the application. **No
-component carries a literal colour, spacing or radius value.**
+**The bridge is a bridge of token NAMES, and that is the load-bearing fact about
+how it is applied.** A name is decided once, in one module; it is turned into a
+rendered value by the library's own derivation, reached through a single theme
+configuration at the root of the application. **No component carries a literal
+colour, spacing or radius value** — the invariant of
+[§7](#7-the-three-non-negotiable-rules) — and no component decides *which* token a
+measured BMS value resolves to either.
 
 | Module | Role |
 |---|---|
-| `ui/src/theme/tokens.ts` | The bridge recorded by this document — the measured BMS values resolved to named tokens, with each snapped original retained alongside its token per G3 |
-| `ui/src/theme/antdTheme.ts` | The provider theme object assembled from that bridge and handed to `ConfigProvider` |
+| `ui/src/theme/tokens.ts` | The bridge recorded by this document — the measured BMS values resolved to named tokens, with each snapped original retained alongside its token per G3. It records **names, never values**, so that a token name is the normative thing and cannot silently disagree with the theme |
+| `ui/src/theme/antdTheme.ts` | The provider theme object handed to `ConfigProvider`. It fixes the derivation itself — the algorithm, the CSS-variable scope, the class-name shape, whether style is generated at run time — and carries the **one** pair of seed values a name cannot carry, the informational/primary separation of the turquoise row in [§4.2](#42-colour-and-attribute-mapping). It sets no other value |
+| `ui/src/layout/**` and `ui/src/screens/**` | Consumers. Each imports the **name** it needs from the bridge and resolves it against the live theme through the library's own token accessor, so the value it renders is whatever the theme currently derives |
 
-**Dependency direction.** This document is **upstream** of both modules, and
-neither exists yet. The path spellings above are therefore not descriptions of
-something already written — they are **the contract the later user-interface work
-will look for**, which is why they are given exactly and why the filename of this
-document is fixed rather than incidental.
+**Which accessor a consumer uses is itself part of the contract, because the two
+are not interchangeable.** The library's token hook returns both a resolved token
+object and a CSS-variable token object. The resolved one holds real computed
+values (a hex colour, a pixel number); the CSS-variable one holds `var(--…)`
+references to the same tokens. A consumer writing a **CSS property value** must
+take the reference form, because a resolved value written into a `style`
+attribute is a literal in every sense that matters — it bakes today's palette into
+the element and takes it off the variable surface the theme enables, which is the
+exact failure mode rule 1 of [§7](#7-the-three-non-negotiable-rules) describes,
+and nothing fails when it happens. **Every consumer in the tree takes the reference
+form, and there is currently no exception at all** — the three shell modules each
+destructure only the CSS-variable map, and no module reads a resolved token value.
+
+Assumptions: **a layout primitive's `gap` is not the exception it looks like.** An
+earlier revision of this paragraph named it as one, on the reasoning that the prop
+wants a number and so cannot carry a `var()` reference. That was measured against
+the pinned component and is **false**: `gap` is typed
+`LiteralUnion<SizeType, CSSProperties['gap']>`, and at run time the component tests
+the value against exactly four preset keywords — `small`, `middle`, `medium`,
+`large` — and assigns anything else verbatim to the element's inline `style.gap`. A
+`var(--…)` string is not a preset, so it is written through unchanged and the browser
+resolves it. The claim is corrected rather than deleted because it was load-bearing:
+it was the stated justification for one module keeping a resolved read, and removing
+the justification is what removed the read. Two conditions have to hold for a
+referenced numeric token to be usable this way, and both are checkable: the prop must
+be assigned to a style rather than consumed by the component's own arithmetic, and
+the token must not be on the library's **unitless** list — that list is exactly the
+line-height family, `opacityLoading`, `fontWeightStrong`, the two z-index tokens and
+`opacityImage`, and a token on it resolves to a bare number that a length property
+would reject. A genuine exception would be a prop the component does arithmetic on;
+if one is ever found, it is recorded at its call site, but none is claimed here on
+reasoning alone.
+
+**Dependency direction.** This document is **upstream** of the bridge and the
+theme module: it is normative for the *reasoning*, and those modules are
+normative for the *names and the derivation*. The path spellings above are exact
+because they are the contract the user-interface work is written against.
 
 ---
 
 ## 11. Caveats and boundaries
 
-- **Nothing here has been rendered in a browser.** This mapping is authored and
-  statically reviewable only. **No visual regression test has been run, no
+- **What has and has not been rendered in a browser.** The mapping itself is
+  authored and statically reviewable. Separately, the four shell modules under
+  `ui/src/layout` have been mounted in a temporary throwaway harness and inspected
+  in a real headless browser, which is how three specific claims in this document
+  were checked rather than asserted: that the scope class carries the CSS custom
+  properties, that a consumer taking the reference form resolves to a real computed
+  value, and that the informational and primary roles now render as different
+  colours after the seed separation in [§4.2](#42-colour-and-attribute-mapping).
+  That is the whole of the claim. **No visual regression test exists, no
   accessibility audit has been performed, and no conformance level of any kind is
-  claimed.**
+  claimed** — a harness rendered once and read by hand establishes that specific
+  values resolve, and nothing about whether a screen looks right, stays right
+  between revisions, or meets any standard. Assumptions: the distinction is drawn
+  narrowly on purpose, because "it was rendered in a browser" is the sentence most
+  easily mistaken for "it was tested in a browser", and the two would license very
+  different conclusions about how much of this document is verified.
 - **Accessibility is treated as a fidelity requirement, not an addition.** The
   3270 original was operated entirely from the keyboard, so full keyboard
   operation in the target is a parity obligation inherited from the source rather
@@ -929,7 +981,15 @@ document is fixed rather than incidental.
   the target deliberately behaves differently — as the field-error highlight in
   [§5](#5-the-field-error-contract) does — the divergence belongs to the register
   in `docs/architecture/cobol-to-service-traceability.md`.
-  This document records the presentational mapping only.
+  This document records the presentational mapping only. Two divergences reach the
+  presentation layer and are named here so the indirection is signposted rather than
+  discovered: the field-error highlight's driving input, which that register carries
+  among its structural divergences, and **D-7**, the shared title band's clock — the
+  baseline read one region clock in one zone, whereas the band reads the browser's
+  clock and zone whenever the application shell supplies no instant. The band's
+  typography is mapped in [§4.2](#42-colour-and-attribute-mapping); its clock is
+  **not** a token question, which is exactly why it is registered there and not
+  resolved here.
 
 ---
 

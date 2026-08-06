@@ -31,8 +31,9 @@ import org.slf4j.MDC;
  *
  * <p>Those three settle a fourth case that they do not name, and the resolution is stated here
  * because it is the one a reader is most likely to assume wrongly: a caller that supplies an identity
- * which cannot be carried -- too wide for the width contract, or carrying a character the response
- * header must not receive -- has its request <b>refused</b> with a client error. It is not served
+ * which cannot be carried -- too wide for the width contract, carrying a character the response
+ * header must not receive, or shaped like a primary account number -- has its request <b>refused</b>
+ * with a client error. It is not served
  * under a minted identity. The first obligation is what forbids the substitution: an identity the
  * caller did not send is one it cannot correlate on, so quietly replacing a value satisfies the
  * filter's mechanics while defeating its purpose. Minting belongs to the second obligation alone, and
@@ -304,6 +305,37 @@ public final class CorrelationIdFilter implements Filter {
     public static final int REQUEST_ID_MAX_LENGTH = 64;
 
     /**
+     * Reports whether a value may be carried as the correlation identity of a unit of work unaltered.
+     *
+     * <p><b>Purpose.</b> This is the ONE conformance rule for a correlation identity anywhere in the
+     * migration, exposed so that a non-servlet transport applies the identical rule rather than an
+     * approximation of it. A value conforms when it is present, occupies at least one and at most
+     * {@link #CORRELATION_ID_MAX_LENGTH} characters, and every one of those characters is an ASCII
+     * letter, an ASCII digit or one of the separators in the accepted punctuation set.</p>
+     *
+     * <p>Refactoring Rationale: the rule was private, and being private is what let a second transport
+     * diverge from it. The queue-driven authorization consumer read a correlation attribute straight off
+     * a message into its logging context and into a persisted row, applying no width and no alphabet
+     * check at all -- so a requester could put a line terminator, a quotation mark or sixty-four
+     * characters of anything into the same log field this filter refuses one character of. The two paths
+     * write the same field and now share the same predicate; publishing it is what makes that shareable
+     * without copying the alphabet into a second class.</p>
+     *
+     * <p>Assumptions: this answers only whether a value is usable. It does not decide what happens when
+     * it is not, and the separation is deliberate -- the two transports answer that differently and
+     * correctly so. A servlet request carrying a nonconforming value is refused with a client error,
+     * because a caller that can be told to correct its header should be; a queue message carrying one
+     * cannot be corrected by its sender in time to matter, so the consumer drops the attribute and
+     * proceeds rather than destroying an authorization request over a log field.</p>
+     *
+     * @param candidate the value to judge, or {@code null} when none was supplied
+     * @return {@code true} when the value may be carried unaltered, {@code false} when it must not be
+     */
+    public static boolean isConformingCorrelationId(String candidate) {
+        return conformsWithin(candidate, CORRELATION_ID_MAX_LENGTH);
+    }
+
+    /**
      * The count of random bytes rendered into a minted identity, twelve.
      *
      * <p>Assumptions: hexadecimal rendering yields two characters per byte, so twelve bytes yield
@@ -342,6 +374,23 @@ public final class CorrelationIdFilter implements Filter {
      * differ only in the stripped characters would collapse onto one.</p>
      */
     private static final String ACCEPTED_PUNCTUATION = "-_.";
+
+    /**
+     * The fewest digits a bare numeric value must carry to be treated as a primary account number.
+     *
+     * <p>Assumptions: thirteen is the shortest length the card family issues, so it is the point below
+     * which an all-digit value cannot be one of these numbers. It is deliberately lower than the
+     * sixteen characters this system's own record declares at
+     * {@code CARD-NUM PIC X(16)}, line 5 of {@code app/cpy/CVACT02Y.cpy}, because the value judged
+     * here arrives from a caller rather than from this system's storage and is not bound by that
+     * width.</p>
+     *
+     * <p>Trade-offs: the identifiers this system does put in a path are all shorter -- an account is
+     * {@code PIC 9(11)} and a customer {@code PIC 9(09)} -- so nothing the platform itself generates
+     * falls into the refused class, and the cost lands only on a caller that chose a long bare number
+     * as its own correlation identity.</p>
+     */
+    private static final int ACCOUNT_NUMBER_MIN_DIGITS = 13;
 
     /**
      * The request attribute that marks this filter as already applied to the current request.
@@ -708,11 +757,19 @@ public final class CorrelationIdFilter implements Filter {
         if (response instanceof HttpServletResponse httpResponse) {
             httpResponse.sendError(
                     HttpServletResponse.SC_BAD_REQUEST,
+                    // WHY : Assumptions: the numeric-shape rule is NAMED in the refusal, because a
+                    //       value of sixteen digits satisfies every other clause of the sentence and a
+                    //       caller told only the width and the alphabet would read the refusal as
+                    //       contradicting itself. The rule is stated as a shape, so the message
+                    //       explains the refusal without reproducing the value that caused it -- which
+                    //       is the whole point of refusing it.
                     "The " + CORRELATION_ID_HEADER + " header must be 1 to "
                             + CORRELATION_ID_MAX_LENGTH
                             + " characters, each a letter, a digit or one of "
                             + ACCEPTED_PUNCTUATION
-                            + "; the supplied value is " + inbound.length()
+                            + ", and must not be a bare run of "
+                            + ACCOUNT_NUMBER_MIN_DIGITS
+                            + " or more digits; the supplied value is " + inbound.length()
                             + " characters. Omit the header to have one generated.");
         }
     }
@@ -742,9 +799,11 @@ public final class CorrelationIdFilter implements Filter {
      * Reports whether an inbound value may be echoed as the correlation identity unaltered.
      *
      * <p>A value conforms when it is present, occupies at least one and at most
-     * {@code CORRELATION_ID_MAX_LENGTH} characters, and every one of those characters is token-safe by
+     * {@code CORRELATION_ID_MAX_LENGTH} characters, every one of those characters is token-safe by
      * {@link #isTokenSafe(char)} -- an ASCII letter, an ASCII digit, or one of the separators in
-     * {@link #ACCEPTED_PUNCTUATION}. The rule itself lives in
+     * {@link #ACCEPTED_PUNCTUATION} -- and the value as a whole is not a bare run of digits long
+     * enough to be a primary account number, by {@link #isAccountNumberShaped(String)}. The rule
+     * itself lives in
      * {@link #conformsWithin(String, int)} so that the edge identity, whose width contract differs, is
      * judged by the same alphabet.</p>
      *
@@ -763,8 +822,8 @@ public final class CorrelationIdFilter implements Filter {
     }
 
     /**
-     * Reports whether a value is present, within a stated width, and made only of token-safe
-     * characters.
+     * Reports whether a value is present, within a stated width, made only of token-safe characters,
+     * and not shaped like a primary account number.
      *
      * <p>Alternatives Considered: two separate checks, one per identity. Rejected because the alphabet
      * rule is the same for both -- both are written into the same log field, so both carry the same
@@ -777,7 +836,8 @@ public final class CorrelationIdFilter implements Filter {
      * @param maxLength the widest value the calling contract admits; a longer value is refused rather
      *     than shortened, for the reason argued on {@link #isContractConforming(String)}
      * @return {@code true} when the value carries at least one character, no more than
-     *     {@code maxLength} of them, and nothing that is not token-safe
+     *     {@code maxLength} of them, nothing that is not token-safe, and is not a bare run of
+     *     {@link #ACCOUNT_NUMBER_MIN_DIGITS} or more digits
      */
     private static boolean conformsWithin(String candidate, int maxLength) {
         if (candidate == null || candidate.isEmpty()) {
@@ -813,6 +873,55 @@ public final class CorrelationIdFilter implements Filter {
             //       round-trips through pads with spaces, so a space inside an identity could not
             //       afterwards be told apart from padding.
             if (!isTokenSafe(candidate.charAt(position))) {
+                return false;
+            }
+        }
+
+        // WHY : Refactoring Rationale: the alphabet check above admits digits, and the width contract
+        //       admits twenty-four characters, so a value made only of digits and shaped exactly like a
+        //       primary account number conformed until this test was added -- and a conforming value is
+        //       published to the mapped diagnostic context and therefore onto every log line the
+        //       request produces. A caller could then write its own card number into log storage
+        //       through a header, which is the one exposure the alphabet check cannot see because the
+        //       characters themselves are unobjectionable.
+        //       Alternatives Considered: hashing an inbound identity instead of refusing it, so that
+        //       any value at all could be accepted. Rejected because it defeats the reason the identity
+        //       is echoed: a caller matches a response to its request on the value it sent, and a
+        //       hashed identity is no longer that value. Refusing the small PAN-shaped class keeps the
+        //       echo exact for every other value.
+        return !isAccountNumberShaped(candidate);
+    }
+
+    /**
+     * Reports whether a value is a bare run of digits long enough to be a primary account number.
+     *
+     * <p>Assumptions: the accepted range is {@link #ACCOUNT_NUMBER_MIN_DIGITS} through
+     * {@link #CORRELATION_ID_MAX_LENGTH} digits, and both ends are derived rather than chosen. The
+     * lower bound is the shortest number the card family issues, so nothing shorter can be one; the
+     * upper bound is simply the widest value this contract admits at all, so no separate ceiling is
+     * needed. The declared field in this system is sixteen characters --
+     * {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy} -- and the range is written
+     * wider than that single width deliberately, because a caller choosing to smuggle a number is not
+     * bound by the width this system stores.</p>
+     *
+     * <p>Trade-offs: a legitimate all-digit identity of thirteen or more digits is refused with it, and
+     * that is the accepted cost. Such a value is indistinguishable from a card number by inspection, so
+     * no rule could admit one and exclude the other; every all-digit identity shorter than thirteen
+     * characters, and every value carrying a letter or one of the accepted separators at any position,
+     * is unaffected.</p>
+     *
+     * @param candidate the value to classify, already known to be non-empty and token-safe
+     * @return {@code true} when every character is an ASCII digit and the length falls in the
+     *     card-number range, {@code false} otherwise
+     */
+    private static boolean isAccountNumberShaped(String candidate) {
+        if (candidate.length() < ACCOUNT_NUMBER_MIN_DIGITS) {
+            return false;
+        }
+
+        for (int position = 0; position < candidate.length(); position++) {
+            char character = candidate.charAt(position);
+            if (character < '0' || character > '9') {
                 return false;
             }
         }

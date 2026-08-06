@@ -87,9 +87,16 @@
 > observability document the temptation to write as though the telemetry were
 > already flowing is unusually strong. First: **no dashboard has rendered, no alarm
 > has fired, no trace has been sampled, and no benchmark or load test has been
-> run. No environment root provisions even the authored log-group modules.** Every
-> figure here is either quoted from a cited baseline line or read from an authored
-> configuration default; none is a measurement of the target. Second:
+> run** — nothing here is deployed, so nothing here has produced a datapoint. What
+> IS authored, and what an earlier revision of this caveat wrongly denied, is the
+> composition: **both environment roots provision the observability module**
+> (`infra/envs/dev/main.tf:1343` and the corresponding block in
+> `infra/envs/prod/main.tf`), passing it the cluster name, the load-balancer ARN
+> suffix, the queue names, the state-machine ARN and the log-group names. The
+> caveat that matters is therefore about EXECUTION and not about authorship: the
+> resources exist as code and have never been applied. Every figure here is either
+> quoted from a cited baseline line or read from an authored configuration
+> default; none is a measurement of the target. Second:
 > **the repository defines no service-level objectives and none are invented
 > here** — there is no latency target, throughput target, availability percentage,
 > error budget or recovery-time objective anywhere in this document, and
@@ -1019,9 +1026,24 @@ precondition are published in
 
 The shared kernel authors the three-tag policy in one Spring configuration class.
 [`MetricsConfig`](../../services/common-lib/src/main/java/com/carddemo/common/observability/MetricsConfig.java)
-declares the tags and binds each to a property rather than to a literal. No authored
-service application imports or scans that class, so it currently contributes to no
-running meter registry. Registration is a target integration obligation.
+declares the tags and binds each to a property rather than to a literal. **It is
+registered, and it reaches every service without any service asking for it.**
+`CardDemoCommonAutoConfiguration` in the same module carries
+`@Import(MetricsConfig.class)` at L66, and that class is the single entry in
+`services/common-lib/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
+— so a service that puts the shared kernel on its path receives the meter filter
+by auto-configuration. What remains outstanding is execution, not registration:
+no service has been deployed, so no registry has yet accepted a meter carrying
+these tags.
+
+Refactoring Rationale: an earlier revision of this paragraph stated that no
+authored service imports or scans the class and that registration was "a target
+integration obligation". That was written before the auto-configuration entry
+existed and became false when it landed. The correction matters more than a
+tense: a reader planning the integration would have added a redundant explicit
+import in each service, which is exactly the per-service registration the
+auto-configuration file's own header records as rejected — because a
+registration a service has to remember is one a service can omit.
 
 | Tag | Constant | Bound from | Question it answers | Action it enables |
 |---|---|---|---|---|
@@ -1092,8 +1114,18 @@ could not be given both is not listed.
   configuration already fixes** — `metrics` and `prometheus` under `/actuator`,
   alongside `health` and `info`. Moving the base path or renaming the health
   endpoint would break target-group registration and container liveness in the same
-  change. No scraper, dashboard data source or environment composition is authored,
-  so endpoint configuration is not evidence that metrics are being collected.
+  change.
+- Refactoring Rationale: this bullet previously closed by stating that no scraper,
+  dashboard data source or environment composition is authored. All three now are,
+  and the sentence is corrected rather than softened. `infra/modules/ecs-service`
+  runs an OpenTelemetry collector sidecar whose `prometheus` receiver scrapes
+  `/actuator/prometheus` (L154-L159) and whose `awsemf` exporter publishes the
+  scraped meters to the `CardDemo` namespace (L228); `infra/modules/observability`
+  declares `aws_cloudwatch_dashboard.operations` (L1057), which now includes a
+  widget reading that namespace; and both environment roots compose the two
+  modules. What endpoint configuration still is not, is evidence that metrics are
+  being COLLECTED — nothing is deployed, so no scrape has run. That narrower claim
+  is the one this document can make.
 
 ---
 
@@ -1101,12 +1133,36 @@ could not be given both is not listed.
 
 The target tracing contract spans the edge, the eight services and the datastore,
 and carries the **trace identifier and correlation identifier together** so that a
-log line can be pivoted to its trace and a trace back to its log lines. No tracing
-library, exporter, service configuration or collector is authored. The nightly
-module declares a `tracing_enabled = true` input at
+log line can be pivoted to its trace and a trace back to its log lines.
+
+The authored surface, corrected: this section previously stated twice that no
+tracing library, exporter, service configuration or collector is authored. Each
+of those four now exists.
+
+- **Library and bridge.** `services/common-lib/pom.xml` L350 declares
+  `spring-boot-starter-opentelemetry`, which supplies the OpenTelemetry SDK, the
+  Micrometer tracing bridge and the OTLP exporter to every service that puts the
+  shared kernel on its path.
+- **Service configuration.** `carddemo-common-defaults.yml` defaults OTLP trace
+  export to `false`, so a local run or a test does not attempt to reach a
+  collector that is not listening, and the deployed path re-enables it explicitly
+  — see the environment mapping below.
+- **Collector.** `infra/modules/ecs-service` runs an `aws-otel-collector` sidecar
+  (L1211) with an `awsxray` exporter (L227) on its traces pipeline (L244).
+- **Producer wiring.** The task definition sets the collector's OTLP endpoint and
+  the exporter selection as `OTEL_*` environment variables, and Spring Boot 4.1's
+  own `OpenTelemetryEnvironmentVariableEnvironmentPostProcessor` maps those onto
+  `management.tracing.export.otlp.enabled` and the OTLP endpoint property, with
+  the mapping enabled by default and contributed at highest precedence. So the
+  X-Ray pipeline has an application-side producer in ECS.
+
+What is still outstanding is instrumentation of this project's own code — no
+custom span is created anywhere — and execution: nothing is deployed, so no trace
+has been sampled. The nightly module additionally declares a
+`tracing_enabled = true` input at
 `infra/modules/step-functions-batch/variables.tf` L704 and reads it at
 `main.tf` L884, L924 and L947, so X-Ray tracing is enabled on the state machine
-itself; no application-side tracing library, exporter or collector is authored.
+itself as well as on the services.
 
 - Assumptions: **the queue hop is asynchronous, so the producer's span and the
   consumer's span are linked by propagated context on a message attribute rather
@@ -1137,28 +1193,41 @@ itself; no application-side tracing library, exporter or collector is authored.
 
 ## Target alarms and notification
 
-The catalog below states each planned alarm's condition, the question it answers
-and the action it is to trigger. The threshold column quotes the **authored input
-default** in `infra/modules/observability/variables.tf`; no alarm or notification
-resource consumes those inputs yet. A threshold is a detection default and **not**
-a target — see
+The catalog below states each alarm's condition, the question it answers and the
+action it triggers. The threshold column quotes the **authored input default** in
+`infra/modules/observability/variables.tf`. A threshold is a detection default and
+**not** a target — see
 [Honest boundaries: structural properties, not service-level objectives](#honest-boundaries-structural-properties-not-service-level-objectives).
+
+Refactoring Rationale: this preamble previously described every row as a "planned"
+alarm and stated that no alarm or notification resource consumes those inputs yet.
+Eleven `aws_cloudwatch_metric_alarm` resources are authored in
+`infra/modules/observability/main.tf` and each of the quoted inputs has a
+consumer, so the catalog is corrected to the present tense and three rows are
+added for alarms the earlier version did not list at all. The notification path is
+authored too: every alarm below sends both its alarm and its OK transition to the
+module's SNS topic. What remains true, and is stated once in the caveats at the
+top of this document rather than repeated per row, is that **none of this has been
+applied**, so no alarm has evaluated a datapoint or fired.
 
 | Alarm | Condition | Authored default | Question it answers | Action it triggers |
 |---|---|---|---|---|
-| Service unhealthy | Unhealthy target count in the load-balancer target group, or health-check failure | — | Is this service's task actually serving | Replace the task, or roll back the image the `version` tag names. The target group is the authority here rather than the service's own log, because a task too broken to log is exactly the case that matters |
-| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_rate_threshold` = **5** (L375) | Is one service failing requests | Investigate that service, then roll back or scale. The future alarm is to watch the load balancer's count, so it can fire even when the service has stopped logging |
-| **Dead-letter depth** | Visible messages in any dead-letter queue | `dead_letter_depth_threshold` = **1** (L406) | Has any message failed its configured number of receives | Investigate that message. **This is the highest-signal messaging alarm**: a dead-letter queue is empty in normal operation, so any depth at all means a message has exhausted every retry, and the default is deliberately the smallest value that can be breached |
-| Stale replies | Oldest-message age on a reply queue approaching that queue's retention window | — | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
-| Batch execution failure | Failed nightly-chain executions within one evaluation period | `batch_failure_threshold` = **1** (L424) | Did the nightly chain fail | Redrive from the failed state. This replaces reading a job log for a non-zero condition code |
-| Batch catch path entered | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation |
-| Datastore capacity ceiling | Cluster utilisation sustained against its configured maximum | `database_cpu_threshold_percent` = **80** (L392) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
-| Connection-pool exhaustion | Acquisition failures or sustained wait on the pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change |
-| Secret or key access failure | Denied access to a secret or a key by a task role | — | Has a rotation or a policy change broken a service's ability to start | Correct the policy or the rotation, before the next task placement fails the same way |
+| Service unhealthy | Unhealthy target count above zero in the load-balancer target group (`main.tf` L1152) | — | Is this service's task failing its health check | Replace the task, or roll back the image the `version` tag names. The target group is the authority here rather than the service's own log, because a task too broken to log is exactly the case that matters |
+| **No healthy target** | Minimum healthy target count below one (`main.tf` L1214) | — | Is this service serving at all | Read the task's stopped reason and log stream, then correct the image, the configuration or the health-check contract. This is the row the one above cannot cover: an empty target group publishes zero and then stops publishing, so **absence is the signal** and this is the module's only alarm treating missing data as breaching |
+| Elevated server errors | Server-error responses per service within one evaluation period | `service_error_count_threshold` = **5** (L573) | Is one service failing requests | Investigate that service, then roll back or scale. The alarm watches the load balancer's own count (`main.tf` L1260), so it fires even when the service has stopped logging |
+| Edge server errors | Server-error responses returned by the HTTP API within one evaluation period (`main.tf` L1301) | `service_error_count_threshold` = **5** (L573) | Is the failure at the edge or integration boundary rather than in a service | Compare the API access log with the per-service and load-balancer alarms. The same input governs both counts deliberately: one number to tune, and a discrepancy between the two alarms is then attributable to the hop between them rather than to two different sensitivities |
+| **Dead-letter depth** | Visible messages in any dead-letter queue (`main.tf` L1349) | `dead_letter_depth_threshold` = **1** (L604) | Has any message failed its configured number of receives | Investigate that message. **This is the highest-signal messaging alarm**: a dead-letter queue is empty in normal operation, so any depth at all means a message has exhausted every retry, and the default is deliberately the smallest value that can be breached |
+| Stale replies | Oldest-message age on a reply queue (`main.tf` L1406) | `reply_queue_age_threshold_seconds` = **5** (L642) | Are replies being consumed before they can expire | Investigate the waiting consumer. This is the observable form of the expiry gap in [`messaging-contracts.md`](messaging-contracts.md#the-expiry-gap): the future consumer is to enforce expiry, so an unconsumed reply is the case the queue cannot discard for itself |
+| **Stale work** | Oldest-message age on a primary work queue -- the three request queues and the error queue (`main.tf` L1463) | `work_queue_age_threshold_seconds` = **300** (L675) | Is the consumer for this queue still taking work off it | Inspect that consumer's task and log stream, and check whether its service has a healthy target. This row is not covered by the dead-letter row above: a message reaches a dead-letter queue only after its source queue's redrive policy exhausts its receives, and exhausting receives requires a consumer to receive and fail -- so a stopped consumer leaves the dead-letter queue empty and its alarm OK while work piles up on the live queue |
+| Batch execution failure | Executions that failed, timed out **or were throttled**, within one evaluation period (`main.tf` L1576, one alarm per metric) | `batch_failure_threshold` = **1** (L622) | Did the nightly chain fail, or refuse to start at all | Redrive from the failed state. This replaces reading a job log for a non-zero condition code. `ExecutionThrottled` is watched because a throttled execution means the chain never ran while the other two metrics both stay at zero — the chain's absence would otherwise be invisible. `ExecutionsAborted` is deliberately NOT watched: an abort is ordinarily deliberate, so alarming on it would page whoever performed the stop |
+| Batch catch path entered — **not yet authored** | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation. No alarm resource exists for this row: the catch transition is not itself a CloudWatch metric, so alarming on it requires either a metric filter over the state-machine log group or an explicit metric published by the failure-notification state |
+| Datastore capacity ceiling | Cluster processor utilisation (`main.tf` L1630) and capacity against its configured maximum (`main.tf` L1671) | `database_cpu_threshold_percent` = **80** (L590) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
+| Connection-pool exhaustion — **not yet authored** | Acquisition failures or sustained wait on the pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm becomes authorable once those meters are reaching the `CardDemo` namespace, which the dashboard's application-meter widget is the first consumer of |
+| Rotation failure | Invocation errors reported by a credential-rotation function (`main.tf` L1512) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts |
 
 Two configuration inputs govern how quickly any of these speaks:
-`alarm_evaluation_periods` defaults to **2** (L336) and `alarm_period_seconds` to
-**300** (L352).
+`alarm_evaluation_periods` defaults to **2** (L520) and `alarm_period_seconds` to
+**300** (L536).
 
 - Trade-offs: **an evaluation-period count above one is what distinguishes a
   sustained problem from a single unlucky period**, and the cost is that the
@@ -1321,7 +1390,7 @@ presented without its cost reads as a free win.
   tuned in either direction without any promise being broken. An objective says
   "this must hold" and implies a measurement regime, an error budget and a
   consequence for breaching it. This repository contains the former and not the
-  latter. The practical difference: raising `service_error_rate_threshold` from five
+  latter. The practical difference: raising `service_error_count_threshold` from five
   is a tuning decision an operator may make on the evidence of a week's alerts, and
   it changes nothing about what the system promises — because it never promised
   anything.

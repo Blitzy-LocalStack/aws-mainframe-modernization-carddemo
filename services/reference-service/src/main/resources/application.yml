@@ -806,14 +806,24 @@ springdoc:
     version: openapi_3_1
 
   swagger-ui:
-    # Trade-offs: the interactive UI is reachable in the base
-    #   configuration, and the accepted cost is one more unauthenticated
-    #   route inside the VPC. It is accepted because the UI serves no data of
-    #   its own -- it renders the contract and issues requests the resource
-    #   server authenticates exactly as it would any other caller, so an
-    #   operator without a token can read the interface and cannot read a
-    #   row. The profiles may narrow this; the base value is the reachable
-    #   one so that narrowing is the deliberate act rather than enabling.
+    # Trade-offs: the interactive UI is SERVED in the base
+    #   configuration, and the accepted cost is one more route inside the
+    #   VPC. It is accepted because the UI serves no data of its own -- it
+    #   renders the contract and issues requests the resource server
+    #   authenticates exactly as it would any other caller, so reaching the
+    #   interface is not reaching a row. The profiles may narrow this; the
+    #   base value is the served one so that narrowing is the deliberate act
+    #   rather than enabling.
+    # Refactoring Rationale: this note previously said the UI was one more
+    #   UNAUTHENTICATED route and that "an operator without a token can read
+    #   the interface". That was true while this module had no filter chain
+    #   and became false when config/SecurityConfig.java landed: that class
+    #   permits /actuator/health/** alone, requires the carddemo-admin
+    #   authority for POST, PUT, PATCH and DELETE, and closes everything
+    #   else with anyRequest().authenticated() -- so /swagger-ui.html needs a
+    #   token like any other GET. Serving the page and authorizing the page
+    #   are two independent decisions, made in two files, and this key makes
+    #   only the first of them.
     # Assumptions: url points the UI at the hand-authored contract
     #   rather than the generated document, so what an operator reads is the
     #   published interface. The path is what classpath:/openapi/ above
@@ -998,6 +1008,25 @@ carddemo:
       #   carddemo-admin for reference writes -- and this scope establishes that
       #   the token was issued through a user sign-in at all.
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are declared here, in the same shape
+    #       every other context declares them, and are read by
+    #       config/SecurityConfig.java -- which hands them to the shared
+    #       JwtRoleConverter. The converter compares each against its own compiled
+    #       constant and refuses to start on a mismatch, so this pair is what turns
+    #       a user pool whose groups were renamed into a startup failure instead of
+    #       a service that authenticates every request and authorizes none.
+    #       Trade-offs: the fallbacks are the two names infra/modules/cognito fixes
+    #       as non-overridable, so a local run needs no environment at all, while a
+    #       deployment that renames a group sets the variables and fails fast if the
+    #       new name and the compiled constant disagree. A no-default form was
+    #       considered and rejected here specifically: unlike the client id, which
+    #       is deployment-specific and must never be guessed, these two names are
+    #       part of the application's own authorization vocabulary and a wrong value
+    #       is caught by the converter rather than being silently accepted.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
   reference:
     inquiry:

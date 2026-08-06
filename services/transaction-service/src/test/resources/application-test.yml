@@ -463,26 +463,63 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          # Assumptions: the value is EMPTIED rather than left to the base
-          #   placeholder, and the mechanism is the difference between a suite
-          #   that starts and one that cannot. The base resolves this key from
-          #   an environment variable with no fallback, which no build host
-          #   supplies. The two ways a value is read behave differently on an
-          #   unresolvable placeholder, both verified against the pinned Spring
-          #   Boot 4.1.0 rather than assumed: configuration-property binding
-          #   leaves the placeholder as literal text and does not raise, which
-          #   is why the datasource keys in deliberate absence 1 can safely
-          #   stay unset, whereas Environment.getProperty raises on it - and
-          #   the condition gating the resource server's decoder reads THIS key
-          #   through exactly that call before testing it for text. Left as the
-          #   inherited placeholder, condition evaluation aborts and every
-          #   context-loading test in this module fails before an assertion
-          #   runs. Emptied, the condition does not match, no decoder is
-          #   auto-configured, and a test that installs the filter chain
-          #   supplies its own. That no issuer or other endpoint value belongs
-          #   in this repository is the second, independent reason the key is
-          #   emptied rather than filled.
-          issuer-uri: ""
+          # Refactoring Rationale: this value was an EMPTY STRING, and the
+          #   reasoning behind that was sound for exactly as long as this module
+          #   had no explicit decoder bean. It read: the base resolves this key
+          #   from an environment variable with no fallback, which no build host
+          #   supplies; configuration-property binding leaves an unresolvable
+          #   placeholder as literal text and does not raise, which is why the
+          #   datasource keys in deliberate absence 1 can safely stay unset,
+          #   whereas Environment.getProperty raises on it, and the condition
+          #   gating the AUTO-CONFIGURED resource-server decoder read this key
+          #   through exactly that call; so emptying it left the condition
+          #   unmatched, no decoder was created, and a test that wanted a filter
+          #   chain supplied its own. config/SecurityConfig.java now declares a
+          #   JwtDecoder bean of its own, so that condition no longer decides
+          #   anything: the bean is created unconditionally and takes this key
+          #   through @Value, which also calls resolveRequiredPlaceholders. An
+          #   empty value therefore no longer suppresses a decoder - it builds
+          #   one whose issuer validator expects an EMPTY `iss` claim, which is
+          #   a decoder that rejects every real token while appearing
+          #   configured. The empty string is replaced rather than kept.
+          #
+          # Assumptions: the reserved `.invalid` top-level domain is guaranteed
+          #   never to resolve, so this value names no reachable provider and is
+          #   not an endpoint in any operational sense - which preserves the
+          #   second, independent reason the key was emptied, that no real
+          #   issuer or endpoint value belongs in this repository. It is also the
+          #   form the auth, card and reference test profiles already use, so the
+          #   four modules now state the same contract the same way.
+          #
+          # Assumptions: building the decoder DOES perform a network call, and
+          #   this is verified by running the process rather than by reading the
+          #   API. NimbusJwtDecoder.withIssuerLocation defers nothing: build()
+          #   calls processor(), which calls jwkSource(), which invokes the
+          #   supplier that issues
+          #   GET <issuer>/.well-known/openid-configuration. A context that
+          #   creates the decoder bean therefore attempts that request while it
+          #   refreshes, and against this issuer it fails with
+          #   UnknownHostException naming the host. The `jwk-set-uri` form is no
+          #   better -- it fetches the key set instead -- so there is no
+          #   eager-versus-lazy choice to make between the two.
+          #
+          # Trade-offs: the consequence is stated plainly so a test author is not
+          #   surprised by it. This value satisfies config/SecurityConfig.java's
+          #   fallback-free @Value, so every test that does NOT load a Spring
+          #   context runs against the deployed property shape; a test that DOES
+          #   load one must register a reachable stub issuer through dynamic
+          #   properties, exactly as it already registers the container-generated
+          #   datasource triple. Controller tests use spring-security-test mock
+          #   JWTs, and common-lib's JwtRoleConverter maps cognito:groups to
+          #   authorities without decoding anything, so none of them needs the
+          #   decoder to answer.
+          #
+          # Trade-offs: this keeps the production filter-chain shape - the same
+          #   decoder, the same delegating validator, the same group mapping -
+          #   while proving no signature validation, because no key material
+          #   backs the stub issuer. Signature verification belongs to an
+          #   environment test with a real identity provider.
+          issuer-uri: https://issuer.invalid/carddemo-transaction-test
 
 logging:
   level:
@@ -507,3 +544,50 @@ logging:
     #   the two reasons.
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
+
+carddemo:
+  security:
+    jwt:
+      # WHY : (1) Refactoring Rationale: this block did not exist while the base
+      #       file's three carddemo.security.jwt keys had no reader. They have one
+      #       now: config/SecurityConfig.java declares an explicit JwtDecoder bean
+      #       and takes all three through @Value, so the values are consumed by
+      #       constructor injection rather than by configuration-property binding.
+      #       That difference decides whether this profile needs the block at all,
+      #       and it is the same difference recorded on the issuer above. Property
+      #       binding leaves an unresolvable placeholder as literal text and does not
+      #       raise, which is why the base file's datasource placeholders can stay
+      #       unset here; @Value calls resolveRequiredPlaceholders, which DOES raise,
+      #       so the base value ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} aborts
+      #       bean creation on any host that does not set that variable - which is
+      #       every build host. Without this block, every context-loading test in
+      #       this module fails before its first assertion.
+      #       (2) Assumptions: this string is NOT a credential and NOT a secret. A
+      #       Cognito app client id is a public identifier carried in every token
+      #       this service accepts; the value below is additionally fabricated and
+      #       visibly non-production, so it identifies nothing that exists. What it
+      #       buys is that common-lib's CognitoAccessTokenValidator is CONSTRUCTED
+      #       with a non-blank client id - the class treats blank as "skip the client
+      #       check", and config/SecurityConfig.java refuses a blank value outright
+      #       rather than silently dropping the check - so a test asserting that a
+      #       token minted for a different client of the same pool is rejected has a
+      #       client to differ from.
+      #       (3) Assumptions: on this module the token-use check is what keeps a
+      #       write path closed. The transaction-add and bill-payment endpoints both
+      #       change a balance, and a Cognito user pool mints an identity token and
+      #       an access token from the same signing key, so both validate against the
+      #       configured issuer. Requiring token_use to be `access` is what stops the
+      #       identity token - the one a browser most readily holds, and which was
+      #       never meant to authorize an API call - from reaching those endpoints.
+      #       (4) Trade-offs: the two adjacent claim values are repeated rather than
+      #       inherited so the complete accepted-token contract is readable in one
+      #       place. The cost is that a deliberate change to either in the base file
+      #       must be mirrored here or the suite stops exercising the deployed
+      #       contract - which is precisely the diff a reviewer should be made to
+      #       see. The two carddemo.security.cognito group names are NOT repeated,
+      #       because the base declares each with the default infra/modules/cognito
+      #       fixes and both therefore resolve with no environment at all.
+      expected-client-id: transaction-test-app-client
+      expected-token-use: access
+      required-scope: aws.cognito.signin.user.admin
+

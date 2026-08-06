@@ -43,10 +43,12 @@
  * labels in {@link UNIFORM_PF_KEY_LABELS} and nothing else textual; every label
  * that varies per screen arrives through {@link PfKeyBarProps.keys}.
  *
- * Design values come from `ui/src/theme/tokens.ts` by name and are resolved to
- * values through the design system's own runtime token hook. This module does not
- * instantiate the theme provider - `ui/src/App.tsx` is the sole injection point -
- * and it writes no literal colour, spacing or radius.
+ * Design values come from `ui/src/theme/tokens.ts` by name and are turned into CSS
+ * custom-property REFERENCES through the design system's own runtime token hook, so
+ * every value this module writes into a style stays on the theme's variable surface
+ * rather than being frozen at render. This module does not instantiate the theme
+ * provider - `ui/src/App.tsx` is the sole injection point - and it writes no
+ * literal colour, spacing or radius, and no resolved one either.
  */
 
 import { Button, Flex, theme } from "antd";
@@ -193,12 +195,19 @@ export interface PfKeyBarProps {
  * shortcut that dispatches nothing. Deriving the inverse from the forward table
  * `usePfKeys` already exports makes divergence impossible.
  *
- * Assumptions: the forward table maps 24 browser keys onto 13 AIDs, because
- * `app/cpy/CSSTRPFY.cpy:L54-L77` aliases PF13-PF24 back onto PF1-PF12. The
- * inverse is therefore ambiguous, and the alias entries - which `usePfKeys`
- * exports separately as `PF_KEY_ALIASES` - are excluded so that each AID resolves
- * to its base key. Advertising `F15` for PF3 would be technically true and
- * useless, since the legend the baseline paints reads `F3`.
+ * Assumptions: the forward table maps 25 browser keys onto 13 AIDs, and the
+ * arithmetic is written out because the figure is not readable from the table's
+ * shape - `KEYBOARD_KEY_TO_AID` lists 13 entries literally (`Enter` plus `F1`
+ * through `F12`) and then spreads `PF_KEY_ALIASES`, whose 12 entries (`F13`
+ * through `F24`) are what make 25. Counting only the visible entries yields 24 and
+ * is wrong by exactly the spread. The 13 AIDs are `ENTER` and `PFK01` through
+ * `PFK12`; the remaining three members of `CicsAid` - `CLEAR`, `PA1` and `PA2` -
+ * have no browser key at all, which is why this function's return type is
+ * `Partial`. The 12 aliases exist because `app/cpy/CSSTRPFY.cpy:L54-L77` folds
+ * PF13-PF24 back onto PF1-PF12, so the inverse is ambiguous: 25 keys cannot each
+ * be the canonical key of one of 13 AIDs. Excluding exactly the 12 alias entries
+ * leaves 13 keys for 13 AIDs, one apiece. Advertising `F15` for PF3 would be
+ * technically true and useless, since the legend the baseline paints reads `F3`.
  *
  * @returns {Readonly<Partial<Record<CicsAid, string>>>} Canonical browser key per
  * AID, omitting the AIDs that have no web key at all.
@@ -366,7 +375,28 @@ export function PfKeyBar({
   // system's own accessor for that theme and reads the provider instantiated in
   // `ui/src/App.tsx`, which is why this module resolves values without
   // instantiating a second provider of its own.
-  const { token } = theme.useToken();
+  //
+  // Refactoring Rationale: `cssVar` is destructured, NOT `token`, and the two are
+  // not interchangeable. The hook returns both maps over the same token names, but
+  // `token` holds the values the theme resolves to right now - a literal hex
+  // colour, a pixel number - while `cssVar` holds `var(--…)` references to the same
+  // tokens. Writing `token` into a `style` prop was what this module did, and it
+  // defeats the CSS-variable surface `ui/src/theme/antdTheme.ts` switches on: the
+  // resolved value is copied into the element's inline style at render, so the
+  // element stops tracking the variable and a later theme change reaches every
+  // component styled by class but not this one. It is a literal in every sense the
+  // no-hardcoded-values rule cares about, differing from a typed hex only in who
+  // typed it. `ui/src/layout/ScreenHeader.tsx` already resolved this correctly and
+  // is the pattern followed here.
+  // Assumptions: the mapping between the two is not guesswork. The design system's
+  // own public hook builds its result as
+  // `const [theme, token, hashId, cssVar] = useInternalToken()` over an internal
+  // tuple returned as `[mergedTheme, realToken, hashId, token, cssVar, …]`, so the
+  // public `token` is the internal `realToken` - resolved - and the public `cssVar`
+  // is the internal cssVar-substituted map - references. Both are typed
+  // `GlobalToken`, so nothing in the type system distinguishes them and the choice
+  // has to be made deliberately rather than caught by the compiler.
+  const { cssVar } = theme.useToken();
   const renderableKeys = selectRenderableKeys(keys);
 
   // Assumptions: no baseline screen paints an empty row-24 legend - all 17 carry
@@ -406,7 +436,27 @@ export function PfKeyBar({
       // fields at columns 1, 23 and 31 on `app/bms/COACTUP.bms` - so the value is
       // a measured design decision that belongs in the bridge where it can be
       // audited, not a keyword chosen at the call site.
-      gap={token[SPACING_TOKENS.sectionGapCompact]}
+      // Refactoring Rationale: this passes the reference form, not the resolved
+      // number, and it took reading the primitive's implementation to establish
+      // that it may. Its `gap` prop is typed `LiteralUnion<SizeType,
+      // CSSProperties['gap']>`, and at run time it tests the value against the
+      // four preset keywords (`small`, `middle`, `medium`, `large`) and, for
+      // anything that is not one of them, assigns it verbatim to the element's
+      // inline `style.gap`. A `var(--…)` string is not a preset, so it is written
+      // through unchanged and the browser resolves it, exactly as it does for a
+      // colour. The alternative belief - that this prop needs a number - is what
+      // would have left the last resolved-token read in this module; it is false
+      // for the pinned version, so the exception it would have justified does not
+      // exist and the module reads no resolved value at all.
+      // Assumptions: the referenced token carries its unit. The design system emits
+      // numeric tokens into CSS variables with a `px` suffix unless the token is on
+      // its own unitless list, and that list is exactly the line-height family,
+      // `opacityLoading`, `fontWeightStrong`, the two z-index tokens and
+      // `opacityImage`. The compact spacing step resolves to `marginXS`, which is
+      // not on it, so the variable holds `8px` - a valid `gap` length. A unitless
+      // token would resolve to a bare number here and be invalid, which is why the
+      // list matters rather than being incidental.
+      gap={cssVar[SPACING_TOKENS.sectionGapCompact]}
       // Assumptions: this establishes the legend region's inherited text colour,
       // which is what the mapset's `COLOR=` operand set on the legend field. Its
       // scope is narrow, and measurably so: a populated bar contains no text
@@ -415,21 +465,37 @@ export function PfKeyBar({
       // nothing actually inherits this declaration. That is a consequence of the
       // mapping outranking the source colour, not an oversight - recorded here
       // so a reader who measures the same thing does not file it as a defect.
-      // Carrying the value is still correct, because the measured distinction
-      // between the 15 yellow legends and the two turquoise ones is a real
-      // design value, and this is the one component responsible for the legend;
-      // discarding it here would lose it with nowhere else to record it. Note
-      // also that the turquoise role resolves to the design system's
-      // informational token, which its default seed sets to the same value as
-      // the primary token - the documented token-snap gap, owned by the bridge
-      // rather than by this component.
+      // Trade-offs: the accepted decision is that the design-system component
+      // mapping wins over the source legend colour where they disagree, and this
+      // is where they disagree. The mapset colours the whole legend field one way;
+      // the mapping colours each control by what its key DOES, so ENTER and PF5
+      // take the primary emphasis and the rest the default, and a button's own
+      // label colour is part of that emphasis. Overriding it would put the source
+      // colour back and take the emphasis distinction away, which is the more
+      // informative of the two - the mapset's single colour says nothing about
+      // which key writes. Carrying the value here is still correct, because the
+      // measured distinction between the 15 yellow legends and the two turquoise
+      // ones is a real design value, this is the one component responsible for the
+      // legend, and the declaration governs any non-button text a screen adds to
+      // the region; discarding it would lose the value with nowhere else to
+      // record it.
+      // Refactoring Rationale: this comment previously ended by noting that the
+      // turquoise role resolves to an informational token which the design
+      // system's default seed sets to the same value as the primary token, so the
+      // two measured roles rendered identically. That is no longer true and the
+      // note is withdrawn rather than softened: `ui/src/theme/antdTheme.ts` now
+      // separates the informational seed from the primary one, so turquoise and
+      // blue resolve to different colours and the two legend roles are visibly
+      // distinct. Leaving the sentence in place would have been the more harmful
+      // half of a stale comment - a reader would have trusted it and concluded the
+      // `legendColor` prop cannot matter.
       // Alternatives Considered: the typography component's own `type="warning"`,
-      // which would need no resolved value. It is rejected because that prop has
-      // no informational member, so turquoise could not be expressed through it
-      // and the two measured roles would resolve by two different mechanisms -
-      // one a system keyword, one a token lookup - leaving the bridge only half
+      // which would need no token lookup. It is rejected because that prop has no
+      // informational member, so turquoise could not be expressed through it and
+      // the two measured roles would resolve by two different mechanisms - one a
+      // system keyword, one a token lookup - leaving the bridge only half
       // authoritative.
-      style={{ color: token[BMS_COLOR_TOKENS[legendColor]] }}
+      style={{ color: cssVar[BMS_COLOR_TOKENS[legendColor]] }}
     >
       {renderableKeys.map(
         /**
@@ -450,6 +516,31 @@ export function PfKeyBar({
             // ENTER and PF5 and the default to the rest; see
             // PRIMARY_ACTION_AIDS.
             type={isPrimaryActionAid(binding.aid) ? "primary" : "default"}
+            // Trade-offs: the two activation paths are NOT equivalent for a
+            // disabled binding, and the difference is intended rather than
+            // incidental. A disabled control cannot fire its click handler, so a
+            // click never reaches `onInvoke` and nothing is reported. The key path
+            // does reach dispatch: `usePfKeys` recognises the AID, finds the
+            // handler disabled, and reports a rejection carrying the baseline's own
+            // `INVALID_KEY_PRESSED` text through its invalid-key channel. So
+            // pressing the key surfaces a message and clicking the greyed control
+            // surfaces none.
+            // Assumptions: that asymmetry is correct because only one of the two
+            // channels exists in the baseline. The terminal had no pointer, so the
+            // key press is the fidelity-bearing path and it must keep reporting the
+            // way the source's message channel does. The button is additive, and
+            // for an additive control inertness is the stronger feedback: it is
+            // continuous and visible before the user commits, where a message is
+            // only available after a failed attempt. Emitting a message on a click
+            // that the browser already refused would also have to be synthesised,
+            // since no click event fires at all.
+            // Alternatives Considered: rendering the control enabled with
+            // `aria-disabled` and routing its click through `onInvoke` so both
+            // paths report identically. Rejected because it buys symmetry with a
+            // control that looks unavailable but responds, which is a worse
+            // affordance than one that is plainly inert, and because it would
+            // change focus order and tab stops to fix a difference that is only
+            // observable to someone deliberately comparing the two channels.
             disabled={!binding.enabled}
             // Assumptions: this is stated rather than left to the component's
             // default because the bar is rendered inside screens that are

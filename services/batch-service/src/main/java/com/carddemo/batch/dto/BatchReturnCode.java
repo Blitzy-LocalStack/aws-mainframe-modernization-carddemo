@@ -158,8 +158,8 @@ package com.carddemo.batch.dto;
  *
  * <h2>What this type deliberately does not have</h2>
  *
- * <p>Alternatives Considered: a second predicate answering whether a step finished clean. Rejected
- * for now, on the ground that it would be a second way to say something already expressible: a
+ * <p>Alternatives Considered: a second predicate answering whether a step finished clean. Rejected,
+ * on the ground that it would be a second way to say something already expressible: a
  * caller needing that question compares the value against this type's clean constant directly, and
  * the comparison reads no worse than a call would. The predicate that IS provided earns its place
  * differently -- it encodes the inverted sense described above, which a caller cannot be expected to
@@ -195,15 +195,6 @@ package com.carddemo.batch.dto;
  * committed, and columns 73 to 80 of a COBOL or job-control line carry a sequence field that is not
  * part of the statement.</p>
  *
- * <h2>Parameters, return values and exceptions at type level: declared inapplicable</h2>
- *
- * <p>An enumeration declaration accepts no parameter, yields no value and raises nothing, so this
- * block carries no parameter, return or exception at-clause, and no authorship, availability or
- * revision at-clause either. The inapplicability is stated rather than left silent because the
- * project's single user-specified rule, Explainability, names at its line 39 a docstring that omits
- * parameters, return values or purpose among its forbidden patterns, and a reader has to be able to
- * tell a declared inapplicability from an oversight. The three elements that do apply to a type are
- * discharged above; the fourth is discharged on each member below.</p>
  */
 public enum BatchReturnCode {
 

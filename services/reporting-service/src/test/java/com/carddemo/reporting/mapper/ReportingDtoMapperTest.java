@@ -3,6 +3,7 @@ package com.carddemo.reporting.mapper;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.time.TimestampFormatter;
@@ -27,6 +28,8 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -99,12 +102,20 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>Assumptions: the declared-type sweeps below are assertions about the shape of this module's own
  * payload records, and they do not restate an architecture rule. The prohibition on a binary
  * approximation anywhere on the money path is owned, as an executable rule, by
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
- * which the build scans into this module's test run through a dedicated runner execution; that class
- * is not relocated, its rules are not duplicated here, and no local rule engine is declared. What
- * the sweeps here add is different in kind: they close the set of component types this module's
- * records may declare at all, which catches an exact-decimal component that no money-path rule
- * forbids and that nonetheless emits a bare JSON number.
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java};
+ * that class is not relocated, its rules are not duplicated here, and no local rule engine is
+ * declared. What the ownership does and does not amount to at this checkpoint is stated exactly,
+ * because the money path is the migration's highest-risk requirement and a reader must not take a
+ * stronger guarantee from this file than the build actually provides. {@code services/pom.xml}
+ * declares an {@code architecture-rules} runner execution that selects rules by that reserved class
+ * name, and each service declares the shared kernel's test artifact so the class would be collected
+ * onto this module's own test classpath; the class itself is authored at a later index of the same
+ * plan, and its package charter records that until it lands no engine enforces layering anywhere in
+ * the reactor. The accurate statement is therefore that the prohibition has one owner and a prepared
+ * gate, not that a gate already rejects a violation on every build. What the sweeps here add is
+ * different in kind, and it is what this file does enforce today: they close the set of component
+ * types this module's records may declare at all, which catches an exact-decimal component that no
+ * money-path rule forbids and that nonetheless emits a bare JSON number.
  *
  * <p>Assumptions: a rationale in this file names the field, what is withheld from it, and what a
  * reader of the published form could otherwise recover. A rationale that appealed to safety in the
@@ -135,12 +146,28 @@ import tools.jackson.databind.json.JsonMapper;
 final class ReportingDtoMapperTest {
 
     /**
-     * The ten fixed-width fixture records this class states its preconditions against, by exact name.
+     * The ten fixed-width records this context reads, named by the convention the baseline uses.
      *
-     * <p>Assumptions: the names are bound literally rather than derived, because a fixture is
-     * identified by its file name and a constructed name would match a file nobody wrote. They live
-     * in {@code src/test/resources/fixtures/} and none is authored from this package. The layouts
-     * behind them are {@code app/cpy/CVACT01Y.cpy}, {@code app/cpy/CVACT02Y.cpy},
+     * <p>Assumptions: each name is a baseline data-definition or seed-dataset name, lowercased with a
+     * {@code .txt} suffix, which is the convention the reference corpus follows. That is stated
+     * precisely because <b>this module has no test resource directory and authors none of these
+     * files</b>: nine of the ten appear as files in the immutable trees -- {@code trantype.txt} and
+     * {@code trancatg.txt} under {@code app/data/ASCII/}, the remaining seven under
+     * {@code tests/fixtures/} -- and {@code tranfile.txt} appears nowhere in the repository, because
+     * the posted-transaction master its data definition names is batch OUTPUT rather than a seeded
+     * input. {@code CBTRN02C} declares it at line 34 as {@code SELECT TRANSACT-FILE ASSIGN TO
+     * TRANFILE}, {@code app/jcl/POSTTRAN.jcl} supplies it at line 28, and
+     * {@code scripts/test_env.sh} binds it at line 253. So the list names records rather than
+     * locations, and the guards in this class are consequently expressed over values declared in
+     * source rather than over bytes read from a path.
+     *
+     * <p>Alternatives Considered: writing a resource path here so the names would read as loadable.
+     * Rejected because it would be false for this module, and a citation a reader cannot follow costs
+     * more than no citation at all. The layouts these names carry are pinned instead against the
+     * shared kernel's record registry by {@link #theTenFixtureRecordNamesAreBoundExactly()}, which is
+     * a production symbol this module really does depend on.
+     *
+     * <p>The layouts behind them are {@code app/cpy/CVACT01Y.cpy}, {@code app/cpy/CVACT02Y.cpy},
      * {@code app/cpy/CVCUS01Y.cpy}, {@code app/cpy/CVACT03Y.cpy}, {@code app/cpy/CVTRA05Y.cpy},
      * {@code app/cpy/COSTM01.CPY}, {@code app/cpy/CVTRA03Y.cpy}, {@code app/cpy/CVTRA04Y.cpy} and
      * {@code app/cpy/CVTRA01Y.cpy}.
@@ -157,6 +184,30 @@ final class ReportingDtoMapperTest {
                     "trantype.txt",
                     "trancatg.txt",
                     "tcatbal.txt");
+
+    /**
+     * The shared-kernel record layout each name in {@link #FIXTURE_RECORD_NAMES} carries.
+     *
+     * <p>Assumptions: the values are the names under which {@link CopybookLayout} registers those
+     * records, so every entry is resolvable against a production registry rather than against a
+     * description. Two keys deliberately share one value: {@code cardxref.txt} is the seed file name
+     * of the 50-byte cross-reference record and {@code xreffile.txt} is the data-definition name of
+     * the same record -- {@code app/jcl/CREASTMT.JCL} line 84 supplies {@code XREFFILE} from the
+     * {@code CARDXREF} cluster -- so ten names carry nine distinct layouts, and that is asserted
+     * rather than left as a coincidence a reader has to notice.
+     */
+    private static final Map<String, String> FIXTURE_RECORD_LAYOUTS =
+            Map.ofEntries(
+                    Map.entry("acctfile.txt", "ACCOUNT"),
+                    Map.entry("carddata.txt", "CARD"),
+                    Map.entry("custfile.txt", "CUSTOMER"),
+                    Map.entry("cardxref.txt", "XREF"),
+                    Map.entry("xreffile.txt", "XREF"),
+                    Map.entry("tranfile.txt", "TRAN"),
+                    Map.entry("trnxfile.txt", "TRNX"),
+                    Map.entry("trantype.txt", "TRANTYPE"),
+                    Map.entry("trancatg.txt", "TRANCAT"),
+                    Map.entry("tcatbal.txt", "TCATBAL"));
 
     /** The binary resource path of the reporting payload package, used to enumerate it. */
     private static final String DTO_RESOURCE_PATH = "com/carddemo/reporting/dto";
@@ -362,9 +413,21 @@ final class ReportingDtoMapperTest {
      * against the four types it knows about, so a lookup that found nothing fails rather than passing
      * on an empty sweep.
      *
-     * @return every class declared in {@code com.carddemo.reporting.dto}, package descriptor excluded
+     * <p>Assumptions: every accepted location is a <b>directory</b> on the file system, and that
+     * assumption is stated because it is a real constraint rather than an implementation detail. The
+     * enumeration reads the payload package from this module's own {@code target/classes}, which the
+     * build hands to the test runtime as a directory; a packaged location would arrive with the
+     * {@code jar} protocol and could not be opened as a file at all. Entries whose protocol is not
+     * {@code file} are therefore skipped rather than converted, so a packaged classpath produces an
+     * EMPTY enumeration -- which the caller's own floor assertion reports as a failure naming the
+     * missing types -- instead of an {@code IllegalArgumentException} thrown out of this helper, which
+     * would name a URI syntax problem and send a reader looking in the wrong place entirely.
+     *
+     * @return every class declared in {@code com.carddemo.reporting.dto} whose compiled file was found
+     *     in a file-system location, with the package descriptor excluded; empty if the package is
+     *     reachable only from a packaged location
      * @throws IOException if the class path cannot be enumerated
-     * @throws URISyntaxException if a class path entry is not a usable file location
+     * @throws URISyntaxException if a file-protocol class path entry is not a usable file location
      * @throws ClassNotFoundException if an enumerated class file cannot be loaded
      */
     private static List<Class<?>> reportingDtoTypes()
@@ -373,7 +436,11 @@ final class ReportingDtoMapperTest {
         Enumeration<URL> locations =
                 Thread.currentThread().getContextClassLoader().getResources(DTO_RESOURCE_PATH);
         while (locations.hasMoreElements()) {
-            File directory = new File(locations.nextElement().toURI());
+            URL location = locations.nextElement();
+            if (!"file".equals(location.getProtocol())) {
+                continue;
+            }
+            File directory = new File(location.toURI());
             File[] entries = directory.listFiles();
             if (entries == null) {
                 continue;
@@ -659,7 +726,6 @@ final class ReportingDtoMapperTest {
     void everyCardNumberPathKeepsOnlyItsLastFourCharacters(CardNumberPath path) {
         String published = ReportingDtoMapper.maskPrimaryAccountNumber(path.rawValue());
 
-        // WHAT: the published form, its width, and the count of characters it still discloses.
         // WHY : Assumptions: the width is retained at sixteen so that a consumer reading into a
         //       declared-width field is not handed something narrower than the field, and the
         //       disclosed count is asserted at four because that is the whole of the concession. Each
@@ -672,7 +738,6 @@ final class ReportingDtoMapperTest {
         assertThat(published.chars().filter(Character::isDigit).count())
                 .isEqualTo(ReportingDtoMapper.VISIBLE_TRAILING_CHARACTERS);
 
-        // WHAT: that the withheld portion is generated rather than shortened or transformed.
         // WHY : Assumptions: a reduced value has to be unreconstructable, not merely shorter, so the
         //       twelve leading positions are asserted to be the mask character throughout. A checksum,
         //       a partial prefix or a length hint in those positions would leave the withheld digits
@@ -692,7 +757,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("the reduction is unconditional and no entry point can switch it off")
     void theCardNumberReductionIsUnconditional() throws NoSuchMethodException {
-        // WHAT: that no public entry point takes a second argument capable of selecting a mode.
         // WHY : Assumptions: the architecture reserves an unmasked card view for an administrative
         //       card-detail endpoint, and this context has no such endpoint -- it reads through
         //       read-only cross-schema views under a role holding SELECT and nothing else. There is
@@ -710,7 +774,6 @@ final class ReportingDtoMapperTest {
         assertThat(ReportingDtoMapper.class.getDeclaredMethod("maskPrimaryAccountNumber", String.class))
                 .isNotNull();
 
-        // WHAT: that both payloads carrying a card number publish the reduced form.
         // WHY : Assumptions: each payload is handed the full sixteen-character value declared at
         //       app/cpy/CVACT03Y.cpy L5 and app/cpy/COSTM01.CPY L22, so a payload that published it
         //       unchanged would fail here. Asserting on the constructed payload rather than on the
@@ -731,7 +794,6 @@ final class ReportingDtoMapperTest {
     void theWithheldCardPrefixReachesNoPayloadOutput() throws JacksonException {
         String json = everyPayloadAsJson();
 
-        // WHAT: that the twelve withheld characters appear nowhere in the whole emitted surface.
         // WHY : Assumptions: the four synthetic values share one twelve-character prefix precisely so
         //       that this single search covers all four paths at once. Searching for one path's full
         //       value would leave the other three unchecked, and a mapper that reduced one path while
@@ -740,7 +802,6 @@ final class ReportingDtoMapperTest {
         //       L15 and app/cpy/COSTM01.CPY L22, all PIC X(16).
         assertThat(json).doesNotContain(WITHHELD_CARD_PREFIX);
 
-        // WHAT: that the rendered form of every payload withholds the same characters.
         // WHY : Assumptions: a record's rendered form is what reaches a log line or an exception
         //       message, and it is assembled from the component values rather than from the JSON, so
         //       it is a second and independent exposure path. Nothing in this module logs today; the
@@ -765,7 +826,6 @@ final class ReportingDtoMapperTest {
         List<Class<?>> everyRecordType = new ArrayList<>(reportingDtoTypes());
         everyRecordType.addAll(mapperPayloadTypes());
 
-        // WHAT: that the concept is absent from the declared shape of every reporting record.
         // WHY : Alternatives Considered: declaring a component and blanking or masking it, which is
         //       what the two customer identifiers do. Rejected for this one value because the
         //       requirement is absence rather than reduction: a component that exists can be
@@ -780,7 +840,6 @@ final class ReportingDtoMapperTest {
             }
         }
 
-        // WHAT: that no mapper entry point offers an argument for the value either.
         // WHY : Assumptions: a component cannot be populated through an entry point that has no
         //       parameter for it, so checking the parameter names closes the second half of the same
         //       guarantee. The module compiles with parameter names retained, which is what makes the
@@ -807,7 +866,6 @@ final class ReportingDtoMapperTest {
     void noPayloadOutputCarriesACardVerificationValue() throws JacksonException {
         String json = everyPayloadAsJson();
 
-        // WHAT: that the concrete three-digit value appears in no serialised and no rendered output.
         // WHY : Assumptions: the structural assertion above proves the shape and this one proves the
         //       emitted bytes, and both are kept because they fail for different reasons -- a shape
         //       assertion cannot catch a value smuggled into an unrelated text component, and a
@@ -820,7 +878,6 @@ final class ReportingDtoMapperTest {
             assertThat(payload.toString()).doesNotContain(CARD_VERIFICATION_VALUE);
         }
 
-        // WHAT: that no serialised property name spells the concept either.
         // WHY : Assumptions: a key with no value still discloses that the record holds the field,
         //       which is information the reduction of the two customer identifiers deliberately does
         //       disclose and this suppression deliberately does not. Reading the property names back
@@ -848,7 +905,6 @@ final class ReportingDtoMapperTest {
         ReportingDtoMapper.StatementSummaryPayload summary = statementSummary(ZERO_AMOUNT);
         String mask = String.valueOf(ReportingDtoMapper.MASK_CHARACTER);
 
-        // WHAT: the reduced form of the national identifier, at its own nine-character width.
         // WHY : Assumptions: CUST-SSN is PIC 9(09) at app/cpy/CVCUS01Y.cpy L17, so nine is the width
         //       and five is nine less the four retained characters. The reduced width is the source
         //       width rather than four, because a consumer reading into the declared field must not be
@@ -864,7 +920,6 @@ final class ReportingDtoMapperTest {
         assertThat(summary.nationalIdentifier())
                 .hasSize(ReportingDtoMapper.NATIONAL_IDENTIFIER_WIDTH);
 
-        // WHAT: the reduced form of the government-issued identifier, at its own twenty-character width.
         // WHY : Assumptions: CUST-GOVT-ISSUED-ID is PIC X(20) at app/cpy/CVCUS01Y.cpy L18, so sixteen
         //       positions are withheld and four retained. Both identifiers are held encrypted at rest
         //       by the context that owns the record, and this class neither decrypts nor re-encrypts
@@ -890,7 +945,6 @@ final class ReportingDtoMapperTest {
     void theUnreducedCustomerIdentifiersReachNoPayloadOutput() throws JacksonException {
         String json = everyPayloadAsJson();
 
-        // WHAT: that neither identifier's full value, nor the withheld head of either, is emitted.
         // WHY : Assumptions: asserting the absence of the whole value alone would pass on a payload
         //       that emitted all but the final character, so the withheld head is searched for
         //       separately. The heads are the first five characters of the nine declared at
@@ -914,7 +968,6 @@ final class ReportingDtoMapperTest {
         ReportingDtoMapper.StatementSummaryPayload summary = statementSummary(ZERO_AMOUNT);
         String mask = String.valueOf(ReportingDtoMapper.MASK_CHARACTER);
 
-        // WHAT: three different published shapes for three fields, and no component for the fourth.
         // WHY : Alternatives Considered: one shared reduction helper applied uniformly to every
         //       sensitive field. Rejected because the three requirements differ -- twelve withheld of
         //       sixteen at app/cpy/CVACT03Y.cpy L5, five of nine at app/cpy/CVCUS01Y.cpy L17 and
@@ -932,7 +985,6 @@ final class ReportingDtoMapperTest {
                 .startsWith(mask.repeat(16))
                 .endsWith("9494");
 
-        // WHAT: that the three withheld lengths are three different numbers, not one repeated.
         // WHY : Assumptions: the widths differ because the source declarations differ, so asserting
         //       that the three counts are distinct is what would fail if a shared helper were
         //       introduced later and quietly reduced all three to one width. Asserting only the
@@ -985,7 +1037,6 @@ final class ReportingDtoMapperTest {
             throws IOException, URISyntaxException, ClassNotFoundException {
         List<Class<?>> discovered = reportingDtoTypes();
 
-        // WHAT: that enumeration actually found the package, before anything is concluded from it.
         // WHY : Assumptions: an exhaustive sweep that discovered nothing would pass every assertion
         //       below without examining a single component, which is the one way a guard like this
         //       fails silently. Checking four types that are known to exist turns an empty sweep
@@ -1000,8 +1051,6 @@ final class ReportingDtoMapperTest {
                         StatementTransactionResponse.class,
                         TransactionReportLineResponse.class);
 
-        // WHAT: that the declared type of every component is one the wire format admits, and that no
-        //       component can carry a decimal quantity outside the money type.
         // WHY : Alternatives Considered: asserting the serialised value of each monetary component
         //       instead of its declared type. Rejected because the shared module binds its handler to
         //       the money type itself at L271 and L272 of
@@ -1074,7 +1123,6 @@ final class ReportingDtoMapperTest {
     void everyMonetaryPayloadComponentIsDeclaredAsMoney() {
         List<Class<?>> payloads = mapperPayloadTypes();
 
-        // WHAT: that enumeration found all six payload records before anything is concluded.
         // WHY : Assumptions: the mapper declares six payload records, so a sweep returning fewer has
         //       lost one and every assertion after it would be reporting on a partial surface. The
         //       count is asserted rather than the names, so adding a seventh record is a deliberate
@@ -1082,8 +1130,6 @@ final class ReportingDtoMapperTest {
         //       services/reporting-service/src/main/java/com/carddemo/reporting/mapper/ReportingDtoMapper.java.
         assertThat(payloads).hasSize(6);
 
-        // WHAT: that a monetary name always carries the money type, and that no other numeric type
-        //       appears anywhere in the payload surface.
         // WHY : Alternatives Considered: naming only the components known to be monetary today.
         //       Rejected because a component added later under a monetary name would then be missed by
         //       the very assertion written to catch it. The two halves cover each other: the first
@@ -1126,7 +1172,6 @@ final class ReportingDtoMapperTest {
     void anAmountIsQuotedPlainDecimalTextAtScaleTwo(String amount) throws JacksonException {
         String json = jsonMapper().writeValueAsString(Money.of(amount));
 
-        // WHAT: the quoting, the exact digits, the absence of an exponent and the absence of grouping.
         // WHY : Trade-offs: text is a less compact and less obviously numeric wire form than a JSON
         //       number, and that cost is accepted because a JSON number is read into an IEEE-754
         //       binary approximation by most clients, which destroys exactness at the one boundary a
@@ -1150,7 +1195,6 @@ final class ReportingDtoMapperTest {
     void zeroIsTheQuotedTwoPlaceForm() throws JacksonException {
         String json = jsonMapper().writeValueAsString(ZERO_AMOUNT);
 
-        // WHAT: that zero is the quoted two-place form and not any of the other three in this package.
         // WHY : Assumptions: four renderings of zero coexist in this one package and each belongs to a
         //       different owner. The report detail and total regimes at app/cpy/CVTRA07Y.cpy L30 and
         //       L54, L60 and L66 suppress an all-zero item to fifteen blanks, and that is
@@ -1179,7 +1223,6 @@ final class ReportingDtoMapperTest {
     void aNegativeAmountKeepsItsLeadingSignInsideTheQuotes() throws JacksonException {
         String json = jsonMapper().writeValueAsString(NEGATIVE_AMOUNT);
 
-        // WHAT: that the sign leads, sits inside the quotes, and does not trail.
         // WHY : Assumptions: both byte-exact statement regimes place the sign last -- PIC 9(9).99- at
         //       app/cbl/CBSTM03A.CBL L113 and the zero-suppressing form beside it -- and the report
         //       regimes at app/cpy/CVTRA07Y.cpy L30 and L54 place it first inside a fifteen-character
@@ -1201,7 +1244,6 @@ final class ReportingDtoMapperTest {
     void anAmountRoundTripsToAnEqualValueAtScaleTwo() throws JacksonException {
         ObjectMapper mapper = jsonMapper();
 
-        // WHAT: that reading the emitted text back yields a value equal to the one written.
         // WHY : Assumptions: equality is asserted on the value object rather than on the digits,
         //       because the value object's equality is defined at scale two and that is the property a
         //       consumer relies on. Both declared ceilings are round-tripped, so a conversion that
@@ -1230,7 +1272,6 @@ final class ReportingDtoMapperTest {
     void everyMonetaryPayloadPropertyIsAJsonString() throws JacksonException {
         int monetaryPropertiesChecked = 0;
 
-        // WHAT: the token type of each monetary property, discovered from the declared types.
         // WHY : Assumptions: the property names are derived from the record components rather than
         //       written out, so a payload gaining a monetary component is covered without this
         //       assertion being edited. The token type is checked as well as its text because a
@@ -1257,7 +1298,6 @@ final class ReportingDtoMapperTest {
             }
         }
 
-        // WHAT: that at least one monetary property was actually reached.
         // WHY : Assumptions: the loop above concludes nothing when it finds no monetary component, so
         //       a count is asserted to keep a vacuous pass from reading as a guarded one. Three of the
         //       six payload records carry money, and the payload list exercises each of them more than
@@ -1275,7 +1315,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("both declared monetary ceilings are carried intact at full precision")
     void bothDeclaredMonetaryCeilingsAreCarriedIntact() throws JacksonException {
-        // WHAT: that a nine-integer-digit amount and a ten-integer-digit balance both survive whole.
         // WHY : Assumptions: the amount ceiling follows TRAN-AMT PIC S9(09)V99 at
         //       app/cpy/CVTRA05Y.cpy L10 and TRNX-AMT PIC S9(09)V99 at app/cpy/COSTM01.CPY L29, which
         //       is NUMERIC(11,2); the balance ceiling follows ACCT-CURR-BAL PIC S9(10)V99 at
@@ -1294,7 +1333,6 @@ final class ReportingDtoMapperTest {
                                 .stringValue())
                 .isEqualTo("9999999999.99");
 
-        // WHAT: that the plain-text statement's high-order narrowing is not carried into JSON.
         // WHY : Assumptions: the baseline moves the ten-integer-digit balance into the nine-integer-digit
         //       edited field ST-CURR-BAL PIC 9(9).99- at app/cbl/CBSTM03A.CBL L113, by the statement at
         //       L484 of that program. That narrowing is a property of an 80-column fixed-width band and
@@ -1315,7 +1353,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("the two monetary precisions are not merged into one shared bound")
     void theTwoMonetaryPrecisionsAreNotMerged() {
-        // WHAT: that the two declared integer-digit counts differ by exactly one.
         // WHY : Assumptions: the one-digit gap between PIC S9(09)V99 at app/cpy/CVTRA05Y.cpy L10 and
         //       PIC S9(10)V99 at app/cpy/CVACT01Y.cpy L7 is the whole of the distinction, and the
         //       account record makes the contrast deliberate by declaring five separate twelve-character
@@ -1326,7 +1363,6 @@ final class ReportingDtoMapperTest {
                                 - ReportingDtoMapper.TRANSACTION_AMOUNT_INTEGER_DIGITS)
                 .isEqualTo(1);
 
-        // WHAT: that a balance-sized value is admitted as a balance and refused as an amount.
         // WHY : Alternatives Considered: one shared monetary bound for the whole context. Rejected
         //       because it is wrong in one direction whichever of the two is kept -- widening the amount
         //       admits a value the nine-integer-digit field at app/cpy/CVTRA05Y.cpy L10 cannot hold and
@@ -1351,7 +1387,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("the general monetary contract is scale two half-up and no amount is re-scaled")
     void theGeneralMonetaryContractIsScaleTwoHalfUp() {
-        // WHAT: the scale and the rounding mode of the general contract, and the mode's effect.
         // WHY : Assumptions: the general contract is the one this context uses. Where a reduction to
         //       cents happens anywhere on this path it is scale two, rounding half away from zero, and
         //       a three-place input reduces upward rather than raising. The separate baseline accrual
@@ -1364,7 +1399,6 @@ final class ReportingDtoMapperTest {
         assertThat(Money.of(new BigDecimal("1.005"))).isEqualTo(Money.of("1.01"));
         assertThat(Money.BASELINE_INTEREST_ROUNDING).isNotEqualTo(Money.GENERAL_ROUNDING);
 
-        // WHAT: that a payload carries an amount at the scale it arrived with and re-scales nothing.
         // WHY : Assumptions: this class performs no arithmetic, so the order-of-operations rule that
         //       forms a product at full precision before dividing has nothing to reorder here -- but it
         //       is recorded because the rule is what makes a caller's already-computed amount safe to
@@ -1386,8 +1420,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("no monetary payload property carries an edit-mask artifact")
     void noMonetaryPayloadPropertyCarriesAnEditMaskArtifact() throws JacksonException {
-        // WHAT: that no monetary property carries a grouping separator, a fixed sign, a currency
-        //       symbol, a blank-suppressed position or a trailing sign.
         // WHY : Assumptions: every artifact searched for here is a real regime in this very package,
         //       which is why the search is specific rather than general. The grouping separator and the
         //       leading plus come from PIC -ZZZ,ZZZ,ZZZ.ZZ at app/cpy/CVTRA07Y.cpy L30 and
@@ -1414,7 +1446,6 @@ final class ReportingDtoMapperTest {
             }
         }
 
-        // WHAT: that a screen-rendering picture declared in the request program is not applied either.
         // WHY : Assumptions: WS-TRAN-AMT PIC +99999999.99 at app/cbl/CORPT00C.cbl L77 is a twelve-character
         //       regime with EIGHT integer digits whose sign always prints and whose leading zeros are
         //       kept, because the picture uses the digit symbol rather than the zero-suppression symbol.
@@ -1438,7 +1469,6 @@ final class ReportingDtoMapperTest {
         ReportingDtoMapper.StatementTransactionPayload line =
                 statementLine(ZERO_AMOUNT, TRUNCATED_PROCESSING_TIMESTAMP);
 
-        // WHAT: that both timestamps are 26 characters and identical to the text supplied.
         // WHY : Assumptions: TRAN-ORIG-TS and TRAN-PROC-TS are PIC X(26) at app/cpy/CVTRA05Y.cpy L16
         //       and L17, and TRNX-ORIG-TS and TRNX-PROC-TS at app/cpy/COSTM01.CPY L34 and L35, and the
         //       processing member occupies positions 305 to 330 of the 350-character record. A
@@ -1451,7 +1481,6 @@ final class ReportingDtoMapperTest {
         assertThat(line.originatingTimestamp()).isEqualTo(ORIGINATING_TIMESTAMP);
         assertThat(line.processingTimestamp()).isEqualTo(TRUNCATED_PROCESSING_TIMESTAMP);
 
-        // WHAT: that the two blank tail positions of the truncated value are preserved, not trimmed.
         // WHY : Assumptions: app/jcl/CREASTMT.JCL L53-L54 reshapes the record so the processing member
         //       receives only its first 24 characters, leaving the last two blank by design. Trimming
         //       them would be indistinguishable from trimming storage padding, yet here the blanks are
@@ -1462,8 +1491,6 @@ final class ReportingDtoMapperTest {
         assertThat(propertyOf(line, "processingTimestamp").stringValue())
                 .isEqualTo(TRUNCATED_PROCESSING_TIMESTAMP);
 
-        // WHAT: that the shared renderer produces the same 26-character shape it is not asked to
-        //       re-derive here.
         // WHY : Assumptions: TimestampFormatter is the producer of this form on the write path, and on
         //       this read path the text already exists and passes through untouched. It is exercised
         //       once to confirm the width contract the payload is validated against is the same width
@@ -1484,7 +1511,6 @@ final class ReportingDtoMapperTest {
         ReportingDtoMapper.ReportRequestPayload request =
                 ReportingDtoMapper.toReportRequest(REPORT_NAME, START_DATE, END_DATE);
 
-        // WHAT: the declared ten-character maximum for the report name, and the values it admits.
         // WHY : Assumptions: WS-REPORT-NAME is PIC X(10) VALUE SPACES at app/cbl/CORPT00C.cbl L58, and
         //       the three values that program moves into it -- Monthly at L214, Yearly at L240 and
         //       Custom at L433 -- are all shorter than the field. Ten therefore bounds the name rather
@@ -1497,7 +1523,6 @@ final class ReportingDtoMapperTest {
         assertThatThrownBy(() -> ReportingDtoMapper.toReportRequest("ELEVENCHARS", START_DATE, END_DATE))
                 .isInstanceOf(IllegalArgumentException.class);
 
-        // WHAT: the exact ten-character date form, its two hyphen positions, and its ordering property.
         // WHY : Assumptions: WS-DATE-FORMAT is PIC X(10) VALUE 'YYYY-MM-DD' at app/cbl/CORPT00C.cbl
         //       L72, and the group that program composes each date from at L60 to L65 is a
         //       four-character year, a hyphen filler at L62, a two-character month, a hyphen filler at
@@ -1530,7 +1555,6 @@ final class ReportingDtoMapperTest {
         List<Class<?>> everyRecordType = new ArrayList<>(reportingDtoTypes());
         everyRecordType.addAll(mapperPayloadTypes());
 
-        // WHAT: that no component is named for a padding field, across the whole reporting surface.
         // WHY : Assumptions: padding in a stored record is there to reach the declared record length
         //       and carries no value a consumer can use -- the X(20) at app/cpy/CVTRA05Y.cpy L18 and
         //       the X(20) at app/cpy/COSTM01.CPY L36 are the trailing bytes of a 350-character record,
@@ -1553,7 +1577,6 @@ final class ReportingDtoMapperTest {
     @Test
     @DisplayName("every dropped padding field is recorded by copybook path and line")
     void everyDroppedPaddingFieldIsRecorded() throws IOException {
-        // WHAT: that the source of the unit under test is where this assertion expects it.
         // WHY : Assumptions: the path is resolved against this module's base directory, which is the
         //       runner's working directory. Asserting the file exists first means a changed working
         //       directory reports a missing source rather than an empty search that would pass every
@@ -1563,7 +1586,6 @@ final class ReportingDtoMapperTest {
         assertThat(Path.of(MAPPER_SOURCE_PATH)).exists();
         String recorded = withoutJavadocMarkup(readMapperSource());
 
-        // WHAT: that each of the seven dropped padding fields is named with its width, path and line.
         // WHY : Assumptions: the copybook is the normative source, and it asks for the dropping of
         //       padding to be documented per record rather than only performed -- a drop nobody can
         //       find is indistinguishable from a field somebody forgot. Asserting the record's presence
@@ -1579,7 +1601,6 @@ final class ReportingDtoMapperTest {
         assertThat(recorded).contains("X(04) at L9 of app/cpy/CVTRA04Y.cpy");
         assertThat(recorded).contains("X(168) at L23 of app/cpy/CUSTREC.cpy");
 
-        // WHAT: that the opposite treatment of the same word two files away is recorded alongside it.
         // WHY : Assumptions: the identical keyword means padding in a stored input record and means
         //       content in an emitted output record, and this is the most confusable rule in the
         //       package. All 22 of the declarations in app/cpy/CVTRA07Y.cpy carry a VALUE -- column
@@ -1607,8 +1628,6 @@ final class ReportingDtoMapperTest {
         List<Class<?>> everyRecordType = new ArrayList<>(reportingDtoTypes());
         everyRecordType.addAll(mapperPayloadTypes());
 
-        // WHAT: that neither the reference spelling nor the target spelling of the three recorded
-        //       renamings appears anywhere in this context's payload surface.
         // WHY : Assumptions: exactly three reference spellings are given a different target name
         //       across the whole migration, and every one of them belongs to a different context. The
         //       reference declares ACCT-EXPIRAION-DATE at app/cpy/CVACT01Y.cpy L11 and the account
@@ -1643,19 +1662,24 @@ final class ReportingDtoMapperTest {
             envelopeComponents.add(component.getName());
         }
 
-        // WHAT: that the envelope names the two ends of a page and whether a further page follows.
         // WHY : Assumptions: the envelope is the shared kernel's contract and no second one is declared
         //       in this package, because two declarations of one contract are two things to keep in
         //       step. Naming the ends is what a subsequent request is verified against, which is why an
         //       exhausted page carries no ends at all. The contract is declared at
         //       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java.
-        assertThat(envelopeComponents).contains("firstKey", "lastKey", "hasNext", "hasPrev");
+        // WHY : Refactoring Rationale: the assertion pins the member set EXACTLY rather than asserting
+        //       that four expected names are among the members. A containment test passed while the
+        //       envelope carried three further members -- two extra cursors and a backward indicator --
+        //       so it could not tell the fixed four-member shape from a superset of it, and the three
+        //       reached three service contracts before anything failed. Exact equality is what makes an
+        //       added member fail here, in the module that publishes a page, rather than in review.
+        assertThat(envelopeComponents)
+                .containsExactly("items", "firstKey", "lastKey", "hasNext");
         assertThat(PageResponse.empty().items()).isEmpty();
         assertThat(PageResponse.empty().firstKey()).isNull();
         assertThat(PageResponse.empty().lastKey()).isNull();
         assertThat(PageResponse.empty().hasNext()).isFalse();
 
-        // WHAT: that the envelope declares no page number, offset, limit or total count.
         // WHY : Alternatives Considered: an ordinal envelope carrying a position and a page size.
         //       Rejected because an ordinal read loses and repeats rows once a concurrent insert shifts
         //       positions between two requests, which changes observable behaviour that a browse by key
@@ -1671,7 +1695,6 @@ final class ReportingDtoMapperTest {
             assertThat(normalised).doesNotContain("index");
         }
 
-        // WHAT: that the envelope refuses a page whose ends are the raw key columns themselves.
         // WHY : Assumptions: the ends of a page are published to the client, and one of the key columns
         //       in this context is a primary account number -- TRNX-CARD-NUM PIC X(16) is the leading
         //       component of the key at app/cpy/COSTM01.CPY L21 to L22. Handing the raw key forward
@@ -1687,9 +1710,19 @@ final class ReportingDtoMapperTest {
                                         rows,
                                         TRANSACTION_IDENTIFIER,
                                         TRANSACTION_IDENTIFIER,
-                                        true,
-                                        false))
-                .isInstanceOf(IllegalArgumentException.class);
+                                        true))
+                .isInstanceOf(IllegalArgumentException.class)
+                // WHY : Assumptions: the type alone does not identify WHICH guard fired. The envelope
+                //       validates four components and its factory could equally reject a self
+                //       inconsistent page -- a next cursor on an exhausted page, say -- with the same
+                //       type, so a type-only assertion would keep passing if the cursor check were
+                //       removed and some other argument check happened to fail instead. Naming the
+                //       component and the sealing requirement pins the refusal to the one guard this
+                //       assertion is about. The text is the envelope's own, at L357 to L360 of
+                //       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java.
+                .hasMessageContaining("firstKey")
+                .hasMessageContaining("must be a token sealed by CursorToken")
+                .hasMessageContaining("not a raw keyset cursor");
     }
 
     /**
@@ -1700,7 +1733,6 @@ final class ReportingDtoMapperTest {
     void theMapperIsReadDirectionOnly() {
         List<Class<?>> payloads = mapperPayloadTypes();
 
-        // WHAT: that every published entry point returns text or a payload record, and nothing else.
         // WHY : Assumptions: this context owns no tables. It reads through read-only cross-schema views
         //       under a role holding SELECT and nothing else, so a mapping that produced a persistence
         //       type would produce something this context has no privilege to store -- the failure would
@@ -1727,7 +1759,6 @@ final class ReportingDtoMapperTest {
                     .doesNotStartWith("delete");
         }
 
-        // WHAT: that no member of the class, published or internal, touches a projection type.
         // WHY : Assumptions: the projection types this context reads are declared in a sibling package,
         //       and one of them exposes only a no-argument constructor at protected visibility, so a
         //       member bound to it could not be exercised without the persistence provider at all. This
@@ -1747,7 +1778,6 @@ final class ReportingDtoMapperTest {
             }
         }
 
-        // WHAT: that shape is validated while meaning is not, shown on a range that is out of order.
         // WHY : Assumptions: an end date earlier than a start date is a business question about a run,
         //       and this class is an anti-corruption layer rather than a service, so it admits the pair
         //       and leaves the question to whoever owns it. Both values still satisfy the ten-character
@@ -1761,22 +1791,70 @@ final class ReportingDtoMapperTest {
     }
 
     /**
-     * Pins the ten fixture record names this class states its preconditions against.
+     * Pins every record name this class names to the layout the shared kernel registers for it.
+     *
+     * <p>Refactoring Rationale: this test previously asserted only intrinsic properties of a
+     * same-file literal -- its size, its distinctness and its suffixes -- so no production symbol
+     * took part and it could not fail for any reason connected to the code under test. It now resolves
+     * every name through {@link CopybookLayout}, which is the migration's single normative source of
+     * record geometry and a real dependency of this module, so an unregistered record, a renamed one
+     * or a changed declared length fails here. The two properties the earlier wording claimed but
+     * never checked -- that the transaction and reporting records are genuinely two records, and that
+     * the ten names cover nine layouts -- are now assertions rather than prose.
      */
     @Test
-    @DisplayName("the ten fixture record names are bound exactly and none is authored here")
+    @DisplayName("every named record resolves to its registered layout, and TRAN is not TRNX")
     void theTenFixtureRecordNamesAreBoundExactly() {
-        // WHAT: that ten names are bound, that they are distinct, and that two easily confused ones
-        //       remain separate.
+        assertThat(FIXTURE_RECORD_NAMES).hasSize(10).doesNotHaveDuplicates();
+        assertThat(FIXTURE_RECORD_NAMES).allSatisfy(name -> assertThat(name).endsWith(".txt"));
+
+        // WHY : Assumptions: the two constants are declared separately so that the list can stay the
+        //       thing the class charter cites while the map carries the production binding. Declaring
+        //       them separately is what makes them able to drift, so the agreement is asserted here
+        //       rather than assumed; a name added to one and not the other fails at this line.
+        assertThat(FIXTURE_RECORD_LAYOUTS.keySet())
+                .containsExactlyInAnyOrderElementsOf(FIXTURE_RECORD_NAMES);
+
+        // WHY : Assumptions: the registry raises rather than returning null for an unknown name, so a
+        //       resolution failure arrives as a named exception from production code rather than as a
+        //       null-pointer failure in this test. Asserting the resolved record's own name as well as
+        //       the lookup succeeding is what catches a registry that answered with a different record.
+        FIXTURE_RECORD_LAYOUTS.forEach((fileName, layoutName) -> {
+            CopybookLayout.RecordSpec layout = CopybookLayout.layout(layoutName);
+            assertThat(layout.name()).as(fileName + " resolves " + layoutName).isEqualTo(layoutName);
+            assertThat(layout.reclen()).as(fileName + " declared length").isPositive();
+            assertThat(layout.fields()).as(fileName + " declared fields").isNotEmpty();
+        });
+
+        // WHY : Assumptions: cardxref.txt is the seed file name of the cross-reference record and
+        //       xreffile.txt is the data-definition name of the same record, so the count is nine by
+        //       construction and not by accident. Asserting the number rather than the pair means a
+        //       future name that duplicated some OTHER layout would also be caught here.
+        assertThat(FIXTURE_RECORD_LAYOUTS.values()).hasSize(10);
+        assertThat(Set.copyOf(FIXTURE_RECORD_LAYOUTS.values())).hasSize(9);
+        assertThat(CopybookLayout.layout("XREF"))
+                .isEqualTo(CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("cardxref.txt")))
+                .isEqualTo(CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("xreffile.txt")));
+
         // WHY : Assumptions: the transaction record at app/cpy/CVTRA05Y.cpy and the reporting record at
         //       app/cpy/COSTM01.CPY both sum to 350 characters and declare the same fourteen field
         //       names, but their keys are reordered -- the first opens with the transaction identifier
         //       at L5 and holds the card number at L15, the second opens with a 32-character key at L21
-        //       whose leading component is the card number at L22. Two fixture files are therefore
-        //       required rather than one, and binding both names here is what stops a later reader
-        //       treating either as the other and reading a card number out of a description.
-        assertThat(FIXTURE_RECORD_NAMES).hasSize(10).doesNotHaveDuplicates();
-        assertThat(FIXTURE_RECORD_NAMES).contains("tranfile.txt", "trnxfile.txt");
-        assertThat(FIXTURE_RECORD_NAMES).allSatisfy(name -> assertThat(name).endsWith(".txt"));
+        //       whose leading component is the card number at L22. Equal length is therefore not
+        //       enough to tell them apart, and the key length and leading field name are; asserting
+        //       those is what stops a later reader treating either as the other and reading a card
+        //       number out of a description.
+        CopybookLayout.RecordSpec transactionRecord =
+                CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("tranfile.txt"));
+        CopybookLayout.RecordSpec reportingRecord =
+                CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("trnxfile.txt"));
+
+        assertThat(transactionRecord.reclen()).isEqualTo(350).isEqualTo(reportingRecord.reclen());
+        assertThat(transactionRecord.fields()).hasSameSizeAs(reportingRecord.fields());
+        assertThat(transactionRecord.keyLength()).isEqualTo(16);
+        assertThat(reportingRecord.keyLength()).isEqualTo(32);
+        assertThat(transactionRecord.keyLength()).isNotEqualTo(reportingRecord.keyLength());
+        assertThat(transactionRecord.fields().get(0).name()).isEqualTo("TRAN-ID");
+        assertThat(reportingRecord.fields().get(0).name()).isEqualTo("TRNX-CARD-NUM");
     }
 }

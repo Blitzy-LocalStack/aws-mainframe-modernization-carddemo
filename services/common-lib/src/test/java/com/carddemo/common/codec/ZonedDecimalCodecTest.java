@@ -5,6 +5,7 @@ import com.carddemo.common.codec.CopybookLayout.Kind;
 import com.carddemo.common.codec.CopybookLayout.RecordSpec;
 import com.carddemo.common.codec.ZonedDecimalCodec.FieldContext;
 import com.carddemo.common.codec.ZonedDecimalCodec.ZonedDecimalException;
+import com.carddemo.common.money.Money;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -559,28 +560,106 @@ class ZonedDecimalCodecTest {
     }
 
     /**
-     * Confirms that a closing-brace zero decodes to numerical zero at the declared scale and that
-     * re-encoding it emits the opening brace, which is the one documented zoned span that does not
-     * round-trip byte for byte.
+     * Confirms that the sign-preserving pair reproduces a closing-brace zero byte for byte.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a decoded value other than zero, a
+     * mis-reported sign, or a re-encoded span differing from the source in any position as a failure.</p>
+     *
+     * <p>Assumptions: this is the operation a caller uses when it must write a record back exactly as
+     * it read it, and it has NO documented exception. The value component cannot carry the distinction
+     * between the two zero overpunches, because {@link BigDecimal} has no negative zero, so the sign the
+     * span carried is returned beside the value and the encoder writes it back. The pair is asserted in
+     * both directions -- the closing-brace source reproduces a closing brace and the opening-brace
+     * source reproduces an opening brace -- because an implementation that always wrote the negative
+     * overpunch for a zero would satisfy the first assertion alone.</p>
+     *
+     * <p>Assumptions: the reference implementation is FOLLOWED here rather than diverged from.
+     * {@code tests/helpers/record_codec.py} reads the sign of its decoded value at line 395 with a test
+     * that preserves a signed zero, so a closing-brace zero re-encodes to a closing brace there; this
+     * pair now does the same. The plain pair's normalisation, exercised by the test below, is what
+     * remains divergent, and it is registered rather than merely described.</p>
+     */
+    @Test
+    void signPreservingPairReproducesTheNegativeZeroOverpunchByteForByte() {
+        ZonedDecimalCodec.SignedZoned negative = ZonedDecimalCodec.decodePreservingSign(
+                NEGATIVE_ZERO_SPAN, ACCOUNT_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED);
+        ZonedDecimalCodec.SignedZoned positive = ZonedDecimalCodec.decodePreservingSign(
+                POSITIVE_ZERO_SPAN, ACCOUNT_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED);
+
+        assertEquals(new BigDecimal("0.00"), negative.value(),
+                "a closing-brace zero must decode to numerical zero");
+        assertTrue(negative.negativeSign(),
+                "the closing-brace overpunch must be reported as the negative sign");
+        assertEquals(new BigDecimal("0.00"), positive.value(),
+                "an opening-brace zero must decode to the same numerical zero");
+        assertEquals(false, positive.negativeSign(),
+                "the opening-brace overpunch must be reported as the positive sign");
+
+        assertEquals(NEGATIVE_ZERO_SPAN,
+                ZonedDecimalCodec.encodePreservingSign(negative, ACCOUNT_MONEY_INT_DIGITS,
+                        MONEY_DEC_DIGITS, SIGNED),
+                "the sign-preserving encoder must reproduce the closing-brace zero exactly");
+        assertEquals(POSITIVE_ZERO_SPAN,
+                ZonedDecimalCodec.encodePreservingSign(positive, ACCOUNT_MONEY_INT_DIGITS,
+                        MONEY_DEC_DIGITS, SIGNED),
+                "the sign-preserving encoder must reproduce the opening-brace zero exactly");
+    }
+
+    /**
+     * Confirms that the sign-preserving pair reproduces a non-zero negative span unchanged.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a differing value, a mis-reported sign
+     * or a differing span as a failure.</p>
+     *
+     * <p>Assumptions: a non-zero value carries its own sign, so this vector proves the sign component is
+     * consistent with the value rather than an independent switch that could contradict it. The span is
+     * the attested {@code 0000005047G} body under the negative table, which is the same construction the
+     * negative-table vectors above use.</p>
+     */
+    @Test
+    void signPreservingPairReproducesANonZeroNegativeSpan() {
+        String span = TRAN_AMT_OVERPUNCH_G.substring(0, TRAN_AMT_OVERPUNCH_G.length() - 1) + "P";
+        ZonedDecimalCodec.SignedZoned decoded = ZonedDecimalCodec.decodePreservingSign(span,
+                TRANSACTION_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED);
+
+        assertEquals(new BigDecimal("-504.77"), decoded.value(),
+                "the negative table entry 'P' must decode as the negative seven");
+        assertTrue(decoded.negativeSign(), "a negative value must report the negative sign");
+        assertEquals(span, ZonedDecimalCodec.encodePreservingSign(decoded, TRANSACTION_MONEY_INT_DIGITS,
+                MONEY_DEC_DIGITS, SIGNED), "a non-zero span must reproduce itself exactly");
+    }
+
+    /**
+     * Confirms that a pair whose stated sign contradicts a non-zero value is refused.
+     *
+     * <p>Takes no parameters and returns no value; the expected exception is captured so none escapes.</p>
+     *
+     * <p>Assumptions: the two components may disagree only at zero, so a positive magnitude paired with
+     * the negative overpunch is not a representable span and is refused at construction. Accepting it
+     * would emit a span that decoded back to a different value, which is the one failure a codec whose
+     * purpose is faithful representation must not have.</p>
+     */
+    @Test
+    void signPreservingPairRefusesASignThatContradictsANonZeroValue() {
+        ZonedDecimalException refusal = assertThrows(ZonedDecimalException.class,
+                () -> new ZonedDecimalCodec.SignedZoned(new BigDecimal("1.00"), true));
+
+        assertThat(refusal).hasMessageContaining("contradicts the value's own sign");
+    }
+
+    /**
+     * Confirms that the PLAIN pair normalises a closing-brace zero to the opening-brace form.
      *
      * <p>Takes no parameters and returns no value. JUnit reports a non-zero value, a differing scale,
      * or a re-encoded span other than the positive-zero form as a test failure.</p>
      *
-     * <p>This is the ONLY documented non-byte-identical zoned round trip. It is a consequence of the
-     * target type and not a defect on either side. The baseline distinguishes the opening-brace
-     * overpunch, a positive zero, from the closing-brace overpunch, a negative zero, as two distinct
-     * bytes; {@link BigDecimal} has no negative zero, because a value built from the text
-     * {@code "-0.00"} carries scale two and signum zero and is indistinguishable from one built from
-     * {@code "0.00"}. Decoding either overpunched zero therefore yields the same value, and encoding a
-     * zero always emits the opening brace. Every other span this codec accepts reproduces itself
-     * exactly.</p>
-     *
-     * <p>Assumptions: the Java contract is authoritative here and the reference implementation is
-     * deliberately NOT followed. {@code tests/helpers/record_codec.py} reads the sign of its decoded
-     * value at line 395 with a test that preserves a signed zero, so a closing-brace zero re-encodes to
-     * a closing brace there. This codec classifies every zero as non-negative and canonicalises to the
-     * opening brace. The divergence is stated in both directions so that a reader comparing the two
-     * implementations finds the difference declared rather than having to discover it.</p>
+     * <p>Assumptions: this is the one documented non-byte-identical round trip of the PLAIN pair, and it
+     * is a consequence of the argument type rather than a defect on either side: encoding accepts a
+     * value alone, so a zero arrives with no sign to write and the encoder emits the canonical positive
+     * overpunch. It is asserted rather than left implicit so that the normalisation is a stated contract
+     * a caller can rely on, and the divergence is registered under identifier D-SIGNED-ZERO-ZONED in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. A caller that cannot accept it uses
+     * the sign-preserving pair exercised above, which has no exception at all.</p>
      */
     @Test
     void negativeZeroDecodesToZeroAndReEncodesAsThePositiveZeroOverpunch() {
@@ -1498,5 +1577,269 @@ class ZonedDecimalCodecTest {
                         NO_DEC_DIGITS,
                         UNSIGNED),
                 "removing the magnitude defect must reveal the successful unsigned span");
+    }
+
+    /**
+     * Proves the money-typed pair round-trips every attested span byte-identically at both widths.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a differing amount, a scale other than
+     * the money scale, or a re-encoded span that is not byte-identical to the original as a test
+     * failure.</p>
+     *
+     * <p>Assumptions: this is the boundary every account balance and transaction amount actually
+     * crosses, so it is asserted on the SAME live spans the general form is asserted on rather than on
+     * fresh vectors. Three of the four are attested reference bytes -- the twelve-byte
+     * {@code ACCT-CURR-BAL} span at zero-based [12:24] of
+     * {@code tests/fixtures/posting/happy_path/acctdata.txt}, and two eleven-byte {@code TRAN-AMT}
+     * spans at [132:143] of records 1 and 2 of {@code tests/fixtures/export/happy_path/trandata.txt},
+     * one of each sign. Reusing them means a divergence between the general form and the money form
+     * shows up as a difference between two assertions over identical input, which is the only shape in
+     * which such a divergence is attributable.</p>
+     *
+     * <p>Alternatives Considered: asserting the money form only through a round trip, without naming
+     * the decoded amount. Rejected because a codec whose decode and encode agreed with each other on a
+     * wrong reading would pass -- that symmetric defect is the one this class exists to catch, and the
+     * factor-of-ten misreading of the {@code G} overpunch is precisely it. The amount is therefore
+     * named on both sides: 504.77 rather than 50.47.</p>
+     */
+    @Test
+    void moneyTypedSpansRoundTripAtBothDeclaredWidths() {
+        Money accountBalance = ZonedDecimalCodec.decodeMoney(
+                ACCT_CURR_BAL_SPAN, ACCOUNT_MONEY_INT_DIGITS, SIGNED);
+        Money positiveTransactionAmount = ZonedDecimalCodec.decodeMoney(
+                TRAN_AMT_OVERPUNCH_G, TRANSACTION_MONEY_INT_DIGITS, SIGNED);
+        Money negativeTransactionAmount = ZonedDecimalCodec.decodeMoney(
+                TRAN_AMT_OVERPUNCH_CLOSING_BRACE, TRANSACTION_MONEY_INT_DIGITS, SIGNED);
+
+        assertEquals("193.00", accountBalance.toPlainString(),
+                "the attested twelve-byte account balance must decode to its plain decimal value");
+        assertEquals("504.77", positiveTransactionAmount.toPlainString(),
+                "overpunch G must contribute low-order digit seven, not be discarded as a sign marker");
+        assertEquals("-919.00", negativeTransactionAmount.toPlainString(),
+                "the closing-brace overpunch must carry the negative sign into the amount");
+
+        assertEquals(Money.SCALE, accountBalance.amount().scale(),
+                "the money form must fix the fractional width at the money scale, never negotiate it");
+        assertEquals(Money.SCALE, negativeTransactionAmount.amount().scale(),
+                "a negative amount must carry the same declared scale as a positive one");
+
+        // WHY : Assumptions: encoding what was decoded must reproduce the original bytes exactly,
+        //       because byte identity is the property a record rewrite depends on. A value that decoded
+        //       correctly but re-encoded one character differently would rewrite a field that nothing
+        //       changed, and every following field of a fixed-width record would still align, so the
+        //       only place the defect could be observed is a byte comparison like this one.
+        assertEquals(ACCT_CURR_BAL_SPAN,
+                ZonedDecimalCodec.encodeMoney(accountBalance, ACCOUNT_MONEY_INT_DIGITS, SIGNED),
+                "the twelve-byte account span must survive a decode and encode unchanged");
+        assertEquals(TRAN_AMT_OVERPUNCH_G,
+                ZonedDecimalCodec.encodeMoney(
+                        positiveTransactionAmount, TRANSACTION_MONEY_INT_DIGITS, SIGNED),
+                "the positive eleven-byte transaction span must survive unchanged");
+        assertEquals(TRAN_AMT_OVERPUNCH_CLOSING_BRACE,
+                ZonedDecimalCodec.encodeMoney(
+                        negativeTransactionAmount, TRANSACTION_MONEY_INT_DIGITS, SIGNED),
+                "the negative eleven-byte transaction span must survive unchanged");
+
+        // WHY : Assumptions: the money form must agree with the general form on identical input. The
+        //       money form is documented as a convenience over the general one at a fixed fractional
+        //       width, so the two must be indistinguishable wherever both apply. Comparing them here is
+        //       what makes that a checked property rather than a description.
+        assertEquals(
+                ZonedDecimalCodec.decode(
+                        ACCT_CURR_BAL_SPAN, ACCOUNT_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED),
+                accountBalance.amount(),
+                "the money form must decode to the same exact value as the general form");
+    }
+
+    /**
+     * Proves negative zero normalises through the money pair exactly as it does through the general
+     * one.
+     *
+     * <p>Takes no parameters and returns no value. JUnit reports a decoded amount other than zero, or
+     * a re-encoded span other than the positive-zero form, as a test failure.</p>
+     *
+     * <p>Assumptions: this is the one documented span for which the round-trip law does not hold, so
+     * it is asserted on the money form as well rather than assumed to behave alike. The negative-zero
+     * span is SYNTHETIC -- the reference corpus stores positive zero at two declared offsets of the
+     * account record and stores no negative zero anywhere -- while its positive counterpart is the
+     * live {@code ACCT-CURR-CYC-CREDIT} span at [78:90]. The two differ in their final character
+     * alone, so the normalisation is observable as a single-byte difference and nothing else.</p>
+     *
+     * <p>Trade-offs: the asymmetry is accepted rather than repaired, and pinning it here is what keeps
+     * it from being rediscovered as a byte mismatch during a rewrite. The target type has no negative
+     * zero to preserve, so an encoder that emitted the negative form would have to invent a sign the
+     * value does not carry.</p>
+     */
+    @Test
+    void moneyTypedNegativeZeroNormalisesToThePositiveOverpunch() {
+        Money fromPositiveZero = ZonedDecimalCodec.decodeMoney(
+                POSITIVE_ZERO_SPAN, ACCOUNT_MONEY_INT_DIGITS, SIGNED);
+        Money fromNegativeZero = ZonedDecimalCodec.decodeMoney(
+                NEGATIVE_ZERO_SPAN, ACCOUNT_MONEY_INT_DIGITS, SIGNED);
+
+        assertEquals("0.00", fromPositiveZero.toPlainString(),
+                "the live positive-zero span must decode to zero at the money scale");
+        assertEquals("0.00", fromNegativeZero.toPlainString(),
+                "the synthetic negative-zero span must decode to the same zero");
+        assertEquals(fromPositiveZero, fromNegativeZero,
+                "the two zero spans must be indistinguishable once decoded");
+
+        assertEquals(POSITIVE_ZERO_SPAN,
+                ZonedDecimalCodec.encodeMoney(fromPositiveZero, ACCOUNT_MONEY_INT_DIGITS, SIGNED),
+                "positive zero must re-encode to its own span");
+        assertEquals(POSITIVE_ZERO_SPAN,
+                ZonedDecimalCodec.encodeMoney(fromNegativeZero, ACCOUNT_MONEY_INT_DIGITS, SIGNED),
+                "negative zero must re-encode to the positive-zero span, the one documented asymmetry");
+        assertNotEquals(NEGATIVE_ZERO_SPAN,
+                ZonedDecimalCodec.encodeMoney(fromNegativeZero, ACCOUNT_MONEY_INT_DIGITS, SIGNED),
+                "the negative-zero span must not be reproduced, because the target type has no such"
+                        + " value");
+    }
+
+    /**
+     * Proves the money form refuses a magnitude the reference money picture cannot hold.
+     *
+     * <p>Takes no parameters and returns no value. Both expected failures are captured inside
+     * assertion lambdas, so this method completes normally; JUnit reports a missing or differently
+     * typed exception, or a general-form decode that also failed, as a test failure.</p>
+     *
+     * <p>Assumptions: this branch is reachable ONLY through the money form. A span declaring eleven
+     * integer digits is a perfectly valid zoned field and the general form returns its value without
+     * complaint; it is the conversion to the money type that refuses it, because no baseline record
+     * declares a money field wider than the twelve-byte {@code PIC S9(10)V99} form. The two calls are
+     * therefore made over the SAME span so the difference between them is attributable to the
+     * conversion and to nothing else.</p>
+     *
+     * <p>Trade-offs: the refusal is an {@link ArithmeticException} from the money type rather than a
+     * {@link ZonedDecimalException} from this codec, and that is asserted as it stands rather than
+     * wrapped. The codec did its work correctly -- the bytes decoded -- and the value is out of the
+     * DOMAIN, so reporting it as a codec fault would name the wrong layer; the message names the
+     * integer-digit count and never the amount.</p>
+     */
+    @Test
+    void moneyTypedDecodeRefusesAMagnitudeOutsideTheMoneyDomain() {
+        int oneIntegerDigitTooMany = ACCOUNT_MONEY_INT_DIGITS + 1;
+        String thirteenByteSpan = "999999999999I";
+
+        assertEquals(13, ZonedDecimalCodec.widthOf(oneIntegerDigitTooMany, MONEY_DEC_DIGITS),
+                "eleven integer digits plus two fractional must declare a thirteen-byte field");
+        assertEquals(thirteenByteSpan.length(),
+                ZonedDecimalCodec.widthOf(oneIntegerDigitTooMany, MONEY_DEC_DIGITS),
+                "the vector must fill the declared width exactly, so length cannot be the cause");
+
+        // WHY : Assumptions: the general form must accept the very span the money form refuses. Without
+        //       this control the refusal below could equally be a length or a digit-body defect, and
+        //       the test would pass while proving nothing about the domain.
+        assertEquals("99999999999.99",
+                ZonedDecimalCodec.decode(
+                        thirteenByteSpan, oneIntegerDigitTooMany, MONEY_DEC_DIGITS, SIGNED)
+                        .toPlainString(),
+                "the general form must decode an eleven-integer-digit field without complaint");
+
+        ArithmeticException signedRefusal = assertThrows(ArithmeticException.class,
+                () -> ZonedDecimalCodec.decodeMoney(
+                        thirteenByteSpan, oneIntegerDigitTooMany, SIGNED));
+        ArithmeticException unsignedRefusal = assertThrows(ArithmeticException.class,
+                () -> ZonedDecimalCodec.decodeMoney(
+                        "9999999999999", oneIntegerDigitTooMany, UNSIGNED));
+
+        assertThat(signedRefusal.getMessage())
+                .contains("an amount declaring 11 integer digits")
+                .contains("exceeds the reference money domain of 9999999999.99")
+                .doesNotContain(thirteenByteSpan);
+        assertThat(unsignedRefusal.getMessage())
+                .contains("an amount declaring 11 integer digits");
+
+        // WHY : Assumptions: the widest amount the money picture DOES hold must decode through the
+        //       money form. The pair differs by one integer digit position, which is what a bound
+        //       written one place out would move, so the admitted side is what makes the refusal a
+        //       boundary rather than a blanket ceiling.
+        assertEquals("9999999999.99",
+                ZonedDecimalCodec.decodeMoney("999999999999", ACCOUNT_MONEY_INT_DIGITS, UNSIGNED)
+                        .toPlainString(),
+                "the twelve-byte all-nine span must decode to the widest admitted money value");
+    }
+
+    /**
+     * Proves the money encoder refuses an absent amount and an unsigned field it cannot sign.
+     *
+     * <p>Takes no parameters and returns no value. Both expected failures are exact
+     * {@link ZonedDecimalException} instances captured inside assertion lambdas, so this method
+     * completes normally; JUnit reports a missing or differently typed exception as a test failure.</p>
+     *
+     * <p>Assumptions: the absent-amount refusal is the money encoder's own guard rather than the
+     * general encoder's, so it is asserted through the money entry point. Its diagnostic names no
+     * field, because the money form takes no field descriptor -- that is the documented geometry-only
+     * behaviour, and asserting the message shape here is what stops a later edit from reporting a
+     * field name the caller never supplied.</p>
+     */
+    @Test
+    void moneyTypedEncodeRefusesAnAbsentAmountAndAnUnsignedNegative() {
+        ZonedDecimalException absent = assertThrows(ZonedDecimalException.class,
+                () -> ZonedDecimalCodec.encodeMoney(null, ACCOUNT_MONEY_INT_DIGITS, SIGNED));
+        assertEquals(ZonedDecimalException.class, absent.getClass(),
+                "an absent amount must raise the codec's exact nested exception class");
+        assertThat(absent.getMessage()).contains("zoned money value is absent");
+
+        ZonedDecimalException unsignedNegative = assertThrows(ZonedDecimalException.class,
+                () -> ZonedDecimalCodec.encodeMoney(
+                        Money.of("-1.00"), ACCOUNT_MONEY_INT_DIGITS, UNSIGNED));
+        assertThat(unsignedNegative.getMessage())
+                .contains("unsigned zoned field cannot carry a negative value")
+                .contains("no sign carrier");
+    }
+
+    /**
+     * Proves the published width helper refuses impossible geometry when called directly.
+     *
+     * <p>Takes no parameters and returns no value. All three expected failures are exact
+     * {@link ZonedDecimalException} instances captured inside assertion lambdas, so this method
+     * completes normally; JUnit reports a missing or differently typed exception, or a message that
+     * does not name the offending counts, as a test failure.</p>
+     *
+     * <p>Assumptions: these two branches are reached elsewhere in this class as a side effect of
+     * decoding with malformed metadata, and that is deliberately not the same assertion. The helper is
+     * PUBLISHED: a caller slicing a record calls it directly to size the slice, and for that caller
+     * the exception type and the counts in its message are the contract. Asserting it only through a
+     * decode would leave the published behaviour free to change while the decode path kept passing.</p>
+     *
+     * <p>Assumptions: both negative positions are asserted, not one. The guard reads two counts and a
+     * condition testing only the first would let a negative fractional width through to produce a
+     * width smaller than its integer part, which no later check would question.</p>
+     */
+    @Test
+    void widthOfRefusesNegativeCountsAndAZeroSumWidthWhenCalledDirectly() {
+        ZonedDecimalException negativeIntegerDigits = assertThrows(ZonedDecimalException.class,
+                () -> ZonedDecimalCodec.widthOf(-1, MONEY_DEC_DIGITS));
+        assertEquals(ZonedDecimalException.class, negativeIntegerDigits.getClass(),
+                "a negative integer-digit count must raise the codec's exact nested exception class");
+        assertThat(negativeIntegerDigits.getMessage())
+                .contains("zoned field digit counts must not be negative")
+                .contains("intDigits=-1")
+                .contains("decDigits=" + MONEY_DEC_DIGITS);
+
+        ZonedDecimalException negativeFractionalDigits = assertThrows(ZonedDecimalException.class,
+                () -> ZonedDecimalCodec.widthOf(ACCOUNT_MONEY_INT_DIGITS, -1));
+        assertThat(negativeFractionalDigits.getMessage())
+                .contains("zoned field digit counts must not be negative")
+                .contains("intDigits=" + ACCOUNT_MONEY_INT_DIGITS)
+                .contains("decDigits=-1");
+
+        ZonedDecimalException zeroSumWidth = assertThrows(ZonedDecimalException.class,
+                () -> ZonedDecimalCodec.widthOf(0, 0));
+        assertEquals(ZonedDecimalException.class, zeroSumWidth.getClass(),
+                "a zero-sum width must raise the codec's exact nested exception class");
+        assertThat(zeroSumWidth.getMessage())
+                .contains("must declare at least one digit position")
+                .contains("sum to zero");
+
+        // WHY : Assumptions: a single digit position must be admitted, so the zero-sum refusal is a
+        //       boundary. A signed field carries its sign inside its low-order digit, so one digit
+        //       position is genuinely sufficient and a guard written to require two would be wrong. The
+        //       admitted case is what distinguishes the two.
+        assertEquals(1, ZonedDecimalCodec.widthOf(1, NO_DEC_DIGITS),
+                "one integer digit and no fraction must declare a one-byte field");
+        assertEquals(1, ZonedDecimalCodec.widthOf(0, 1),
+                "one fractional digit and no integer part must also declare a one-byte field");
     }
 }

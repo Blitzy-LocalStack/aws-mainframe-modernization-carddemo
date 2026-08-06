@@ -16,17 +16,6 @@ import com.carddemo.common.money.Money;
  * permitted to hold them. The reference COBOL is the specification, so this shape encodes the field
  * set, the widths and the scale that specification already states rather than redefining them.
  *
- * <p><b>Return values, exceptions or errors.</b> A record declaration returns no value and raises
- * nothing, and the body below declares no member, so this docstring carries no {@code @return} and
- * no {@code @throws} at-clause. The inapplicability is declared rather than left silent, because
- * the Explainability rule lists a docstring that omits return values among its forbidden patterns
- * at line 39, and a reader has to be able to tell a declared inapplicability from an oversight. The
- * record's components are the parameters of its canonical constructor, so the parameters element of
- * that rule is answered by the four {@code @param} at-clauses below and not by a separate
- * paragraph. Nothing here declares a checked exception: a component is a carrier, and the
- * validation that can fail belongs to the request side of this package and to the shared error type
- * named further down.
- *
  * <p>The framing used throughout is the only one used: the baseline does one thing, the Java
  * implements another, and the divergence is documented in the migration traceability register
  * rather than introduced silently. The repository states the same discipline for its own suite at
@@ -277,16 +266,10 @@ import com.carddemo.common.money.Money;
  *
  * <h2>What is not used to build this type</h2>
  *
- * <p>Alternatives Considered: Lombok was evaluated and rejected because its generated accessors
- * cannot carry the Javadoc the Explainability rule requires at its line 15, and the repository
- * ruleset grants no exemption that would excuse a generated member -- the suppression file the
- * documentation gate loads limits itself to generated sources and test fixtures, so no suppression
- * is available to source under this directory at all. A Java 21 record gives the same brevity with
- * members that can be documented. MapStruct was rejected on a separate ground: mapping the
- * reference record onto the shapes in this package is not mechanical. It drops {@code FILLER},
- * masks the primary account number to its last four digits, suppresses a card verification value
- * entirely, encrypts protected identifiers and renames misspelled baseline fields, and each of
- * those needs a justification at the mapping site that a generated mapper has nowhere to hold.
+ * <p>Alternatives Considered: Lombok and MapStruct were both evaluated and both rejected for this
+ * package as a whole; {@code com.carddemo.transaction.dto}'s package charter carries the reasoning,
+ * which turns on generated members being undocumentable and on copybook-to-transfer-object mapping
+ * being non-mechanical. A Java 21 record with hand-written mapping is what replaces them.
  *
  * <p>Assumptions: this type imports no persistence entity from
  * {@code com.carddemo.transaction.domain} and nothing from a sibling service. The conversion from
@@ -299,7 +282,7 @@ import com.carddemo.common.money.Money;
  * so a constraint here would never be exercised; the request types in this package are where the
  * copybook widths become constraint values.
  *
- * <h2>Trade-offs accepted, and the rule this file is audited against</h2>
+ * <h2>Trade-offs accepted</h2>
  *
  * <p>Trade-offs: carrying record widths rather than display widths means this row can hold values
  * the reference terminal could not render, and it does so in three of its four components. The
@@ -311,14 +294,6 @@ import com.carddemo.common.money.Money;
  * was rejected because it would discard data the record demonstrably holds and would make this row
  * depend on which screen happened to ask for it, which is the coupling the display-order decision
  * above already declined.
- *
- * <p>Assumptions: one user-specified rule governs this migration, Explainability, and it does not
- * conflict with the repository's own convention or with the migration plan. The four rationale
- * categories it names at its lines 31 to 34 are the same four the house convention at
- * {@code tests/README.md} lines 544 to 549 already names, and that convention names the same
- * docstring quartet of purpose, parameters, returns and exceptions at its lines 545 and 546. No
- * resolution between them was necessary, and the labels above are written in the single accepted
- * form: plural, unparenthesised, colon-terminated and unemphasised.
  *
  * @param transactionId the key identifying this transaction, from
  *     {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, at the record's sixteen
@@ -341,13 +316,10 @@ import com.carddemo.common.money.Money;
 public record TransactionListItemResponse(
     String transactionId,
     String description,
-    // WHAT: the transaction amount, typed as the shared exact-decimal value rather than as a
-    //       general-purpose decimal or a primitive.
     // WHY : Assumptions: the shared Jackson module binds its serialiser to this exact type, so the
     //       declared type is what selects the quoted-string wire form. Substituting a bare decimal
     //       here compiles and runs and silently emits a JSON number instead.
     Money amount,
-    // WHAT: the originating instant, and the one of the record's two timestamps this row carries.
     // WHY : Assumptions: COTRN00C line 384 is what settles the choice -- the populating paragraph
     //       reads TRAN-ORIG-TS and never TRAN-PROC-TS, so the second timestamp has no place on a
     //       row derived from that paragraph. The value arrives already formatted from the mapper;

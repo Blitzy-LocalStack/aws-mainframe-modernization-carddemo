@@ -16,6 +16,8 @@
 #     requires it and the image supplies no default.
 #
 # Return values:
+#   The process status preserves three observable tiers, and the ENTRYPOINT below
+#   is what carries them out of the container unchanged:
 #   0 (integer): the selected job completed without rejects.
 #   4 (integer): the selected job completed and produced soft rejects.
 #   >= 8 (integer): argument validation, infrastructure, I/O, or job execution
@@ -39,7 +41,25 @@
 # WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
 #       Corretto vendor and Java 21 major version, preventing a class-file level
 #       or vendor-specific behavior from appearing only after the jar is shipped.
-FROM maven:3.9.16-amazoncorretto-21-al2023 AS build
+# WHY : Refactoring Rationale: the base is pinned by DIGEST and not by tag alone,
+#       because a tag is a mutable pointer. The tag below was observed resolving
+#       to two different multi-architecture indexes at two different times, so
+#       the tag alone does not identify a build input: two builds of this same
+#       commit can compile against two different JDK patch levels and produce two
+#       different jars, and a bisect over the source cannot see the difference.
+#       The digest makes the base an exact input, so a rebuild of a commit is a
+#       rebuild and not a re-resolution. It also means an upstream change is a
+#       reviewable edit to this line rather than something a rebuild absorbs
+#       silently, which is the supply-chain concern named CWE-1357.
+# WHY : Assumptions: the digest names the multi-architecture INDEX, not one
+#       platform's manifest, so the pin does not silently make this a single
+#       architecture build; the daemon still selects the manifest for the build
+#       platform. Pinning a platform manifest instead would break a build on the
+#       other architecture with a manifest-not-found error rather than an obvious
+#       message. The tag is retained beside the digest because the digest alone
+#       tells a reader nothing about what it is; the digest is what is enforced.
+#       The same convention is already applied at data-migration/Dockerfile.
+FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e282adf79d02fbd1ad3091ad0bb2feff1d7 AS build
 
 # WHY : Assumptions: mirroring the repository's services depth under /build keeps
 #       the parent's basedir-activated Checkstyle path valid in both the
@@ -60,12 +80,50 @@ COPY config/checkstyle /build/config/checkstyle
 #       common-lib and batch-service in its build-only module list; otherwise the
 #       intentionally absent service directories fail model loading before Maven
 #       can select the two permitted projects. The source parent POM is unchanged.
-RUN awk '/<modules>/{in_modules=1} \
-    in_modules && /<module>/ \
-    && $0 !~ /<module>common-lib<\/module>/ \
-    && $0 !~ /<module>batch-service<\/module>/{next} \
-    {print} \
-    /<\/modules>/{in_modules=0}' pom.xml > pom.xml.reactor \
+# WHY : Refactoring Rationale: the earlier form of this filter deleted ANY line
+#       inside <modules> that contained `<module>` and was not one of the two
+#       retained entries, and it counted nothing. Two failure modes followed from
+#       that, both silent. An XML comment mentioning a module - exactly the comment
+#       a maintainer would add to explain why a module is absent here - was deleted
+#       as if it were a module entry. And if either retained module were renamed,
+#       the filter would still succeed while emitting a POM that no longer declared
+#       it, so the failure surfaced later as an obscure `-pl` resolution error
+#       pointing at Maven rather than at this line. The rewrite below fixes both:
+#       comments are passed through verbatim, and the transformation ASSERTS its
+#       own outcome so a POM-shape change fails here, with the count that was
+#       wrong, instead of producing a plausible-looking wrong POM.
+# WHY : Assumptions: exactly two module entries must survive (common-lib and
+#       batch-service) and at least one must be dropped. The second assertion is
+#       what catches a source POM that has already been trimmed or that lists only
+#       these two modules - in that case this whole RUN is unnecessary, and
+#       discovering it here is better than carrying a no-op transformation.
+# WHY : Trade-offs: the awk program is longer and tracks a comment state machine
+#       rather than matching one line at a time. That cost buys a filter whose
+#       failure is always loud; a shorter filter that can silently emit a subtly
+#       wrong POM is the more expensive option once it does.
+RUN awk ' \
+    in_comment { print; if ($0 ~ /-->/) { in_comment = 0 } next } \
+    /<!--/ && $0 !~ /-->/ { print; in_comment = 1; next } \
+    /<!--/ { print; next } \
+    /<modules>/ { in_modules = 1; print; next } \
+    /<\/modules>/ { in_modules = 0; print; next } \
+    in_modules && /<module>/ { \
+      if ($0 ~ /<module>common-lib<\/module>/ \
+          || $0 ~ /<module>batch-service<\/module>/) { kept++; print } \
+      else { dropped++ } \
+      next \
+    } \
+    { print } \
+    END { \
+      if (kept != 2) { \
+        printf "pom trim: expected 2 retained <module> entries, kept %d\n", kept \
+          > "/dev/stderr"; exit 3 \
+      } \
+      if (dropped < 1) { \
+        printf "pom trim: expected >= 1 dropped <module> entry, dropped %d\n", \
+          dropped > "/dev/stderr"; exit 4 \
+      } \
+    }' pom.xml > pom.xml.reactor \
     && mv pom.xml.reactor pom.xml \
     && mvn -B -ntp -f pom.xml -pl common-lib,batch-service -am \
        dependency:go-offline
@@ -74,19 +132,45 @@ COPY services/common-lib/src ./common-lib/src
 COPY services/batch-service/src ./batch-service/src
 
 # WHY : Trade-offs: tests are skipped while packaging because
-#       .github/workflows/services-ci.yml and
-#       `mvn -f services/pom.xml clean verify` execute the unit and integration
-#       suites. Checkstyle remains bound to validate and runs before package, so
-#       the build-correctness documentation gate is retained rather than treated
-#       as a test. The process-status rubric never relaxes this binary Maven gate.
+#       .github/workflows/services-ci.yml runs both tiers before any image is
+#       built -- `mvn ... clean test` for the Surefire tier and
+#       `mvn ... test-compile failsafe:integration-test failsafe:verify` for the
+#       Failsafe tier. Assumptions: those are named as two commands rather than one
+#       because a whole-reactor `clean verify` does NOT reach either tier's
+#       assertion point -- it halts at spring-boot:repackage on the first module
+#       with no main class, before Failsafe executes -- so citing it as the command
+#       that "executes the suites" would have been false. Checkstyle remains bound
+#       to validate and runs before package, so the build-correctness documentation
+#       gate is retained here rather than treated as a test. The process-status
+#       rubric never relaxes this binary Maven gate.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,batch-service -am \
     clean package -DskipTests
 
 # WHY : Assumptions: the publisher provides no Alpine variant of this Corretto
-#       image; `21-alpine` does not resolve and would fail the build. Version
-#       21.0.12 is the highest published 21.x tag, and headless is selected
+#       image; `21-alpine` does not resolve and would fail the build. The
+#       selection criterion is the highest 21.x `al2023-headless` release the
+#       publisher offered when this pin was reviewed -- stated as a criterion
+#       rather than as a standing fact, because the publisher can add a newer
+#       21.x at any time and a claim that this tag is the highest would then be
+#       false without anything in this repository changing. Headless is selected
 #       because the batch process needs no AWT or graphics stack.
-FROM public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless AS runtime
+# WHY : Refactoring Rationale: pinned by digest for the reason given on the build
+#       stage above, and the drift it prevents is not hypothetical here: this tag
+#       was observed resolving to a different index from the one a local cache
+#       held, with different manifests for both amd64 and arm64. Unpinned, the
+#       runtime layer of this image is whatever the tag pointed at on the day of
+#       the build.
+# WHY : Assumptions: the digest is also what makes the HEALTHCHECK below sound.
+#       That command invokes /usr/bin/curl, which this image provides and which
+#       nothing in this file installs -- verified present in THIS digest, at
+#       curl 8.17.0. A base image is entitled to drop a utility between two
+#       resolutions of one tag, and if it did, the probe would fail on a missing
+#       binary while reporting an unhealthy container: the task would be replaced
+#       for a reason that has nothing to do with the job. Pinning the digest
+#       means the presence of that binary is a property of a reviewed input
+#       rather than of the registry's current state, so the two lines are
+#       verified together and must be changed together.
+FROM public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless@sha256:75f1cdabc3d8758f5499bf67046991bc7797e37156c7445f0048eb6d17c90dcf AS runtime
 
 # WHY : Alternatives Considered: installing shadow-utils solely for useradd and
 #       groupadd was rejected because the pinned minimal image omits those tools
@@ -127,7 +211,20 @@ USER carddemo:carddemo
 
 # WHY : Assumptions: the exact pinned headless runtime image contains
 #       /usr/bin/curl and does not contain wget, so the probe requires no package
-#       installation and fails explicitly on a non-success HTTP response.
+#       installation and fails explicitly on a non-success HTTP response. Both
+#       halves were verified by running the digest pinned above: curl 8.17.0 is
+#       present at that path and `command -v wget` finds nothing. The claim is
+#       tied to the digest and not to the tag, because a probe that names a binary
+#       the base no longer ships reports an unhealthy container for a reason
+#       unrelated to the job -- so this line and the runtime FROM line must be
+#       revisited together.
+# WHY : Assumptions: the probe addresses the LOOPBACK interface, which is not a
+#       stylistic choice about probes but the only address that answers. The
+#       server.address key of
+#       services/batch-service/src/main/resources/application.yml binds the
+#       listener to 127.0.0.1 so that nothing outside the task can reach it, and
+#       a probe naming the container's own routable address would therefore time
+#       out on a perfectly healthy task. The two settings are one decision.
 # WHY : Trade-offs: a periodic health check is unusual for a run-to-completion
 #       task because a correctly finished process has no steady healthy state.
 #       It is retained because the service-image contract mandates one and the
@@ -139,8 +236,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
          "--max-time", "4", "--output", "/dev/null", \
          "http://127.0.0.1:8080/actuator/health"]
 
-# WHAT: The process status preserves three observable tiers: 0 is clean, 4 is a
-#       completed run with rejects, and 8 or greater is a hard failure.
 # WHY : Refactoring Rationale: app/cbl/CBTRN02C.cbl:229-230 produces the warn
 #       tier with `MOVE 4 TO RETURN-CODE`; app/jcl/TRANBKP.jcl:51 consumes the
 #       threshold as `COND=(4,LT)`. JCL expresses a SKIP predicate, so the step

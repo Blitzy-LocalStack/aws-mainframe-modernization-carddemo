@@ -5,8 +5,21 @@ const ACCESS_TOKEN_STORAGE_KEY = "carddemo.access-token";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 60_000;
-const DEFAULT_CORRELATION_HEADER = "X-Correlation-ID";
+const DEFAULT_CORRELATION_HEADER = "X-Correlation-Id";
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
+
+/**
+ * Bytes of entropy each generated correlation identifier carries.
+ *
+ * Assumptions: twelve, because the identifier is rendered two hexadecimal characters per byte and
+ * the services accept at most twenty-four characters. That bound is not a preference here: it is
+ * `CORRELATION_ID_MAX_LENGTH` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, and a
+ * longer value is refused with HTTP 400 before any handler runs. Twelve bytes is also exactly what
+ * that filter uses when it mints one itself, so a request the browser named and a request the
+ * service named are indistinguishable in shape.
+ */
+const CORRELATION_ID_ENTROPY_BYTES = 12;
 
 let client: AxiosInstance | undefined;
 
@@ -97,6 +110,43 @@ function correlationHeaderName(): string {
 }
 
 /**
+ * Mints one request correlation identifier in the shape the services accept.
+ *
+ * Refactoring Rationale: this replaces `crypto.randomUUID()`, whose value is thirty-six characters
+ * long — thirty-two hexadecimal digits and four hyphens. The shared correlation filter accepts at
+ * most twenty-four, so EVERY request this client sent was refused with HTTP 400 before reaching a
+ * handler, and the failure was invisible to both builds because a header value is a string on each
+ * side. Twenty-four upper-case hexadecimal characters over twelve random bytes is the exact
+ * construction that filter uses when it mints one itself, so the two are interchangeable.
+ *
+ * Alternatives Considered: truncating a UUID to twenty-four characters, which would have been a
+ * one-line change. Rejected because a truncated UUID still carries a hyphen at position nine and
+ * would silently lose the four bits of version and two bits of variant that make a UUID a UUID —
+ * producing a value that looks like an identifier of a kind it is not. Generating the bytes
+ * directly says what it is.
+ *
+ * Alternatives Considered: omitting the header entirely and letting the service mint the value,
+ * which the contract explicitly permits. Rejected because the response identifier would then be the
+ * only record of the request, so a browser-side failure before the response arrived — a timeout, an
+ * aborted navigation — would leave nothing to quote to support.
+ * @returns {string} Exactly twenty-four upper-case hexadecimal characters.
+ */
+function newCorrelationId(): string {
+  const entropy = new Uint8Array(CORRELATION_ID_ENTROPY_BYTES);
+  crypto.getRandomValues(entropy);
+  return Array.from(
+    entropy,
+    /**
+     * Renders one byte as two upper-case hexadecimal characters.
+     * @param {number} byte - One byte of entropy, 0 through 255.
+     * @returns {string} Its two-character upper-case hexadecimal rendering, zero-padded so that
+     *   every byte contributes exactly two characters and the total length is fixed.
+     */
+    (byte: number): string => byte.toString(16).toUpperCase().padStart(2, "0"),
+  ).join("");
+}
+
+/**
  * Adds the short-lived access token and a fresh request correlation identifier.
  * @param {InternalAxiosRequestConfig} config - Axios request configuration being dispatched.
  * @returns {InternalAxiosRequestConfig} The same configuration with bounded security headers
@@ -109,7 +159,7 @@ function applyRequestHeaders(
   if (token !== null && token.length > 0) {
     config.headers.set("Authorization", `Bearer ${token}`);
   }
-  config.headers.set(correlationHeaderName(), crypto.randomUUID());
+  config.headers.set(correlationHeaderName(), newCorrelationId());
   return config;
 }
 

@@ -193,8 +193,33 @@ reviewable.
 Assumptions: the guarantee this buys is **bounded**. The deduplication interval
 is five minutes, so a duplicate arriving after it lapses is accepted as a new
 message. The queue is a first line of defence and not the system of record for
-idempotency — the durable backstop is the database, which is where a replayed
-transaction identifier is ultimately rejected.
+idempotency — the durable backstop is the database.
+
+**What the durable backstop actually enforces**, stated exactly, because the
+difference from a looser reading of it decides whether a replay is rejected or
+silently posted twice. The consumer's schema declares
+`transaction_id` **NOT NULL** and carries the unique constraint
+`uq_pending_auth_detail_card_transaction` over the **composite**
+`(card_num, transaction_id)`, in
+[`V1__authorization.sql`](../../../services/authorization-service/src/main/resources/db/migration/V1__authorization.sql),
+and the consumer's replay lookup queries by that same composite. So:
+
+* a redelivery of the same transaction identifier **for the same card** is
+  rejected durably, past the five-minute window and across consumer restarts;
+* the same transaction identifier **for a different card** is accepted, and that
+  is correct rather than a gap — the identifier is only unique within its
+  originating terminal's stream, and the message group that preserves ordering is
+  the card number for the same reason.
+
+Refactoring Rationale: this paragraph previously said only that a replayed
+transaction identifier is "ultimately rejected", naming no constraint. At the time
+it was written the column was neither `NOT NULL` nor unique nor indexed, so the
+guarantee it described did not exist at all — a queue-tuning document was carrying
+the load-bearing claim for a correctness property that nothing enforced. It now
+names the constraint and the exact key, so the claim can be checked against the
+migration rather than believed, and it names the composite rather than the
+identifier alone, because a reader who assumed a single-column key would conclude
+that a cross-card replay was a defect.
 
 **The interdependent pair.** `deduplication_scope = "messageGroup"` and
 `fifo_throughput_limit = "perMessageGroupId"` are set together on both FIFO

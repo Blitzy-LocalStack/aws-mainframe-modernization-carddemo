@@ -2,32 +2,66 @@
 # services/auth-service/src/main/resources/openapi/auth-api.yaml
 # -----------------------------------------------------------------------------
 # Purpose: this document is the committed OpenAPI 3.1 contract of record for the
-#       CardDemo auth bounded context. It is the artifact ui/src/api/auth.ts is
-#       written against, and the document springdoc serves at /v3/api-docs from
-#       this service's live controllers must agree with it. A difference between
-#       the two is a defect in whichever one moved; it is not a tolerated
-#       variation and it is not something to reconcile at runtime. The contract
-#       covers six operations: the sign-on token exchange migrated from
-#       app/cbl/COSGN00C.cbl, and the four user-administration operations
-#       migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and
-#       COUSR03C.cbl, whose shared list view contributes the fifth.
+#       CardDemo auth bounded context. Everything that touches this context is
+#       written against it rather than against a reading of the baseline, and when
+#       controllers exist here the document springdoc serves at /v3/api-docs must
+#       agree with it. A difference between the two is a defect in whichever one
+#       moved; it is not a tolerated variation and it is not something to reconcile
+#       at runtime. Landed at this checkpoint: config/SecurityConfig.java, which
+#       enforces the authority each operation below declares, and
+#       config/AuthApiContractTest.java, which asserts the two against each other.
+#       Planned and NOT yet authored: the browser client ui/src/api/auth.ts and
+#       every controller, request shape, response shape and mapper of this module -
+#       so no operation below is served yet, and a reader should not expect to find
+#       a Java type implementing one. The contract
+#       covers seven operations: the sign-on token exchange migrated from
+#       app/cbl/COSGN00C.cbl, the challenge exchange that completes it for a
+#       user whose password is temporary, and the four user-administration
+#       operations migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl,
+#       COUSR02C.cbl and COUSR03C.cbl, whose shared list view contributes the
+#       fifth of those.
+#
+# Structure: purpose for every top-level block is stated here, in the one place a
+#       format with no docstring construct has available, so that each block below
+#       carries rationale and nothing else.
+#       - servers: the single server entry, declared as a substitutable variable
+#         rather than as any environment's address.
+#       - security: the bearer scheme, applied to every operation by default.
+#       - paths: the six operations of this context, in the order a user meets
+#         them -- sign on, list users, create one, read one, update one, delete
+#         one.
+#       - components.securitySchemes: the single authentication scheme every
+#         operation but sign-on requires.
+#       - components.headers: the response header every operation returns,
+#         declared once.
+#       - components.responses: the two error responses that are identical across
+#         all five user-administration operations.
+#       - components.schemas: the payload shapes of this context -- six of its own,
+#         and five that mirror types the shared kernel owns -- among them the error
+#         body every failing operation returns together with the two nested shapes
+#         it carries.
 #
 # WHY (non-obvious design decisions):
-#       (1) Assumptions: the comment conventions in this file. Header and block
-#       preambles use the aligned "# WHAT:" / "# WHY :" pair whose continuation
-#       lines indent to the marker plus seven spaces, so both colons sit in one
-#       column and a body reads as one paragraph. Rationale attached to a single
-#       element instead uses a labelled comment at that element's own
-#       indentation, continued at the marker plus three spaces, matching the
-#       sibling application.yml and db/migration/V1__auth.sql in this same
-#       resources tree. Two conventions rather than one is deliberate: the wide
-#       indent marks a block-level statement and the narrow one marks a remark
-#       about the key beneath it, so a reader can tell the scope of a comment
+#       (0) Assumptions: components.parameters declares one entry, the correlation
+#       header every operation accepts, referenced rather than re-typed at each
+#       operation.
+#       (1) Assumptions: the comment conventions in this file. Purpose is stated
+#       once, in this header block, which is the analogue of a docstring for a
+#       format that has none; no statement-level "# WHAT:" comment sits above any
+#       key below. Rationale attached to a single element uses a labelled comment
+#       at that element's own indentation, continued at the marker plus three
+#       spaces, matching the sibling application.yml and db/migration/V1__auth.sql
+#       in this same resources tree, while a block-level statement continues at the
+#       marker plus seven spaces so that a reader can tell the scope of a comment
 #       from its shape alone. Only four rationale labels appear anywhere in this
 #       file -- Alternatives Considered, Refactoring Rationale, Assumptions and
 #       Trade-offs -- because those are the four the project's Explainability
 #       rule enumerates, and mixing in a variant spelling would make the set
-#       unsearchable.
+#       unsearchable. Trade-offs: describing each block up here costs the reader a
+#       jump from a block back to the header, and buys the removal of a line above
+#       every block that restated the key beneath it, which the "The `# WHAT:` /
+#       `# WHY :` idiom -- prose command blocks only" section of
+#       docs/CODE_DOCUMENTATION_STANDARD.md forbids outright in a .yaml file.
 #       (2) Refactoring Rationale: the five user-administration operations are
 #       published under /api/v1/auth/users rather than under a top-level
 #       /api/v1/users collection, and this is the one place this contract's paths
@@ -46,18 +80,28 @@
 #       provisioned environment does not permit. Every method, authority, schema
 #       and message text below is exactly as specified; only the reachable prefix
 #       is used.
-#       (3) Trade-offs: exactly six operations are contracted here, while the
-#       edge additionally publishes POST /api/v1/auth/challenge and
-#       POST /api/v1/auth/refresh as pre-token routes -- the closed set validated
-#       at infra/modules/api-gateway-http/variables.tf lines 683 to 690. Those
-#       two are deliberately outside this document, because the sign-on
-#       challenge and token-renewal flows are a separate contract with their own
-#       request and reply shapes, and describing them from the route key alone
-#       would put a guess into the artifact the browser client is generated from.
-#       The cost is that this document is not the whole edge surface for /auth;
-#       the gain is that everything it does describe is derived from a migrated
-#       program rather than inferred. The omission is recorded here so a reader
-#       comparing this file against the route table sees a decision rather than
+#       (3) Refactoring Rationale: POST /api/v1/auth/challenge IS contracted
+#       here, and an earlier revision of this document left it out on the ground
+#       that "describing them from the route key alone would put a guess into the
+#       artifact the browser client is generated from". That reasoning had a hole
+#       in it: the challenge is not an optional extra flow but the FIRST thing
+#       every provisioned user does, because the infrastructure seeds each user
+#       with a temporary password (infra/modules/cognito/variables.tf,
+#       temporary_password_validity_days), and the earlier revision routed that
+#       outcome to 500 -- so the omission did not leave a flow undescribed, it
+#       left the system unusable and reported the fact as a server fault. Nor was
+#       the shape a guess: it is the pool's own documented challenge exchange, and
+#       its members are named on SignOnChallenge and SignOnChallengeRequest below.
+#       POST /api/v1/auth/refresh REMAINS outside this document, and that omission
+#       is a decision rather than an oversight: token renewal is reachable without
+#       having signed on in this exchange at all, its shape is the pool's refresh
+#       grant rather than anything migrated from a baseline program, and no
+#       operation in this document consumes or returns a refresh token beyond
+#       handing one to the caller. The two are the pre-token keys validated at
+#       infra/modules/api-gateway-http/variables.tf. The cost is that this
+#       document is still not the whole edge surface for /auth; the omission is
+#       recorded here so a reader comparing this file against the route table sees
+#       a decision rather than
 #       an oversight.
 #       (4) Refactoring Rationale: no password is carried anywhere except the
 #       sign-on request, which forwards it to the identity provider and keeps
@@ -137,8 +181,10 @@ info:
     registered as CC00, CU00, CU01, CU02 and CU03
     (app/csd/CARDDEMO.CSD lines 378, 449, 459, 469 and 479). Sign-on exchanges a
     user identifier and password for tokens minted by the configured Cognito
-    user pool; the remaining five operations administer the rows of the auth
-    schema's users table and are restricted to the carddemo-admin authority.
+    user pool, or returns the challenge a temporary password raises, which the
+    challenge operation answers; the remaining five operations administer the rows
+    of the auth schema's users table and are restricted to the carddemo-admin
+    authority.
     Pseudo-conversational state is gone: no operation accepts or returns a
     communication area, identity is read from the signed token on every request,
     and the selected user travels in the request path.
@@ -146,8 +192,6 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
 
-# WHAT: declare the single server entry as a substitutable variable rather than
-#       as any environment's address.
 # WHY : (1) Assumptions: the edge address is a Terraform output consumed at
 #       deploy time, never a value committed to source -- no service hard-codes
 #       an endpoint. The browser client resolves the same origin from its own
@@ -176,15 +220,16 @@ servers:
 tags:
   - name: Sign-On
     description: >-
-      The token exchange migrated from app/cbl/COSGN00C.cbl. Reachable without a
-      token, because it is the operation that issues one.
+      The token exchange migrated from app/cbl/COSGN00C.cbl, together with the
+      challenge exchange that completes it for a user whose password is
+      temporary. Both are reachable without a token, because between them they are
+      the operations that issue one, and both carry x-required-authority none.
   - name: User Administration
     description: >-
       List, create, read, update and delete over the auth schema's users table,
       migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and
-      COUSR03C.cbl. Every operation requires the carddemo-admin authority.
+      COUSR03C.cbl. Every operation carries x-required-authority carddemo-admin.
 
-# WHAT: apply the bearer scheme to every operation by default.
 # WHY : Assumptions: a document-level default makes the unauthenticated
 #       operation the explicit exception rather than the silent norm, so an
 #       operation added later without a security block inherits the
@@ -194,8 +239,46 @@ tags:
 security:
   - bearerAuth: []
 
-# WHAT: the six operations of this context, in the order a user meets them --
-#       sign on, list users, create one, read one, update one, delete one.
+# WHY : Refactoring Rationale: the authority each operation requires is declared
+#       as a MACHINE-READABLE field on the operation, and an earlier revision of
+#       this document declared it in prose and in a tag name only. Five of the six
+#       operations here say "Requires the carddemo-admin authority" in their
+#       description, and nothing could read that: a generator, a gateway or a
+#       linter saw five ordinary authenticated routes indistinguishable from any
+#       other, so the administrative restriction was an assertion rather than a
+#       contract. Every operation now carries x-required-authority, and
+#       AuthApiContractTest asserts that the value on each one agrees with the
+#       authority SecurityConfig enforces for the path it sits on, so the two
+#       cannot drift apart while both continue to compile.
+# WHY : Alternatives Considered: expressing the authority as a security-scheme
+#       scope, by writing `security: [{bearerAuth: [carddemo-admin]}]` on each
+#       administrative operation. Rejected because the specification requires the
+#       scope list to be EMPTY for a scheme that is not oauth2 or openIdConnect,
+#       and bearerAuth is `type: http`, so a populated list there is invalid and a
+#       validating tool would reject or ignore it. Re-declaring the scheme as
+#       oauth2 purely to gain a scope list was rejected in turn, because these
+#       values are Cognito GROUP names carried in a cognito:groups claim rather
+#       than OAuth scopes, and publishing them as scopes would state something
+#       untrue about how the token is issued.
+# WHY : Assumptions: three values are admitted and no more. carddemo-admin and
+#       carddemo-user are exactly the two group names the shared token converter
+#       recognises, ADMIN_AUTHORITY and USER_AUTHORITY in
+#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
+#       which are the migrated form of the two SEC-USR-TYPE values 'A' and 'U' at
+#       app/cpy/CSUSR01Y.cpy line 22. The third value, none, marks an operation
+#       reachable without a token and exists so that an unauthenticated operation
+#       is stated rather than inferred from an absent field -- an omitted field and
+#       a deliberately open operation would otherwise look identical.
+x-authority-model:
+  field: x-required-authority
+  values:
+    - none
+    - carddemo-user
+    - carddemo-admin
+  enforcedBy: >-
+    services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java
+  assertedBy: >-
+    services/auth-service/src/test/java/com/carddemo/auth/config/AuthApiContractTest.java
 # WHY : (1) Assumptions: each operation is stateless. The baseline carried
 #       continuity between screen turns in the communication area declared at
 #       app/cpy/COCOM01Y.cpy lines 19 to 44, and that structure decomposes into
@@ -228,6 +311,10 @@ security:
 paths:
 
   /api/v1/auth/signon:
+    description: >-
+      The credential exchange. It is the only path in this document reachable
+      without a bearer token, because it is the path that issues one, and the edge
+      publishes it as an unauthenticated route.
 
     post:
       tags: [Sign-On]
@@ -256,29 +343,53 @@ paths:
         distinction is given up deliberately because the pool is configured to
         return uniform user-existence errors.
       security: []
+      x-required-authority: none
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         required: true
         description: >-
-          The two credential fields of the sign-on screen, at the widths the
-          symbolic map declares.
+          The two credential fields of the sign-on screen.
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/SignOnRequest"
       responses:
         "200":
+          # Refactoring Rationale: this status carries TWO shapes, and an earlier
+          #   revision of this document declared one. The pool answers an initial
+          #   authentication with either a token set or a challenge, and the
+          #   earlier revision had nowhere for the second to go, so it was reported
+          #   as 500 -- which meant the first sign-on of every seeded user, whose
+          #   password is temporary by construction, reported a server fault. Both
+          #   outcomes are 200 because in both the credential was ACCEPTED: the
+          #   difference is whether tokens were issued, not whether the caller was
+          #   recognised, and 401 would tell a caller its credential was wrong when
+          #   it was right.
+          # Assumptions: the two are discriminated by a required outcome member
+          #   rather than by which members are present, so a client branches on a
+          #   value it can read rather than on an absence it has to infer.
           description: >-
-            The credential was accepted. The body carries the tokens the pool
-            minted and the identifier they were minted for; the caller sends the
-            access token as a bearer token on every other operation in this
-            document.
+            The credential was accepted. The body carries either the tokens the
+            pool minted, with outcome AUTHENTICATED, or a challenge the caller must
+            answer before tokens will be issued, with outcome CHALLENGE. On the
+            first, the caller sends the access token as a bearer token on every
+            other operation in this document; on the second, it calls the challenge
+            operation.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SignOnResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SignOnResponse"
+                  - $ref: "#/components/schemas/SignOnChallenge"
+                discriminator:
+                  propertyName: outcome
+                  mapping:
+                    AUTHENTICATED: "#/components/schemas/SignOnResponse"
+                    CHALLENGE: "#/components/schemas/SignOnChallenge"
         "400":
           # Assumptions: this status covers the two presence checks the baseline
           #   performs before it reads the file, at app/cbl/COSGN00C.cbl lines
@@ -299,7 +410,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -331,7 +442,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "500":
@@ -340,10 +451,17 @@ paths:
           #   not-found, so it is the arm an infrastructure fault arrives on
           #   rather than a credential fault. Its migrated counterpart is any
           #   provider or integration failure -- the pool being unreachable, the
-          #   request signature being rejected, a challenge the flow cannot
-          #   complete -- and it deliberately does not reuse the 401 message,
-          #   because telling a caller its password was wrong when the pool was
-          #   simply unreachable would send it to reset a working credential.
+          #   request signature being rejected, or a challenge OTHER than
+          #   NEW_PASSWORD_REQUIRED, which this flow genuinely cannot complete --
+          #   and it deliberately does not reuse the 401 message, because telling a
+          #   caller its password was wrong when the pool was simply unreachable
+          #   would send it to reset a working credential.
+          # Refactoring Rationale: NEW_PASSWORD_REQUIRED no longer arrives here.
+          #   An earlier revision of this document reported it as this status,
+          #   which made the first sign-on of every seeded user a server fault and
+          #   left no path to a permanent password; it is now the 200 above,
+          #   carrying the challenge shape, because the credential was in fact
+          #   accepted.
           description: >-
             The credential could not be evaluated. The message is
             "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254). The
@@ -354,7 +472,206 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/auth/refresh:
+    description: >-
+      Renewal of an expiring token set from the refresh token sign-on issued. It is
+      pre-token by nature: the access token it renews may already have expired.
+
+    post:
+      tags: [Sign-On]
+      operationId: refreshTokens
+      summary: Exchange a refresh token for a new token set.
+      description: >-
+        Submits the identifier and the refresh token a previous sign-on returned,
+        and returns a new token set. It exists so that a session outlives one access
+        token lifetime without the user re-entering a credential; the baseline had
+        no counterpart, because a CICS sign-on lasted as long as the terminal
+        session did.
+
+
+        It carries no bearer token because the token it would carry is the one being
+        renewed, and a caller whose access token has already expired must still be
+        able to renew.
+      security: []
+      x-required-authority: none
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        required: true
+        description: >-
+          The identifier the tokens were issued for and the refresh token to renew
+          them with.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRefreshRequest"
+      responses:
+        "200":
+          # Assumptions: the renewed set carries a null refreshToken, because the
+          #   pool does not reissue one on renewal: the caller keeps the token it
+          #   already holds until that token itself expires. The property is nullable
+          #   on the shared shape precisely so this operation can return the same
+          #   schema without a second, nearly identical one.
+          description: >-
+            The refresh token was accepted. The body is the same token set shape
+            sign-on returns, carrying a new access token and identity token and a
+            null refreshToken.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignOnResponse"
+        "400":
+          description: >-
+            A submitted field was absent or blank. The fieldErrors array carries one
+            entry per offending field, keyed userId or refreshToken.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: >-
+            The refresh token was expired, revoked, or not issued to the identifier
+            supplied. The caller signs on again; no distinction between the three is
+            reported, for the same non-disclosure reason sign-on gives.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The renewal could not be evaluated. The message is
+            "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254) and the
+            body never carries a provider diagnostic.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+
+  # Assumptions: this path is the one the edge already publishes. It is the second
+  #   of the three deliberately unauthenticated route keys in
+  #   infra/modules/api-gateway-http/variables.tf, so the gateway forwards it with
+  #   no authorizer attached, and it must be unauthenticated for the same reason
+  #   sign-on is: a caller answering a challenge has no token yet, that being what
+  #   the exchange exists to obtain.
+  /api/v1/auth/challenge:
+
+    post:
+      tags: [Sign-On]
+      operationId: answerSignOnChallenge
+      summary: Set a permanent password in answer to a sign-on challenge.
+      description: >-
+        Completes a sign-on that returned outcome CHALLENGE with challengeName
+        NEW_PASSWORD_REQUIRED, by setting the permanent password the pool is asking
+        for and returning the token set the sign-on could not issue.
+
+
+        This operation has no baseline counterpart, and that is stated rather than
+        papered over: the reference sign-on compared a stored eight-character
+        password directly at app/cbl/COSGN00C.cbl lines 211 to 256 and had no
+        notion of a credential that must be changed before use, so no message
+        literal is carried across here and none of the three sign-on sentences is
+        reused. It exists because the credential moved to a managed user pool whose
+        seeded users are provisioned with temporary passwords, which makes this
+        exchange the FIRST thing every provisioned user does. The divergence is
+        registered as D-PASSWORD-CHALLENGE in
+        docs/architecture/cobol-to-service-traceability.md, and it follows from the
+        entry D-4 there, which records the plaintext credential field not being
+        carried forward.
+
+
+        It is idempotent in neither direction and must not be retried blindly: the
+        session value is single-use, so a repeat with the same session is refused
+        and a fresh sign-on is required.
+      security: []
+      x-required-authority: none
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        required: true
+        description: >-
+          The session value from the challenge body, the identifier it was raised
+          for, and the permanent password to set.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignOnChallengeRequest"
+      responses:
+        "200":
+          # Assumptions: this returns the AUTHENTICATED shape only, never the
+          #   challenge shape, so it cannot loop. The pool issues tokens once the
+          #   new password is accepted, and a second challenge would mean a
+          #   configuration this contract does not publish -- reported as 500 below
+          #   rather than returned as another challenge a client would have no
+          #   defined way to answer.
+          description: >-
+            The password was set and the pool issued tokens. The body is the same
+            shape a challenge-free sign-on returns, carrying outcome AUTHENTICATED.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignOnResponse"
+        "400":
+          description: >-
+            A submitted field was absent, or the proposed password was refused by
+            the pool's password policy. The fieldErrors array names the offending
+            field -- userId, session or newPassword -- and for a policy refusal the
+            entry carries the pool's own reason rather than a restatement of the
+            policy, because the policy is configured in the pool and this contract
+            does not hold a second copy of it.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          # Trade-offs: an expired, altered, already-used or mismatched session all
+          #   reach this one status with one message. Distinguishing them would tell
+          #   an unauthenticated caller which of the four it had, and the remedy is
+          #   the same in every case: sign on again.
+          description: >-
+            The session could not be accepted -- it has expired, has already been
+            used, was altered, or was not issued for the identifier supplied. The
+            body names no reason beyond that, and the remedy is to sign on again.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The exchange could not be evaluated -- the pool was unreachable, the
+            request signature was rejected, or the pool raised a further challenge
+            this flow does not publish a contract for. The body carries a
+            correlation identifier and never a provider diagnostic.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
@@ -371,7 +688,7 @@ paths:
         authority. A page holds at most ten rows and that size is set by the
         contract rather than chosen by the caller. Paging is by key in one
         direction at a time: send no cursor for the first page, then send the
-        lastKey of the page you hold to move forward or its firstKey to move
+        nextCursor of the page you hold to move forward or its prevCursor to move
         back, with direction naming which of the two you sent.
 
 
@@ -379,13 +696,16 @@ paths:
         lands on the last page returns 200 with hasNext false, and a request that
         cannot move at all -- because the caller asked to go back from the first
         page or forward from the last -- returns 200 with the boundary page
-        unchanged and the relevant availability indicator false. The baseline
+        unchanged and the cursor for the direction travelled absent, or hasNext
+        false when that direction was forward. The baseline
         distinguished these two situations by message and this contract keeps
         them distinguishable by response: an arrival moved and reports a boundary,
         whereas a refused move returns the page the caller already had.
       security:
         - bearerAuth: []
+      x-required-authority: carddemo-admin
       parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
         # Alternatives Considered: positioning a page by an ordinal or a row
         #   offset, which is the obvious shape and is rejected on a specific
         #   defect. Under concurrent insertion the number of rows preceding a
@@ -411,27 +731,26 @@ paths:
         #   Its shape is a version marker, a payload and a code separated by
         #   periods; treat it as text to be echoed unchanged and never parse or
         #   construct one.
-        - name: lastKey
-          in: query
-          required: false
-          description: >-
-            Sealed cursor identifying the last row of the page the caller
-            currently holds, echoed back verbatim from that page's lastKey to
-            move forward. Omit it for the first page. Send it only with direction
-            next; sending both cursors at once is rejected because the two name
-            opposite ends and only one can be the position to read from.
-          schema:
-            $ref: "#/components/schemas/CursorToken"
-        - name: firstKey
-          in: query
-          required: false
-          description: >-
-            Sealed cursor identifying the first row of the page the caller
-            currently holds, echoed back verbatim from that page's firstKey to
-            move back. Omit it for the first page. Send it only with direction
-            previous.
-          schema:
-            $ref: "#/components/schemas/CursorToken"
+        # Refactoring Rationale: ONE cursor parameter, and an earlier revision of
+        #   this document declared two -- named lastKey and firstKey, which are
+        #   also the names of the page envelope's two ROW IDENTITIES, while its
+        #   two paging POSITIONS are named nextCursor and prevCursor. Naming the
+        #   inputs after the identities invited a client to page from the wrong
+        #   members, and on a page whose rows were all removed by a filter after
+        #   being read the identities are null while the positions are not, so
+        #   that client would have seen no cursor and stopped paging on a page
+        #   that had a successor. One input named cursor cannot name the wrong
+        #   member. It also makes this document agree with the card and
+        #   transaction contracts, which declare the same single parameter, so
+        #   there is one paging shape across this migration rather than three.
+        # Assumptions: the direction is carried in the SEAL of each token as well
+        #   as in the direction parameter, so replaying the previous-page position
+        #   with direction next cannot silently answer with the wrong page: the
+        #   token fails to open and the request is refused with 400. That is what
+        #   makes a single parameter as safe as two named ones while removing the
+        #   both-supplied and mismatched-pair cases two parameters had to define
+        #   errors for.
+        - $ref: "#/components/parameters/Cursor"
         # Alternatives Considered: accepting a page number, which the baseline
         #   screen genuinely had and which this contract still refuses. The field
         #   exists as PAGENUMI PIC X(8) at app/cpy-bms/COUSR00.CPY line 60 and as
@@ -444,18 +763,8 @@ paths:
         #   cannot be honoured by a key-positioned query without enumerating every
         #   row ahead of the cursor -- which is the enumeration this design exists
         #   to avoid.
-        - name: direction
-          in: query
-          required: false
-          description: >-
-            Which cursor was supplied and therefore which way to read: next reads
-            keys strictly greater than lastKey in ascending order, previous reads
-            keys strictly less than firstKey in descending order. Defaults to
-            next, which with no cursor supplied returns the first page.
-          schema:
-            type: string
-            enum: [next, previous]
-            default: next
+        - $ref: "#/components/parameters/PagingDirection"
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       responses:
         "200":
           # Assumptions: a cursor naming a row that no longer exists is NOT a
@@ -481,8 +790,9 @@ paths:
           #   app/cbl/COUSR00C.cbl and none carries a space before its ellipsis.
           #   The two classes stay distinguishable in the response rather than by
           #   message: a guard returns the same page the caller already held, while
-          #   an arrival returns a different page whose availability indicator for
-          #   the direction travelled is now false.
+          #   an arrival returns a different page which no longer offers the
+          #   direction travelled -- hasNext false going forward, or no firstKey
+          #   going back.
           # Alternatives Considered: returning these five as the response message
           #   so the browser could display them without deciding which applies.
           #   Rejected because a caller can already tell the five apart from the
@@ -494,9 +804,9 @@ paths:
           #   migrated system lives.
           description: >-
             One page of at most ten rows in ascending user-identifier order,
-            together with the two cursors for continuing in either direction and
-            the two availability indicators. An exhausted or fully filtered page
-            carries an empty items array rather than an error.
+            together with the two boundary cursors for continuing in either
+            direction and the forward availability indicator. An exhausted or fully
+            filtered page carries an empty items array rather than an error.
 
 
             This status also covers both boundary situations the baseline reported
@@ -504,8 +814,8 @@ paths:
             already at that end returns the page it already held -- the baseline's
             "You are already at the top of the page..." and
             "You are already at the bottom of the page...". A move that happened
-            and landed on an end returns the new page with that direction's
-            indicator false -- the baseline's
+            and landed on an end returns the new page no longer offering that
+            direction -- the baseline's
             "You are at the top of the page...",
             "You have reached the bottom of the page..." and
             "You have reached the top of the page...". Neither situation is an
@@ -529,7 +839,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -550,7 +860,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
@@ -577,6 +887,9 @@ paths:
         failed is knowledge only this service has.
       security:
         - bearerAuth: []
+      x-required-authority: carddemo-admin
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         required: true
         description: >-
@@ -627,7 +940,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -658,7 +971,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "500":
@@ -670,12 +983,15 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
 
   /api/v1/auth/users/{userId}:
+    description: >-
+      One user row addressed by its eight-character identifier: read, replaced or
+      deleted. Every operation on it requires the carddemo-admin authority.
 
     # Assumptions: the selected user travels in the path on all three operations
     #   below, which is what replaces the baseline's input field on the screen
@@ -711,6 +1027,9 @@ paths:
         before-image across a screen turn on this file.
       security:
         - bearerAuth: []
+      x-required-authority: carddemo-admin
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       responses:
         "200":
           description: >-
@@ -733,7 +1052,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -749,7 +1068,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "500":
@@ -761,7 +1080,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
@@ -794,6 +1113,9 @@ paths:
         for the reason given on the create operation.
       security:
         - bearerAuth: []
+      x-required-authority: carddemo-admin
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         required: true
         description: >-
@@ -850,7 +1172,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -865,7 +1187,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "500":
@@ -876,7 +1198,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
@@ -898,7 +1220,9 @@ paths:
         204 carries no body at all.
       security:
         - bearerAuth: []
+      x-required-authority: carddemo-admin
       parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
         # Refactoring Rationale: the baseline made deleting a two-step act. Its
         #   load arm read the record and then invited a second, different
         #   keystroke -- "Press PF5 key to delete this user ..." in neutral at
@@ -910,6 +1234,8 @@ paths:
         #   affirmative parameter reconstructs the two-step act from the
         #   information a single request carries -- the caller must have decided
         #   to delete in order to have sent it.
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+
         # Alternatives Considered: carrying the confirmation in a request body,
         #   which was rejected because a body on DELETE has no defined semantics
         #   and intermediaries are permitted to drop it, so the safeguard could
@@ -952,7 +1278,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
@@ -967,7 +1293,7 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "500":
@@ -993,14 +1319,13 @@ paths:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
 
 components:
 
-  # WHAT: the single authentication scheme every operation but sign-on requires.
   # WHY : (1) Assumptions: authority comes from the signed cognito:groups claim
   #       and from nothing else. The shared kernel's JwtRoleConverter reads that
   #       claim and grants carddemo-admin for the baseline's 'A' user type and
@@ -1042,7 +1367,6 @@ components:
         carddemo-admin or carddemo-user -- and never from anything the caller
         supplies in the request.
 
-  # WHAT: the response header every operation returns, declared once.
   # WHY : Assumptions: the shared kernel's correlation filter names this header on
   #       both directions of every request and also places the value in the
   #       logging context, so a caller reporting a problem can quote one
@@ -1061,10 +1385,80 @@ components:
         diagnostic code.
       required: true
       schema:
-        type: string
-        maxLength: 24
+        $ref: "#/components/schemas/CorrelationId"
 
+  # WHY : Assumptions: the shared kernel's correlation filter reads this header on
+  #       the way in and echoes it on the way out, so a caller that already has an
+  #       identity for the unit of work it is performing can supply its own and see
+  #       its logs and this service's logs carry the same value. Omitting the header
+  #       is the ordinary case and the filter mints one, which is why it is optional
+  #       rather than required.
+  # WHY : Assumptions: the bound and the character rule are the filter's, not this
+  #       document's: it accepts at most twenty-four characters, each a letter, a
+  #       digit, a hyphen, an underscore or a full stop, and refuses a longer or
+  #       otherwise nonconforming value with 400 before any handler runs. Publishing
+  #       the rule here is what lets a caller avoid that refusal; restating it
+  #       loosely would invite exactly the value the filter rejects.
+  # WHY : Trade-offs: the parameter is declared once and referenced by every
+  #       operation rather than written out at each. A header re-typed at every
+  #       operation is a header that will eventually be typed differently, which is
+  #       the same reason the response header beside it is declared once.
   parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        The paging position to continue from: copy the nextCursor member of the
+        page you hold to advance past it, or its prevCursor member to retreat from
+        it, and state the matching direction. Omit it, and the direction, for the
+        first page. It is opaque and sealed -- a version marker, a payload and an
+        authentication code separated by full stops -- and must be echoed exactly
+        as received; it is not a user identifier and cannot be constructed by a
+        caller. The two members it is copied from carry across the baseline's own
+        stored page keys at app/cbl/COUSR00C.cbl lines 435 and 389.
+      schema:
+        $ref: "#/components/schemas/CursorToken"
+
+    PagingDirection:
+      name: direction
+      in: query
+      required: false
+      description: >-
+        Which side of the supplied cursor to read: next reads keys strictly
+        greater than it in ascending order, previous reads keys strictly less than
+        it in descending order. It is meaningful only alongside a cursor, and the
+        two are sent together or not at all. Defaults to next, which with no
+        cursor supplied returns the first page. A direction whose cursor is
+        absent, or a cursor sealed for the other direction, is a 400.
+      schema:
+        $ref: "#/components/schemas/PageDirection"
+
+    # Refactoring Rationale: the correlation identity is declared on the REQUEST
+    #   side as well as the response, and an earlier revision of this document
+    #   declared it on the response side alone. The inbound shape is part of the
+    #   contract whether or not the contract states it, because the shared filter
+    #   at
+    #   services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
+    #   accepts an inbound value and refuses one that is over-long or carries an
+    #   unsafe character, and the already-authored browser client sends the header
+    #   on every request from ui/src/api/client.ts. A shape published on one
+    #   direction only left the client's value checked against nothing.
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Identity of the unit of work this request belongs to, echoed back on the
+        response. Supply it to tie this request to one a caller has already named,
+        or omit it and the service mints one. A value longer than the published
+        bound, or carrying a character outside the published set, is refused with
+        400 rather than being silently replaced, so a caller cannot believe it is
+        correlating requests the service is in fact correlating under a different
+        identity.
+      schema:
+        $ref: "#/components/schemas/CorrelationId"
+
     UserIdPath:
       name: userId
       in: path
@@ -1081,8 +1475,6 @@ components:
         minLength: 1
         maxLength: 8
 
-  # WHAT: the two error responses that are identical across all five
-  #       user-administration operations.
   # WHY : Trade-offs: only these two are shared, and the others are written out at
   #       each operation even though that is more text. The reason is that every
   #       other failure carries a message literal belonging to a specific program
@@ -1106,7 +1498,7 @@ components:
         X-Correlation-Id:
           $ref: "#/components/headers/XCorrelationId"
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: "#/components/schemas/ApiError"
     Forbidden:
@@ -1119,13 +1511,11 @@ components:
         X-Correlation-Id:
           $ref: "#/components/headers/XCorrelationId"
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: "#/components/schemas/ApiError"
 
 
-  # WHAT: the payload shapes of this context -- six of its own, and five that
-  #       mirror types the shared kernel owns.
   # WHY : (1) Assumptions: the five mirrored shapes -- the cursor token, the page
   #       envelope, the error body, its per-field entry and its abend aggregate --
   #       describe types published by services/common-lib and are NOT local
@@ -1179,18 +1569,77 @@ components:
             The signing-on user's identifier, at most eight characters. Must not
             be blank; the baseline treats SPACES and LOW-VALUES alike as absent
             at app/cbl/COSGN00C.cbl line 118.
+        # Refactoring Rationale: the EIGHT-CHARACTER CEILING IS GONE, and its
+        #   removal is the security correction this schema carries. An earlier
+        #   revision of this document capped the value at eight characters and
+        #   attributed the cap to SEC-USR-PWD PIC X(08) at app/cpy/CSUSR01Y.cpy
+        #   line 21. That was faithful to a field this migration deliberately does
+        #   not carry forward -- V1__auth.sql declares no password column at all,
+        #   because the credential moved to the managed user pool -- and it made
+        #   the operation unusable rather than merely conservative: the pool's
+        #   password policy is configured with a minimum length of 14 and a floor
+        #   of 12 that no caller can lower (infra/modules/cognito/variables.tf,
+        #   variable password_minimum_length and its validation), so EVERY
+        #   password the pool will accept was longer than this contract admitted
+        #   and every sign-on would have been refused with 400 before the
+        #   credential was ever presented.
+        # Assumptions: no minimum length and no character-class requirement is
+        #   asserted here even though the pool enforces both -- lowercase,
+        #   uppercase, digit and symbol are each required by default in that same
+        #   variables file. This operation does not judge a credential's strength;
+        #   it forwards it and reports what the pool decided. Restating the policy
+        #   here would put it in two places, and the copy in this contract would be
+        #   the one that goes stale when an environment tightens the pool, at which
+        #   point this service would refuse credentials the pool accepts. The
+        #   presence check is retained because it is the baseline's own, at
+        #   app/cbl/COSGN00C.cbl line 123, and because forwarding an empty value
+        #   would spend a pool call to learn nothing.
+        # Trade-offs: an upper bound of 256 is imposed even though the policy's
+        #   own maximum is expressed as a minimum-length floor rather than a
+        #   ceiling. The bound exists so that an oversized body is refused here
+        #   rather than forwarded to the identity provider, and 256 is far enough
+        #   above the configured minimum of 14 that no policy this repository can
+        #   express would collide with it. The cost is one arbitrary-looking
+        #   number; what it buys is that this operation cannot be used to relay
+        #   unbounded input to a third party.
         password:
           type: string
           format: password
           minLength: 1
-          maxLength: 8
+          maxLength: 256
           writeOnly: true
           description: >-
-            The user's password, at most eight characters, the width the baseline
-            record declared at app/cpy/CSUSR01Y.cpy line 21. Write-only: no
-            operation in this contract ever returns it, and the service stores
-            nothing of it. Must not be blank, per the presence check at
-            app/cbl/COSGN00C.cbl line 123.
+            The user's password, forwarded to the Cognito user pool for evaluation
+            and never persisted, logged or echoed. Must not be blank, per the
+            presence check at app/cbl/COSGN00C.cbl line 123. Its length and
+            composition are governed by the pool's own password policy, not by
+            this contract: a value that fails that policy is reported by the
+            outcome the pool returns rather than by field validation here. The
+            baseline's eight-character record field is retired along with the
+            record column that held it.
+
+    TokenRefreshRequest:
+      type: object
+      description: >-
+        The identifier the tokens were issued for and the refresh token to renew
+        them with. Both are required.
+      additionalProperties: false
+      required: [userId, refreshToken]
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 8
+          description: >-
+            The identifier the token set being renewed was issued for, at most eight
+            characters.
+        refreshToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: >-
+            The refresh token a previous sign-on returned, replayed unaltered.
+            Write-only: it travels in this request only and appears in no response.
 
     SignOnResponse:
       type: object
@@ -1199,8 +1648,24 @@ components:
         minted for. The caller sends accessToken as a bearer credential on every
         other operation in this document.
       additionalProperties: false
-      required: [userId, accessToken, idToken, tokenType, expiresIn]
+      required: [outcome, userId, accessToken, idToken, tokenType, expiresIn]
       properties:
+        # Refactoring Rationale: this member exists so that the two things a
+        #   sign-on can return are told apart by a value rather than by which
+        #   members a client happens to find present. An earlier revision of this
+        #   document had only one success shape, so a pool response that was a
+        #   CHALLENGE rather than a token set had nowhere to go and was reported as
+        #   500 -- see the rationale on SignOnChallenge. With two success shapes a
+        #   client must be able to branch, and branching on the presence of
+        #   accessToken would make a missing member load-bearing, which is exactly
+        #   the kind of inference a closed schema exists to remove.
+        outcome:
+          type: string
+          const: AUTHENTICATED
+          description: >-
+            Always AUTHENTICATED on this shape. It names which of the two sign-on
+            outcomes this body carries, and it is the discriminating member of the
+            operation's response.
         # Refactoring Rationale: there is deliberately NO user-type property here,
         #   and its absence is the security correction this operation carries. The
         #   baseline put CDEMO-USER-TYPE (app/cpy/COCOM01Y.cpy lines 26 to 28) into
@@ -1242,9 +1707,11 @@ components:
           type: ["string", "null"]
           description: >-
             The pool's refresh token where the app client is configured to issue
-            one, and null where it is not. It is not accepted by any operation in
-            this document; renewal is a separate pre-token route outside this
-            contract.
+            one, and null where it is not -- and null on the response to a renewal,
+            because the pool does not reissue one there. It is not a bearer
+            credential and no operation accepts it for authorisation; the refresh
+            operation above accepts it in a request body, which is the one place it
+            travels.
         tokenType:
           type: string
           description: >-
@@ -1259,6 +1726,131 @@ components:
             Lifetime of accessToken in seconds from issue, as the pool reports it.
             The client re-authenticates or renews before it elapses; this service
             rejects an expired token rather than extending it.
+
+    # Refactoring Rationale: this shape and the operation that consumes it are
+    #   REQUIRED for the migrated system to be usable at all, and an earlier
+    #   revision of this document omitted both. Cognito answers an initial
+    #   authentication with either a token set or a CHALLENGE, and one challenge in
+    #   particular is unavoidable here: every seed user is created with a temporary
+    #   password whose validity is measured in days
+    #   (infra/modules/cognito/variables.tf, temporary_password_validity_days), and
+    #   a temporary password always yields NEW_PASSWORD_REQUIRED on first use. The
+    #   earlier revision routed that outcome to 500, its own rationale naming "a
+    #   challenge the flow cannot complete" as an integration failure -- so the
+    #   very first sign-on of every provisioned user reported a server fault, and
+    #   no path existed to set a permanent password. The edge already publishes the
+    #   route this contract now declares: POST /api/v1/auth/challenge is one of the
+    #   three deliberately unauthenticated keys in
+    #   infra/modules/api-gateway-http/variables.tf, so the gateway was forwarding
+    #   an operation this document did not describe.
+    # Assumptions: the challenge has NO baseline counterpart and none is invented
+    #   for it. The reference sign-on compared a stored password directly at
+    #   app/cbl/COSGN00C.cbl lines 211 to 256 and had no notion of a credential
+    #   that must be changed before use, so there is no message literal to carry
+    #   across and none of the three sign-on sentences is reused here: reporting
+    #   "Wrong Password. Try again ..." for a challenge would tell an operator to
+    #   retype a credential that was in fact correct.
+    # Trade-offs: only NEW_PASSWORD_REQUIRED is admitted, not the full set of
+    #   challenges the pool can raise. The pool's other challenges belong to the
+    #   second-factor configuration, and this document declines to publish a
+    #   contract for flows the seeded configuration does not produce; an
+    #   unpublished challenge remains a 500, which is honest, because this service
+    #   genuinely cannot complete one. The cost is that enabling a second factor
+    #   requires an edit here; what it buys is that no client is written against a
+    #   challenge exchange that has never been exercised.
+    SignOnChallenge:
+      type: object
+      description: >-
+        The sign-on could not complete because the pool requires something further
+        of the caller before it will issue tokens. No token of any kind accompanies
+        this body. The caller answers it by calling the challenge operation with
+        the session value returned here.
+      additionalProperties: false
+      required: [outcome, challengeName, session, userId]
+      properties:
+        outcome:
+          type: string
+          const: CHALLENGE
+          description: >-
+            Always CHALLENGE on this shape. It names which of the two sign-on
+            outcomes this body carries.
+        challengeName:
+          type: string
+          enum: [NEW_PASSWORD_REQUIRED]
+          description: >-
+            What the pool requires. NEW_PASSWORD_REQUIRED means the credential
+            presented was correct but is temporary or expired, and a permanent one
+            must be set before tokens are issued. It is the outcome of a first
+            sign-on by any user the infrastructure seeded.
+        # Trade-offs: the session value is returned to the caller even though it is
+        #   a credential of sorts -- possession of it plus a new password completes
+        #   the authentication. It has to travel, because the pool requires it back
+        #   and this service holds no per-caller state to keep it in; holding it
+        #   server-side would reintroduce exactly the session storage that ending
+        #   the pseudo-conversational design removed. It is short-lived, single-use
+        #   and bound by the pool to the one exchange it was issued for, and it is
+        #   write-only in the opposite direction: no operation echoes it back.
+        session:
+          type: string
+          maxLength: 4096
+          description: >-
+            Opaque continuation value issued by the pool, to be sent back verbatim
+            on the challenge operation. It is not a bearer token and is accepted by
+            no other operation in this document. Treat it as a credential: do not
+            log it, do not store it beyond the exchange, and do not parse it.
+        userId:
+          type: string
+          maxLength: 8
+          description: >-
+            The identifier the challenge was raised for, echoed so a client can
+            render it while collecting the new password. It carries no authority.
+
+    SignOnChallengeRequest:
+      type: object
+      description: >-
+        The answer to a NEW_PASSWORD_REQUIRED challenge: the session value the
+        sign-on returned, the identifier it was raised for, and the permanent
+        password to set. On success the pool issues the token set the sign-on could
+        not.
+      additionalProperties: false
+      required: [userId, session, newPassword]
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 8
+          description: >-
+            The identifier the challenge was raised for, as returned on the
+            challenge body. It must match the one the session was issued for; the
+            pool refuses the exchange otherwise.
+        session:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+          description: >-
+            The session value from the challenge body, echoed back verbatim. It is
+            single-use: a second attempt with the same value requires a fresh
+            sign-on.
+        # Assumptions: this member is bounded and present-checked here and its
+        #   strength is judged nowhere in this contract, for the same reason
+        #   recorded on the sign-on password. The pool applies the configured
+        #   policy -- minimum length 14 with a floor of 12, and lowercase,
+        #   uppercase, digit and symbol each required, per
+        #   infra/modules/cognito/variables.tf -- and a value failing it is
+        #   reported through the 400 below carrying the pool's own reason rather
+        #   than through a restatement of the policy here that could go stale
+        #   against it.
+        newPassword:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+          description: >-
+            The permanent password to set. Its length and composition are governed
+            by the pool's password policy, not by this contract. Never persisted,
+            logged or echoed by this service.
 
     UserSummary:
       type: object
@@ -1518,9 +2110,60 @@ components:
         authentication code; a caller must not parse, edit or construct one,
         because the code covers both the payload and a binding naming the query
         and the subject the token was issued to, so an altered or borrowed token
-        fails to open and is refused with 400. The shape is declared once here and
-        referenced by both cursor parameters, so the two cannot acquire different
-        bounds. It is a string in every direction and never a number.
+        fails to open and is refused with 400. It is bound to the DIRECTION it was
+        minted for as well, so replaying the previous-page position with direction
+        next cannot silently answer with the wrong page. The shape is declared once
+        here and referenced by the single cursor parameter and by both cursor
+        members of the page envelope, so none of the three can acquire a different
+        bound. It is a string in every direction and never a number.
+
+    # Assumptions: the two member values are the two the already-authored browser
+    #   client sends, declared as the union "next" | "previous" at
+    #   ui/src/api/cards.ts, and the two the sibling card and transaction contracts
+    #   publish for the same purpose, so there is one paging vocabulary across this
+    #   migration. They are declared as a named schema rather than inline on the
+    #   parameter so that a generated client names the type once.
+    PageDirection:
+      type: string
+      description: >-
+        Which side of a supplied cursor to read. Reading next seeks keys strictly
+        greater than the cursor in ascending order; reading previous seeks keys
+        strictly less than it in descending order, which is the migrated form of
+        the baseline READPREV at app/cbl/COUSR00C.cbl line 343.
+      enum: [next, previous]
+      default: next
+
+    # Refactoring Rationale: ONE bound and ONE character set for the correlation
+    #   identity, declared once and referenced by the request parameter, the
+    #   response header and the error body alike. Three descriptions of one value
+    #   existed across this migration's three contracts -- twenty-four characters
+    #   here, twenty in the transaction contract and unbounded with
+    #   thirty-six-character examples in the card contract -- and nothing compared
+    #   them, so the disagreement was invisible until a request was refused.
+    # Assumptions: twenty-four characters, and the set of letters, digits, hyphen,
+    #   underscore and full stop, are not chosen here. They are what
+    #   CorrelationIdFilter.java enforces -- CORRELATION_ID_MAX_LENGTH is 24 at its
+    #   line 238 and its accepted punctuation is exactly those three characters --
+    #   so a value outside that is refused with 400 before any handler runs, and
+    #   publishing anything wider would document a request this service rejects.
+    # Assumptions: the empty string is admitted as well as a conforming identity,
+    #   and it is not slack: the shared error shape normalises an absent identity to
+    #   the empty string, which is the state of a failure raised before the
+    #   correlation filter ran. Declaring only the token shape would describe a
+    #   body this service can in fact emit as invalid.
+    CorrelationId:
+      type: string
+      maxLength: 24
+      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      description: >-
+        Identity of one unit of work. At most twenty-four characters drawn from the
+        ASCII letters, the digits, the hyphen, the underscore and the full stop. A
+        value the service mints is exactly twenty-four upper-case hexadecimal
+        characters over twelve bytes of entropy; a value a caller supplies need
+        only fit the bound and the set. The empty string appears only inside an
+        error body, and only for a failure raised before any identity had been
+        established.
+      examples: ["4F1C0E423A554D219B7E6C0F"]
 
     PageResponse:
       type: object
@@ -1531,27 +2174,24 @@ components:
         pages anywhere in this envelope, because supplying one would require
         counting the whole table on every request that only ever returns ten rows.
       additionalProperties: false
-      required: [items, firstKey, lastKey, nextCursor, prevCursor, hasNext, hasPrev]
+      required: [items, firstKey, lastKey, hasNext]
       properties:
-        # Assumptions: these seven properties, in this order, are the seven
-        #   components of the shared page envelope that services/common-lib
-        #   publishes, so what a caller receives here is that record serialised and
-        #   nothing else. A migration-plan summary of that type quotes an earlier
-        #   four-component shape -- rows, the two row identities and forward
-        #   availability -- and this contract follows the committed type rather
-        #   than the summary, because the runtime serialises the committed type and
-        #   a four-property contract would be contradicted by the first response
-        #   it described.
-        # Refactoring Rationale: the three additional components exist because the
-        #   four-component shape left states reachable that a caller could not act
-        #   on. Separating the two request positions from the two row identities is
-        #   what closes it: a page whose every row was filtered away after being
-        #   read has a scan position but no last row, so under the older shape it
-        #   reported that more rows followed while carrying nothing to continue
-        #   from. Stating backward availability rather than inferring it from the
-        #   presence of a first row removes the matching fault at the other end,
-        #   where the opening page of every set claimed a previous page that did
-        #   not exist.
+        # Assumptions: these four properties, in this order, are the four components
+        #   of the shared page envelope services/common-lib publishes, so what a
+        #   caller receives here is that record serialised and nothing else. The
+        #   transaction and card contracts declare the same four under the same
+        #   required list, so one client type reads a page from any of the three.
+        # Refactoring Rationale: an earlier revision of this schema declared seven
+        #   properties -- the two boundary tokens, a separate forward and backward
+        #   scan position, and a backward availability indicator -- and argued here
+        #   that the four-component figure was a summary the runtime contradicted.
+        #   The alignment ran the wrong way. Four components is the shape this
+        #   migration fixed for the envelope, the shared record now declares exactly
+        #   those four, and a contract does not reinterpret the plan it implements.
+        #   Nothing the three withdrawn properties carried is lost: a page whose rows
+        #   were all filtered away after being read carries its two scan positions in
+        #   firstKey and lastKey, which is what they are on such a page, and backward
+        #   availability is the presence of firstKey.
         items:
           type: array
           maxItems: 10
@@ -1561,7 +2201,7 @@ components:
             away, carries an empty array instead.
           items:
             $ref: "#/components/schemas/UserSummary"
-        # Refactoring Rationale: both row identities are taken from the rows this
+        # Refactoring Rationale: both boundary tokens are taken from the rows this
         #   page actually returned, which is a correction to the baseline's
         #   behaviour on a short page. The baseline wrote its last-row cursor only
         #   on the tenth row of a full page (app/cbl/COUSR00C.cbl line 435) and its
@@ -1574,40 +2214,26 @@ components:
         #   altered.
         firstKey:
           description: >-
-            Sealed cursor identifying the first row returned in items, or null
-            exactly when items is empty -- an empty page has no returned row for a
-            cursor to identify. A caller sends this value back, with direction
-            previous, to read the page before this one.
+            Sealed cursor naming this page's leading boundary: the first row
+            returned in items, or -- on a page whose every row was filtered away
+            after being read -- the key at which the backward scan stopped. Null
+            when neither exists. A caller sends this value back as cursor, with
+            direction BACKWARD, to read the page before this one, so its presence is
+            what tells a caller a backward step is expressible.
           oneOf:
             - $ref: "#/components/schemas/CursorToken"
             - type: "null"
         lastKey:
           description: >-
-            Sealed cursor identifying the last row returned in items, or null
-            exactly when items is empty. It identifies the last row the caller
-            actually received and never the surplus row read to settle hasNext. A
-            caller sends this value back, with direction next, to read the page
-            after this one.
+            Sealed cursor naming this page's trailing boundary: the last row
+            returned in items -- the last row the caller actually received, never
+            the surplus row read to settle hasNext -- or, on a filtered-away page,
+            the key at which the forward scan stopped. Null when neither exists. A
+            caller sends this value back as cursor, with direction FORWARD, to read
+            the page after this one, and it is present whenever hasNext is true.
           oneOf:
             - $ref: "#/components/schemas/CursorToken"
             - type: "null"
-        nextCursor:
-          type: ["string", "null"]
-          maxLength: 256
-          description: >-
-            The sealed position a forward request is issued from, present exactly
-            when hasNext is true and null otherwise. Normally identical to
-            lastKey; it is a separate property because a page whose rows were all
-            filtered away after being read still has a scan position to continue
-            from while having no last returned row to name.
-        prevCursor:
-          type: ["string", "null"]
-          maxLength: 256
-          description: >-
-            The sealed position a backward request is issued from, present exactly
-            when hasPrev is true and null otherwise. Normally identical to
-            firstKey, and separate for the same filtered-away reason as
-            nextCursor.
         # Assumptions: forward availability is discovered by reading one row beyond
         #   the page and observing whether that row exists -- never from a count of
         #   rows or pages, which this envelope does not carry. That is precisely
@@ -1628,17 +2254,9 @@ components:
             Whether a further page follows this one. False on the last page and
             false when this page is empty because the set is exhausted. A caller
             binds the forward paging control to this value, which is what the
-            baseline's own next-page indicator expressed.
-        hasPrev:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False for a request that supplied no
-            cursor, since that is by definition the first page, and true for any
-            page reached from a neighbouring one. It is stated by the service from
-            the request it answered, not inferred from this page's contents.
+            baseline's own next-page indicator expressed, and it is never true
+            without a lastKey to continue from.
 
-    # WHAT: the error body every failing operation returns, and the two nested
-    #       shapes it carries.
     # WHY : (1) Assumptions: these three describe the shared error record, its
     #       per-field entry and its abend aggregate exactly as
     #       services/common-lib publishes them, including property order, so a
@@ -1653,10 +2271,23 @@ components:
     #       failed, which tells a caller nothing it can act on and tells an
     #       attacker something it can. The correlation identifier is what crosses
     #       the boundary instead: it ties the caller's report to the server's own
-    #       record of the same failure. (3) Assumptions: the media type of every
-    #       error response is application/problem+json while every success is
-    #       application/json, so a client can route a response on its content type
-    #       before parsing it.
+    #       record of the same failure. (3) Assumptions: every response of every
+    #       operation, failing or succeeding, is application/json. The shared
+    #       advice that builds this shape returns ResponseEntity<ApiError> and sets
+    #       no content type of its own, so the framework negotiates application/json
+    #       and that is what a caller actually receives.
+    #       Refactoring Rationale: an earlier revision declared the failing
+    #       responses as application/problem+json, which was wrong twice over. It
+    #       described a media type no handler emits, so a client routing on content
+    #       type before parsing would have taken the wrong branch on every failure;
+    #       and this shape is not an RFC 9457 problem document -- it declares
+    #       code, secondaryCode, severity, subsystem, status, correlationId, path,
+    #       timestamp, fieldErrors and abend, and none of the type, title, detail
+    #       and instance members that specification requires. Declaring the media
+    #       type the handler emits is the correction; restructuring the shared shape
+    #       into a problem document was rejected because it is published by
+    #       services/common-lib for all eight services and the two sibling
+    #       contracts already describe it as application/json.
     ApiError:
       type: object
       description: >-
@@ -1692,17 +2323,25 @@ components:
         # Assumptions: message text is carried character for character from the
         #   program line it originates on, including spacing before an ellipsis,
         #   which differs per program and even within one program and is therefore
-        #   never normalised -- see the note in this file's header. The field these
-        #   strings were displayed in is 78 characters wide in all five auth maps
-        #   (app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372, COUSR01.CPY
-        #   line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84), and none of the
-        #   five programs copies the templated field-highlight book, so the
-        #   narrower 75-character width belonging to the shared error field does
-        #   not govern this context. The longest string carried here is 44
-        #   characters, so no message is ever shortened to fit either width.
+        #   never normalised -- see the note in this file's header.
+        # Refactoring Rationale: the bound is 75, the shared rendering width
+        #   ApiError.MESSAGE_RENDERING_WIDTH declares from
+        #   CCARD-ERROR-MSG PIC X(75) and CCARD-RETURN-MSG PIC X(75) at
+        #   app/cpy/CVCRD01Y.cpy lines 28 and 29. An earlier revision declared 78
+        #   here, taken from the width the message field occupies in all five auth
+        #   maps (app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372,
+        #   COUSR01.CPY line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84). Both
+        #   widths are real, but one record is shared by every service and cannot
+        #   be described at two widths at once: a client reading three contracts
+        #   would see three bounds on one property. The shared constant wins, and it
+        #   costs nothing -- the longest string carried here is 44 characters and the
+        #   longest the shared advice can emit is 58, so no message is shortened to
+        #   fit either width. The 78-character screen field is recorded here rather
+        #   than dropped, because it is the width a renderer reproducing the 3270
+        #   presentation has to allow for.
         message:
           type: ["string", "null"]
-          maxLength: 78
+          maxLength: 75
           description: >-
             The human-readable sentence for this failure, reproduced verbatim from
             its originating program where one exists, or null where the failure
@@ -1737,8 +2376,8 @@ components:
             that a logged or archived payload is self-describing once separated
             from its response envelope.
         correlationId:
-          type: string
-          maxLength: 24
+          allOf:
+            - $ref: "#/components/schemas/CorrelationId"
           description: >-
             Identity of the unit of work that failed, the same value as the
             X-Correlation-Id response header, and the empty string if the request
@@ -1802,24 +2441,37 @@ components:
             the request body, a path parameter, or a query parameter. The names
             this context produces are userId, password, firstName, lastName,
             userType and confirmed.
-        # Assumptions: the three states are the shared validation domain, migrated
-        #   from the baseline's per-field flag convention where a field was either
-        #   acceptable, present but rejected, or not supplied at all. BLANK is kept
-        #   distinct from NOT_OK because the baseline treated them differently on
-        #   screen: a blank field additionally received a literal asterisk marker,
-        #   whereas a rejected value did not. VALID appears in the domain because
-        #   the enumeration is the shared one; an entry in this array is by
-        #   definition not valid.
+        # Assumptions: TWO states, not three. The shared validation domain in
+        #   com.carddemo.common.validation declares a third, acceptable state,
+        #   migrated from the baseline's per-field flag convention, but an entry in
+        #   this array exists only because a field was refused, so the acceptable
+        #   state cannot appear in one. The shared advice bears this out: it
+        #   constructs an entry with the rejected state or the blank state and with
+        #   nothing else. BLANK stays distinct from NOT_OK because the baseline
+        #   treated the two differently on screen -- a blank field additionally
+        #   received a literal asterisk marker, whereas a rejected value did not --
+        #   which is the disjunction at app/cpy/CSSETATY.cpy lines 18 and 19 with the
+        #   marker written at lines 23 to 25.
+        # Refactoring Rationale: an earlier revision published the acceptable state
+        #   here on the ground that the enumeration is the shared one. Publishing a
+        #   member no response can carry describes a state a client must write a
+        #   branch for and will never reach, and it disagreed with the sibling
+        #   contracts, which publish two.
         state:
           type: string
-          enum: [VALID, NOT_OK, BLANK]
+          enum: [NOT_OK, BLANK]
           description: >-
             Why the field is listed: NOT_OK for a value that was supplied and
             rejected, BLANK for one that was absent or blank. A caller rendering
             the baseline's presentation shows the asterisk marker for BLANK only.
+        # Refactoring Rationale: the same 75 as the aggregate message above, and for
+        #   the same reason: this is the nested entry of one shared record, so the
+        #   two cannot be bounded differently in one contract and identically in
+        #   its siblings. The longest literal any of these five programs produces
+        #   for a field is well inside it.
         message:
           type: string
-          maxLength: 78
+          maxLength: 75
           description: >-
             The message this field's failure produced, carried verbatim from its
             originating program line, spacing included. The per-operation responses
@@ -1871,4 +2523,3 @@ components:
             when reporting the failure. It occupies the position of ABEND-MSG at
             app/cpy/CSMSG02Y.cpy line 28 and replaces whatever that field held,
             so the width is preserved while the internal text is not disclosed.
-

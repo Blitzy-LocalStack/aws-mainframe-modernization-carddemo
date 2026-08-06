@@ -23,7 +23,7 @@
 #   infra/envs/prod/main.tf, which is what keeps the only differences between the
 #   two environments visible in their own terraform.tfvars files.
 #
-# Parameters -- twelve required, sixteen optional:
+# Parameters -- twelve required, seventeen optional:
 #   environment                     string       REQUIRED. Names every resource.
 #   kms_key_arn                     string       REQUIRED. Encrypts the log
 #                                                groups and the topic.
@@ -53,7 +53,7 @@
 #   alarm_evaluation_periods        number       Consecutive breaching periods
 #                                                needed to raise an alarm.
 #   alarm_period_seconds            number       Length of one such period.
-#   service_error_rate_threshold    number       Server-error count per period
+#   service_error_count_threshold   number       Server-error count per period
 #                                                that raises a service alarm.
 #   database_cpu_threshold_percent  number       Cluster processor utilisation
 #                                                that raises a database alarm.
@@ -63,6 +63,10 @@
 #                                                that raise a batch alarm.
 #   reply_queue_age_threshold_seconds
 #                                   number       Stale-reply alarm threshold.
+#   work_queue_age_threshold_seconds
+#                                   number       Stale-work alarm threshold for
+#                                                the primary request and error
+#                                                queues.
 #   access_log_bucket_force_destroy bool         Teardown behavior for the
 #                                                shared access-log destination.
 #   rotation_lambda_function_names  set(string)  Rotation functions whose
@@ -263,7 +267,7 @@ variable "aurora_max_capacity" {
 }
 
 variable "queue_names" {
-  description = "Map of logical queue key to the exact SQS QueueName dimension. Keys ending in _dlq receive dead-letter alarms, while keys ending in _reply receive stale-reply alarms; an empty map creates no queue alarm."
+  description = "Map of logical queue key to the exact SQS QueueName dimension. Keys ending in _dlq receive dead-letter alarms, keys ending in _reply receive stale-reply alarms, and every other key receives a primary work-queue age alarm; an empty map creates no queue alarm."
   type        = map(string)
 
   validation {
@@ -273,6 +277,30 @@ variable "queue_names" {
       can(regex("^[A-Za-z0-9_-]{1,75}(\\.fifo)?$", name))
     ])
     error_message = "queue_names must map snake_case logical keys to valid standard or .fifo SQS queue names."
+  }
+
+  validation {
+    # WHY : Refactoring Rationale: this second rule exists because the first one
+    #       cannot catch the failure that actually matters here. Alarm membership is
+    #       decided by the key SUFFIX -- `_dlq` for the dead-letter alarm, `_reply`
+    #       for the stale-reply alarm -- so a caller that renamed its keys while
+    #       passing perfectly valid queue names would satisfy every rule above and
+    #       silently receive ZERO dead-letter alarms, with nothing said at plan time.
+    #       A dead-letter alarm is the highest-signal messaging alarm this module
+    #       creates, so its silent disappearance is the worst available outcome.
+    #       Assumptions: only the dead-letter suffix is asserted, not all three. Every
+    #       queue in the messaging design has a dead-letter companion, so the presence
+    #       of one `_dlq` key is evidence the whole convention is being followed;
+    #       requiring a `_reply` key as well would refuse a caller that legitimately
+    #       passes a subset -- a single queue and its dead-letter queue, for instance
+    #       -- which the empty-map contract above already establishes as permitted.
+    #       Trade-offs: an empty map is admitted, because an empty map is the
+    #       documented way to create no queue alarm at all and is not a naming
+    #       mistake.
+    condition = length(var.queue_names) == 0 || anytrue([
+      for key in keys(var.queue_names) : endswith(key, "_dlq")
+    ])
+    error_message = "queue_names must contain at least one key ending in _dlq, because dead-letter alarm membership is decided by that suffix; without one the module would create no dead-letter alarm and report nothing."
   }
 }
 
@@ -528,8 +556,22 @@ variable "alarm_period_seconds" {
 # Alarm thresholds -- one per watched signal
 # -----------------------------------------------------------------------------
 
-variable "service_error_rate_threshold" {
-  description = "Server-error responses within one evaluation period that raise the per-service alarm. This watches the load balancer's own count of 5xx responses, so it fires for a service that is failing requests regardless of whether the service itself is still logging."
+# WHY : Refactoring Rationale: this input was named `service_error_rate_threshold`
+#       and is renamed here because the name asserted something the alarm does not
+#       do. It is applied as an absolute Sum of 5xx responses within one evaluation
+#       period, not as a proportion of requests, so a low-traffic service alarms at
+#       a far higher error RATE than a busy one and a reader budgeting from the old
+#       name would have mis-set it. No environment root passed the old name, so the
+#       rename moves no configured value.
+# WHY : Alternatives Considered: keeping the name and implementing a true rate
+#       through a metric-query expression over 5xx divided by request count.
+#       Rejected because a rate needs a percentage threshold, and this repository
+#       defines no error-rate objective from which one could be derived -- inventing
+#       a percentage would read as authoritative while being arbitrary, which is
+#       exactly the failure this module's own preamble refuses. A count is what the
+#       alarm can state honestly, so the name is corrected to say count.
+variable "service_error_count_threshold" {
+  description = "Count of server-error responses within one evaluation period that raises the per-service alarm. This is an absolute Sum of the load balancer's own 5xx count and not a proportion of requests, so it fires for a service that is failing requests regardless of whether the service itself is still logging."
   type        = number
   default     = 5
 
@@ -540,8 +582,8 @@ variable "service_error_rate_threshold" {
     #       dismiss the alarm. A small positive threshold keeps the alarm
     #       meaningful; a root that genuinely wants zero tolerance can pass 1
     #       with an evaluation period count of 1.
-    condition     = var.service_error_rate_threshold >= 1 && floor(var.service_error_rate_threshold) == var.service_error_rate_threshold
-    error_message = "service_error_rate_threshold must be a whole number of 1 or more; zero would be breached by a single error, including one produced by a rolling deployment."
+    condition     = var.service_error_count_threshold >= 1 && floor(var.service_error_count_threshold) == var.service_error_count_threshold
+    error_message = "service_error_count_threshold must be a whole number of 1 or more; zero would be breached by a single error, including one produced by a rolling deployment."
   }
 }
 
@@ -609,6 +651,41 @@ variable "reply_queue_age_threshold_seconds" {
     #       source metric does not expose.
     condition     = var.reply_queue_age_threshold_seconds >= 1 && floor(var.reply_queue_age_threshold_seconds) == var.reply_queue_age_threshold_seconds
     error_message = "reply_queue_age_threshold_seconds must be a whole number of one second or more."
+  }
+}
+
+# WHY : Assumptions: this is a DETECTION DEFAULT and not a service objective, and it
+#       is the second input in this file whose comparison point is a tuning decision
+#       rather than a structural fact -- the database utilisation percentage is the
+#       other, and it carries the same caveat. The repository defines no queue-latency
+#       objective and none is invented here.
+# WHY : Assumptions: the default is one full evaluation period of this module's own
+#       default period, so the condition it states is "no consumer took this message
+#       within a whole period in which the alarm was looking". Deriving it from the
+#       period rather than choosing a round number of minutes keeps the two settings
+#       coherent: a caller that shortens the period tightens this alarm in the same
+#       proportion, which is the behaviour a reader expects and would otherwise have
+#       to arrange by hand.
+# WHY : Alternatives Considered: reusing reply_queue_age_threshold_seconds, whose
+#       default is five seconds. Rejected because that value is the baseline's
+#       request/reply EXPIRY contract, which applies to a reply nobody has consumed
+#       and does not apply to inbound work at all; a five-second threshold on a
+#       request queue would fire during any ordinary processing backlog and the
+#       channel would be ignored.
+variable "work_queue_age_threshold_seconds" {
+  description = "Oldest-message age that raises a primary work-queue alarm, covering the request queues and the error queue. This is a detection default equal to one full evaluation period, not a latency objective; the repository defines none."
+  type        = number
+  default     = 300
+
+  validation {
+    # WHY : Assumptions: the floor is 60 rather than 1. The lowest value this alarm
+    #       can act on is bounded below by the period it is evaluated over, and a
+    #       threshold under a minute on a queue drained by a long-polling consumer
+    #       would alarm on the poll interval itself. The ceiling is the SQS maximum
+    #       message retention of fourteen days, past which no message can still be
+    #       waiting for the alarm to observe.
+    condition     = var.work_queue_age_threshold_seconds >= 60 && var.work_queue_age_threshold_seconds <= 1209600 && floor(var.work_queue_age_threshold_seconds) == var.work_queue_age_threshold_seconds
+    error_message = "work_queue_age_threshold_seconds must be a whole number of seconds from 60 through 1209600, the SQS maximum message retention."
   }
 }
 

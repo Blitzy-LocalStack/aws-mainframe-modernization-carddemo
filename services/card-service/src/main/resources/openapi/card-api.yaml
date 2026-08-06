@@ -3,13 +3,19 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The hand-authored OpenAPI 3.1 contract of record for the card bounded
-#   context. It settles, for the four synchronous operations this service
+#   context. It settles, for the five synchronous operations this service
 #   exposes, the paths, the operation identifiers, the parameter and property
 #   names, the response shapes and the error vocabulary. Every other tree that
 #   touches this context is written against this document rather than against a
-#   reading of the baseline: the browser client at ui/src/api/cards.ts and
-#   ui/src/api/types.ts consume it, and the controllers, request and response
-#   shapes and mapper of this module implement it.
+#   reading of the baseline. Landed at this checkpoint: the browser client at
+#   ui/src/api/cards.ts, which declares CardSummary, CardDetail and the seven-member
+#   page envelope from the schemas below, and the assertions at
+#   services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java,
+#   which hold this document and SecurityConfig to each other. Planned and NOT yet
+#   authored: the shared client type module ui/src/api/types.ts, and the
+#   controllers, request and response shapes and mapper of this module - so no
+#   Java type in this module implements the document yet, and the reader should
+#   not expect to find one.
 #
 #   The document the springdoc library generates from those controllers at
 #   run time is therefore not a second source of truth - it is a check on this
@@ -28,16 +34,23 @@
 #   exists rather than five.
 #
 # Parameters:
-#   Requests carry three kinds of input, and every one of them is described
+#   Requests carry four kinds of input, and every one of them is described
 #   at the point it is declared rather than only here.
 #
-#   - Path parameters: the sixteen-character card number identifying one card,
-#     declared once at components/parameters/CardNumberPath and referenced by
-#     the three operations addressing a single card.
-#   - Query parameters: the two optional list filters, accountId and
-#     cardNumber, and the three paging inputs, lastKey, firstKey and
-#     direction. All five are declared under components/parameters.
-#   - A request body: CardUpdateRequest, carried by the update operation only.
+#   - A path parameter: the twenty-two-character opaque selector identifying one
+#     card, declared once at components/parameters/OpaqueCardIdPath and
+#     referenced by the three operations addressing a single card. It is NOT the
+#     card number; no card number appears in any path in this document.
+#   - Query parameters: the one optional list filter, accountId, and the two
+#     paging inputs, cursor and direction. All three are declared under
+#     components/parameters. The card-number filter of the baseline screen is
+#     deliberately NOT among them: it travels in the lookup operation's request
+#     body instead, because a query string is part of the request line and would
+#     carry a full account number into history and access logs.
+#   - A request header: X-Correlation-Id, optional on every operation, declared
+#     once at components/parameters/CorrelationIdHeader.
+#   - Two request bodies: CardUpdateRequest, carried by the update operation, and
+#     CardLookupRequest, carried by the lookup operation.
 #
 #   The number of rows a full page carries is NOT among them. It is settled
 #   server-side at seven by carddemo.card.list.page-size (application.yml),
@@ -45,17 +58,24 @@
 #   app/cbl/COCRDLIC.cbl:177-178. A client cannot vary it.
 #
 # Return values:
-#   - CardPage, from the list operation: one page of CardSummary rows with the
+#   - CardPage, from the list and lookup operations: one page of CardSummary rows
+#     with the
 #     sealed cursor tokens and the two availability indicators needed to walk
 #     the ordered set by key.
-#   - CardDetail, from both read operations and from a successful update: the
-#     full state of one card, with the primary account number rendered
-#     according to the authority the caller holds.
+#   - CardDetail, from the non-administrative read and from a successful update:
+#     the full state of one card with the account number masked, and with no
+#     member able to carry it unmasked.
+#   - AdminCardDetail, from the administrative read alone: that same core plus
+#     the full sixteen-digit account number. The full number exists on this one
+#     schema and nowhere else in this document.
 #   - ApiError, from every failure, described under components/schemas and
 #     single-sourced from the shared kernel rather than redeclared here.
 #
+#   Every response, successful or not, carries the X-Correlation-Id header
+#   declared once at components/headers/XCorrelationId.
+#
 # Exceptions or errors:
-#   Five failure responses are declared, each as a reusable entry under
+#   Six failure responses are declared, each as a reusable entry under
 #   components/responses so that every operation references one definition.
 #
 #   - 400 the request itself is not acceptable: a malformed identifier, a
@@ -69,6 +89,11 @@
 #     distinct conditions reach it and are never merged; each carries its own
 #     machine identity and its own message, reproduced character for
 #     character from app/cbl/COCRDUPC.cbl:205-210.
+#   - 500 the operation failed for a reason the caller cannot correct. Declared
+#     on every operation because the shared advice in the kernel assembles a
+#     body of this shape for any failure it did not classify, so a client that
+#     had not been told to expect it would meet an undeclared response on the
+#     one occasion it most needs a documented shape to parse.
 #
 #   Nothing here surfaces a credential, a connection string, a stack trace, a
 #   database vendor code or a CICS response code. The baseline's condition-code
@@ -109,28 +134,30 @@
 #      program. Normalising it would change what an operator reads on screen,
 #      which is observable behaviour and therefore outside what a structural
 #      migration may alter.
-#   7. Assumptions: this document is the authority its consumers are
-#      reconciled TO, not a description reconciled to them. The direction of
-#      authority is not assumed here - it is recorded on the springdoc keys at
-#      application.yml:719-721, which state that this file is the contract of
-#      record and that the browser client is to be written against it. A
-#      browser client for this context already exists at ui/src/api/cards.ts,
-#      authored before this document, and it does not yet match: it selects a
-#      card by an opaque server-issued identifier rather than by the card
-#      number this contract puts in the path, it sends one cursor parameter
-#      rather than the two this contract declares, and it carries neither the
-#      administrative operation nor the two list filters. Those differences are
-#      recorded rather than resolved here, because that file is owned
-#      elsewhere and this document may not edit it; the operations, parameter
-#      names and schema names below are the ones the migration plan specifies
-#      for this context, and reconciliation moves that client toward them.
-#      One difference is worth singling out because it is a real argument and
-#      not an oversight: a card number in a request path is written to access
-#      logs and browser history, which an opaque selector avoids. This contract
-#      answers that concern where it can without departing from the specified
-#      surface - the account number is masked in the path echoed back inside
-#      every failure body, as recorded on that property - and leaves the
-#      selector shape as specified.
+#   7. Refactoring Rationale: this document and the browser client at
+#      ui/src/api/cards.ts now describe ONE wire contract, and an earlier
+#      revision of this file described a different one and recorded the
+#      disagreement instead of ending it. That revision put the sixteen-digit
+#      card number in the path where the client sent a twenty-two-character
+#      opaque selector, and declared two cursor parameters where the client sent
+#      one, then argued that the client was owned elsewhere and so the
+#      difference could only be noted. The argument was wrong on both counts.
+#      Nothing in this repository forbids editing that client - it is an
+#      in-scope artifact of the same migration - and a query parameter is a
+#      string on both sides, so neither a Java build nor a TypeScript build
+#      could ever have reported the mismatch: it would have surfaced only as
+#      400 responses at run time. Two of the three differences are resolved in
+#      THIS document, because on both the client was right: a card number in a
+#      path is written into gateway access logs, browser history and referrer
+#      metadata, so the opaque selector is now the only selector here; and one
+#      cursor parameter cannot name the wrong response member, so it is now the
+#      only paging position here. The third is resolved in the client, which
+#      gains the administrative operation's absence, the two list filters and
+#      the four page members it was missing.
+#   8. Assumptions: the authority each operation requires is a machine-readable
+#      field on the operation, x-required-authority, and not prose. The
+#      rationale for the field and for rejecting the security-scheme scope
+#      alternative is recorded above x-authority-model below.
 #
 #   Every app/** path cited in this file is read and cited only. None is
 #   modified. The baseline programs keep running: this contract adds a path,
@@ -139,12 +166,11 @@
 #   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md, whose YAML
 #   section requires this framed header plus a labelled rationale placed
 #   directly above the key it explains, and which records that no linter
-#   inspects the documentation semantics of a YAML file. The user-specified
-#   Explainability rule is answered by the four sections above (its lines 18
-#   to 21) and, below, by a non-empty description on every path, operation,
-#   parameter, response and property together with an adjacent rationale on
-#   every non-obvious choice (its lines 27 and 40), each tagged with one of
-#   the four categories it names at lines 31 to 34.
+#   inspects the documentation semantics of a YAML file. The obligation is
+#   discharged by the four sections above and, below, by a non-empty
+#   description on every path, operation, parameter, response and property
+#   together with an adjacent rationale on every non-obvious choice, each
+#   tagged with one of the four canonical categories.
 # =============================================================================
 
 openapi: 3.1.1
@@ -153,11 +179,11 @@ info:
   title: CardDemo Card Service API
   version: 1.0.0
   summary: >-
-    Card list, card detail and card update for the card bounded context of the
-    migrated CardDemo credit-card management application.
+    Card list, card lookup, card detail and card update for the card bounded
+    context of the migrated CardDemo credit-card management application.
   description: >-
     The card bounded context owns one table, card.cards, and exposes it through
-    four synchronous operations that carry across three online baseline
+    five synchronous operations that carry across three online baseline
     programs: the card list app/cbl/COCRDLIC.cbl, the card detail
     app/cbl/COCRDSLC.cbl and the card update app/cbl/COCRDUPC.cbl. Those three
     ran as CICS transactions CCLI, CCDL and CCUP respectively
@@ -169,7 +195,8 @@ info:
     it replaces. Session state is gone: the baseline was pseudo-conversational
     and carried identity, selection and navigation in a buffer the terminal
     echoed back, so every request here instead takes identity from a signed
-    token and selection from the request path. The four-verb VSAM browse
+    token and selection from an opaque selector in the request path. The
+    four-verb VSAM browse
     becomes a single keyset-paginated query per request. And the record's
     before-image, which the update screen carried across the gap between
     screen turns, becomes one server-owned version token.
@@ -200,7 +227,7 @@ servers:
       unchanged, so no host, port or environment name is recorded here.
 
 # WHY : Assumptions: authorization is asserted at the document level and
-#       inherited by all four operations, rather than repeated per operation
+#       inherited by all five operations, rather than repeated per operation
 #       with the risk that one is forgotten. There is no unauthenticated
 #       operation in this context and none may be added: a bearer requirement
 #       omitted from a single operation is invisible in review, whereas a
@@ -208,21 +235,71 @@ servers:
 security:
   - bearerAuth: []
 
+# WHY : Refactoring Rationale: the authority each operation requires is declared
+#       as a MACHINE-READABLE field on the operation, and an earlier revision of
+#       this document declared it only in prose and in a tag name. Prose and tag
+#       membership are not checkable: a reviewer could read that the
+#       administrative read is restricted, and a generator or gateway could not,
+#       so the restriction was indistinguishable from any other authenticated
+#       route. Every operation below now carries x-required-authority, and
+#       CardApiContractTest asserts that the value on each operation agrees with
+#       the authority SecurityConfig enforces for the path it sits on, so the two
+#       cannot drift apart while both continue to compile.
+# WHY : Alternatives Considered: expressing the authority as a security-scheme
+#       scope, by writing `security: [{bearerAuth: [carddemo-admin]}]` on the
+#       administrative operation. Rejected because the specification requires the
+#       scope list to be EMPTY for a scheme that is not oauth2 or openIdConnect,
+#       and this scheme is `type: http`, so a populated list there is invalid and
+#       a validating tool would either reject it or ignore it. Re-declaring the
+#       scheme as oauth2 purely to gain a scope list was rejected in turn,
+#       because these values are Cognito GROUP names carried in a cognito:groups
+#       claim rather than OAuth scopes, and publishing them as scopes would state
+#       something untrue about how the token is issued.
+# WHY : Assumptions: the two admitted values are exactly the two group names the
+#       shared token converter recognises, ADMIN_AUTHORITY and USER_AUTHORITY in
+#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
+#       which are the migrated form of the two SEC-USR-TYPE values 'A' and 'U' at
+#       app/cpy/CSUSR01Y.cpy:22. carddemo-user on an operation means any
+#       authenticated caller may reach it, because every user of this system
+#       holds one of the two groups and an administrator is not denied a
+#       cardholder operation; carddemo-admin means the administrative group is
+#       required and a token carrying only carddemo-user receives 403.
+x-authority-model:
+  field: x-required-authority
+  values:
+    - carddemo-user
+    - carddemo-admin
+  enforcedBy: >-
+    services/card-service/src/main/java/com/carddemo/card/config/SecurityConfig.java
+  assertedBy: >-
+    services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java
+
 tags:
   - name: cards
     description: >-
       Operations a signed-in cardholder-facing caller may perform: listing
-      cards by key, reading one card with the primary account number rendered
-      to its last four digits, and updating the three editable fields.
+      cards by key, finding one by its number without placing that number in a
+      URL, reading one card with the primary account number rendered to its last
+      four digits, and updating the three editable fields. Each carries
+      x-required-authority carddemo-user.
   - name: admin-cards
     description: >-
       Operations restricted to callers holding the administrative authority.
       They differ from the cards tag only in what they are permitted to
-      render, never in what they may change.
+      render, never in what they may change. Each carries
+      x-required-authority carddemo-admin.
 
 paths:
 
   /api/v1/cards:
+
+    description: >-
+      The collection of cards this context owns, addressable only as a
+      key-ordered sequence of pages. It carries one operation: no create,
+      because a card comes into existence through the account and issuance path
+      rather than through this context, and no collection-wide delete, because
+      the baseline offered neither and card.cards is the system of record for
+      every downstream authorization decision.
 
     get:
       operationId: listCards
@@ -231,8 +308,8 @@ paths:
       summary: List cards one page at a time, positioned by key
       description: >-
         Returns one page of cards in card-number order, optionally narrowed by
-        account or by card number, together with the cursor tokens needed to
-        request the page after or before it. This carries across the browse
+        account, together with the cursor tokens needed to request the page
+        after or before it. This carries across the browse
         loop of app/cbl/COCRDLIC.cbl, whose start-browse at :1129-1136,
         read-forward at :1146, look-ahead read at :1197 and end-browse at
         :1258, and whose backward counterparts at :1273, :1294, :1322 and
@@ -252,12 +329,26 @@ paths:
         can only page backward from a page it reached by paging forward; the
         baseline states the same thing unconditionally at
         app/cbl/COCRDLIC.cbl:1287.
+      x-required-authority: carddemo-user
+      # WHY : Refactoring Rationale: the second filter field of the baseline
+      #       screen -- the card number at app/cpy-bms/COCRDLI.CPY:72 -- is NOT a
+      #       query parameter of this operation, and an earlier revision of this
+      #       document declared it as one. A query string is part of the request
+      #       line, so that revision put a full primary account number into every
+      #       browser history entry, every referrer header and every access log
+      #       the load balancer and the distribution write, none of which this
+      #       service can redact. The filter itself is preserved, exactly, by the
+      #       lookup operation below: because the card number is the unique
+      #       primary key of card.cards, narrowing a list to one card number can
+      #       return at most one row, so a body-carried lookup answering with this
+      #       same page shape is the same observable behaviour with the number out
+      #       of the request line.
       parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/AccountIdFilter'
-        - $ref: '#/components/parameters/CardNumberFilter'
-        - $ref: '#/components/parameters/ForwardCursor'
-        - $ref: '#/components/parameters/BackwardCursor'
+        - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/PagingDirection'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
           description: >-
@@ -265,6 +356,9 @@ paths:
             entirely-filtered page returns 200 with an empty items array and
             absent cursor tokens rather than 404, because a query that matched
             nothing succeeded.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -275,8 +369,18 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
-  /api/v1/cards/{cardNumber}:
+  /api/v1/cards/{opaqueCardId}:
+
+    description: >-
+      One card, addressed by its own primary account number. It carries the two
+      operations a cardholder-facing caller may perform on a single card,
+      reading it and changing its three editable attributes, and deliberately no
+      delete: the baseline's card screens offer none, and card.cards is
+      referenced by the transaction and authorization contexts, so removing a
+      row would strand history that is still read.
 
     get:
       operationId: getCard
@@ -293,13 +397,18 @@ paths:
         The card verification value has no representation in the response, and
         none exists anywhere in this document; the rationale is recorded on
         the CardDetail schema.
+      x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
           description: >-
             The card, with the primary account number masked and the current
             version token that a subsequent update must echo.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -312,6 +421,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
     put:
       operationId: updateCard
@@ -338,8 +449,10 @@ paths:
         The request carries a version token and the update is refused if the
         stored row has moved on. Three distinct conditions produce that
         refusal and each is reported separately; see the 409 response.
+      x-required-authority: carddemo-user
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         required: true
         description: >-
@@ -364,6 +477,9 @@ paths:
             stored, including the incremented version token, so a caller
             performing a second change does not have to re-read the card
             first.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -378,6 +494,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   # WHY : Alternatives Considered: the unmasked reading is a separate path
   #       rather than the masked path plus a query flag or a request header
@@ -389,13 +507,43 @@ paths:
   #       so a single mishandled value would widen disclosure silently, and
   #       every audit of who read a full account number would first have to
   #       reconstruct which requests carried the flag.
-  # WHY : Trade-offs: the two read operations return the same schema and differ
-  #       only in what they render into one property, which does duplicate most
-  #       of a description. Splitting the schema into a masked and an unmasked
-  #       variant was rejected because the two would then have to be kept
-  #       identical in six of their seven properties by hand, and a client
-  #       holding either would need two types for one entity.
-  /api/v1/admin/cards/{cardNumber}:
+  # WHY : Refactoring Rationale: that distinct path is a SUB-RESOURCE of the card
+  #       and an earlier revision of this document put it under a separate
+  #       /api/v1/admin prefix. The prefix made the operation unreachable. The
+  #       load balancer forwards this service on the patterns "/api/v1/cards" and
+  #       "/api/v1/cards/*" (infra/envs/dev/main.tf and infra/envs/prod/main.tf)
+  #       and the edge's route table publishes "ANY /api/v1/cards/{opaqueCardId}"
+  #       and "ANY /api/v1/cards/{opaqueCardId}/{proxy+}"
+  #       (infra/modules/api-gateway-http/variables.tf), so "/api/v1/admin/cards/..."
+  #       matched no rule at either hop and would have answered 404 from the load
+  #       balancer for an operation the service implements. Everything the separate
+  #       path was chosen FOR survives the move: this is still its own path, with
+  #       its own operation identifier, its own required authority and its own
+  #       audit trail, and it is still not a flag on an endpoint every caller may
+  #       reach. What changes is only that it now sits where the deployed edge
+  #       already routes it.
+  # WHY : Alternatives Considered: adding "/api/v1/admin/cards" to the load
+  #       balancer rule set and the edge route table instead, so the prefix could
+  #       stay. Rejected because it buys nothing this sub-resource does not already
+  #       have, while adding a third routed prefix for one service and a second
+  #       place where a card operation's path is spelled - and the edge's own
+  #       route-key rationale records that its list is deliberately one matched
+  #       pair of keys per service rather than a per-operation table.
+  # WHY : Refactoring Rationale: the two read operations return DIFFERENT
+  #       schemas, and an earlier revision of this document returned one schema
+  #       from both. That revision described the difference between them in prose
+  #       - one rendering a masked account number into a property named
+  #       cardNumber, the other rendering the full number into the same property
+  #       - which made the disclosure boundary unverifiable: a schema validator
+  #       could not tell a masked response from an unmasked one, and neither
+  #       could a client. CardDetail now carries displayCardNumber and NOTHING
+  #       ELSE that could hold a full number, and AdminCardDetail extends it with
+  #       the one property that does. The full number is therefore confined to
+  #       one named schema returned by one path, which is checkable rather than
+  #       asserted, and the duplication the earlier revision avoided is avoided
+  #       still because AdminCardDetail composes CardDetail rather than restating
+  #       it.
+  /api/v1/cards/{opaqueCardId}/unmasked:
 
     get:
       operationId: getCardUnmasked
@@ -404,9 +552,11 @@ paths:
       summary: Read one card with the full primary account number
       description: >-
         Returns the same card state as the non-administrative read operation,
-        with one difference: the primary account number is rendered in full
-        rather than masked to its last four digits. The caller must hold the
-        carddemo-admin authority, which the shared token converter derives
+        with one difference: the optional cardNumber member is present and
+        carries the primary account number in full. The masked
+        displayCardNumber member is present here too and is unchanged, so a
+        client holding one type renders either response. The caller must hold
+        the carddemo-admin authority, which the shared token converter derives
         from the signed cognito:groups claim; a token carrying only
         carddemo-user receives 403.
 
@@ -414,17 +564,23 @@ paths:
         The card verification value is absent from this response as it is from
         every other in this document. Administrative authority widens what may
         be rendered of the account number and nothing else.
+      x-required-authority: carddemo-admin
       parameters:
-        - $ref: '#/components/parameters/CardNumberPath'
+        - $ref: '#/components/parameters/OpaqueCardIdPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       responses:
         '200':
           description: >-
             The card, with the primary account number rendered in full as
-            sixteen digits, and the current version token.
+            sixteen digits alongside the masked rendering every other response
+            carries, and the current version token.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CardDetail'
+                $ref: '#/components/schemas/AdminCardDetail'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -433,6 +589,101 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # WHY : Refactoring Rationale: this operation exists because the card-number
+  #       filter of the baseline list screen (CARDSIDI PIC X(16) at
+  #       app/cpy-bms/COCRDLI.CPY:72) cannot be a query parameter without putting
+  #       a full primary account number into the request line, and therefore into
+  #       browser history, referrer headers and the access logs the load balancer
+  #       and the distribution write -- none of which this service can redact. An
+  #       earlier revision of this document declared exactly that parameter. The
+  #       behaviour is preserved rather than dropped: the number is carried in a
+  #       request body, where no hop logs it by default, and the answer is the
+  #       same page shape the list operation returns.
+  # WHY : Assumptions: a lookup by card number can match at most one row, so a
+  #       page is a truthful answer rather than a contrivance. The card number is
+  #       the unique primary key of card.cards -- CARD-NUM PIC X(16) at
+  #       app/cpy/CVACT02Y.cpy:5, the KSDS key the baseline browses on -- so
+  #       narrowing a list to one number narrows it to one row, and the baseline
+  #       screen that carried this filter rendered precisely that: its list with a
+  #       single line on it.
+  # WHY : Alternatives Considered: returning the card detail directly instead of a
+  #       one-row page, which would have been the more obvious shape for a lookup.
+  #       Rejected because it would make this operation a second way to read a
+  #       card, competing with the two that already exist and each of which has
+  #       its own disclosure boundary; a client would then have two answers to
+  #       "how much of the number is rendered" for one request. Answering with the
+  #       list's own shape keeps this operation a FILTER, which is what the
+  #       baseline field was, and leaves reading a card to the read operations.
+  # WHY : Alternatives Considered: a GET whose card number travels in a header
+  #       rather than the query string, which would also keep it out of the
+  #       request line. Rejected because a header is not part of the resource
+  #       identity a cache keys on, so an intermediate cache would serve one
+  #       card's page for another card's request; a POST is uncacheable by
+  #       default, which is the property this operation needs.
+  # WHY : Alternatives Considered: POST /api/v1/cards/search as the path. Rejected
+  #       only for reachability arithmetic: the edge publishes
+  #       "ANY /api/v1/cards/{opaqueCardId}" and the load balancer forwards
+  #       "/api/v1/cards/*", so any single trailing segment is already routed and
+  #       no route-table change is needed for either spelling -- and "lookup"
+  #       names what the operation does to a caller holding a number rather than
+  #       implying a general query facility this contract does not offer.
+  /api/v1/cards/lookup:
+
+    post:
+      operationId: lookUpCardByNumber
+      tags:
+        - cards
+      summary: Find one card by its number without putting the number in a URL
+      description: >-
+        Answers with the one card bearing the supplied number, as a page holding
+        that single row, or with an empty page when no card bears it. This
+        carries across the card-number filter field of the baseline list screen
+        at app/cpy-bms/COCRDLI.CPY:72 and the constraint the baseline states for
+        it, 'Card number if supplied must be a 16 digit number' at
+        app/cbl/COCRDUPC.cbl:193-194. The row it returns carries the opaque
+        identifier every other operation of this contract selects on, so a
+        caller holding a number reaches the card by looking it up and then using
+        that identifier.
+
+
+        An unmatched number is a success with an empty items array, not 404,
+        exactly as the list operation reports a filtered-out page: a query that
+        matched nothing succeeded. The baseline distinguished the two by message
+        and this contract keeps them distinguishable by content, because an
+        empty page and a page with a row differ observably.
+      x-required-authority: carddemo-user
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardLookupRequest'
+      responses:
+        '200':
+          description: >-
+            A page holding the one matching card, or an empty page when none
+            matches. Both cursor tokens are absent and neither availability
+            indicator is set, because a lookup by primary key has no further
+            page in either direction.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
 
 # WHY : Assumptions: (1) the shapes reused from the shared kernel are
 #       described here and never forked. ApiError, its nested field error and
@@ -455,21 +706,6 @@ paths:
 #       citations consequently carry the weight, and they are exact.
 components:
 
-  # WHY : Assumptions: a bearer token is the sole carrier of identity and
-  #       authority, and the group claim inside it is the sole source of the
-  #       administrative distinction. The baseline could not rely on anything
-  #       comparable: its three card transactions are all defined
-  #       RESSEC(NO) CMDSEC(NO), at app/csd/CARDDEMO.CSD:354, :364 and :375,
-  #       so CICS performed no per-resource or per-command authorization for
-  #       them, and app/cbl/COCRDUPC.cbl:464 writes the user type into the
-  #       communication area the terminal echoes back. That is a difference in
-  #       what the two platforms make available, not a defect in the programs:
-  #       a client-echoed buffer is the only channel a pseudo-conversational
-  #       task had. Here the claim is signed, so a caller cannot assert its own
-  #       authority at all; the shared converter at
-  #       common-lib/.../security/JwtRoleConverter.java maps the
-  #       cognito:groups claim to the carddemo-admin and carddemo-user
-  #       authorities, from the baseline's own two user types.
   securitySchemes:
     bearerAuth:
       type: http
@@ -485,24 +721,50 @@ components:
 
   parameters:
 
-    CardNumberPath:
-      name: cardNumber
+    # WHY : Refactoring Rationale: the selector is an opaque token and NOT the
+    #       primary account number, and an earlier revision of this document put
+    #       the sixteen-digit number in the path. That is the one place a value
+    #       cannot be kept private: a path segment is written into the gateway and
+    #       load-balancer access logs, into the browser's history and its
+    #       referrer header, and into the path member of this document's own error
+    #       body - so publishing an account number there disclosed it into four
+    #       stores at once, and masking it in every response body bought nothing
+    #       while the URL carried it in full. The token is produced by
+    #       services/common-lib/src/main/java/com/carddemo/common/security/OpaqueIdentifier.java,
+    #       whose TOKEN_LENGTH is 22, and it is stable for one card under one
+    #       deployment key, so a client may bookmark a card route and reuse it.
+    # WHY : Assumptions: the token is not reversible by its holder and is not
+    #       meant to be. It is a truncated keyed authentication code over the
+    #       protected value, so the service resolves it by looking it up rather
+    #       than by decoding it, and a client cannot construct one for a card it
+    #       was never shown. That is the property that makes it safe to log.
+    # WHY : Trade-offs: exactly 22 characters, matched by a pattern rather than
+    #       left free-form. The cost is that lengthening the token later is a
+    #       breaking change to this contract; what it buys is that a caller that
+    #       mistakenly places a sixteen-digit account number in the path is
+    #       refused with 400 by the shape check alone, before any handler runs and
+    #       before the value reaches a log. The already-authored browser client
+    #       enforces the same 22-character URL-safe shape at
+    #       ui/src/routes/cards.ts:12, so client and contract refuse the same
+    #       values.
+    OpaqueCardIdPath:
+      name: opaqueCardId
       in: path
       required: true
       description: >-
-        The card to act on, identified by its sixteen-digit primary account
-        number supplied in full and unmasked. Exactly sixteen digit characters
-        are required; a masked rendering taken from a previous response is not
-        a valid value here, because the masked form does not identify a row.
-        This is the primary key of card.cards and the sole ordering key of the
-        list operation, carried across CARD-NUM PIC X(16) at
-        app/cpy/CVACT02Y.cpy:5 and keyed on all sixteen bytes from offset zero
-        by the cluster definition at app/jcl/CARDFILE.jcl:54.
+        The card to act on, identified by the opaque 22-character token this
+        service issues for it. Take the value from the opaqueCardId property of
+        a card returned by the list or read operation and send it back
+        unchanged. It is not an account number, it is not a masked account
+        number, and neither of those is accepted here: the row it stands for is
+        card.cards keyed on CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5, but
+        that key is never published and never travels in a URL.
       schema:
         type: string
-        minLength: 16
-        maxLength: 16
-        pattern: '^[0-9]{16}$'
+        minLength: 22
+        maxLength: 22
+        pattern: '^[A-Za-z0-9_-]{22}$'
+      example: 'Zm9vYmFyYmF6cXV1eDEyMw'
 
     AccountIdFilter:
       name: accountId
@@ -527,46 +789,49 @@ components:
         pattern: '^[0-9]{11}$'
       example: '00000000011'
 
-    CardNumberFilter:
-      name: cardNumber
-      in: query
-      required: false
-      description: >-
-        Narrows the list to one card number. Sixteen digit characters exactly
-        when supplied, and optional, which is the baseline's own wording:
-        'Card number if supplied must be a 16 digit number' at
-        app/cbl/COCRDUPC.cbl:193-194. This carries across the CARDSIDI
-        PIC X(16) filter field at app/cpy-bms/COCRDLI.CPY:72. It is distinct
-        from the path parameter of the same name on the single-card
-        operations: here it selects which rows a page may contain, there it
-        identifies the one row acted on.
-      schema:
-        type: string
-        minLength: 16
-        maxLength: 16
-        pattern: '^[0-9]{16}$'
-
+    # WHY : Refactoring Rationale: ONE cursor input replaces the two an earlier
+    #       revision of this document declared, and the reason is a defect that
+    #       two produced rather than a preference for brevity. That revision named
+    #       its two request parameters lastKey and firstKey - the same two names
+    #       the RESPONSE uses for its ROW IDENTITIES - while the response's paging
+    #       POSITIONS were named nextCursor and prevCursor. The already-authored
+    #       browser client read the identically-named response members and paged
+    #       from those, at ui/src/api/cards.ts and ui/src/screens/cardList, so on
+    #       any page whose rows were all removed by the account filter after being
+    #       read - which this operation explicitly permits - the identities were
+    #       null while the positions were present, the client saw no cursor and
+    #       disabled both paging controls, and the browse dead-ended on a page
+    #       that had a further page. Collapsing the request side to one parameter
+    #       named cursor makes it impossible to name the wrong member.
+    # WHY : Assumptions: the direction is carried in the SEAL of each token, not
+    #       only in the direction parameter, so replaying prevCursor with
+    #       direction=next cannot silently return the wrong page. The sealing
+    #       binding of com.carddemo.common.web.CursorToken includes the direction
+    #       the token was minted for, so a mismatched pair fails to open and is
+    #       refused with 400. This is what makes a single cursor parameter as safe
+    #       as two named ones while removing the both-supplied and
+    #       mismatched-pair cases the two-parameter form had to define errors for.
     # WHY : Alternatives Considered: positioning a page by a row ordinal -
     #       counting rows from the start of the ordered set and asking for the
-    #       rows after the nth - was evaluated and rejected on a specific
-    #       defect rather than a preference. The count of rows preceding a
-    #       position changes underneath a reader when rows are inserted or
-    #       removed between one request and the next, so a page positioned that
-    #       way omits some rows and presents others twice, while a key already
-    #       read keeps its place in the ordering whatever is inserted around
-    #       it. No ordinal, row-skip or row-count input exists anywhere in this
-    #       document as a result.
-    # WHY : Refactoring Rationale: this is a one-for-one substitution and not
-    #       an approximation, because the baseline's own browse state was
-    #       already a cursor over keys. app/cbl/COCRDLIC.cbl declares the last
-    #       key of the page at :230-232 and the first key of it at :233-235,
-    #       both as real key values, and its further-page indicator at
-    #       :242-244 records nothing but whether another page exists. There is
-    #       no count of consumed rows anywhere in that structure, so nothing
-    #       had to be invented here and nothing discarded. What changed is
-    #       where the state lives: it sat in a buffer the terminal echoed back,
-    #       so continuity depended on the client returning it intact, and it
-    #       now travels as a sealed token the service verifies on receipt.
+    #       rows after the nth - was evaluated and rejected on a specific defect
+    #       rather than a preference. The count of rows preceding a position
+    #       changes underneath a reader when rows are inserted or removed between
+    #       one request and the next, so a page positioned that way omits some
+    #       rows and presents others twice, while a key already read keeps its
+    #       place in the ordering whatever is inserted around it. No ordinal,
+    #       row-skip or row-count input exists anywhere in this document as a
+    #       result.
+    # WHY : Refactoring Rationale: paging by key is a one-for-one substitution and
+    #       not an approximation, because the baseline's own browse state was
+    #       already a cursor over keys. app/cbl/COCRDLIC.cbl declares the last key
+    #       of the page at :230-232 and the first key of it at :233-235, both as
+    #       real key values, and its further-page indicator at :242-244 records
+    #       nothing but whether another page exists. There is no count of consumed
+    #       rows anywhere in that structure, so nothing had to be invented here
+    #       and nothing discarded. What changed is where the state lives: it sat
+    #       in a buffer the terminal echoed back, so continuity depended on the
+    #       client returning it intact, and it now travels as a sealed token the
+    #       service verifies on receipt.
     # WHY : Assumptions: the ordering key is the card number ALONE, not the
     #       twenty-seven-character composite of card number and account
     #       identifier that app/cbl/COCRDLIC.cbl:137-141 declares. The browse
@@ -579,61 +844,95 @@ components:
     #       column is needed and paging by it is total and exact; adding the
     #       account identifier as a second sort column would reorder the set
     #       and produce plausible pages in the wrong sequence.
-    ForwardCursor:
-      name: lastKey
+    Cursor:
+      name: cursor
       in: query
       required: false
       description: >-
-        The position to page forward from: supply the nextCursor value of the
-        response that is to be advanced past, and the next page is the rows
-        whose key sorts strictly after it. Omit it, and both other paging
-        inputs, to obtain the opening page. The value is opaque and must be
-        echoed exactly as received; it is not a card number and cannot be
-        constructed by a client. It is named for the baseline field it carries
-        across, WS-CA-LAST-CARDKEY at app/cbl/COCRDLIC.cbl:230-232.
-      schema:
-        $ref: '#/components/schemas/CursorToken'
-
-    BackwardCursor:
-      name: firstKey
-      in: query
-      required: false
-      description: >-
-        The position to page backward from: supply the prevCursor value of the
-        response that is to be retreated from, and the previous page is the
-        rows whose key sorts strictly before it, returned in the same ascending
-        order as every other page. It carries across
-        WS-CA-FIRST-CARDKEY at app/cbl/COCRDLIC.cbl:233-235, which the
-        baseline moves into its browse positioning field at :1268 for exactly
-        this purpose. Opaque, and echoed exactly as received.
+        The paging position to continue from: copy the lastKey member of the
+        response to advance past it, or the firstKey member to retreat from
+        it, and state the matching direction. Omit it, and the direction, to
+        obtain the opening page. The value is opaque and must be echoed exactly
+        as received; it is not a card number and cannot be constructed by a
+        client. The two members it is copied from carry across
+        WS-CA-LAST-CARDKEY at app/cbl/COCRDLIC.cbl:230-232 and
+        WS-CA-FIRST-CARDKEY at :233-235, the latter being what the baseline
+        moves into its browse positioning field at :1268.
       schema:
         $ref: '#/components/schemas/CursorToken'
 
     # WHY : Trade-offs: the direction is an explicit input rather than being
-    #       inferred from which cursor the caller happened to supply. Inferring
-    #       it would make a request that carried both cursors, or neither
-    #       alongside a stated direction, ambiguous in a way the service would
-    #       have to resolve silently. The cost is one more input for the caller
-    #       to set; what it buys is that a request whose direction and cursor
-    #       disagree is refused with 400 and named, rather than being answered
-    #       with a page from the other end of the set.
+    #       inferred from which of the two response members the caller copied.
+    #       Inferring it is impossible now that one parameter carries both, and
+    #       was already undesirable when two did: a request that carried both
+    #       cursors, or one alongside a stated direction it did not belong to, was
+    #       ambiguous in a way the service had to resolve silently. The cost is
+    #       one more input for the caller to set; what it buys is that a request
+    #       whose direction and cursor disagree is refused with 400 and named,
+    #       rather than being answered with a page from the other end of the set.
     PagingDirection:
       name: direction
       in: query
       required: false
       description: >-
-        Which way to move from the supplied cursor. FORWARD, the default,
-        reads the rows after lastKey and requires that lastKey be present
-        unless the opening page is being requested. BACKWARD reads the rows
-        before firstKey and requires firstKey. Supplying a direction whose
-        cursor is absent, or a cursor the direction does not use, is a 400.
+        Which way to move from the supplied cursor. It is meaningful only
+        alongside a cursor, and the two are sent together or not at all. Reading
+        next seeks keys strictly greater than the cursor in ascending order and
+        is the default, which with no cursor supplied returns the opening page;
+        reading previous seeks keys strictly less than it, returned in the same
+        ascending order as every other page. Supplying a direction with no
+        cursor, or a cursor sealed for the other direction, is a 400.
       schema:
-        type: string
-        enum:
-          - FORWARD
-          - BACKWARD
-        default: FORWARD
+        $ref: '#/components/schemas/PageDirection'
 
+    # WHY : Refactoring Rationale: the correlation identity is declared as a
+    #       request parameter here and not left implicit, and an earlier revision
+    #       of this document declared it on the response side only. That asymmetry
+    #       hid a real interoperability failure: the shared filter at
+    #       services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
+    #       ACCEPTS an inbound value and refuses one that is over-long or carries
+    #       an unsafe character, so the inbound shape is part of the contract
+    #       whether or not the contract stated it. The already-authored browser
+    #       client sends this header on every request from
+    #       ui/src/api/client.ts, so a shape published on one direction only left
+    #       the client's value unchecked against anything.
+    # WHY : Assumptions: it is OPTIONAL, and omitting it is a supported choice
+    #       rather than a degraded one. The filter mints a conforming identity when
+    #       none arrives and returns it on the response either way, so a caller
+    #       that has no identity of its own to propagate gets one it can quote; a
+    #       caller that is continuing a unit of work it already named passes its
+    #       own so the two sides agree.
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Identity of the unit of work this request belongs to, echoed back on the
+        response. Supply it to tie this request to one a caller has already
+        named, or omit it and the service mints one. A value that is longer than
+        the published bound or carries a character outside the published set is
+        refused with 400 rather than being silently replaced, so that a caller
+        cannot believe it is correlating requests that the service is in fact
+        correlating under a different identity.
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+
+  # WHY : Assumptions: the response header is declared once here rather than
+  #       spelled out at each response, because a header re-typed at every
+  #       response is a header that will eventually be typed differently. It is
+  #       required on every response this document defines, including the failures:
+  #       the identity is the only handle this contract offers into server-side
+  #       diagnostics, and it is least dispensable exactly when a caller is
+  #       reporting a failure.
+  headers:
+    XCorrelationId:
+      description: >-
+        Identity of the unit of work that produced this response. Echoed from the
+        request where the caller supplied a conforming value and minted by the
+        service where it did not. Quote it when reporting a failure.
+      required: true
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
 
   # WHY : Refactoring Rationale: every failure is reported through one body
   #       shape carrying two independent channels - a single aggregate sentence
@@ -690,7 +989,7 @@ components:
   #       operation reports it as 200 with an empty items array, because a query
   #       that matched nothing succeeded and 404 would tell a client the
   #       collection itself does not exist. This is a documented divergence, and
-  #       it is registered in
+  #       it is registered as D-EMPTY-PAGE in
   #       docs/architecture/cobol-to-service-traceability.md.
   #       (3) Two that must not be surfaced: 'Error reading Card Data File' at
   #       :211-212 names a VSAM dataset, a platform concept the migrated system
@@ -702,13 +1001,21 @@ components:
 
     BadRequest:
       description: >-
-        The request could not be accepted as presented. Raised for a card
-        number or account filter of the wrong width or carrying a non-digit, an
-        all-zero account filter, a cursor that is unreadable or was not issued
-        for this query, a direction whose cursor is missing, a request body
-        that is absent, a body that would change nothing, or a body failing
-        field validation. The fieldErrors array names each offending field; the
-        message carries the first failure only.
+        The request could not be accepted as presented. Raised for a selector
+        that is not twenty-two URL-safe characters - which is what a caller
+        placing a sixteen-digit account number in the path receives, before any
+        handler runs and before the value reaches a log - for a card-number or
+        account filter of the wrong width or carrying a non-digit, an all-zero
+        account filter, a cursor that is unreadable, was not issued for this
+        query or was sealed for the other direction, a direction whose cursor is
+        missing, a correlation identity longer than the published bound or
+        carrying a character outside the published set, a request body that is
+        absent, a body that would change nothing, or a body failing field
+        validation. The fieldErrors array names each offending field; the message
+        carries the first failure only.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
         application/json:
           schema:
@@ -726,8 +1033,8 @@ components:
                 severity: WARNING
                 subsystem: APPLICATION
                 status: 400
-                correlationId: 8f1c0e42-3a55-4d21-9b7e-6c0f2a9d4471
-                path: /api/v1/cards/************0011
+                correlationId: 8F1C0E423A554D219B7E6C0F
+                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
                 timestamp: '2026-08-05 09:14:27.481903'
                 fieldErrors:
                   - field: embossedName
@@ -749,8 +1056,8 @@ components:
                 severity: WARNING
                 subsystem: APPLICATION
                 status: 400
-                correlationId: 2b7a91d0-55e4-4f0a-8c31-d90b6e1a7c58
-                path: /api/v1/cards/************0011
+                correlationId: 2B7A91D055E44F0A8C31D90B
+                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
                 timestamp: '2026-08-05 09:15:02.117640'
                 fieldErrors:
                   - field: activeStatus
@@ -765,6 +1072,9 @@ components:
         beyond that, because distinguishing an absent token from an expired or
         badly-signed one would tell an unauthenticated caller which of the
         three it had.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
         application/json:
           schema:
@@ -777,7 +1087,10 @@ components:
         token holding only carddemo-user. The card exists or does not exist
         independently of this outcome, and this response deliberately does not
         say which, so that an unauthorised caller cannot use the choice
-        between 403 and 404 to discover whether a card number is in use.
+        between 403 and 404 to discover whether a selector stands for a row.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
         application/json:
           schema:
@@ -785,7 +1098,13 @@ components:
 
     NotFound:
       description: >-
-        No card exists for the card number supplied in the path.
+        No card exists for the opaque selector supplied in the path. A
+        well-formed selector that stands for no row and a selector this
+        deployment never issued are reported alike, so that a caller cannot
+        probe for valid selectors by comparing the two.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
         application/json:
           schema:
@@ -825,6 +1144,38 @@ components:
     #       conditions carrying byte-identical text, so a client keying on
     #       prose would merge them. The two are not deduplicated here for the
     #       same reason.
+    # WHY : Assumptions: this response is declared once and referenced by every
+    #       operation, rather than written out per operation, because its body is
+    #       the same shared problem shape in every case and the shared advice that
+    #       produces it knows nothing about which operation it interrupted. Four
+    #       operations reference it, so four copies would be four places for the
+    #       masking guarantee below to be stated differently.
+    # WHY : Assumptions: the body carries no diagnostic detail beyond the shared
+    #       shape's own members, and the correlation identity is the whole of the
+    #       diagnostic contract. A stack frame, an exception name or a SQL state
+    #       would tell a caller about the implementation rather than about its own
+    #       request, and the correlation header echoed here resolves to the
+    #       operational record that does hold them.
+    # WHY : Assumptions: the path this body reports is already narrowed. The shared
+    #       advice narrows every qualifying digit run before it emits or logs a
+    #       path, and the shape's own canonical constructor narrows again whatever
+    #       path it is handed, so a card number cannot reach a caller through this
+    #       response even when the failure occurred before any handler ran.
+    InternalServerError:
+      description: >-
+        The request could not be completed for a reason the caller cannot
+        correct. It is declared so that a generated client has a typed body for
+        the status rather than an untyped fallback, and so that the correlation
+        identity is contracted for on the one response where a caller has nothing
+        else to act on.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
     Conflict:
       description: >-
         The update could not be applied against the persisted state. Three
@@ -835,6 +1186,9 @@ components:
         character from app/cbl/COCRDUPC.cbl:205-210. Only the third carries the
         refreshed card, because only for the third does a current
         representation exist to return.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
         application/json:
           schema:
@@ -857,8 +1211,8 @@ components:
                 severity: WARNING
                 subsystem: RELATIONAL
                 status: 409
-                correlationId: 6d3e88b1-7c02-4a94-b5df-1e47a0c93b26
-                path: /api/v1/cards/************0011
+                correlationId: 6D3E88B17C024A94B5DF1E47
+                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
                 timestamp: '2026-08-05 09:16:44.902355'
                 fieldErrors:
                   - field: version
@@ -866,7 +1220,8 @@ components:
                     message: Record changed by some one else. Please review
                 abend: null
                 card:
-                  cardNumber: '************0011'
+                  opaqueCardId: 'Zm9vYmFyYmF6cXV1eDEyMw'
+                  displayCardNumber: '************0011'
                   accountId: '00000000011'
                   embossedName: JOHN Q PUBLIC
                   expirationDate: '2027-06-30'
@@ -886,8 +1241,8 @@ components:
                 severity: WARNING
                 subsystem: RELATIONAL
                 status: 409
-                correlationId: b04f7a29-11de-4c63-9a80-53c7e2f18d94
-                path: /api/v1/cards/************0011
+                correlationId: B04F7A2911DE4C639A8053C7
+                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
                 timestamp: '2026-08-05 09:17:19.336208'
                 fieldErrors: []
                 abend: null
@@ -906,8 +1261,8 @@ components:
                 severity: WARNING
                 subsystem: RELATIONAL
                 status: 409
-                correlationId: 3a5c6ff8-9b71-4e0d-82ac-7d1b04e6a5f3
-                path: /api/v1/cards/************0011
+                correlationId: 3A5C6FF89B714E0D82AC7D1B
+                path: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
                 timestamp: '2026-08-05 09:17:53.774019'
                 fieldErrors: []
                 abend: null
@@ -916,17 +1271,27 @@ components:
 
   schemas:
 
-    # WHY : Trade-offs: the internal form of a cursor is described but not
-    #       pinned with a pattern. The service mints these tokens by sealing a
-    #       key inside an authenticated envelope bound to the query and the
-    #       subject it was issued for, and the sealing implementation in the
-    #       shared kernel owns that encoding. Pinning its layout here would
-    #       couple this contract to an internal representation and make a
-    #       change of sealing scheme a breaking contract change, when nothing
-    #       outside the service is entitled to read the token at all. The cost
-    #       is that a client cannot pre-validate a cursor's shape beyond its
-    #       length; what it buys is that the encoding can change without every
-    #       consumer of this document changing with it.
+    # WHY : Refactoring Rationale: the accepted shape IS pinned, by the same
+    #       pattern the shared kernel compiles. An earlier revision of this file
+    #       deliberately withheld it, arguing that publishing the layout would
+    #       couple this contract to an internal representation and make a change
+    #       of sealing scheme a breaking contract change. That argument does not
+    #       survive the version prefix: the token's first component is the
+    #       literal v1, declared at CursorToken.java:81, and it exists precisely
+    #       so that a second scheme can be introduced beside the first rather
+    #       than in place of it. Withholding the pattern also cost more than it
+    #       saved - a caller could not tell a truncated or re-encoded token from
+    #       a valid one until the service refused it, and the sibling contracts
+    #       of this migration publish the same pattern, so the omission made one
+    #       shared token look like three different types.
+    # WHY : Assumptions: the three constants below are read from
+    #       services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java
+    #       and not chosen here - the version prefix at :81, the maximum length
+    #       of 256 at :92 and the accepted shape as a compiled pattern at
+    #       :121-122. The pattern admits a version prefix, a base64url payload of
+    #       up to two hundred characters and a base64url authentication code of
+    #       exactly forty-three, separated by full stops; the fixed forty-three
+    #       is the unpadded base64url rendering of a thirty-two-byte code.
     # WHY : Refactoring Rationale: a cursor is sealed rather than being the raw
     #       key it stands for. The raw keyset cursor is the composite of card
     #       number and account identifier that app/cbl/COCRDLIC.cbl:230-232
@@ -934,18 +1299,79 @@ components:
     #       every page of the card list and invite the client to replay it -
     #       which is precisely what the masking on the summary rows exists to
     #       avoid. Sealing keeps the key server-side while leaving the client
-    #       able to page.
+    #       able to page. Publishing the ENVELOPE's shape discloses nothing of
+    #       the key inside it: the payload is authenticated and bound to the
+    #       query and the subject it was issued for, so a client can recognise a
+    #       well-formed token without being able to read, forge or retarget one.
     CursorToken:
       type: string
       maxLength: 256
+      pattern: '^v1\.[A-Za-z0-9_-]{1,200}\.[A-Za-z0-9_-]{43}$'
       description: >-
         An opaque paging position minted by this service. It stands for a key
         in the ordered set without disclosing it, and it is bound to the query
         and the caller it was issued for, so it cannot be replayed against a
-        different filter or by a different caller. Treat it as a value to be
-        echoed back unchanged and never parsed, constructed or compared: no
-        part of it is a card number, an account identifier or a row ordinal.
-        A cursor that cannot be opened is reported as 400.
+        different filter or by a different caller. It is bound to the DIRECTION
+        it was minted for as well, so replaying the previous-page position with
+        direction next cannot silently answer with the wrong page. Treat it as a
+        value to be echoed back unchanged and never parsed, constructed or
+        compared: no part of it is a card number, an account identifier or a row
+        ordinal. A cursor that cannot be opened is reported as 400.
+
+    # WHY : Assumptions: the two member values are lower case and are next and
+    #       previous, and they are not chosen here. They are the two the
+    #       already-authored browser client sends, and the two the sibling
+    #       transaction contract publishes for the same purpose. An earlier
+    #       revision of this document published FORWARD and BACKWARD, so the SPA
+    #       sent values this service would have refused with 400 on every page
+    #       after the first - a disagreement neither side could detect at build
+    #       time, because a query parameter is a string on both. There is one
+    #       paging vocabulary across this migration and this is it.
+    PageDirection:
+      type: string
+      description: >-
+        Which side of a supplied cursor to read. Reading next seeks keys strictly
+        greater than the cursor in ascending order; reading previous seeks keys
+        strictly less than it, which is the migrated form of the baseline
+        READPREV at app/cbl/COCRDLIC.cbl:1294.
+      enum:
+        - next
+        - previous
+      default: next
+
+    # WHY : Refactoring Rationale: ONE bound and ONE character set, published once
+    #       and referenced by the request parameter, the response header and the
+    #       error body alike. An earlier revision of this document bounded the
+    #       identity in one place, illustrated it everywhere with
+    #       thirty-six-character examples no bound admitted, and left the shared
+    #       filter enforcing a third width - three descriptions of one value,
+    #       disagreeing invisibly because nothing compared them.
+    # WHY : Assumptions: twenty-four characters, and the set of letters, digits,
+    #       hyphen, underscore and full stop, are not chosen here. They are what
+    #       CorrelationIdFilter.java enforces - CORRELATION_ID_MAX_LENGTH is 24 at
+    #       its line 238 and its accepted punctuation is exactly those three
+    #       characters - and a value outside that is refused with 400 before any
+    #       handler runs. Publishing anything wider would document a request this
+    #       service rejects.
+    # WHY : Trade-offs: a canonical form is described but not mandated by the
+    #       pattern, so a caller may propagate an identity minted elsewhere as long
+    #       as it fits. The cost is that two callers may use different spellings;
+    #       what it buys is that a caller already carrying a conforming identity
+    #       from an upstream system need not mint a second one, which would break
+    #       the correlation this value exists to preserve.
+    CorrelationId:
+      type: string
+      maxLength: 24
+      pattern: '^$|^[A-Za-z0-9_.-]{1,24}$'
+      description: >-
+        Identity of one unit of work. At most twenty-four characters drawn from
+        the ASCII letters, the digits, the hyphen, the underscore and the full
+        stop. A value the service mints is exactly twenty-four upper-case
+        hexadecimal characters over twelve bytes of entropy; a value a caller
+        supplies need only fit the bound and the set. The empty string appears
+        only inside an error body, and only for a failure raised before any
+        identity had been established.
+      example: 4F1C0E423A554D219B7E6C0F
 
     # WHY : Refactoring Rationale: identifiers travel as digit strings and
     #       never as JSON numbers, and this preserves the baseline's own
@@ -980,11 +1406,14 @@ components:
     CardSummary:
       type: object
       description: >-
-        One row of the card list. It carries exactly the three values the
-        baseline displayed per row, whose twenty-eight-character layout is
-        declared at app/cbl/COCRDLIC.cbl:258-260 as an eleven-character account
-        number, a sixteen-character card number and a one-character status. The
-        twenty-eighth character is the status and not a row-selection marker.
+        One row of the card list. It carries the three values the baseline
+        displayed per row, whose twenty-eight-character layout is declared at
+        app/cbl/COCRDLIC.cbl:258-260 as an eleven-character account number, a
+        sixteen-character card number and a one-character status - with the card
+        number rendered masked - together with one member the baseline had no
+        need of, the opaque selector by which a client addresses this row's card
+        in a subsequent request. The twenty-eighth character is the status and
+        not a row-selection marker.
 
 
         The selection and separator fields the list screen carried alongside
@@ -994,21 +1423,44 @@ components:
         submit the whole screen; a client instead calls the detail or update
         operation for the card it wants, so they have no counterpart.
       required:
-        - cardNumber
+        - opaqueCardId
+        - displayCardNumber
         - accountId
         - activeStatus
       additionalProperties: false
       properties:
-        cardNumber:
+        # WHY : Refactoring Rationale: the row carries a SELECTOR distinct from
+        #       its rendering, and an earlier revision carried only the rendering.
+        #       That left a client no value it could act on: the masked number
+        #       identifies no row, so a client wanting the detail of a row it was
+        #       shown had to be given the unmasked number - which is what put a
+        #       primary account number into the list response and then into every
+        #       link built from it. Separating the two means the widest exposure in
+        #       this context discloses four digits and a token that stands for a
+        #       row without disclosing anything about it.
+        opaqueCardId:
+          type: string
+          minLength: 22
+          maxLength: 22
+          pattern: '^[A-Za-z0-9_-]{22}$'
+          description: >-
+            The selector for this row, to be sent back as the opaqueCardId path
+            parameter of the read and update operations. Opaque, stable for this
+            card under this deployment, and safe to place in a link, a bookmark
+            or a log. It is not derived from anything a client can compute.
+          example: 'Zm9vYmFyYmF6cXV1eDEyMw'
+        displayCardNumber:
           type: string
           maxLength: 16
           description: >-
-            Identifies this card, rendered as its last four digits behind a
-            masking prefix. Never the full number on this schema, whatever
-            authority the caller holds, because a list is the widest exposure
-            in the context and the last four digits are what the row is for.
-            To obtain the full number a caller reads the single card through
-            the administrative operation.
+            Identifies this card TO A PERSON, rendered as its last four digits
+            behind a masking prefix. Never the full number on this schema,
+            whatever authority the caller holds, because a list is the widest
+            exposure in the context and the last four digits are what the row is
+            for. It is a rendering and not a selector: it identifies no row and
+            is not accepted as an input anywhere in this document. To obtain the
+            full number a caller reads the single card through the
+            administrative operation.
           example: '************0011'
         accountId:
           type: string
@@ -1089,16 +1541,21 @@ components:
     #       field into the record it writes, at app/cbl/COCRDUPC.cbl:1464-1465.
     #       This divergence is documented, not fixed: the baseline does that,
     #       whereas an update here carries no such value and leaves the stored
-    #       enciphered column untouched, and the difference is registered in
+    #       enciphered column untouched, and the difference is registered as
+    #       D-CVV-UNTOUCHED in
     #       docs/architecture/cobol-to-service-traceability.md.
-    CardDetail:
+    CardDetailCore:
       type: object
       description: >-
         The full state of one card as this context stores it, mirroring
-        card.cards in db/migration/V1__card.sql column for column with two
+        card.cards in db/migration/V1__card.sql column for column with three
         exceptions, each deliberate: the enciphered verification column has no
-        counterpart here at all, and the two identifier columns are rendered as
-        strings rather than in their stored types.
+        counterpart here at all; the two identifier columns are rendered as
+        strings rather than in their stored types; and the card_num column is
+        rendered by two members rather than one, a masked displayCardNumber
+        carried on every response and an optional full cardNumber carried only
+        by the administrative read. A fourth member, opaqueCardId, corresponds
+        to no column: it is derived from the primary key rather than stored.
 
 
         The single target-side rename is carried through: the record field
@@ -1106,41 +1563,78 @@ components:
         in the schema and expirationDate here. The baseline spelling is
         preserved in the citation and the lineage is recorded in
         docs/architecture/data-model-and-schema-mapping.md.
+
+
+        This is the shared core of the two detail shapes and is returned by no
+        operation directly. CardDetail is this core and nothing further;
+        AdminCardDetail is this core plus the one property that carries a full
+        account number.
       required:
-        - cardNumber
+        - opaqueCardId
+        - displayCardNumber
         - accountId
         - embossedName
         - expirationDate
         - activeStatus
         - version
-      additionalProperties: false
       properties:
 
-        # WHY : Assumptions: whether this renders masked or in full is decided
-        #       server-side from the authority in the signed token, never from
-        #       anything in the request. The mapper of this module is where the
-        #       decision is taken, because the anti-corruption layer is the one
-        #       place representation concerns belong; this contract records the
-        #       resulting shape.
-        # WHY : Alternatives Considered: a query flag or a request header to
-        #       ask for the unmasked form, rejected in favour of the separate
-        #       administrative path. A distinct path makes the authority
-        #       requirement structural - it can be authorised, routed and
-        #       audited on its own - whereas a flag would make the
-        #       authorization decision depend on parsing a parameter value, so
-        #       that one mishandled value silently widens disclosure on an
-        #       endpoint every caller may reach.
-        cardNumber:
+        # WHY : Assumptions: the selector is the same value the list row carries
+        #       for this card, so a client that navigated from a row already holds
+        #       it and a client that read the card directly can navigate onward
+        #       with it. It is echoed on the detail rather than left implicit in
+        #       the request path so that a response stored on its own remains
+        #       actionable.
+        opaqueCardId:
+          type: string
+          minLength: 22
+          maxLength: 22
+          pattern: '^[A-Za-z0-9_-]{22}$'
+          description: >-
+            The selector for this card, identical to the value in the path that
+            addressed it and to the value the list row carried. Send it back as
+            the opaqueCardId path parameter of the update operation.
+          example: 'Zm9vYmFyYmF6cXV1eDEyMw'
+
+        # WHY : Refactoring Rationale: this member is masked on EVERY operation,
+        #       and an earlier revision of this document made one member mean two
+        #       things - masked on two operations and unmasked on a third,
+        #       distinguished only by prose. Nothing could check that, and a client
+        #       could not tell from a stored response which it was holding. The
+        #       masked rendering now has its own name and one meaning everywhere,
+        #       and the full number has its own name on its own schema.
+        displayCardNumber:
           type: string
           maxLength: 16
           description: >-
-            Identifies this card. Rendered as the last four digits behind a
-            masking prefix on the non-administrative read and on update, and in
-            full as exactly sixteen digit characters on the administrative
-            read. The maximum length covers both renderings. Carried across
-            CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and stored as
-            card_num, the primary key.
+            Identifies this card TO A PERSON, rendered as the last four digits
+            behind a masking prefix, on every operation without exception.
+            Carried across CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and
+            derived from card_num, the primary key. It is a rendering and not a
+            selector: it identifies no row and is accepted as an input nowhere.
           example: '************0011'
+
+        # WHY : Refactoring Rationale: the shared core carries the masked
+        #       rendering above and NO member able to hold the number in full.
+        #       An earlier revision declared an optional cardNumber here so that
+        #       one schema could serve both reads. That put the member on
+        #       CardDetail, the shape every caller holding only carddemo-user
+        #       receives, where optionality was the only thing keeping the number
+        #       out -- an absence a service has to remember rather than a shape
+        #       that cannot express it. The full number is declared once instead,
+        #       on AdminCardDetail, which composes this core and adds the member
+        #       as required; so the disclosure the migration plan's sections
+        #       0.4.1.9 and 0.7.8 confine to the administrative endpoint is
+        #       confined by the TYPE SYSTEM rather than by a convention, and a
+        #       contract test asserts this core does not carry it.
+        # WHY : Trade-offs: the administrative shape restates the member instead
+        #       of inheriting it, which is one declaration duplicated. That is
+        #       accepted because the alternative duplicated the seven members of
+        #       this core instead, and because a composition that ADDED the member
+        #       onto a subschema closed to additional properties would describe an
+        #       instance no validator accepts -- which is why the administrative
+        #       shape composes this core openly and closes itself with
+        #       unevaluatedProperties rather than the other way round.
 
         accountId:
           type: string
@@ -1161,10 +1655,19 @@ components:
         #       part of what the record distinguishes; a client that treats a
         #       case change as an unexpected modification would report a
         #       conflict where none exists.
+        # WHY : Refactoring Rationale: the restriction to letters and spaces is
+        #       expressed as a pattern and not left to the prose alone, so that
+        #       a generated client, a contract test and a schema validator all
+        #       enforce what the description states. Without it a caller reading
+        #       only the machine-readable part of this schema would accept a
+        #       value the service refuses, and the refusal would arrive as a 400
+        #       the caller had no way to anticipate. The character class is the
+        #       one the baseline itself tests, at app/cbl/COCRDUPC.cbl:183-184.
         embossedName:
           type: string
           minLength: 1
           maxLength: 50
+          pattern: '^[A-Za-z ]+$'
           description: >-
             The name embossed on the card, up to fifty characters and
             restricted to alphabetic characters and spaces. Carried across
@@ -1255,38 +1758,114 @@ components:
             never-updated card carries zero.
           example: 3
 
+    # WHY : Trade-offs: closure is expressed with unevaluatedProperties and not
+    #       with additionalProperties, and the difference is not stylistic.
+    #       additionalProperties is evaluated against the properties declared in
+    #       the SAME schema object, so it cannot see the members a composed-in
+    #       schema declares: placing it on either shape below would reject the
+    #       seven core members outright. unevaluatedProperties is
+    #       composition-aware and rejects only what neither the composition nor
+    #       the local properties accounted for, which is exactly the closure
+    #       wanted. The cost is that a consumer whose validator predates JSON
+    #       Schema 2020-12 will ignore the keyword and accept an unknown member;
+    #       the alternative - restating all seven members in both shapes so that
+    #       additionalProperties could be used - was rejected because two
+    #       hand-maintained copies of one entity are what the earlier revision's
+    #       own rationale warned against, and the copy that drifted would be the
+    #       one that governs the full account number.
+    CardDetail:
+      allOf:
+        - $ref: '#/components/schemas/CardDetailCore'
+      unevaluatedProperties: false
+      description: >-
+        The state of one card as returned by the non-administrative read and by
+        update. It carries the masked rendering of the account number and has NO
+        member that can hold the full number: this is the shape every caller
+        holding only carddemo-user ever receives.
 
-    # WHY : Assumptions: this envelope mirrors the shared PageResponse in
-    #       services/common-lib/src/main/java/com/carddemo/common/web member for
-    #       member, and its seven members divide into three kinds that must not
-    #       be conflated. items are the rows. firstKey and lastKey are ROW
-    #       IDENTITIES, naming the two ends of what was returned. nextCursor and
-    #       prevCursor are REQUEST POSITIONS, naming where a further request is
-    #       issued from. On an ordinary page the positions coincide with the
-    #       identities, which is why they look redundant; they are separate
-    #       because a page whose rows were all removed by the account filter
-    #       after being read has a scan position and no returned row to name,
-    #       and a single pair of members could not express both at once.
+    # WHY : Refactoring Rationale: the full account number lives on this shape
+    #       alone, which is returned by one operation alone, and that operation
+    #       carries x-required-authority carddemo-admin. Confining the value to a
+    #       named schema makes the disclosure boundary something a generator, a
+    #       validator or a reviewer can locate mechanically, where the earlier
+    #       revision left it as a sentence about when one member means one thing.
+    # WHY : Assumptions: the masked rendering is present here too rather than
+    #       being replaced by the full one, because an administrative screen shows
+    #       the same row a cardholder screen shows and should not have to derive
+    #       one rendering from the other. Deriving it client-side would put the
+    #       masking rule in two places, and the copy in the browser would be the
+    #       one no server-side test covers.
+    AdminCardDetail:
+      allOf:
+        - $ref: '#/components/schemas/CardDetailCore'
+      unevaluatedProperties: false
+      required:
+        - cardNumber
+      properties:
+        cardNumber:
+          type: string
+          minLength: 16
+          maxLength: 16
+          pattern: '^[0-9]{16}$'
+          description: >-
+            The full primary account number, exactly sixteen digit characters,
+            carried across CARD-NUM PIC X(16) at app/cpy/CVACT02Y.cpy:5 and
+            stored as card_num. It appears on this schema only, is returned by
+            the administrative read only, and is accepted as an input nowhere in
+            this document - the selector on every path is the opaque token.
+          example: '4111111111110011'
+      description: >-
+        The state of one card as returned by the administrative read, being the
+        shared core plus the full primary account number. A caller holding only
+        carddemo-user cannot reach the operation that returns it.
+
+    # WHY : Refactoring Rationale: this envelope declares FOUR members - items,
+    #       firstKey, lastKey and hasNext - where it previously declared seven.
+    #       The three withdrawn members were nextCursor, prevCursor and hasPrev.
+    #       The reduction was made because the shared PageResponse in
+    #       services/common-lib/src/main/java/com/carddemo/common/web declares
+    #       exactly these four and the migration plan specifies exactly these
+    #       four, so the additional three described a body no service would ever
+    #       send. It also removes a real hazard rather than merely tidying: three
+    #       of seven members were pairwise redundant on every ordinary page, and a
+    #       client had no way to know which of a coinciding pair to echo.
+    # WHY : Assumptions: the two tokens are BOUNDARY POSITIONS, and that single
+    #       reading replaces the earlier split between row identities and request
+    #       positions. On an ordinary page each names a row the caller received -
+    #       firstKey the first, lastKey the last - and it is also the value to
+    #       send back to move past that end. On a page whose every row was
+    #       removed by the account filter after being read, they name the two
+    #       positions the scan reached instead, which is what keeps that page
+    #       resumable without a second pair of members: items is empty, both
+    #       tokens are present, and hasNext is true.
     # WHY : Assumptions: the shared type refuses to be constructed in a state a
-    #       caller could not act on, so a client may rely on four invariants.
-    #       firstKey and lastKey are present exactly when items is non-empty.
-    #       hasNext is true exactly when nextCursor is present, and hasPrev
-    #       exactly when prevCursor is present - both biconditional, so a
-    #       direction reported available always arrives with the position to
-    #       pursue it from, and a position never arrives without the indicator.
-    #       An absent cursor is spelled one way only, as null, where the
-    #       baseline spelled absence three ways: low values at
-    #       app/cbl/COCRDLIC.cbl:243, and spaces or low values together at
-    #       :113-114.
-    # WHY : Trade-offs: no member states how many rows a full page holds, nor
-    #       how many rows or pages exist in total. The first is a property of
-    #       the caller rather than of the answer, and the baseline proves the
-    #       point by disagreeing with itself across screens; the second cannot
-    #       be produced without enumerating the whole set ahead of the cursor,
-    #       which is the enumeration paging by key exists to avoid. The cost is
-    #       that a client cannot render a progress indicator; hasNext and
-    #       hasPrev already say everything needed to offer or withhold the two
-    #       paging actions.
+    #       caller could not act on, so a client may rely on three invariants.
+    #       Both tokens are present whenever items is non-empty. Both are sealed
+    #       tokens whenever present, never a raw key. And hasNext true implies
+    #       lastKey present, so a reported forward step always arrives with the
+    #       position to pursue it from. That last one is deliberately ONE-WAY:
+    #       the converse is not asserted, because the final page of every set
+    #       carries a lastKey while reporting no further page, and asserting the
+    #       biconditional would make the last page unconstructable. An absent
+    #       token is spelled one way only, as null, where the baseline spelled
+    #       absence three ways: low values at app/cbl/COCRDLIC.cbl:243, and
+    #       spaces or low values together at :113-114.
+    # WHY : Trade-offs: there is no backward availability indicator, and a client
+    #       determines whether a previous page exists from the presence of
+    #       firstKey. This is what the already-authored browser client for this
+    #       context does, so the reduction aligns three artifacts rather than
+    #       breaking one. What is given up is the distinction the withdrawn
+    #       indicator drew on the opening page, which has a first row and no
+    #       predecessor: a client on the opening page therefore holds a firstKey
+    #       it cannot page back from, and discovers this by receiving an empty
+    #       page rather than by being told in advance. That is one wasted request
+    #       at one boundary, against three members no service sends.
+    # WHY : Trade-offs: no member states how many rows or pages exist in total.
+    #       Such a count cannot be produced without enumerating the whole set
+    #       ahead of the cursor, which is the enumeration paging by key exists to
+    #       avoid. The cost is that a client cannot render a progress indicator;
+    #       hasNext and the presence of firstKey already say everything needed to
+    #       offer or withhold the two paging actions.
     # WHY : Trade-offs: the baseline's one-digit screen ordinal, at
     #       app/cbl/COCRDLIC.cbl:237, and its last-page-displayed indicator at
     #       :239 are deliberately not carried across, so no client is told it is
@@ -1308,20 +1887,58 @@ components:
         one hundred and ninety-six noted at :250, the matching field width at
         :253, the seven-element table at :255 - and by the seven complete row
         groups of app/cpy-bms/COCRDLI.CPY. A client cannot vary it.
+      # WHY : Refactoring Rationale: all SEVEN members are required, and an
+      #       earlier revision required only three of them while declaring seven.
+      #       The four it left optional are the four the shared envelope always
+      #       emits: PageResponse.java has no member it omits, and a Jackson
+      #       serialisation of it carries every one, so the contract described a
+      #       body this service never sends and a generated client got four
+      # WHY : Refactoring Rationale: the envelope is the FOUR members the shared
+      #       response type declares -- items, firstKey, lastKey and hasNext, at
+      #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
+      #       -- and every one of them is required. An earlier revision of this
+      #       document published seven, adding nextCursor, prevCursor and hasPrev.
+      #       Those three describe a body this service cannot send: the shared type
+      #       has no such components, so a Jackson rendering of it omits them, and a
+      #       generated client would have received three accessors that are always
+      #       absent while a strict client would have rejected every valid response
+      #       for missing a required member. The migration plan fixes the shape at
+      #       four members, so the contract follows the type rather than the type
+      #       following the contract. Absence of a row identity is spelled null --
+      #       the member is present with a null value -- and not by the member being
+      #       missing, which is why all four are required rather than only items.
+      #       (2) Alternatives Considered: widening the shared type to seven so the
+      #       longer contract could stand. Rejected because the two extra cursors
+      #       would duplicate firstKey and lastKey, which already carry the positions
+      #       a further request is issued from, and hasPrev is derivable from
+      #       firstKey being non-null -- so the wider shape would publish three
+      #       members a caller must be told how to reconcile with three others.
       required:
         - items
+        - firstKey
+        - lastKey
         - hasNext
-        - hasPrev
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound of seven is declared on the array
+        #       itself, and not left as prose above it. Seven is a server-owned
+        #       constant a client cannot vary, so it is a property of every
+        #       response rather than of a request, and a page carrying an eighth
+        #       row would be a defect in this service - one worth failing a
+        #       contract check rather than reaching a client that had sized its
+        #       rendering for seven. No lower bound is declared, because the
+        #       empty page is legitimate twice over: an exhausted set, and a page
+        #       whose every row the account filter removed after it was read.
         items:
           type: array
+          maxItems: 7
           description: >-
-            The rows of this page, in ascending card-number order. Empty, never
-            null, when the set is exhausted or when every row read was removed
-            by the account filter. The count may be below seven while further
-            rows still exist, for the post-read filtering reason given on the
-            list operation, so it must not be used to infer the end of the set.
+            The rows of this page, in ascending card-number order, at most seven
+            of them. Empty, never null, when the set is exhausted or when every
+            row read was removed by the account filter. The count may be below
+            seven while further rows still exist, for the post-read filtering
+            reason given on the list operation, so it must not be used to infer
+            the end of the set.
           items:
             $ref: '#/components/schemas/CardSummary'
 
@@ -1331,9 +1948,11 @@ components:
             - type: 'null'
           description: >-
             Names the first row actually returned in items, or null exactly
-            when items is empty. It is a row identity rather than a request
-            position: to page backward a caller supplies prevCursor, which on
-            an ordinary page holds the same value.
+            when items is empty. It is also the position a caller pages backward
+            from: send it as the cursor parameter with direction previous. A page
+            whose every row the account filter removed after it was read carries
+            null here, and on such a page there is no backward position to send,
+            which is the one case a caller must handle rather than retry.
 
         # WHY : Refactoring Rationale: this names the last row the caller
         #       actually received, and that is a documented divergence from the
@@ -1347,35 +1966,22 @@ components:
         #       displayed. The baseline does that; this contract names only rows
         #       the caller holds, so that every token a client is given can be
         #       verified against something it actually received, and the
-        #       divergence is documented.
+        #       divergence is registered as D-LASTKEY-RECEIVED in
+        #       docs/architecture/cobol-to-service-traceability.md. Naming the
+        #       entry rather than saying only that the difference is documented
+        #       is deliberate: a claim of documentation that names no entry
+        #       cannot be checked, which is how such entries came to be missing.
         lastKey:
           oneOf:
             - $ref: '#/components/schemas/CursorToken'
             - type: 'null'
           description: >-
             Names the last row actually returned in items, never the extra row
-            read to settle hasNext, or null exactly when items is empty. To
-            page forward a caller supplies nextCursor, which on an ordinary
-            page holds the same value.
-
-        nextCursor:
-          oneOf:
-            - $ref: '#/components/schemas/CursorToken'
-            - type: 'null'
-          description: >-
-            The position to supply as the lastKey parameter to obtain the page
-            after this one. Present exactly when hasNext is true, and null
-            otherwise. This is the value a client echoes back; firstKey and
-            lastKey are for identifying what it received.
-
-        prevCursor:
-          oneOf:
-            - $ref: '#/components/schemas/CursorToken'
-            - type: 'null'
-          description: >-
-            The position to supply as the firstKey parameter to obtain the page
-            before this one. Present exactly when hasPrev is true, and null
-            otherwise.
+            read to settle hasNext, or null exactly when items is empty. It is
+            also the position a caller pages forward from: send it as the cursor
+            parameter with direction next, which the shared envelope supports
+            because the row identity and the forward position are the same value
+            on every page this service returns.
 
         # WHY : Assumptions: this is settled by reading one row beyond the page
         #       and observing whether that row exists - never from any tally of
@@ -1390,22 +1996,14 @@ components:
         hasNext:
           type: boolean
           description: >-
-            Whether a page follows this one. Always true on a page reached by
+            Whether a page follows this one, and the only forward availability
+            statement this envelope makes. Always true on a page reached by
             paging backward, because a caller can only page backward from a page
             it reached by paging forward - the baseline asserts the same thing
             unconditionally at app/cbl/COCRDLIC.cbl:1287. Because rows are
             filtered after being read, this and not the row count is the only
-            statement about whether more rows exist.
-
-        hasPrev:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. Stated from the request that
-            produced this page rather than inferred from its contents: false
-            for an opening request, which supplied no cursor, and true for any
-            page reached from a neighbouring one. It is not derived from the
-            presence of a first row, because the opening page has a first row
-            and no predecessor.
+            statement about whether more rows exist. When it is true, lastKey is
+            present.
 
     CardUpdateRequest:
       type: object
@@ -1419,7 +2017,8 @@ components:
 
 
         No verification value and no snapshot, prior-value or before-image
-        property of any kind appears, for the reasons recorded on CardDetail. A
+        property of any kind appears, for the reasons recorded on
+        CardDetailCore. A
         field failing validation yields 400 with an entry in the per-field
         array; where more than one field fails, every failing field appears in
         the array while the aggregate message reports the first.
@@ -1430,10 +2029,19 @@ components:
         - version
       additionalProperties: false
       properties:
+        # WHY : Refactoring Rationale: the same pattern the read schema carries
+        #       is repeated here rather than referenced, because the two schemas
+        #       are independent objects and a request must be rejectable on its
+        #       own terms. A caller validating against this schema before sending
+        #       therefore sees the same constraint the service applies, so the
+        #       'Card name can only contain alphabets and spaces' refusal at
+        #       app/cbl/COCRDUPC.cbl:183-184 becomes a condition the caller can
+        #       anticipate rather than only discover.
         embossedName:
           type: string
           minLength: 1
           maxLength: 50
+          pattern: '^[A-Za-z ]+$'
           description: >-
             The replacement name to emboss, alphabetic characters and spaces
             only, up to fifty characters. Carried across the CRDNAMEI PIC X(50)
@@ -1480,6 +2088,52 @@ components:
             app/cbl/COCRDUPC.cbl:207-208. It is echoed unchanged from a previous
             response and never chosen or incremented by the caller.
           example: 3
+
+    # WHY : Assumptions: this schema exists so that a card number has somewhere
+    #       to travel that is not a request target. It carries one member and
+    #       will not acquire a second: any further narrowing belongs on the list
+    #       operation's query parameters, where it can be combined with paging,
+    #       and only the card-number criterion has a reason to be in a body.
+    # WHY : Trade-offs: a single-member object rather than a bare string body.
+    #       A bare string would be shorter and is rejected because it cannot
+    #       name the member that failed validation, so the per-field error array
+    #       every other refusal in this document populates would have nothing to
+    #       point at; an object gives the field the name 'cardNumber' in that
+    #       array and leaves room for the schema to state its own constraint.
+    CardLookupRequest:
+      type: object
+      description: >-
+        The criterion for the lookup operation: one card number, carried in a
+        request body rather than in a request target. This is the body form of
+        the baseline's CARDSIDI list filter field at
+        app/cpy-bms/COCRDLI.CPY:72.
+      required:
+        - cardNumber
+      additionalProperties: false
+      properties:
+        cardNumber:
+          type: string
+          minLength: 16
+          maxLength: 16
+          pattern: '^[0-9]{16}$'
+          description: >-
+            The card number to narrow to, as exactly sixteen digit characters. A
+            masked rendering taken from a previous response is not a valid value,
+            because the masked form does not identify a row. An absent value, or
+            one of the wrong width or carrying a non-digit, yields 400 with the
+            baseline's own wording 'Card number if supplied must be a 16 digit
+            number' from app/cbl/COCRDUPC.cbl:193-194 and an entry naming this
+            field in the per-field array.
+          # WHY : Assumptions: the member is declared write-only, and the flag is
+          #       load-bearing rather than decorative. This is the only place in
+          #       this contract that ACCEPTS a full primary account number, and no
+          #       response other than the administrative read renders one, so a
+          #       generated client that modelled this schema in both directions
+          #       would expose a response accessor for a value it can never
+          #       receive. A contract test asserts the flag, because a schema that
+          #       accepts a full number without declaring its direction is the
+          #       shape a future response could be built from by accident.
+          writeOnly: true
 
 
     # WHY : Assumptions: this mirrors the shared ApiError in
@@ -1531,8 +2185,8 @@ components:
             clients and by operational tooling and never reworded. This service
             uses the shared identifiers of the kernel, whose numeric suffix
             aligns with the HTTP status the shared advice assembles: the
-            validation identifier for 400, the not-found identifier for 404 and
-            the conflict identifier for 409.
+            validation identifier for 400, the not-found identifier for 404, the
+            conflict identifier for 409 and the internal identifier for 500.
           example: CARDDEMO-0409
         secondaryCode:
           type: string
@@ -1544,29 +2198,49 @@ components:
             app/cbl/COCRDUPC.cbl:189-190 and :191-192 are two distinct
             conditions carrying byte-identical text.
           example: CARD-DATA-CHANGED
+        # WHY : Refactoring Rationale: the seventy-five-character width is
+        #       DECLARED rather than merely mentioned. This property previously
+        #       carried no bound at all while its description observed that
+        #       renderers may hold it to seventy-five, which left the one
+        #       inherited width the migration actually carries forward
+        #       unenforced here and declared in the sibling contracts - so one
+        #       shared record was described three different ways. The bound is
+        #       MESSAGE_RENDERING_WIDTH in the shared error type, from
+        #       CCARD-ERROR-MSG PIC X(75) and CCARD-RETURN-MSG PIC X(75) at
+        #       app/cpy/CVCRD01Y.cpy:28-29.
+        # WHY : Assumptions: declaring it costs nothing, which is why it is safe
+        #       to declare. The longest sentence any condition in this document
+        #       carries is the fifty-one-character 'Transaction received after
+        #       account expiration' family; every message this service can emit
+        #       is well inside seventy-five, so no value is truncated to fit and
+        #       none needs to be. Had any exceeded it, the correct repair would
+        #       have been to widen this bound rather than to shorten a message,
+        #       because the text is carried character for character.
         message:
           type:
             - string
             - 'null'
+          maxLength: 75
           description: >-
             The aggregate sentence, carried verbatim from the baseline copybook
             or program that owns it wherever one does. Deliberately nullable:
             null is the migrated form of no-message and the empty string the
             migrated form of an empty message, two states the baseline
-            distinguishes and this shape therefore does not merge. Renderers may
-            hold it to seventy-five characters, the width of
-            CCARD-ERROR-MSG PIC X(75) and CCARD-RETURN-MSG PIC X(75) at
-            app/cpy/CVCRD01Y.cpy:28-29, which is the only one of the migration's
-            four inherited message widths carried forward as a rendering
-            constraint.
+            distinguishes and this shape therefore does not merge. Bounded at
+            seventy-five characters, the width of CCARD-ERROR-MSG PIC X(75) and
+            CCARD-RETURN-MSG PIC X(75) at app/cpy/CVCRD01Y.cpy:28-29, which is
+            the only one of the migration's four inherited message widths carried
+            forward as a rendering constraint.
           example: Record changed by some one else. Please review
         severity:
           $ref: '#/components/schemas/Severity'
           description: >-
             How serious this failure is, on the baseline's own four-level
-            ladder. Every failure this service declares is at the warning
-            level, because all five are outcomes a caller may act on rather
-            than faults in the service.
+            ladder. The five client-correctable failures are all at the warning
+            level, because each is an outcome a caller may act on rather than a
+            fault in the service; the unclassified failure reported as 500 is at
+            the critical level, which is the one place the two differ and the
+            reason this property is worth reading rather than assuming.
         subsystem:
           $ref: '#/components/schemas/Subsystem'
           description: >-
@@ -1583,26 +2257,45 @@ components:
             response envelope is still self-describing. It always equals the
             status of the response that carried it.
           example: 409
+        # WHY : Assumptions: the empty string is admitted as well as a conforming
+        #       identity, and it is not slack. The shared shape normalises an
+        #       absent identity to the empty string at ApiError.java:384, and the
+        #       assembling advice supplies the empty string when the logging
+        #       context holds no entry at GlobalExceptionHandler.java:957-959,
+        #       which is the state of a failure raised before the correlation
+        #       filter ran. Declaring only the token shape would describe a body
+        #       this service can in fact emit as invalid.
         correlationId:
-          type: string
+          allOf:
+            - $ref: '#/components/schemas/CorrelationId'
           description: >-
             Identifies the unit of work that failed, inherited from the inbound
             request rather than generated here, and the empty string when the
-            request carried none. It is the intended route from this response to
-            the operational record, which is where diagnostic detail lives.
-            Correlating the events of one unit of work is an idea this migration
-            inherited rather than introduced: the baseline's structured error
-            record already carries a twenty-character event key.
-          example: 6d3e88b1-7c02-4a94-b5df-1e47a0c93b26
+            request carried none and none had been minted. It is the intended
+            route from this response to the operational record, which is where
+            diagnostic detail lives. Correlating the events of one unit of work
+            is an idea this migration inherited rather than introduced: the
+            baseline's structured error record already carries a
+            twenty-character event key.
+        # WHY : Refactoring Rationale: the example is an opaque card selector and
+        #       an earlier revision of this document showed a masked account
+        #       number here. That example was consistent with itself and still
+        #       wrong as guidance, because it advertised a URL shape whose path
+        #       segment was derived from a primary account number, and this
+        #       document no longer has one: the selector on every card path is the
+        #       opaque token described on OpaqueCardIdPath. Nothing derived from an
+        #       account number reaches this member, masked or otherwise.
         path:
           type: string
           description: >-
             The request path that failed, so that a client reporting a problem
             does not have to reconstruct which call produced it. The empty
-            string when no path is available. A card number appearing in it is
-            rendered exactly as the corresponding response would render it, so
-            the masking rules are not circumvented by the diagnostic field.
-          example: /api/v1/cards/************0011
+            string when no path is available. No card number, and nothing derived
+            from one, appears here: every card path carries the opaque selector,
+            and the shared advice additionally masks any digit run long enough to
+            be an account number before placing a path in this member, so a
+            mistaken route cannot leak one through the diagnostic field.
+          example: /api/v1/cards/Zm9vYmFyYmF6cXV1eDEyMw
         timestamp:
           type: string
           description: >-
@@ -1622,7 +2315,18 @@ components:
             unconditionally even while its aggregate sentence stays latched to
             the first.
           items:
-            $ref: '#/components/schemas/ApiFieldError'
+            $ref: '#/components/schemas/FieldError'
+        # WHY : Assumptions: this member is POPULATED on 500 and null on the
+        #       other five, which is the opposite of what an earlier revision of
+        #       this file stated when no 500 was declared. The shared advice
+        #       builds an abend block for every failure it could not classify,
+        #       and the block a client receives is the reduced external form: the
+        #       four-character condition code survives, the culprit and reason are
+        #       replaced by the empty string, and the operator sentence is a fixed
+        #       client-safe line. The reduction is what allows an abend block to
+        #       be surfaced at all - the internal culprit and reason name
+        #       application components, which is the diagnostic detail every body
+        #       in this document withholds.
         abend:
           oneOf:
             - $ref: '#/components/schemas/AbendDetail'
@@ -1630,10 +2334,11 @@ components:
           description: >-
             The structured detail of an abnormal termination when the failure
             was one, and null otherwise. Nullable rather than an empty object
-            because such a failure is genuinely absent from an ordinary
-            validation or conflict response rather than present and blank. None
-            of the failures this service declares is of that kind, so it is null
-            on all five.
+            because such a failure is genuinely absent from a validation or
+            conflict response rather than present and blank. Of the six failures
+            this service declares only the 500 is of that kind, so this member is
+            null on the other five and present, in its reduced external form, on
+            that one.
 
     # WHY : Alternatives Considered: the conflict body is COMPOSED from the
     #       shared error shape by reference rather than being a fourth
@@ -1679,16 +2384,32 @@ components:
                 The card as it now stands, carrying the version token a retry
                 must echo. Present for the changed-row condition only, and null
                 for the two conditions in which the write did not proceed and
-                so left no new state to report. The primary account number in
-                it is rendered exactly as the operation that failed would have
-                rendered it, so the masking rules are not widened by a failure.
+                so left no new state to report. It is the masked CardDetail
+                shape, never the administrative one, so a failure cannot widen
+                what a response discloses: the update operation carries
+                x-required-authority carddemo-user, and no conflict body has any
+                member able to hold a full account number.
       description: >-
         The body of the conflict response: every member of the shared error
         shape, referenced rather than restated, plus one optional card. It is
         used by this status alone; the other four failures return the shared
         shape unextended.
 
-    ApiFieldError:
+    # WHY : Refactoring Rationale: the schema is named FieldError, where it was
+    #       previously named ApiFieldError. The Java record it mirrors is the
+    #       nested FieldError of the shared error type, and the sibling contracts
+    #       of this migration publish it under that name, so the prefixed
+    #       spelling was a third name for one shape - which is precisely how a
+    #       generated client ends up with two classes for one entity and a reader
+    #       ends up unsure whether they are the same thing.
+    # WHY : Refactoring Rationale: the entry is CLOSED to additional members.
+    #       Every other object schema in this document already refuses unknown
+    #       members and this one did not, which made it the one place a service
+    #       could add a field to a failure body without the contract noticing -
+    #       and a failure body is the last place an undeclared member should be
+    #       able to appear, because it is what a client parses when something has
+    #       already gone wrong.
+    FieldError:
       type: object
       description: >-
         One offending field. This is the structured counterpart of the
@@ -1700,43 +2421,64 @@ components:
         - field
         - state
         - message
+      additionalProperties: false
       properties:
         field:
           type: string
+          minLength: 1
           description: >-
             The name of the offending property exactly as it appears in the
             request that carried it, so a client can bind the entry to the input
             it rendered without mapping table or guesswork.
           example: activeStatus
         state:
-          $ref: '#/components/schemas/FieldValidationState'
+          allOf:
+            - $ref: '#/components/schemas/FieldValidationState'
           description: >-
-            Whether this field was rejected for carrying an unacceptable value
-            or for carrying none at all. Both are errors; the distinction lets
-            a client prompt for a missing field differently from one it must
-            correct, which is the distinction the baseline drew when it marked
-            a blank field with an additional character as well as a colour.
+            Which of the two failing states this field is in: it carried an
+            unacceptable value, or it carried none at all. Both are errors; the
+            distinction lets a client prompt for a missing field differently
+            from one it must correct, which is the distinction the baseline drew
+            when it marked a blank field with an additional character as well as
+            a colour.
         message:
           type: string
+          maxLength: 75
           description: >-
             What is wrong with this field, carried verbatim from the baseline
             condition that owns the wording. It may repeat the aggregate
             sentence when this entry is the first failure, and differ from it
-            when it is not.
+            when it is not. Bounded at the same seventy-five characters as the
+            aggregate sentence, and for the same reason: the two carry the same
+            kind of text and a client renders them in the same place.
           example: Card Active Status must be Y or N
 
+    # WHY : Refactoring Rationale: the domain is the TWO failing states, where
+    #       this schema previously declared three by including the valid one. A
+    #       valid state cannot occur in this array: an entry exists only because
+    #       a field was refused, so admitting VALID would have let the array's
+    #       length stop equalling the number of offending fields and would have
+    #       handed a client two contradictory signals in one entry - a field
+    #       named as an error and simultaneously reported acceptable. The shared
+    #       validation flag type does declare three constants, and correctly so
+    #       because it also describes fields that passed; the nested error record
+    #       that this schema mirrors rejects the third, and this is that record.
+    # WHY : Assumptions: the two that remain are the two arms of the disjunction
+    #       at app/cpy/CSSETATY.cpy:18-19, and the blank arm is the one that
+    #       additionally earned the literal asterisk marker at :23-25 - which is
+    #       why the baseline itself needed to tell them apart and why this
+    #       contract keeps them apart rather than reporting one error state.
     FieldValidationState:
       type: string
       description: >-
-        The state of one validated field, drawn from the shared kernel's
-        three-value domain rather than a newly invented one. Blank is a kind of
+        The state of one refused field, drawn from the shared kernel's two
+        failing values rather than a newly invented domain. Blank is a kind of
         error and not a third state beside valid and invalid, which is why the
-        baseline tests the two error states together in one disjunction at
-        app/cpy/CSSETATY.cpy:18-19 while the blank path additionally sets its
-        own flag. Distinguishing them lets a client render a missing field
+        baseline tests the two together in one disjunction at
+        app/cpy/CSSETATY.cpy:18-19 while the blank path additionally sets its own
+        flag. Distinguishing them lets a client render a missing field
         differently from a wrong one without changing whether it is an error.
       enum:
-        - VALID
         - NOT_OK
         - BLANK
       example: BLANK
@@ -1745,9 +2487,12 @@ components:
       type: string
       description: >-
         The operational level of a failure, drawn from the baseline's own
-        four-value domain rather than a newly invented ladder. Failures this
-        service declares are WARNING: they are outcomes a caller may act on
-        rather than faults in the service.
+        four-value domain rather than a newly invented ladder. Two of the four
+        occur here: the five client-correctable failures are WARNING, because
+        they are outcomes a caller may act on rather than faults in the service,
+        and the unclassified failure reported as 500 is CRITICAL, because it is.
+        The remaining two name levels below the threshold at which a failure
+        response is produced at all.
       enum:
         - LOG
         - INFO
@@ -1790,13 +2535,37 @@ components:
     #       so any citation past it cannot be read. A further hazard worth
     #       recording: the file's own internal title names a different copybook
     #       than its path does.
+    # WHY : Assumptions: all four members are required by this schema and yet
+    #       two of them are always empty and a third always the same sentence in
+    #       any response a client can receive, and that combination is
+    #       deliberate rather than contradictory. The shared type is constructed
+    #       for external use through a factory that supplies an empty culprit, an
+    #       empty reason and one fixed operator-facing sentence, and the shared
+    #       error record applies that factory in its canonical constructor, so no
+    #       code path can assemble a client-facing body carrying the internal
+    #       values. Requiring the members keeps the shape stable - a client
+    #       parses four members whatever happened - while the descriptions below
+    #       state what a client will actually find in each, so nobody writes a
+    #       branch on a culprit value that never arrives.
+    # WHY : Trade-offs: an alternative shape would have omitted the two members
+    #       entirely from external bodies and declared them optional. It was
+    #       rejected because the shared type is one type serving both internal
+    #       diagnostics and external responses, and making members optional would
+    #       move the redaction decision from one factory into every construction
+    #       site. Keeping them required and always redacted concentrates the
+    #       decision in one place; the cost is a schema whose required members
+    #       carry less than their widths suggest, which these descriptions
+    #       correct.
     AbendDetail:
       type: object
       description: >-
         The structured detail of an abnormal termination, carried inside
-        ApiError when a failure was of that kind. It is declared here because
-        ApiError references it, and it is null on every failure this service
-        declares; none of the five is an abnormal termination.
+        ApiError when a failure was of that kind. Of the six failures this
+        service declares, the 500 is the only one that carries it; on the other
+        five it is null. What a client receives is the reduced external form, in
+        which the condition code survives and the culprit and reason are the
+        empty string, so every component is declared here but two of the four are
+        deliberately blank on the wire.
       required:
         - abendCode
         - abendCulprit
@@ -1818,7 +2587,10 @@ components:
             The eight-character name of the component the termination is
             attributed to, from ABEND-CULPRIT PIC X(8) at
             app/cpy/CSMSG02Y.cpy:24. It names an application component and
-            never a host, an account or an infrastructure resource.
+            never a host, an account or an infrastructure resource - and in the
+            reduced external form a client receives it is always the empty
+            string, because naming the component is itself the diagnostic detail
+            every body in this document withholds.
         abendReason:
           type: string
           maxLength: 50
@@ -1827,6 +2599,8 @@ components:
             ABEND-REASON PIC X(50) at app/cpy/CSMSG02Y.cpy:26. Fifty is one of
             the migration's four inherited message widths and is distinct from
             the seventy-five-character width that governs the aggregate message.
+            Like the culprit, it is the empty string in the reduced external form
+            a client receives.
         abendMsg:
           type: string
           maxLength: 72
@@ -1835,4 +2609,3 @@ components:
             seventy-two characters, from ABEND-MSG PIC X(72) at
             app/cpy/CSMSG02Y.cpy:28. It carries no diagnostic detail of the
             kinds excluded from every failure body in this service.
-

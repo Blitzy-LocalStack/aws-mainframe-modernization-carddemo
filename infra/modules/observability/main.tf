@@ -41,6 +41,80 @@
 #   name and ARN, and the merged map of alarm ARNs, so a root can wire a
 #   producer or an operator runbook without reconstructing a name or an ARN.
 #
+# Declarations:
+#   Purpose for every declaration in this file is stated here, in the one block a
+#   language with no docstring construct has available, so that each declaration
+#   below carries rationale and nothing else.
+#   - `data aws_partition` / `aws_region` / `aws_caller_identity`: exactly three
+#     data sources, and every one of them is referenced below.
+#   - `aws_cloudwatch_log_group.managed`: one group per producer that owns no
+#     log-group resource of its own, named exactly as the root supplies it.
+#   - `aws_sns_topic.alerts`: the single destination every alarm below publishes
+#     to, and the successor to the baseline's per-job operator notification.
+#   - `data aws_iam_policy_document.alerts`: the topic's resource policy, built as
+#     a document rather than inline JSON.
+#   - `aws_sns_topic_subscription.email`: one subscription per endpoint the root
+#     supplies, and none by default.
+#   - `aws_s3_bucket.access_logs` and its companion configuration resources: one
+#     object destination for the request-level access records that do not go to
+#     CloudWatch Logs -- the load balancer's own access log and the dataset
+#     bucket's server-access log.
+#   - `data aws_iam_policy_document.access_logs`: the destination's resource
+#     policy -- one blanket transport Deny followed by three narrowly-scoped
+#     delivery Allows.
+#   - `locals` (dashboard widgets): the widget list, composed in `locals` and
+#     rendered by the single dashboard resource that follows it.
+#   - Every `aws_cloudwatch_metric_alarm`: `evaluation_periods`,
+#     `datapoints_to_alarm` and `period` together state the evaluation window, and
+#     `treat_missing_data` is set explicitly on every alarm and takes one of two
+#     values. Each alarm's operational meaning -- the condition it fires on, the
+#     question it answers and the action it calls for -- is:
+#     - `service_unhealthy`: the load balancer reports an unhealthy target for a
+#       service. Is this service's task actually serving traffic? Replace the task
+#       or roll back the image revision the `version` metric tag names.
+#     - `service_no_healthy_targets`: a service's target group holds no healthy
+#       target at all. Is this service serving, as distinct from serving badly?
+#       Read the task's stopped reason and its log stream, then correct the image,
+#       the configuration or the health-check contract.
+#     - `service_5xx`: target-generated server-error responses reach the
+#       configured count within one evaluation period. Is this service failing
+#       requests, as distinct from being unreachable? Inspect that service's
+#       correlated log lines, then roll back or replace the failing task.
+#     - `api_5xx`: the HTTP API returns server-error responses at the configured
+#       count. Is the failure inside a service or between the edge and the
+#       service? Compare against the per-service pair above and investigate the
+#       integration and target registration rather than the application when only
+#       this one is in alarm.
+#     - `dead_letter_depth`: a dead-letter queue holds a visible message. Has any
+#       message exhausted every receive attempt the system offers? Inspect that
+#       message, correct the cause, and only then redrive it.
+#     - `reply_queue_age`: the oldest message waiting on a reply queue reaches the
+#       baseline's request/reply expiry interval. Is the requester consuming
+#       replies, or are they ageing past the point at which they were meant to be
+#       discarded? Inspect the waiting consumer and correlate the stale message
+#       before its `expiresAt` is enforced.
+#     - `work_queue_age`: the oldest message waiting on a primary work queue has
+#       been waiting longer than the configured interval. Is the consumer for this
+#       queue still taking work off it? Inspect that consumer's task and log
+#       stream, and check whether its service has any healthy target.
+#     - `rotation_failure`: a Secrets Manager rotation function reported an
+#       invocation error. Did a scheduled credential rotation fail and leave the
+#       secret on its previous version? Inspect that function's encrypted log
+#       group and reconcile the affected secret version before the next interval.
+#     - `batch_failure`: the daily state machine reports a failed or a timed-out
+#       execution. Did the nightly chain FAIL, as distinct from completing with
+#       business-rule rejects? Read the failed state's step-ledger row and redrive
+#       from that state once the cause is corrected.
+#     - `aurora_cpu`: cluster processor utilisation stays at or above the
+#       configured percentage across the whole evaluation window. Is compute
+#       pressure sustained rather than momentary? Read this against the capacity
+#       and connection series on the dashboard before changing the environment's
+#       maximum capacity units.
+#     - `aurora_capacity`: serverless database capacity reaches the maximum the
+#       environment root itself configured. Has the cluster exhausted the capacity
+#       it is permitted to add? Review the workload, and raise the declared
+#       maximum only where the pressure is expected.
+#
 # Exceptions or errors:
 #   - `kms_key_arn` is required and rejects null. variables.tf records that
 #     admitting null to select the services' managed encryption was considered
@@ -166,7 +240,6 @@
 #     they route today: this migration adds a path, it does not remove one.
 # =============================================================================
 
-# WHAT: exactly three data sources, and every one of them is referenced below.
 # WHY : Assumptions: the partition, region and account are read from the resolved
 #       provider rather than accepted as inputs or written as literals. That is
 #       what lets the composed ARNs and service principals below be correct in any
@@ -208,16 +281,51 @@ locals {
     if endswith(key, "_reply")
   }
 
-  # WHY : Trade-offs: the two terminal execution metrics are iterated from a map
-  #       rather than written as two resources, so both arrive under
-  #       distinguishable names from one definition and a third terminal outcome
+  # WHY : Refactoring Rationale: the two sets above left the PRIMARY work queues
+  #       -- the request queues and the error queue -- with no alarm of any kind,
+  #       and the gap is not covered transitively by the dead-letter alarm. A
+  #       message reaches a dead-letter queue only after its source queue's
+  #       redrive policy exhausts its receives, and exhausting receives requires
+  #       a consumer to RECEIVE and fail. A stopped or wedged consumer never
+  #       receives, so nothing redrives, the dead-letter queue stays empty and
+  #       its alarm stays OK while work piles up on the live queue. That is the
+  #       failure this third set exists to make alertable.
+  #       Assumptions: membership is decided by EXCLUSION -- neither suffix --
+  #       rather than by listing the four queue keys. Listing them would put the
+  #       messaging design's queue inventory in a second place, where it could
+  #       disagree with infra/modules/sqs; excluding the two roles that already
+  #       have their own alarm leaves exactly the queues nothing else watches, and
+  #       a queue added by that module gains this alarm without an edit here.
+  work_queue_names = {
+    for key, name in var.queue_names : key => name
+    if !endswith(key, "_dlq") && !endswith(key, "_reply")
+  }
+
+  # WHY : Trade-offs: the terminal execution metrics are iterated from a map
+  #       rather than written as separate resources, so each arrives under a
+  #       distinguishable name from one definition and a further terminal outcome
   #       would be added by extending this map. The keys are the snake_case
   #       Terraform identities and the values are the service's own metric names;
   #       keeping the two apart is what lets an alarm name read as a hyphenated
   #       suffix while the dimension stays exactly what the service publishes.
+  #       Refactoring Rationale: `throttled` was added after the set of two was
+  #       found to leave a genuine unalerted failure. A throttled execution is one
+  #       the service REFUSED to start, so the night's chain does not run at all
+  #       and yet no execution fails and none times out -- both watched metrics
+  #       stay at zero and the chain's absence is invisible. It is the same class
+  #       of gap the comment on the failure alarm records for a chain that never
+  #       started, differing in that this one publishes a metric and can therefore
+  #       be watched.
+  #       Alternatives Considered: adding `ExecutionsAborted` as a fourth entry.
+  #       Rejected because an abort is ordinarily deliberate -- an operator or an
+  #       automation stopped the execution -- so alarming on it would page whoever
+  #       had just performed the stop, which is the notification pattern this
+  #       module's own preamble refuses. An abort nobody intended still shows on
+  #       the batch dashboard widget, so it is observable without being alertable.
   batch_failure_metrics = {
     failed    = "ExecutionsFailed"
     timed_out = "ExecutionsTimedOut"
+    throttled = "ExecutionThrottled"
   }
 
   # WHY : Assumptions: the caller's map is the BASE and these two keys are layered
@@ -251,8 +359,6 @@ locals {
 # -----------------------------------------------------------------------------
 # Log groups owned by this module
 #
-# WHAT: one group per producer that owns no log-group resource of its own, named
-#       exactly as the root supplies it.
 # WHY : Alternatives Considered: creating a group for every producer in the
 #       stack. Rejected on an ownership boundary that is a concrete apply-time
 #       failure rather than a preference. Each of the eight container services
@@ -340,8 +446,6 @@ resource "aws_cloudwatch_log_group" "managed" {
 # -----------------------------------------------------------------------------
 # One encrypted notification topic per environment
 #
-# WHAT: the single destination every alarm below publishes to, and the successor
-#       to the baseline's per-job operator notification.
 # WHY : Refactoring Rationale: all 38 job cards in app/jcl declare a `NOTIFY=`
 #       operand, so the baseline already had the habit of pushing an outcome to a
 #       named recipient rather than waiting for one to look; what changes is the
@@ -372,7 +476,6 @@ resource "aws_sns_topic" "alerts" {
   })
 }
 
-# WHAT: the topic's resource policy, built as a document rather than inline JSON.
 # WHY : Alternatives Considered: leaving the topic with no resource policy and
 #       relying on the account's default owner access. Rejected because an alarm
 #       action is delivered by a CloudWatch service principal, not by the
@@ -447,7 +550,6 @@ resource "aws_sns_topic_policy" "alerts" {
   policy = data.aws_iam_policy_document.alerts.json
 }
 
-# WHAT: one subscription per endpoint the root supplies, and none by default.
 # WHY : Assumptions: the endpoint list is an input that defaults to empty, and
 #       the emptiness is the decision. An address is a person's contact detail
 #       and changes with staffing rather than with the architecture, so it is not
@@ -469,9 +571,6 @@ resource "aws_sns_topic_subscription" "email" {
 # -----------------------------------------------------------------------------
 # Shared ALB and S3 server-access-log destination
 #
-# WHAT: one object destination for the request-level access records that do not go
-#       to CloudWatch Logs -- the load balancer's own access log and the dataset
-#       bucket's server-access log.
 # WHY : Alternatives Considered: a destination per producer. Rejected because the
 #       two delivery services require conflicting properties on their destination
 #       from the ones application logs need, and separating them per producer would
@@ -624,8 +723,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
   depends_on = [aws_s3_bucket_versioning.access_logs]
 }
 
-# WHAT: the destination's resource policy -- one blanket transport Deny followed by
-#       three narrowly-scoped delivery Allows.
 # WHY : Assumptions: a delivery service writes as its OWN service principal, not as
 #       the account, so a destination with no resource policy accepts nothing and
 #       the log simply never arrives -- a failure that reports as an empty bucket
@@ -757,8 +854,6 @@ resource "aws_s3_bucket_policy" "access_logs" {
 # -----------------------------------------------------------------------------
 # Dashboard
 #
-# WHAT: the widget list, composed in `locals` and rendered by the single
-#       dashboard resource below.
 # WHY : Alternatives Considered: writing the widget layout inline in the resource.
 #       Rejected because two of the three widget groups are CONDITIONAL on an
 #       input, and expressing a conditional widget inside a resource argument
@@ -873,9 +968,62 @@ locals {
     }
   }]
 
+  # WHY : Refactoring Rationale: this widget exists because the application metric
+  #       pipeline had a producer and no consumer. Every service declares the
+  #       Actuator and a Prometheus registry, the shared kernel's meter filter
+  #       stamps three common tags on each meter, and the telemetry sidecar in
+  #       infra/modules/ecs-service scrapes that endpoint and exports it through
+  #       CloudWatch EMF into the `CardDemo` namespace -- and before this widget,
+  #       nothing in this module read that namespace at all. Meters were therefore
+  #       being collected, stored and billed while being visible nowhere, which is
+  #       the one state worse than not collecting them: the cost is paid and the
+  #       benefit is not.
+  # WHY : Assumptions: the series are selected by SEARCH expression rather than by
+  #       an explicit metric list, and that is forced by how the exporter publishes.
+  #       It runs with no dimension roll-up and with resource-to-telemetry conversion
+  #       on, so each series carries the FULL dimension set -- the meter's own labels
+  #       plus the resource attributes -- and an explicit metric entry has to name
+  #       every dimension exactly or it matches nothing and renders an empty panel.
+  #       A search matches on the namespace and a metric-name token, so it keeps
+  #       returning the series as the label set evolves.
+  # WHY : Assumptions: identity is currently spelled TWICE in this namespace and the
+  #       search is written to depend on neither spelling. The shared kernel's meter
+  #       filter contributes `service`, `environment` and `version`, while the
+  #       collector's resource processor contributes `service.name`,
+  #       `deployment.environment.name` and `service.version`; both reach the
+  #       published series as dimensions. Pinning either set here would make this
+  #       panel fail silently if the other were consolidated, so the panel is
+  #       dimension-agnostic and the duplication is recorded in
+  #       docs/architecture/observability.md rather than depended upon.
+  # WHY : Trade-offs: the two series below are FRAMEWORK meters -- a request counter
+  #       and heap usage -- because those are the meters that exist today. No
+  #       business meter is authored in any service yet, so a panel promising posting
+  #       rejects or authorization decisions would be a promise this stack cannot
+  #       keep; those series are named as a target in the architecture document and
+  #       will appear here through the same search once a job or a service records
+  #       them, without an edit to this widget.
+  application_meter_widget = [{
+    type   = "metric"
+    x      = 0
+    y      = local.shared_widget_y + 18
+    width  = 24
+    height = 6
+    properties = {
+      title  = "Application meters exported to the CardDemo namespace"
+      region = data.aws_region.current.region
+      view   = "timeSeries"
+      period = var.alarm_period_seconds
+      metrics = [
+        [{ expression = "SEARCH('{CardDemo} http_server_requests', 'Sum', ${var.alarm_period_seconds})", label = "HTTP server requests", id = "requests" }],
+        [{ expression = "SEARCH('{CardDemo} jvm_memory_used', 'Average', ${var.alarm_period_seconds})", label = "JVM heap in use", id = "heap" }],
+      ]
+    }
+  }]
+
   dashboard_widgets = concat(
     local.ecs_service_widgets,
     local.queue_depth_widget,
+    local.application_meter_widget,
     [
       {
         type   = "metric"
@@ -1000,8 +1148,6 @@ resource "aws_cloudwatch_dashboard" "operations" {
 #
 # Two argument groups are shared, and each is a decision rather than a default:
 #
-# WHAT: the evaluation window -- `evaluation_periods`, `datapoints_to_alarm` and
-#       `period`.
 # WHY : Trade-offs: an evaluation count above one is what separates a sustained
 #       condition from one unlucky period, and its cost is that notification is
 #       delayed by that many periods; the detection window is the product of the
@@ -1013,8 +1159,6 @@ resource "aws_cloudwatch_dashboard" "operations" {
 #       source event is already terminal override the window to a single period,
 #       and each says so where it does.
 #
-# WHAT: `treat_missing_data`, which is set explicitly on every alarm and takes
-#       one of two values.
 # WHY : Alternatives Considered: one blanket value across all nine alarms.
 #       Rejected, because the meaning of a missing datapoint differs by metric
 #       family and a single value would be right for some and wrong for others.
@@ -1041,10 +1185,6 @@ resource "aws_cloudwatch_dashboard" "operations" {
 #       assumption this module does not hold.
 # -----------------------------------------------------------------------------
 
-# WHAT: Condition -- the load balancer reports an unhealthy target for a service.
-#       Question -- is this service's task actually serving traffic? Action --
-#       replace the task or roll back the image revision the `version` metric tag
-#       names.
 # WHY : Assumptions: the threshold of zero is DERIVED from the health-check
 #       contract, not chosen as a target. The load balancer classifies a target
 #       as unhealthy only after its own configured checks have failed, so any
@@ -1095,11 +1235,59 @@ resource "aws_cloudwatch_metric_alarm" "service_unhealthy" {
   })
 }
 
-# WHAT: Condition -- target-generated server-error responses reach the configured
-#       count within one evaluation period. Question -- is this service failing
-#       requests, as distinct from being unreachable? Action -- inspect that
-#       service's correlated log lines, then roll back or replace the failing
-#       task.
+# WHY : Refactoring Rationale: this alarm exists because the unhealthy-target
+#       alarm above cannot detect the failure it looks like it detects. That one
+#       watches `UnHealthyHostCount` for a value above zero, and a target group
+#       with NO registered target publishes zero -- so a crash loop that never
+#       reaches the health check, an image that cannot be pulled, a task that
+#       never registers, and a service scaled to zero all leave it in OK. The two
+#       are complements rather than duplicates: one answers "a target is failing
+#       its checks", this one answers "there is no target", and only the second
+#       covers the outage in which nothing is running.
+# WHY : Assumptions: `treat_missing_data` is "breaching" here, in deliberate
+#       contrast to every other alarm in this file. The metric STOPS being
+#       published when a target group has no registered target at all, so an
+#       absent datapoint is not the absence of a signal -- it IS the signal, and
+#       treating it as not-breaching would return this alarm to exactly the blind
+#       spot it was created to close.
+# WHY : Assumptions: the statistic is Minimum rather than Maximum. Across the
+#       datapoints of one period a Maximum reports the best moment, so a service
+#       that was healthy for one moment and down for the rest of the period would
+#       read as healthy; Minimum reports the worst moment, which is the reading an
+#       operator needs from an availability alarm.
+# WHY : Trade-offs: the threshold is one, so this alarm fires for a service
+#       deliberately scaled to zero. That is accepted rather than worked around: no
+#       environment root scales an online service to zero, and an alarm that
+#       tolerated zero healthy targets would have no condition left to detect.
+resource "aws_cloudwatch_metric_alarm" "service_no_healthy_targets" {
+  for_each = var.service_target_group_arn_suffixes
+
+  alarm_name          = "${local.name_stem}-${each.key}-no-healthy-targets"
+  alarm_description   = "Condition: the target group holds no healthy target. Question: is ${each.key} serving at all? Action: read the task's stopped reason and log stream, then correct the image, the configuration or the health-check contract."
+  comparison_operator = "LessThanThreshold"
+  threshold           = 1
+  evaluation_periods  = var.alarm_evaluation_periods
+  datapoints_to_alarm = var.alarm_evaluation_periods
+  period              = var.alarm_period_seconds
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HealthyHostCount"
+  statistic           = "Minimum"
+  treat_missing_data  = "breaching"
+  actions_enabled     = true
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    LoadBalancer = var.alb_arn_suffix
+    TargetGroup  = each.value
+  }
+
+  tags = merge(local.tags, {
+    Service = each.key
+    Signal  = "no-healthy-target"
+  })
+}
+
 # WHY : Assumptions: a 5xx response is a server-side failure BY DEFINITION -- the
 #       status class is the server's own admission -- so what the threshold sets
 #       is how many such admissions are reported together, not whether a failure
@@ -1118,7 +1306,7 @@ resource "aws_cloudwatch_metric_alarm" "service_5xx" {
   alarm_name          = "${local.name_stem}-${each.key}-target-5xx"
   alarm_description   = "Condition: target-generated 5xx responses reach the configured count. Question: is ${each.key} failing requests? Action: inspect that service's correlated logs and roll back or replace the failing task."
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.service_error_rate_threshold
+  threshold           = var.service_error_count_threshold
   evaluation_periods  = var.alarm_evaluation_periods
   datapoints_to_alarm = var.alarm_evaluation_periods
   period              = var.alarm_period_seconds
@@ -1141,11 +1329,6 @@ resource "aws_cloudwatch_metric_alarm" "service_5xx" {
   })
 }
 
-# WHAT: Condition -- the HTTP API returns server-error responses at the configured
-#       count. Question -- is the failure inside a service or between the edge and
-#       the service? Action -- compare this alarm against the per-service pair
-#       above and investigate the integration and target registration rather than
-#       the application when only this one is in alarm.
 # WHY : Alternatives Considered: relying on the per-service alarms alone.
 #       Rejected because the two observe different segments: a request rejected at
 #       the edge, or one whose integration to the load balancer fails, never
@@ -1157,7 +1340,7 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx" {
   alarm_name          = "${local.name_stem}-api-5xx"
   alarm_description   = "Condition: the HTTP API returns 5xx responses at the configured count. Question: is failure occurring at the edge or integration boundary? Action: compare API access logs with the load-balancer and service alarms."
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.service_error_rate_threshold
+  threshold           = var.service_error_count_threshold
   evaluation_periods  = var.alarm_evaluation_periods
   datapoints_to_alarm = var.alarm_evaluation_periods
   period              = var.alarm_period_seconds
@@ -1179,9 +1362,6 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx" {
   })
 }
 
-# WHAT: Condition -- a dead-letter queue holds a visible message. Question -- has
-#       any message exhausted every receive attempt the system offers? Action --
-#       inspect that message, correct the cause, and only then redrive it.
 # WHY : Assumptions: this threshold is DERIVED and not chosen, and it is the model
 #       every other comment in this section follows. A message arrives on a
 #       dead-letter queue only after its source queue's redrive policy has been
@@ -1235,11 +1415,6 @@ resource "aws_cloudwatch_metric_alarm" "dead_letter_depth" {
   })
 }
 
-# WHAT: Condition -- the oldest message waiting on a reply queue reaches the
-#       baseline's request/reply expiry interval. Question -- is the requester
-#       consuming replies, or are they ageing past the point at which they were
-#       meant to be discarded? Action -- inspect the waiting consumer and
-#       correlate the stale message before its `expiresAt` is enforced.
 # WHY : Refactoring Rationale: this alarm is the OBSERVABLE FORM of a genuine
 #       semantic gap rather than a health check. The baseline set a per-message
 #       expiry on its reply, and the target queue service has no per-message
@@ -1286,11 +1461,59 @@ resource "aws_cloudwatch_metric_alarm" "reply_queue_age" {
   })
 }
 
-# WHAT: Condition -- a Secrets Manager rotation function reported an invocation
-#       error. Question -- did a scheduled credential rotation fail and leave the
-#       secret on its previous version? Action -- inspect that function's
-#       encrypted log group and reconcile the affected secret version before the
-#       next interval.
+# WHY : Refactoring Rationale: the two messaging alarms above watch dead-letter
+#       depth and reply age, and between them they cannot see a stopped consumer
+#       on a request queue. Reaching a dead-letter queue requires a consumer to
+#       receive a message and fail it the configured number of times, so a consumer
+#       that has stopped receiving produces no dead-letter arrival at all; and the
+#       reply alarm watches the queues a REQUESTER drains, not the queues a service
+#       drains. The result was that the four queues carrying inbound work -- the
+#       authorization request queue, the two inquiry request queues and the error
+#       queue that is the baseline error queue's successor -- could accumulate
+#       indefinitely with every alarm green.
+# WHY : Assumptions: the metric is oldest-message AGE rather than depth, and the
+#       distinction is what makes the alarm meaningful across queues with very
+#       different arrival rates. Depth is a function of both arrival rate and drain
+#       rate, so a depth threshold that is quiet on a busy queue is noisy on an idle
+#       one; age is a direct statement that a specific message has not been taken,
+#       which is the condition regardless of rate.
+# WHY : Assumptions: this includes the error queue deliberately. Nothing consumes
+#       it in normal operation, so its oldest message ages as soon as anything is
+#       written -- which is the intended reading: a message on the error queue is
+#       an unhandled fault and it should not sit there unnoticed.
+# WHY : Trade-offs: `notBreaching` for missing data, unlike the healthy-target
+#       alarm above. An empty queue publishes no age datapoint at all, and an empty
+#       queue is the normal state of every queue here, so treating absence as
+#       breaching would leave all four alarms permanently in ALARM and the channel
+#       would be ignored inside a day.
+resource "aws_cloudwatch_metric_alarm" "work_queue_age" {
+  for_each = local.work_queue_names
+
+  alarm_name          = "${local.name_stem}-${each.key}-oldest-message"
+  alarm_description   = "Condition: the oldest message on ${each.key} exceeds the configured wait. Question: is the consumer for this queue still taking work off it? Action: inspect that consumer's task and log stream and check whether its service has a healthy target."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = var.work_queue_age_threshold_seconds
+  evaluation_periods  = var.alarm_evaluation_periods
+  datapoints_to_alarm = var.alarm_evaluation_periods
+  period              = var.alarm_period_seconds
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  statistic           = "Maximum"
+  treat_missing_data  = "notBreaching"
+  actions_enabled     = true
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    QueueName = each.value
+  }
+
+  tags = merge(local.tags, {
+    Queue  = each.key
+    Signal = "stale-work"
+  })
+}
+
 # WHY : Assumptions: a rotation failure is silent by construction. Secrets Manager
 #       invokes the function on its own schedule with no operator present, and a
 #       failed rotation leaves the secret on its previous version -- so the system
@@ -1334,10 +1557,6 @@ resource "aws_cloudwatch_metric_alarm" "rotation_failure" {
   })
 }
 
-# WHAT: Condition -- the daily state machine reports a failed or a timed-out
-#       execution. Question -- did the nightly chain FAIL, as distinct from
-#       completing with business-rule rejects? Action -- read the failed state's
-#       step-ledger row and redrive from that state once the cause is corrected.
 # WHY : Assumptions: the batch outcome model is graded, not boolean, and this
 #       alarm fires ONLY on the fail and fatal tiers. The grading is a contract
 #       recorded in two independent places: tests/README.md section 8 sets out the
@@ -1407,11 +1626,6 @@ resource "aws_cloudwatch_metric_alarm" "batch_failure" {
   })
 }
 
-# WHAT: Condition -- cluster processor utilisation stays at or above the
-#       configured percentage across the whole evaluation window. Question -- is
-#       compute pressure sustained rather than momentary? Action -- read this
-#       against the capacity and connection series on the dashboard before
-#       changing the environment's maximum capacity units.
 # WHY : Assumptions: on a serverless cluster this is a SCALING signal as much as a
 #       saturation one -- sustained high utilisation means the workload is pressed
 #       against the capacity it is permitted to add, which is a different finding
@@ -1450,10 +1664,6 @@ resource "aws_cloudwatch_metric_alarm" "aurora_cpu" {
   })
 }
 
-# WHAT: Condition -- serverless database capacity reaches the maximum the
-#       environment root itself configured. Question -- has the cluster exhausted
-#       the capacity it is permitted to add? Action -- review the workload, and
-#       raise the declared maximum only where the pressure is expected.
 # WHY : Assumptions: the comparison value is DERIVED, in the same sense the
 #       dead-letter threshold is. It is the exact `aurora_max_capacity` the root
 #       passed to the Aurora module, so reaching it is a declared configuration

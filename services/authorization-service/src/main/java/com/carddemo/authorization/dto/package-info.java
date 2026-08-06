@@ -135,9 +135,22 @@
  * line of both symbolic maps resolves to. {@code com.carddemo.common.validation.FieldValidationFlag}
  * carries the per-component validation outcome that the baseline expresses as its not-valid and
  * blank condition flags. {@code com.carddemo.common.codec.CsvAuthCodec} owns the 18-field and
- * 6-field wire forms named above, so the field order lives in one place rather than once per
- * payload. {@code com.carddemo.common.time.TimestampFormatter} owns the single timestamp
- * rendering.
+ * 6-field wire forms named above. {@code com.carddemo.common.time.TimestampFormatter} owns the
+ * single timestamp rendering.
+ *
+ * <p>Refactoring Rationale: that codec entry previously added "so the field order lives in one place
+ * rather than once per payload", and the second half of that sentence was not true. Two of the six
+ * types here restate the same field order the codec's own records declare, component for component,
+ * because they are this context's structured representation of a contract whose normative form is
+ * delimited text. What the codec genuinely owns is the wire ENCODING -- the delimiter, the declared
+ * width table, the edited money rendering and the normalisation each component receives -- and it is
+ * the normative side of the pair. The two payload records are derived from it through the single
+ * crossing in {@code com.carddemo.authorization.mapper.AuthorizationMessageMapper}, which validates
+ * the payload on every conversion, and a contract test beside that mapper asserts field for field
+ * that the payload widths, the declared value domains and the component order match the codec's
+ * published width and name tables. So the duplication is real, deliberate, singly-crossed and
+ * mechanically checked, which is a different claim from there being only one of it -- and stating the
+ * stronger claim is what let the payload constraints drift out of agreement unnoticed.
  *
  * <p>Assumptions: this discipline is transformation rule T2 of the migration plan, which states
  * that one former COBOL {@code COPY} statement becomes exactly one Java type import, always from

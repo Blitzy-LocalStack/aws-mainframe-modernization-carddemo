@@ -19,15 +19,15 @@
 > [`app/jcl/DUSRSECJ.jcl`](../../../app/jcl/DUSRSECJ.jcl), which are read as the
 > specification and are never modified.
 
-Assumptions: this README exists because of the project's single user-specified rule, **Rule 1
-(Explainability)**, and not because the migration requirements asked for it. HCL
-has no docstring construct, so the rule's obligation for Terraform is met in two
+Read this README to find out what the module composes, which inputs it requires,
+and why each non-obvious argument is set the way it is. HCL has no docstring
+construct, so the documentation obligation for Terraform is met in two
 halves: the file-header blocks, typed variables, output descriptions and adjacent
 rationale inside the four `.tf` files are the mechanical half, linted by
 [`infra/.tflint.hcl`](../../.tflint.hcl) and surfaced by
 [`infra/.terraform-docs.yml`](../../.terraform-docs.yml); this document is the
 **prose half**. The conventions it follows — the four rationale labels in their one
-permitted written form, and the `# WHAT:` / `# WHY :` idiom in every fenced command
+permitted written form, and the paired what-and-why comment idiom in every fenced command
 block — are defined in the
 [documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md).
 

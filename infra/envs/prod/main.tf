@@ -58,13 +58,36 @@ locals {
 
   # WHY : Assumptions: these seven contexts are the complete synchronous edge
   #       surface. Batch and data migration have task definitions but no
-  #       long-running ECS service or ALB target group.
+  #       long-running ECS service or ALB target group. One entry per CONTEXT, not
+  #       per path segment: a context may own more than one top-level segment, and
+  #       one does, so its patterns list is the place that grows rather than this map.
   # WHY : Assumptions: every pattern carries the /api/v1 prefix the HTTP API's own
   #       route keys publish, so an ALB rule and the edge route it is reached through
   #       name the same path. A pattern without the prefix can never match a request
   #       forwarded from that edge, which is why infra/modules/alb validates it rather
   #       than accepting whatever a root supplies.
   online_services = {
+    # WHY : Refactoring Rationale: auth-service carries TWO patterns, not four. An
+    #       earlier revision added `/api/v1/users` and `/api/v1/users/*` on the
+    #       reading that user administration sat on its own top-level segment. It
+    #       does not: the auth contract publishes those five operations at
+    #       `/api/v1/auth/users` and `/api/v1/auth/users/{userId}`, which is also
+    #       what `SecurityConfig.USER_COLLECTION_PATH_PATTERN` and
+    #       `USER_SUBTREE_PATH_PATTERN` gate and what that service's contract test
+    #       asserts the two agree on. The wildcard `/api/v1/auth/*` below therefore
+    #       already forwards every one of them, and the withdrawn pair named an
+    #       address no contract publishes -- so a request to it would have been
+    #       forwarded to a service with no handler for it, which reports as an
+    #       unimplemented operation rather than as a misrouted one. Withdrawing it
+    #       here is the second half of the same fix as withdrawing the
+    #       `/api/v1/users` route keys in infra/modules/api-gateway-http; the two
+    #       lists have to name the same paths or one of them is describing a
+    #       topology that does not exist.
+    # WHY : Assumptions: the bare pattern is listed beside the wildcard for the same
+    #       reason the gateway pairs a bare key with a greedy one -- `/api/v1/auth/*`
+    #       does not match `/api/v1/auth` itself. Two values is well within the five
+    #       a single path-pattern condition accepts, so this needs no second rule and
+    #       no second priority.
     auth = {
       repository = "auth-service"
       role       = "carddemo_auth"

@@ -18,17 +18,8 @@ import org.springframework.data.repository.query.Param;
  * expressed anywhere else in this module. The package charter beside this file makes that the
  * boundary: no controller, service, mapper, DTO or domain type may hold a query.
  *
- * <p><b>Parameters, return values, exceptions or errors at the type level.</b> An interface
- * declaration accepts no parameter, returns no value and raises nothing, so no parameter, return or
- * exception at-clause has a subject here; each method below carries its own. The inapplicability is
- * stated rather than left silent because user Rule 1 (Explainability) enumerates purpose,
- * parameters, return values and exceptions at its lines 18 to 21 and forbids a docstring that
- * quietly omits one at its line 39, so a reader has to be able to tell a declared inapplicability
- * from an oversight. This interface declares no type parameter of its own either.
- *
  * <p>Assumptions: no method below carries an exception at-clause, and the omission is uniform and
- * deliberate. Rule 1 attaches that element at its line 21 to any exception that may be raised
- * "where applicable", and the house standard narrows it to each exception the caller must handle.
+ * deliberate. The house standard attaches that element to each exception the caller must handle.
  * Every member here is a query. A query raises no checked exception, and the unchecked data-access
  * failures the framework can translate -- a lost connection, a query the caller cannot influence --
  * are not conditions a caller handles per call site; they surface through this module's shared web
@@ -188,14 +179,12 @@ import org.springframework.data.repository.query.Param;
  *
  * <h2>The physical contract is owned elsewhere, and this interface consumes it</h2>
  *
- * <p>Assumptions: the single normative physical contract is
- * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}. It creates
- * the table at its lines 116 to 256, declares {@code pk_transactions} over the identifier column at
- * its line 255, and creates both indexes named above at its lines 269 and 291. The sibling
- * {@code application.yml} sets {@code ddl-auto} to {@code none} at its line 469, so the persistence
- * provider is a CONSUMER of that schema and generates none of it. Nothing reconciles the two at
- * start-up, so a mismatch between a query here and a column there stays invisible until the query
- * runs.
+ * <p>Assumptions: the single normative physical contract is this module's
+ * {@code db/migration/V1__ledger.sql}, which creates the table, its primary key and both indexes
+ * named above; the package charter beside this file records that ownership in full and is not
+ * restated here. What matters at this declaration is the consequence: schema generation is off, so
+ * nothing reconciles a query here against a column there at start-up and a mismatch stays invisible
+ * until the query runs.
  *
  * <p>Alternatives Considered: restating either index as declarative index metadata on the entity's
  * table mapping, or anywhere else in this package. Rejected because with schema generation switched

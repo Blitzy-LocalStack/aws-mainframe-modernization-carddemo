@@ -65,10 +65,23 @@ jobs:
     name: Lint, type-check, test and build the CardDemo SPA
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # WHY (least privilege): `contents: read` is for actions/checkout and
+    # `checks: write` is for the advisory Vitest JUnit publisher below, which uses
+    # it to create the check run carrying the annotations. `pull-requests: write` is
+    # deliberately absent: that publisher receives `report_paths`, `check_name` and
+    # `fail_on_failure` only, so it posts no pull-request comment, and a check run
+    # reaches the pull request through the checks tab without any pull-request
+    # scope. Granting write access to pull-request bodies, comments, labels and
+    # reviews for annotations the check run already carries would widen the token
+    # for no behaviour.
+    # Assumptions: this job mutates nothing outside the runner -- it installs from
+    # the committed lock, lints, type-checks, tests and builds -- so read access to
+    # the tree plus the single check-run scope is the whole of what it legitimately
+    # needs. Anything added later that writes beyond the runner must request its
+    # scope here deliberately rather than inherit one.
     permissions:
       contents: read
       checks: write
-      pull-requests: write
     defaults:
       run:
         working-directory: ui

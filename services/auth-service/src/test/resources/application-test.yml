@@ -337,18 +337,35 @@ spring:
           #   the property and having each test contribute a mock JwtDecoder was
           #   rejected because it removes that chain from the thing under test, so
           #   a filter-chain regression would pass. Setting `jwk-set-uri` instead
-          #   was rejected on a harder ground: it builds its decoder EAGERLY and
-          #   would attempt a network fetch during startup, turning a stub into a
-          #   startup failure and, on a machine with egress, into a real outbound
-          #   request from a unit test.
+          #   was rejected because it names key material this repository must not
+          #   carry, and it removes no startup cost: it fetches the key set during
+          #   refresh exactly as the issuer form fetches the provider document.
           #
-          # Assumptions: `.invalid` is reserved by RFC 2606 and is guaranteed
-          #   never to resolve, which is chosen over a plausible-looking hostname
-          #   for a specific reason -- discovery against this issuer is deferred
-          #   until a token is actually decoded, so if a test ever does reach it,
-          #   it must fail immediately and locally rather than resolving something
-          #   real. No user pool, no account, no region and no endpoint is
-          #   named or implied by this value.
+          # Refactoring Rationale: this note previously said discovery against the
+          #   issuer was DEFERRED until a token was decoded, and contrasted that
+          #   with an eager `jwk-set-uri`. Both halves of that contrast were
+          #   wrong, and the correction comes from running the process rather than
+          #   from re-reading the API. NimbusJwtDecoder.withIssuerLocation defers
+          #   nothing: build() calls processor(), which calls jwkSource(), which
+          #   invokes the supplier that issues
+          #   GET <issuer>/.well-known/openid-configuration. A context that
+          #   creates a decoder bean therefore attempts that request while it
+          #   refreshes, and against this issuer it fails with
+          #   UnknownHostException naming the host. That is true of the
+          #   auto-configured decoder and of the explicit one
+          #   config/SecurityConfig.java now declares.
+          #
+          # Trade-offs: the consequence is stated plainly so a test author is not
+          #   surprised by it. This value satisfies that class's fallback-free
+          #   @Value, so every test that does NOT load a Spring context runs
+          #   against the deployed property shape; a test that DOES load one must
+          #   register a reachable stub issuer through dynamic properties, exactly
+          #   as it already registers the container-generated datasource triple.
+          #   Keeping an unreachable `.invalid` value rather than a
+          #   plausible-looking hostname stays deliberate: RFC 2606 reserves it,
+          #   so the failure is immediate and local, no unit test can reach a real
+          #   provider, and no user pool, account, region or endpoint is named or
+          #   implied.
           #
           # Trade-offs: what this verifies is the authority-mapping path and the
           #   shape of the chain, NOT signature verification, because no key
@@ -422,6 +439,46 @@ logging:
     org.springframework.security: WARN
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
+
+carddemo:
+  security:
+    jwt:
+      # WHY : (1) Refactoring Rationale: this block did not exist while the base
+      #       file's three carddemo.security.jwt keys had no reader. They have one
+      #       now: config/SecurityConfig.java declares an explicit JwtDecoder bean
+      #       and takes all three through @Value, so the values are consumed by
+      #       constructor injection rather than by configuration-property binding.
+      #       That difference decides whether this profile needs the block at all.
+      #       Property binding leaves an unresolvable placeholder as literal text
+      #       and does not raise, which is why the base file's datasource
+      #       placeholders can stay unset here; @Value calls
+      #       resolveRequiredPlaceholders, which DOES raise, so the base value
+      #       ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} aborts bean creation on
+      #       any host that does not set that variable - which is every build host.
+      #       Without this block, every context-loading test in this module fails
+      #       before its first assertion.
+      #       (2) Assumptions: this string is NOT a credential and NOT a secret. A
+      #       Cognito app client id is a public identifier carried in every token
+      #       this service accepts; the value below is additionally fabricated and
+      #       visibly non-production, so it identifies nothing that exists. What it
+      #       buys is that common-lib's CognitoAccessTokenValidator is CONSTRUCTED
+      #       with a non-blank client id - the class treats blank as "skip the
+      #       client check", and config/SecurityConfig.java refuses a blank value
+      #       outright rather than silently dropping the check - so a test asserting
+      #       that a token minted for a different client is rejected has a client to
+      #       differ from.
+      #       (3) Trade-offs: the two adjacent claim values are repeated rather than
+      #       inherited so the complete accepted-token contract is readable in one
+      #       place. The cost is that a deliberate change to either in the base file
+      #       must be mirrored here or the suite stops exercising the deployed
+      #       contract - which is precisely the diff a reviewer should be made to
+      #       see. The two carddemo.security.cognito group names are NOT repeated,
+      #       because the base declares each with the default infra/modules/cognito
+      #       fixes and both therefore resolve with no environment at all.
+      expected-client-id: auth-test-app-client
+      expected-token-use: access
+      required-scope: aws.cognito.signin.user.admin
+
 
 # =============================================================================
 # Register of deliberate absences

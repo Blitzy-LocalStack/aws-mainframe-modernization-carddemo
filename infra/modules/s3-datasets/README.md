@@ -91,7 +91,7 @@ only six bases; all three definition jobs must be read to find the other four.
 Provisioning six would not stop those four families from being written, so it
 would fail silently by leaving their logical cleanup contracts absent.
 
-Assumption: the `domain` values are derived from the bounded-context schemas,
+Assumptions: the `domain` values are derived from the bounded-context schemas,
 not invented as storage categories. Transaction processing owns `ledger`,
 reference data owns `reference`, and reporting produces the 133-column
 `reporting` artifact.
@@ -179,7 +179,7 @@ its retention-function configuration aligned with
 `noncurrent_version_retention`; both environment roots supply five, and the
 output republishes the module value for verification.
 
-Trade-off: the dataset bucket has one prefix-scoped lifecycle rule for each of
+Trade-offs: the dataset bucket has one prefix-scoped lifecycle rule for each of
 the ten generation families and each of the two statement artifacts, plus one
 bucket-wide multipart housekeeping rule. This is more configuration than one
 bucket-wide retention rule, but it preserves an auditable link from every
@@ -210,7 +210,7 @@ dataset. The separate `non_generation_prefixes` and `non_generation_uris`
 outputs preserve that distinction for the statement-producing batch state and
 for any consumer that counts generation families.
 
-Trade-off: the baseline deletes each statement dataset and writes it fresh.
+Trade-offs: the baseline deletes each statement dataset and writes it fresh.
 Bucket versioning expresses a rewrite as a new current version while retaining
 the replaced version for recovery, so no separate target delete step is needed.
 Because versioning is bucket-wide, the two prefixes still need
@@ -233,7 +233,7 @@ bases with `LIMIT(5)` and `SCRATCH`, so the default applies five uniformly.
 per-family variant without changing topology, but every default entry
 deliberately leaves it unset.
 
-Assumption: recording the second definition is necessary even though it does
+Assumptions: recording the second definition is necessary even though it does
 not change the chosen default. Without this note, the eleventh grep hit and its
 different limit could be read either as an eleventh family or as evidence that
 the table omitted a contract.
@@ -265,7 +265,7 @@ roots own backend and provider configuration and call the same module source:
 ```hcl
 # WHAT: call the dataset module from an environment root with identities and
 #       controls resolved from sibling resources and root-owned variables.
-# WHY : Assumption: keeping provider, backend, KMS, logging, and Lambda wiring in
+# WHY : Assumptions: keeping provider, backend, KMS, logging, and Lambda wiring in
 #       the root preserves one dependency direction and prevents sibling modules
 #       from calling one another.
 module "s3_datasets" {
@@ -302,14 +302,14 @@ The roots also supply environment-specific resource identities through
 `access_log_bucket_name`; those values connect the same topology to resources
 owned by that environment. `name_prefix` remains the shared naming stem.
 
-Assumption: `dataset_families` and `non_generation_prefixes` are topology
+Assumptions: `dataset_families` and `non_generation_prefixes` are topology
 contracts and do not vary by environment. If one root changed either key set,
 the batch chain, lifecycle filters, retention function, IAM paths, and migration
 staging code would disagree only in that environment. The variable validations
 therefore pin the default family set to exactly ten and the statement set to
 exactly two.
 
-Trade-off: the transition day is nullable. Leaving it null keeps noncurrent
+Trade-offs: the transition day is nullable. Leaving it null keeps noncurrent
 versions in their existing storage class until expiry; setting it moves eligible
 versions to the configured class. This avoids creating an empty transition
 block that the provider rejects, at the cost of one conditional dynamic block
@@ -334,7 +334,7 @@ the authored module.
 | `audit_bucket_arn` | Audit bucket's IAM resource ARN | The environment root supplies it to the KMS module's exact bucket-context policy wiring |
 | `object_access_trail_arn` | Dataset object-access CloudTrail ARN | Environment aggregate outputs and audit integrations that identify the data-event trail |
 
-Assumption: both prefix and URI forms are published because they are not
+Assumptions: both prefix and URI forms are published because they are not
 interchangeable at their call sites. IAM resource construction and boto3
 `Prefix=` operations need the bare prefix, while a task container override
 replacing a JCL `DD DSN=` location carries an S3 URI. Reconstructing either form
@@ -426,11 +426,11 @@ the dataset bucket's access-logging check fires, the resolution is to supply
 
 ## WHY (non-obvious design decisions)
 
-- Assumption: ten is a closed lineage contract, not a configurable deployment
+- Assumptions: ten is a closed lineage contract, not a configurable deployment
   size. The validation names all ten keys because a length-only check could
   accept nine correct families plus one invented family while still reporting
   ten.
-- Trade-off: logical generation retention depends on a caller-owned
+- Trade-offs: logical generation retention depends on a caller-owned
   ObjectCreated function, accepting asynchronous cleanup in exchange for one
   path that covers batch, retry, migration, and ad-hoc writers. Versioning alone
   cannot count distinct `gen=` keys.

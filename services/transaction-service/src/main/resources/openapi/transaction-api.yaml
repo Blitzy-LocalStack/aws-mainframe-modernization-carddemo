@@ -4,9 +4,16 @@
 # Purpose:
 #   The hand-authored OpenAPI 3.1 contract of record for transaction-service,
 #   the LEDGER bounded context of the CardDemo mainframe-to-microservices
-#   migration. It is the document the browser SPA's transaction client is
-#   written against, and the document this module's controller tests agree
-#   with. It is served as a static classpath resource: application.yml adds
+#   migration. Everything that touches this context is written against it rather
+#   than against a reading of the baseline. Landed at this checkpoint: the request
+#   and response records under src/main/java/com/carddemo/transaction/dto, whose
+#   member names, widths, value domains and paging vocabulary this document and
+#   src/test/java/com/carddemo/transaction/dto/TransactionApiContractTest.java hold
+#   to each other. Planned and NOT yet authored: the browser SPA's transaction
+#   client, and every controller, service and mapper of this module - so no
+#   operation below is served yet, and the controller tests that will assert each
+#   response body do not exist. It is served as a static classpath resource:
+#   application.yml adds
 #   `classpath:/openapi/` to spring.web.resources.static-locations at L601 and
 #   pins springdoc.swagger-ui.url to /transaction-api.yaml at L621, so this
 #   file -- not an annotation-scanned document -- is what the browser view
@@ -156,7 +163,7 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
 
-# WHY : Assumptions: the single entry is a RELATIVE path expressed through a
+# WHY : (1) Assumptions: the single entry is a RELATIVE root expressed through a
 #       server variable, and deliberately carries no scheme and no host. The
 #       browser client resolves its own origin from the VITE_API_BASE_URL build
 #       variable read at ui/src/api/client.ts L19 and applied as the axios
@@ -165,19 +172,45 @@ info:
 #       the no-secrets constraint forbids. The path is a variable rather than a
 #       bare "/" so that a gateway stage prefix can be substituted without
 #       editing this document.
+#       (2) Assumptions: this entry contributes a DEPLOYMENT ROOT only, and the
+#       /api/v1 version segment is carried by every operation path below rather
+#       than by this variable. The edge publishes absolute versioned route keys --
+#       "ANY /api/v1/transactions" and "ANY /api/v1/transactions/{proxy+}" at
+#       infra/modules/api-gateway-http/variables.tf L382 to L383 -- and forwards
+#       the request path unrewritten, its only request-parameter mapping being an
+#       overwrite of the x-request-id header at
+#       infra/modules/api-gateway-http/main.tf L591 to L593. The load-balancer
+#       rules that forwarded path must then match are absolute too:
+#       infra/envs/dev/main.tf L90 and infra/envs/prod/main.tf L90 both list
+#       "/api/v1/transactions", "/api/v1/transactions/*", "/api/v1/billpay" and
+#       "/api/v1/billpay/*", and the comment above the first of those states that a
+#       pattern without the prefix can never match a request forwarded from that
+#       edge.
+#       (3) Alternatives Considered: carrying the /api/v1 segment in this
+#       variable's default instead of in the paths, leaving each path unversioned.
+#       Rejected because the two sibling contracts in this repository publish
+#       absolute versioned paths -- services/auth-service/src/main/resources/
+#       openapi/auth-api.yaml L230 and services/card-service/src/main/resources/
+#       openapi/card-api.yaml L225 -- so one gateway prefix could not be applied
+#       uniformly across the three: it would resolve correctly here while doubling
+#       the segment on the other two, and a reader comparing the three documents
+#       could not tell which of two prefixing strategies any one of them assumed.
 servers:
   - url: "{basePath}"
     description: >-
-      The deployment-relative root this contract is served beneath. Requests are
-      issued against the origin the client is configured with, and this value
-      contributes only the path prefix in front of the operation paths below.
+      The deployment root this contract is served beneath. Requests are issued
+      against the origin the client is configured with, and this value contributes
+      only a stage prefix in front of the absolute, already-versioned operation
+      paths below.
     variables:
       basePath:
         default: "/"
         description: >-
-          Path prefix in front of every operation path. It is "/" when the
-          service is reached directly, and is set to the stage or route prefix
-          when an API gateway fronts it.
+          Stage prefix in front of every operation path. It is "/" both when the
+          service is reached directly and when it is reached through the HTTP API,
+          whose route keys already carry the same /api/v1 segment every path below
+          spells out, and it is set to a stage or route prefix only where an edge
+          adds one of its own.
 
 # WHY : Assumptions: there are exactly four tags because there are exactly four
 #       source programs, and each tag name is the operation name recorded in the
@@ -216,8 +249,51 @@ tags:
 security:
   - bearerAuth: []
 
+# WHY : Refactoring Rationale: every path below carries the /api/v1 prefix, and
+#       the bill-payment collection is published at /api/v1/billpay rather than at
+#       a plural resource name of this document's choosing. An earlier revision
+#       published /transactions, /transactions/{transactionId} and /bill-payments
+#       unversioned, which no request could ever reach on a provisioned
+#       environment: the load balancer rule that forwards to this service matches
+#       "/api/v1/transactions", "/api/v1/transactions/*", "/api/v1/billpay" and
+#       "/api/v1/billpay/*" (infra/envs/dev/main.tf and infra/envs/prod/main.tf),
+#       the module that owns those rules refuses any path pattern not beginning
+#       "/api/v1/" (infra/modules/alb/variables.tf), and the edge publishes only
+#       versioned route keys (infra/modules/api-gateway-http/variables.tf). An
+#       unversioned path authenticates at the edge and is then answered 404 by the
+#       load balancer, which reads as a broken service rather than as a path that
+#       was never routed. The paths are aligned to the provisioned edge rather than
+#       the edge to a name this document invented, because the /api/v1 prefix is a
+#       published invariant of the whole API surface while a spelling of the
+#       bill-payment collection is not.
+# WHY : Assumptions: the load balancer rule was necessary and was not sufficient,
+#       so the edge route table names this segment too. The authorized route keys
+#       now include the bare "ANY /api/v1/billpay"
+#       (infra/modules/api-gateway-http/variables.tf); without it the request would
+#       have stopped one layer earlier than the case above, answered by the API's
+#       own 404 with no integration attempted and no load balancer rule consulted.
+#       It is a BARE key with no greedy sibling because this document publishes one
+#       operation at that exact path and nothing beneath it, so a greedy key would
+#       publish a subtree with nothing behind it.
 paths:
-  /transactions:
+
+  # WHY : Refactoring Rationale: every path carries the /api/v1 prefix, and an
+  #       earlier revision of this document published these three operations
+  #       WITHOUT it. That was not a cosmetic omission. The load balancer routes
+  #       this service on the patterns "/api/v1/transactions",
+  #       "/api/v1/transactions/*", "/api/v1/billpay" and "/api/v1/billpay/*"
+  #       (infra/envs/dev/main.tf and infra/envs/prod/main.tf), the edge's route
+  #       table admits only keys beginning "/api/v1/"
+  #       (infra/modules/api-gateway-http/variables.tf validates the prefix and
+  #       states why), and an unprefixed path matches neither - so a client
+  #       written against the earlier revision received a 404 from the load
+  #       balancer for a service that was running, with nothing to distinguish
+  #       that from a genuinely missing transaction. The server entry stays a
+  #       path variable defaulting to "/" so a gateway stage prefix can still be
+  #       substituted in front of these paths; the version segment is part of the
+  #       contract and belongs here rather than there, for the reasons recorded
+  #       on that route-key variable.
+  /api/v1/transactions:
     description: >-
       The ledger collection. It is browsed by sealed keyset cursor and appended
       to with a server-assigned identifier, migrated from CICS transactions CT00
@@ -254,14 +330,19 @@ paths:
         performs one extra read at L308 and sets its next-page indicator true at
         L310 or false at L312.
       parameters:
+        - $ref: "#/components/parameters/TransactionIdFilter"
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/Direction"
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       responses:
         "200":
           description: >-
             One page of transactions, with the cursors and availability
             indicators needed to request the adjacent pages. An exhausted or
             empty result is this status with an empty item array, not an error.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -279,6 +360,9 @@ paths:
             program also emits at L649 and L683 for its forward and backward paths.
             Its lower-case t is this program's form and differs from the
             capitalised form the other three programs emit.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -309,6 +393,18 @@ paths:
         identifier up at L220 to L223, and supplying neither is refused at L226.
         Whichever is supplied, the card number is what the stored record carries,
         per the MOVE at L459.
+
+
+        The confirmation decides whether the write happens, which is why one
+        operation answers both 200 and 201. The baseline validates the whole
+        submission first at L166 and L167 and only then evaluates that one
+        character at L169 to L188: 'Y' or 'y' performs the write at L172, while
+        'N', 'n', spaces and low values fall to L173 through L176, which write
+        nothing and ask for a confirmation with the prompt at L178. Splitting the
+        unconfirmed turn into its own operation would invent an endpoint the
+        baseline does not have.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         description: >-
           The transaction to create, carrying every field the baseline add
@@ -319,12 +415,37 @@ paths:
             schema:
               $ref: "#/components/schemas/TransactionCreateRequest"
       responses:
+        # WHY : Refactoring Rationale: a withheld confirmation answers 200 with
+        #       nothing written, rather than 201 or an error, because the baseline
+        #       treats it as a normal turn of the same transaction rather than as a
+        #       failure. app/cbl/COTRN02C.cbl L166 and L167 validate the submission
+        #       first, L383 to L386 normalise the amount and write the normalised
+        #       form back into the screen field, and only then does L169 examine the
+        #       confirmation: L173 to L176 answer 'N', 'n', SPACES and LOW-VALUES
+        #       with the prompt at L178 and perform no write at all. Answering an
+        #       error there would report a failure where the baseline reports a
+        #       prompt, and answering 201 would claim a write that did not happen.
+        #       The sibling bill-payment operation in this document answers its own
+        #       withheld confirmation the same way, so one contract does not
+        #       describe two conventions for one situation.
+        "200":
+          description: >-
+            The confirmation was withheld, so no transaction was written. The body
+            reports the normalised amount the submission would be captured at and
+            the prompt "Confirm to add this transaction..." verbatim from
+            app/cbl/COTRN02C.cbl L178.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionAddPreview"
         "201":
           description: >-
             The transaction was written. The body carries the assigned
-            identifier and the baseline's own success sentence, and the Location
-            header addresses the new resource.
+            identifier, the normalised amount and the baseline's own success
+            sentence, and the Location header addresses the new resource.
           headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
             Location:
               description: >-
                 Absolute path of the created transaction, addressing the view
@@ -334,9 +455,10 @@ paths:
                 type: string
                 description: >-
                   Path of the created transaction, of the form
-                  /transactions/{transactionId}.
+                  /api/v1/transactions/{transactionId}, matching the view
+                  operation's own path key.
                 examples:
-                  - "/transactions/0000000000683580"
+                  - "/api/v1/transactions/0000000000683580"
           content:
             application/json:
               schema:
@@ -354,6 +476,9 @@ paths:
             "Account ID NOT found..." verbatim from app/cbl/COTRN02C.cbl L593
             when the account identifier was supplied, and "Card Number NOT
             found..." verbatim from L626 when the card number was.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -372,6 +497,9 @@ paths:
             "Tran ID already exist..." verbatim from app/cbl/COTRN02C.cbl L738,
             singular verb included, and it is the response for both of the
             duplicate conditions the baseline handles together at L735 and L736.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -387,17 +515,21 @@ paths:
             when the card-number form could not be, or "Unable to lookup
             Transaction..." from L664 and L693 when reading the highest existing
             identifier failed.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
-  /transactions/{transactionId}:
+  /api/v1/transactions/{transactionId}:
     description: >-
       One transaction addressed by its identifier, migrated from CICS
       transaction CT01.
     parameters:
       - $ref: "#/components/parameters/TransactionId"
+      - $ref: "#/components/parameters/CorrelationIdHeader"
 
     get:
       tags: [Transaction View]
@@ -416,11 +548,16 @@ paths:
         L103 to L107 -- and selection context that arrives in the request path
         makes each request self-describing and therefore independently
         authorizable.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       responses:
         "200":
           description: >-
             The transaction, with its card number masked to the last four digits
             and its amount carried as an exact decimal string.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -431,6 +568,9 @@ paths:
             message is "Tran ID can NOT be empty..." verbatim from
             app/cbl/COTRN01C.cbl L149 when it is absent, with the emphatic
             capitalisation of NOT preserved as the baseline writes it.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -444,6 +584,9 @@ paths:
             No transaction carries that identifier. The aggregate message is
             "Transaction ID NOT found..." verbatim from app/cbl/COTRN01C.cbl
             L285.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -466,6 +609,9 @@ paths:
             the list operation emits the lower-case "Unable to lookup
             transaction..." from app/cbl/COTRN00C.cbl L615, and the two are not
             interchangeable.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -484,10 +630,30 @@ paths:
   #       empty sentinel. Its relational equivalent is a maximum over the key
   #       column, not a page, so a page envelope here would describe an
   #       operation no source program justifies.
-  /bill-payments:
+  # WHY : Refactoring Rationale: this path is /api/v1/billpay and an earlier
+  #       revision published it as /bill-payments. Two independent things were
+  #       wrong with that. It carried no version prefix, so nothing routed it at
+  #       all; and its collection noun was not the one the deployed edge names -
+  #       the load balancer forwards "/api/v1/billpay" and "/api/v1/billpay/*" to
+  #       this service, so even prefixed, "/api/v1/bill-payments" would have
+  #       matched no rule. The routed spelling is adopted here rather than the
+  #       infrastructure being renamed to the plural because the edge's own
+  #       route-key list is the published contract at the front door and is
+  #       already consumed by the load-balancer rule set, whereas this operation
+  #       has no caller yet to break.
+  # WHY : Trade-offs: the segment is a verb-like noun rather than the plural
+  #       resource noun the two neighbouring paths use. The cost is a small
+  #       inconsistency in this document; what it buys is that one spelling of
+  #       this operation exists across the OpenAPI contract, the load-balancer
+  #       rule, the edge route key and any future caller, which is the property
+  #       whose absence made the earlier revision unroutable.
+  /api/v1/billpay:
     description: >-
       Full-balance payments against an account, migrated from CICS transaction
-      CB00. The collection is appended to and is deliberately not browsable.
+      CB00. The collection is appended to and is deliberately not browsable. Its
+      path segment is billpay because that is the segment the environment roots
+      already route to this service and the browser shell already reserves for the
+      screen; see the rationale above the paths section.
 
     post:
       tags: [Bill Payment]
@@ -525,6 +691,8 @@ paths:
         PAYMENT at L227 and both the merchant city and zip to N/A at L228 and
         L229, and it takes the card number from the cross-reference at L225.
         None of those is a request field.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         description: >-
           The account to pay and the confirmation that selects between previewing
@@ -549,6 +717,9 @@ paths:
             reports the balance that would be paid and, when the confirmation
             was blank, the prompt "Confirm to make a bill payment..." verbatim
             from app/cbl/COBIL00C.cbl L237.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -560,6 +731,8 @@ paths:
             the amount paid and the resulting balance, and the Location header
             addresses the transaction that was written.
           headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
             Location:
               description: >-
                 Absolute path of the transaction the payment wrote, addressing
@@ -569,9 +742,10 @@ paths:
                 type: string
                 description: >-
                   Path of the transaction written by the payment, of the form
-                  /transactions/{transactionId}.
+                  /api/v1/transactions/{transactionId}, matching the view
+                  operation's own path key.
                 examples:
-                  - "/transactions/0000000000683581"
+                  - "/api/v1/transactions/0000000000683581"
           content:
             application/json:
               schema:
@@ -583,6 +757,9 @@ paths:
             "Acct ID can NOT be empty..." verbatim from app/cbl/COBIL00C.cbl
             L161, or "Invalid value. Valid values are (Y/N)..." verbatim from
             L187.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -597,6 +774,9 @@ paths:
             entry. The aggregate message is "Account ID NOT found..." verbatim
             from app/cbl/COBIL00C.cbl L361, which the baseline also emits from
             the update path at L392 and the cross-reference path at L425.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -607,6 +787,9 @@ paths:
             have nothing to pay..." verbatim from app/cbl/COBIL00C.cbl L201 when
             the balance is not positive, or "Tran ID already exist..." verbatim
             from L536 when the identifier the payment derived is already taken.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -619,6 +802,9 @@ paths:
             lookup Transaction..." from L463 and L492, "Unable to Add Bill pay
             Transaction..." from L543, or "Unable to Update Account..." from
             L399.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -640,22 +826,16 @@ components:
 
   parameters:
 
-    # WHY : Assumptions: the name and the shape are fixed by the already-authored
-    #       browser client rather than chosen here. ui/src/api/cards.ts sends
-    #       this parameter as `cursor` at L54, declares it optional at L44, and
-    #       omits it entirely on an opening request at L50 to L52. A different
-    #       name here would leave the SPA's sibling browse call and this contract
-    #       disagreeing on the wire while both still compiling.
     Cursor:
       name: cursor
       in: query
       required: false
       description: >-
-        A sealed cursor token copied from the nextCursor or prevCursor member of
-        a previous response. It is omitted on an opening request, which starts at
-        the beginning of the ordering. It must be replayed exactly as it was
-        received, because it is sealed against tampering and any alteration
-        invalidates it.
+        A sealed cursor token copied from a previous response: that page's lastKey
+        to read forward, or its firstKey to read backward, with direction saying
+        which. It is omitted on an opening request, which starts at the beginning of
+        the ordering. It must be replayed exactly as it was received, because it is
+        sealed against tampering and any alteration invalidates it.
       schema:
         $ref: "#/components/schemas/CursorToken"
 
@@ -664,13 +844,40 @@ components:
       in: query
       required: false
       description: >-
-        Which side of the supplied cursor to read. It is meaningful only
-        alongside a cursor, and the browser client sends the two together or
-        neither. Forward reading seeks keys strictly greater than the cursor in
-        ascending order; backward reading seeks keys strictly less than it in
-        descending order.
+        Which side of the supplied cursor to read. It is meaningful only alongside a
+        cursor, and the browser client sends the two together or neither. `next`
+        seeks keys strictly greater than the cursor in ascending order; `previous`
+        seeks keys strictly less than it in descending order.
       schema:
         $ref: "#/components/schemas/PageDirection"
+
+    # WHY : Refactoring Rationale: the starting identifier is PUBLISHED, and an
+    #       earlier revision of this document declared only the two paging inputs
+    #       while the already-authored request record
+    #       services/transaction-service/.../dto/TransactionListRequest.java
+    #       carried a third component for it. An unpublished input is worse than a
+    #       missing one: the record binds it, the reference screen collects it at
+    #       TRNIDINI PIC X(16) (app/cpy-bms/COTRN00.CPY L66) and the reference
+    #       program branches on it at app/cbl/COTRN00C.cbl L206 to L210, so the
+    #       behaviour existed and no client could discover it. Publishing it makes
+    #       the browse this operation replaces reachable.
+    # WHY : Assumptions: it is a FILTER on where the ordering starts and not a
+    #       selector for one row - a supplied value positions the browse and the
+    #       page still carries up to ten rows from there. Omitting it, or sending
+    #       an empty value, begins at the start of the key space, which is the
+    #       branch app/cbl/COTRN00C.cbl L206 takes for a blank field.
+    TransactionIdFilter:
+      name: transactionIdFilter
+      in: query
+      required: false
+      description: >-
+        The transaction identifier the browse is to begin at, as exactly sixteen
+        decimal digits when supplied. Omit it to begin at the start of the
+        ordering. It cannot be combined with a cursor: a cursor already states a
+        position, so supplying both is a 400 rather than being silently resolved
+        in favour of one.
+      schema:
+        $ref: "#/components/schemas/TransactionId"
 
     TransactionId:
       name: transactionId
@@ -682,6 +889,49 @@ components:
       schema:
         $ref: "#/components/schemas/TransactionId"
 
+    # WHY : Refactoring Rationale: the correlation identity is declared on the
+    #       REQUEST side as well as the response, and an earlier revision declared
+    #       it on neither - it bounded the member inside the error body at twenty
+    #       characters and stopped there. The inbound shape is part of the contract
+    #       whether or not the contract states it, because
+    #       services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
+    #       accepts an inbound value and refuses one that is over-long or carries
+    #       an unsafe character. Twenty was also simply wrong: the filter's
+    #       CORRELATION_ID_MAX_LENGTH is 24 at its line 238, and the value it
+    #       mints when a caller sends none is exactly twenty-four characters, so a
+    #       body carrying a service-minted identity did not satisfy this document's
+    #       own bound.
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Identity of the unit of work this request belongs to, echoed back on the
+        response. Supply it to tie this request to one a caller has already
+        named, or omit it and the service mints one. A value longer than the
+        published bound, or carrying a character outside the published set, is
+        refused with 400 rather than being silently replaced, so a caller cannot
+        believe it is correlating requests the service is in fact correlating
+        under a different identity.
+      schema:
+        $ref: "#/components/schemas/CorrelationId"
+
+  # WHY : Assumptions: the response header is declared once here rather than at
+  #       each response, because a header re-typed at every response is one that
+  #       will eventually be typed differently. It is required on every response
+  #       including the failures: the identity is the only handle this contract
+  #       offers into server-side diagnostics, and it is least dispensable exactly
+  #       when a caller is reporting a failure.
+  headers:
+    XCorrelationId:
+      description: >-
+        Identity of the unit of work that produced this response. Echoed from the
+        request where the caller supplied a conforming value, and minted by the
+        service where it did not. Quote it when reporting a failure.
+      required: true
+      schema:
+        $ref: "#/components/schemas/CorrelationId"
+
   responses:
 
     BadRequest:
@@ -689,6 +939,9 @@ components:
         The request was refused by field validation. The body carries the
         aggregate sentence and one entry per offending field, each entry naming
         the field and carrying that field's verbatim baseline message.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
       content:
         application/json:
           schema:
@@ -699,6 +952,9 @@ components:
         No bearer token was presented, or the token presented could not be
         validated. No field entries accompany this status, because nothing about
         the request body was examined.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
       content:
         application/json:
           schema:
@@ -708,23 +964,53 @@ components:
       description: >-
         The token was valid but its group claim does not carry the authority this
         operation requires.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ApiError"
 
-    InternalServerError:
-      description: >-
-        The operation failed for a reason the caller cannot correct. The
-        aggregate message is carried verbatim from the baseline paragraph that
-        detected the failure, and the correlation identifier in the body is the
-        key to the operational record that holds the diagnostic detail this
-        response deliberately withholds.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
+  # WHY : Assumptions: there is deliberately NO shared InternalServerError entry
+  #       here, and its absence is a decision rather than an omission. The three
+  #       entries above are shared precisely because their meaning does not vary
+  #       by operation: a field-validation refusal, a missing or unvalidatable
+  #       token, and a group claim without the required authority read the same
+  #       whichever operation returned them. A 500 in this context does not. Each
+  #       of the four operations declares its own, because each carries the
+  #       VERBATIM aggregate message of the baseline paragraph that detected the
+  #       failure, together with the program and line it came from -- and those
+  #       messages are not interchangeable. The browse emits "Unable to lookup
+  #       transaction..." with a lower-case t from app/cbl/COTRN00C.cbl L615 while
+  #       the single read emits the capitalised "Unable to lookup Transaction..."
+  #       from app/cbl/COTRN01C.cbl L292, and preserving that difference is a
+  #       parity requirement rather than a stylistic one.
+  #       Alternatives Considered: (1) keeping the shared entry and referencing it
+  #       from all four operations, moving the per-program message text up into
+  #       each operation's description. Rejected because the text describes the
+  #       RESPONSE, not the operation: a reader looking at the 500 would no longer
+  #       find which message it carries, and the four sets of messages -- one of
+  #       which lists six distinct sentences -- would sit in the wrong place to be
+  #       checked against the COBOL. (2) Keeping the shared entry unreferenced, as
+  #       an earlier revision of this file did. Rejected because an unreferenced
+  #       response component is worse than absent: a generator emits it as a type
+  #       nothing returns, and a reader reasonably infers that it IS the declared
+  #       shape of this context's 500s, which was not true even when it was
+  #       present. That inference is exactly the kind of false premise this
+  #       contract is meant not to invite.
+  #       Assumptions: being unreferenced is not by itself the defect, and this
+  #       document holds the counter-example, so the distinction is stated here
+  #       rather than left for a reader to reconcile. The PageBoundaryMessage
+  #       schema below is ALSO referenced by nothing, and it stays: it is a catalog
+  #       of five verbatim baseline sentences published for a client to render, its
+  #       own rationale says outright that it is deliberately a member of no
+  #       response, and it carries content that exists nowhere else in the
+  #       contract. The removed response carried no content of its own -- every
+  #       sentence it might have held is stated more precisely by the four
+  #       operations -- and nothing recorded why it was unreferenced. An orphan
+  #       whose purpose is written down is documentation; an orphan with no stated
+  #       purpose is drift, and only the second kind was removed.
   schemas:
 
     # -------------------------------------------------------------------------
@@ -957,56 +1243,86 @@ components:
       maxLength: 256
       pattern: "^v1\\.[A-Za-z0-9_-]{1,200}\\.[A-Za-z0-9_-]{43}$"
 
+    # WHY : Refactoring Rationale: ONE bound and ONE character set for the
+    #       correlation identity, published once and referenced by the request
+    #       parameter, the response header and the error body alike. Three
+    #       descriptions of one value existed across this migration's three
+    #       contracts - twenty characters here, twenty-four in the auth contract
+    #       and unbounded with thirty-six-character examples in the card contract -
+    #       and nothing compared them, so the disagreement was invisible until a
+    #       request was refused.
+    # WHY : Assumptions: twenty-four characters, and the set of letters, digits,
+    #       hyphen, underscore and full stop, are not chosen here. They are what
+    #       CorrelationIdFilter.java enforces - CORRELATION_ID_MAX_LENGTH is 24 at
+    #       its line 238 and its accepted punctuation is exactly those three
+    #       characters - so a value outside that is refused with 400 before any
+    #       handler runs, and publishing anything wider would document a request
+    #       this service rejects.
+    # WHY : Assumptions: the empty string is admitted as well as a conforming
+    #       identity, and it is not slack. The shared error shape normalises an
+    #       absent identity to the empty string, and the assembling advice supplies
+    #       the empty string when the logging context holds no entry - the state of
+    #       a failure raised before the correlation filter ran. Declaring only the
+    #       token shape would describe a body this service can in fact emit as
+    #       invalid.
+    CorrelationId:
+      type: string
+      maxLength: 24
+      pattern: "^$|^[A-Za-z0-9_.-]{1,24}$"
+      description: >-
+        Identity of one unit of work. At most twenty-four characters drawn from
+        the ASCII letters, the digits, the hyphen, the underscore and the full
+        stop. A value the service mints is exactly twenty-four upper-case
+        hexadecimal characters over twelve bytes of entropy; a value a caller
+        supplies need only fit the bound and the set. The empty string appears
+        only inside an error body, and only for a failure raised before any
+        identity had been established.
+      examples:
+        - "4F1C0E423A554D219B7E6C0F"
+
     # WHY : Assumptions: the two member values are the two the already-authored
     #       browser client sends, declared as the union "next" | "previous" at
     #       ui/src/api/cards.ts L45 with "next" as its default. Naming them
     #       forward and backward here would read more naturally and would leave
-    #       the SPA sending values this contract rejects.
+    #       the SPA sending values this contract rejects. The sibling card
+    #       contract publishes the same two for the same purpose, so there is one
+    #       paging vocabulary across this migration.
+    # WHY : Refactoring Rationale: the two admitted values are next and previous,
+    #       and an earlier revision of this document published FORWARD and
+    #       BACKWARD. Those are the NAMES of the constants on
+    #       services/transaction-service/.../dto/TransactionListRequest.java's
+    #       Direction enum, not the values it accepts: each constant carries a
+    #       lower-case wire value read by an explicit JSON creator, so a request
+    #       sending the constant name is refused with 400 before any handler runs.
+    #       The contract therefore described exactly the values the service does
+    #       not take, and a client generated from it could not page at all. The
+    #       sibling auth and card contracts already publish next and previous, so
+    #       this also removes a second paging vocabulary from the platform, and a
+    #       contract test now asserts the published set equals the enum's own wire
+    #       values so the two cannot drift again.
     PageDirection:
       type: string
       description: >-
-        Which side of a supplied cursor to read. Reading next seeks keys strictly
-        greater than the cursor in ascending order; reading previous seeks keys
-        strictly less than it in descending order, which is the migrated form of
-        the baseline READPREV at app/cbl/COTRN00C.cbl L660.
+        Which side of a supplied cursor to read. `next` seeks keys strictly greater
+        than the cursor in ascending order; `previous` seeks keys strictly less than
+        it in descending order, which is the migrated form of the baseline READPREV
+        at app/cbl/COTRN00C.cbl L660.
       enum: [next, previous]
       default: next
 
-    # WHY : Refactoring Rationale: this catalog is published for clients and is
-    #       deliberately a member of NO response, which is why no $ref points at
-    #       it. The baseline emits these sentences into its message line when a
-    #       paging attempt reaches a boundary, but a stateless page carries
-    #       hasNext and hasPrev, which already say what the sentence said, and a
-    #       request past the end returns an empty page rather than a failure.
-    #       Adding a message member to the page envelope would break its
-    #       component-for-component agreement with PageResponse.java. Publishing
-    #       the five strings here instead lets the browser client render them
-    #       verbatim without re-deriving them from COBOL, and keeps them under
-    #       review whenever this contract is reviewed.
-    PageBoundaryMessage:
-      type: string
-      description: >-
-        The catalog of page-boundary sentences the baseline emits, published so a
-        client can render them verbatim. Five distinct sentences exist and none is
-        a synonym of another. This schema is referenced by no response on purpose:
-        the page envelope's hasNext and hasPrev indicators are what a client
-        branches on, and it selects the sentence to display from this catalog.
-      maxLength: 75
-      # WHY : Assumptions: FIVE constants, and they stay five. app/cbl/COTRN00C.cbl
-      #       emits distinct sentences at L248, L270, L608, L642 and L676, and
-      #       three of the five are about reaching the top while differing in
-      #       wording -- "You are already at the top of the page..." at L248,
-      #       "You are at the top of the page..." at L608 and "You have reached
-      #       the top of the page..." at L676. A grep across the program confirms
-      #       these are the only five. Merging any of them would change what a
-      #       user reads, which is a behavioural change and not a tidy-up.
-      enum:
-        - "You are already at the top of the page..."
-        - "You are already at the bottom of the page..."
-        - "You are at the top of the page..."
-        - "You have reached the bottom of the page..."
-        - "You have reached the top of the page..."
-
+    # WHY : Refactoring Rationale: there is no schema here for the baseline's
+    #       page-boundary sentences, and an earlier revision published one -- an
+    #       enumeration of the five strings, deliberately referenced by no response.
+    #       A component no response references is pruned by every generator that
+    #       reads this document, so it reached no client anyway, and the strings have
+    #       a single home already: ui/src/messages/messages.ts carries all five
+    #       verbatim, which is where every user-visible string in the migrated system
+    #       lives. Publishing them twice would give one sentence two sources that can
+    #       drift. The five remain distinct there -- app/cbl/COTRN00C.cbl emits them
+    #       at L248, L270, L608, L642 and L676, and three differ only in wording
+    #       about reaching the top -- and a client selects among them from hasNext
+    #       and from the presence of firstKey, which is what the paging controls
+    #       already bind to.
     # -------------------------------------------------------------------------
     # Resource shapes.
     # -------------------------------------------------------------------------
@@ -1097,6 +1413,18 @@ components:
     #       they are on page four of anything. The page size is likewise absent
     #       because the baseline disagrees with itself about it: seven rows in the
     #       card list against ten here.
+    # WHY : Refactoring Rationale: FOUR members, and the required list names all
+    #       four. An earlier revision declared seven -- the two boundary tokens plus
+    #       a separate forward and backward request position and a backward
+    #       availability indicator -- and required only three of them, so this
+    #       document, its two sibling contracts and the shared record all described
+    #       one envelope differently. Four is the shape the migration fixed and the
+    #       shape the shared record now declares, and the required list is now
+    #       identical in all three contracts so one generated client type reads a
+    #       page from any of them. Nothing is lost: a page whose rows were all
+    #       filtered away after being read carries its two scan positions in
+    #       firstKey and lastKey, which is what they are on such a page, and a
+    #       backward step is expressible exactly when firstKey is present.
     TransactionPage:
       type: object
       description: >-
@@ -1105,7 +1433,27 @@ components:
         members: firstKey and lastKey identify rows the caller received, while
         nextCursor and prevCursor are the positions a further request is issued
         from.
-      required: [items, hasNext, hasPrev]
+      # WHY : Refactoring Rationale: the envelope is the FOUR members the shared
+      #       response type declares -- items, firstKey, lastKey and hasNext, at
+      #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
+      #       -- and every one of them is required. An earlier revision of this
+      #       document published seven, adding nextCursor, prevCursor and hasPrev.
+      #       Those three describe a body this service cannot send: the shared type
+      #       has no such components, so a Jackson rendering of it omits them, and a
+      #       generated client would have received three accessors that are always
+      #       absent while a strict client would have rejected every valid response
+      #       for missing a required member. The migration plan fixes the shape at
+      #       four members, so the contract follows the type rather than the type
+      #       following the contract. Absence of a row identity is spelled null --
+      #       the member is present with a null value -- and not by the member being
+      #       missing, which is why all four are required rather than only items.
+      #       (2) Alternatives Considered: widening the shared type to seven so the
+      #       longer contract could stand. Rejected because the two extra cursors
+      #       would duplicate firstKey and lastKey, which already carry the positions
+      #       a further request is issued from, and hasPrev is derivable from
+      #       firstKey being non-null -- so the wider shape would publish three
+      #       members a caller must be told how to reconcile with three others.
+      required: [items, firstKey, lastKey, hasNext]
       additionalProperties: false
       properties:
         # WHY : Assumptions: the bound of ten is a BASELINE FACT, not a tuning
@@ -1129,8 +1477,12 @@ components:
             $ref: "#/components/schemas/TransactionSummary"
         firstKey:
           description: >-
-            The sealed token identifying the first row in items, or null exactly
-            when the page carries no rows. The baseline keeps the same value in
+            The sealed token naming this page's leading boundary: the first row in
+            items, or -- on a page whose every row was filtered away after being
+            read -- the key at which the backward scan stopped. Null when neither
+            exists. A backward request replays it as the cursor parameter with
+            direction `previous`, so its presence is what tells a caller a backward
+            step is expressible. The baseline keeps the same value in
             CDEMO-CT00-TRNID-FIRST, declared at app/cbl/COTRN00C.cbl L63 and set
             from the first row at L392 to L393.
           oneOf:
@@ -1149,37 +1501,13 @@ components:
         #       verified by that caller.
         lastKey:
           description: >-
-            The sealed token identifying the last row in items, or null exactly
-            when the page carries no rows. It names a row the caller received, not
-            the extra row read to establish whether a further page follows. The
-            baseline keeps the same value in CDEMO-CT00-TRNID-LAST at
-            app/cbl/COTRN00C.cbl L64.
-          oneOf:
-            - $ref: "#/components/schemas/CursorToken"
-            - type: "null"
-        # WHY : Assumptions: the two cursors are separate members from the two row
-        #       identities, and PageResponse.java L194 to L202 states why: a page
-        #       whose rows were all filtered away after being read has a scan
-        #       position and no last row, so the position a further request is
-        #       issued from cannot always be the identity of a row. Each cursor is
-        #       present exactly when its own availability indicator is true and
-        #       absent otherwise, and it normally equals the row identity beside
-        #       it.
-        nextCursor:
-          description: >-
-            The sealed position a forward request is issued from, present exactly
-            when hasNext is true and null otherwise. A forward request replays it
-            as the cursor parameter with direction next, and the query then seeks
-            keys strictly greater than it in ascending order.
-          oneOf:
-            - $ref: "#/components/schemas/CursorToken"
-            - type: "null"
-        prevCursor:
-          description: >-
-            The sealed position a backward request is issued from, present exactly
-            when hasPrev is true and null otherwise. A backward request replays it
-            as the cursor parameter with direction previous, and the query then
-            seeks keys strictly less than it in descending order.
+            The sealed token naming this page's trailing boundary: the last row in
+            items -- a row the caller received, never the extra row read to
+            establish whether a further page follows -- or, on a filtered-away
+            page, the key at which the forward scan stopped. Null when neither
+            exists, and present whenever hasNext is true. A forward request replays
+            it as the cursor parameter with direction `next`. The baseline keeps
+            the same value in CDEMO-CT00-TRNID-LAST at app/cbl/COTRN00C.cbl L64.
           oneOf:
             - $ref: "#/components/schemas/CursorToken"
             - type: "null"
@@ -1198,20 +1526,15 @@ components:
             beyond the page. When it is false, a forward request would return no
             rows and the baseline answers the attempt with "You are already at the
             bottom of the page..." from app/cbl/COTRN00C.cbl L270.
-        # WHY : Assumptions: hasPrev is stated by the service from the request it
-        #       answered, not inferred from the page's own contents -- it is false
-        #       for an opening request, which supplied no cursor, and true for any
-        #       page reached from a neighbouring one. PageResponse.java L206 to
-        #       L208 fixes that semantic. Inferring it from the mere presence of a
-        #       first row would make the opening page of every result claim a
-        #       predecessor that does not exist, which is precisely why that
-        #       record takes the value as stated rather than deriving one.
-        hasPrev:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. It is false for an opening request,
-            and when it is false the baseline answers a backward attempt with "You
-            are already at the top of the page..." from app/cbl/COTRN00C.cbl L248.
+        # WHY : Trade-offs: no member states whether a page PRECEDES this one, and the
+        #       answer is the presence of firstKey instead. The envelope has four
+        #       members and a backward indicator is not one of them, and the question
+        #       a client actually asks of a response is whether it holds something to
+        #       page backward from. The cost is that an opening page, which names its
+        #       own first row like every other page, offers a backward step that
+        #       returns an empty page; that is the same answer the baseline gives,
+        #       which reports "You are already at the top of the page..." at
+        #       app/cbl/COTRN00C.cbl L248 rather than withholding the key.
 
     TransactionDescription:
       type: string
@@ -1224,15 +1547,36 @@ components:
       examples:
         - "BILL PAYMENT - ONLINE"
 
+    # WHY : Assumptions: two DIGIT characters, not two characters of any kind. The
+    #       Java request record holds the same value to a digits-only expression and
+    #       carries the reference program's own message for a violation, "Type CD
+    #       must be Numeric..." at app/cbl/COTRN02C.cbl L325, so the digit domain is
+    #       the service's rule and this schema restated only half of it. The sibling
+    #       category code already publishes its digit shape, which is what made the
+    #       omission here visible.
+    # WHY : Trade-offs: the shape is published and the VALUE SET is still not. The
+    #       committed reference data holds 01 through 07 (app/data/ASCII/trantype.txt),
+    #       but the domain is owned by the reference context and a type added there
+    #       must not require an edit here, so an enumeration would be a second
+    #       authority that drifts. A pattern bounds the shape without claiming the
+    #       set.
     TransactionTypeCode:
       type: string
       description: >-
-        The transaction type code: two characters. Declared TRAN-TYPE-CD PIC X(02)
-        at app/cpy/CVTRA05Y.cpy L6 and stored as type_cd CHAR(2) at
+        The transaction type code: exactly two decimal digits. Declared
+        TRAN-TYPE-CD PIC X(02) at app/cpy/CVTRA05Y.cpy L6 and stored as
+        type_cd CHAR(2) at
         V1__ledger.sql L132. The domain is owned by the reference context, so no
         enumeration is asserted here.
       minLength: 2
       maxLength: 2
+      # WHY : Refactoring Rationale: the digit pattern is DECLARED and an earlier
+      #       revision asserted the constraint in the description alone, promising
+      #       that a non-numeric value is refused with "Type CD must be Numeric..."
+      #       while admitting one structurally. The reference program tests the
+      #       field NOT NUMERIC at app/cbl/COTRN02C.cbl L331, so the constraint is
+      #       real; a description a validator cannot read is not a contract.
+      pattern: "^[0-9]{2}$"
       examples:
         - "01"
 
@@ -1426,7 +1770,12 @@ components:
             - $ref: "#/components/schemas/Timestamp26"
             - type: "null"
         returnMessage:
-          $ref: "#/components/schemas/ReturnMessage"
+          allOf:
+            - $ref: "#/components/schemas/ReturnMessage"
+          description: >-
+            The message line the view screen carried for this transaction, or
+            null when the read set none. A successful read sets no message, so
+            null is the ordinary value here.
 
     # WHY : Assumptions: seventy-five characters, and NULLABLE, both taken from
     #       app/cpy/CVCRD01Y.cpy. L28 declares CCARD-ERROR-MSG PIC X(75) and L29
@@ -1473,14 +1822,29 @@ components:
     #       carrying neither with "Account or Card Number must be entered...".
     #       Requiring both would reject a request the baseline accepts, and
     #       requiring neither would admit one it refuses.
+    # WHY : Refactoring Rationale: the confirmation IS published, as an optional
+    #       property. An earlier revision omitted it, reasoning that a confirmation
+    #       is a terminal interaction step and an HTTP request either asks for the
+    #       write or does not. The Java request record disagrees, and it is the one
+    #       the runtime binds: it declares a confirmation component constrained to
+    #       the baseline's value domain, and because that constraint admits an absent
+    #       value there was nothing to reject a request that carried none -- so with
+    #       the property absent from this schema and additionalProperties false, the
+    #       component was unreachable and the confirm-before-write gate the reference
+    #       program applies at app/cbl/COTRN02C.cbl L169 to L188 could never be
+    #       exercised. Publishing the property restores the gate; leaving it optional
+    #       preserves the reference's own first-turn behaviour, where a blank
+    #       confirmation asks for another turn at L178 rather than rejecting the
+    #       submission.
     TransactionCreateRequest:
       type: object
       description: >-
         The fields the baseline add screen collects, migrated from
         app/cbl/COTRN02C.cbl. The transaction identifier is absent by design: the
-        service assigns it, per L444 to L451. The confirmation field the screen
-        used at L184 is absent too, because a confirmation is a terminal
-        interaction step and an HTTP request either asks for the write or does not.
+        service assigns it, per L444 to L451. The confirmation the screen collects
+        is present, and is the last member below, because the baseline decides
+        between writing and prompting on that one character at L169 to L188 and
+        answers each of its three states differently.
       required:
         - typeCode
         - categoryCode
@@ -1494,6 +1858,20 @@ components:
         - merchantCity
         - merchantZip
       additionalProperties: false
+      # WHY : Refactoring Rationale: confirm is PUBLISHED below, and an earlier
+      #       revision omitted it and argued that "a confirmation is a terminal
+      #       interaction step and an HTTP request either asks for the write or
+      #       does not". Two things were wrong with that. It contradicted the
+      #       already-authored request record
+      #       services/transaction-service/.../dto/TransactionAddRequest.java,
+      #       which carries the component and constrains its value, so this
+      #       document described a body the service does not bind; and it discarded
+      #       a behaviour the baseline has - app/cbl/COTRN02C.cbl L169 to L188
+      #       answers a blank confirmation with the prompt at L178, which asks for
+      #       another turn, and an unrecognised character with the complaint at
+      #       L184, so the field distinguishes three outcomes rather than two.
+      #       Dropping it would also have left this contract disagreeing with its
+      #       own bill-payment operation, which models the identical field.
       oneOf:
         - required: [accountId]
           description: >-
@@ -1614,13 +1992,112 @@ components:
             L314.
           minLength: 1
           maxLength: 10
+        # WHY : (1) Assumptions: the member is OPTIONAL where the bill-payment body
+        #       requires its own, and the asymmetry is the baseline's rather than a
+        #       preference. app/cbl/COTRN02C.cbl L169 to L172 writes only for 'Y' or
+        #       'y', while L173 to L176 place 'N', 'n', SPACES and LOW-VALUES on one
+        #       branch that writes nothing and asks for a confirmation, so an absent
+        #       value is the first turn of an exchange the baseline conducts rather
+        #       than a malformed submission. Requiring it here would refuse that
+        #       turn. A bill payment requires its confirmation because the
+        #       unconfirmed turn there reports a stored balance the caller cannot
+        #       compute; an add carries every value it needs already.
+        #       (2) Assumptions: one Confirmation schema serves both request bodies,
+        #       because L184 of that program and L187 of app/cbl/COBIL00C.cbl refuse
+        #       an out-of-domain character with the identical sentence and both
+        #       screens declare the field one character wide. A second
+        #       one-character enumeration declared here would put one value domain
+        #       in two places that could then disagree while both went on parsing.
+        #       (3) Assumptions: SPACES and LOW-VALUES are distinct byte states in
+        #       the baseline and share the prompt branch only at L175 and L176. Both
+        #       reach this contract as an absent member, so nothing here restates
+        #       the distinction.
+        confirmation:
+          allOf:
+            - $ref: "#/components/schemas/Confirmation"
+          description: >-
+            Whether to write the transaction. A confirming value writes it and is
+            answered with 201; a declining or absent value writes nothing and is
+            answered with 200 carrying the prompt "Confirm to add this
+            transaction..." verbatim from app/cbl/COTRN02C.cbl L178; any other
+            character is refused with "Invalid value. Valid values are (Y/N)..."
+            verbatim from L184.
 
+    # WHY : (1) Assumptions: this shape carries no transaction identifier, because
+    #       on the turn it describes the baseline has not minted one. The identifier
+    #       is generated inside ADD-TRANSACTION at app/cbl/COTRN02C.cbl L442 to
+    #       L449, which the confirmation branch at L173 to L176 never reaches, so an
+    #       identifier member here could only ever be empty or invented.
+    #       (2) Assumptions: the amount IS carried, because the baseline has already
+    #       normalised it by this point and shows the operator the result -- L385
+    #       edits the parsed value and L386 writes that edited form back into the
+    #       keyed screen field, both of which run at L167 before the confirmation is
+    #       examined at L169.
+    #       (3) Trade-offs: this is a second reported shape for one operation, where
+    #       a single shape with everything nullable would have been fewer lines. The
+    #       cost accepted is the extra schema; what it buys is that the 201 body can
+    #       require its identifier, which a shared shape could not, so a client
+    #       cannot receive a body that claims a capture without naming it. The
+    #       bill-payment operation in this document makes the same trade with its own
+    #       preview and response pair.
+    TransactionAddPreview:
+      type: object
+      description: >-
+        What an add would capture, returned when the confirmation was withheld and
+        nothing was written. It mirrors the baseline turn at app/cbl/COTRN02C.cbl
+        L166 to L181, which validates the submission, normalises the amount and
+        then asks for a confirmation without writing.
+      required: [amount, written]
+      additionalProperties: false
+      properties:
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/TransactionAmount"
+          description: >-
+            The normalised amount a confirmed submission would be captured at, as
+            parsed and edited at app/cbl/COTRN02C.cbl L383 to L385 and written back
+            into the keyed field at L386.
+        written:
+          type: boolean
+          description: >-
+            Always false on this response. It is stated explicitly rather than
+            implied by the status code so that a client logging or replaying the
+            body alone cannot mistake a prompt for a capture.
+          const: false
+        # WHY : Assumptions: the member is the shared message line rather than a
+        #       locally declared string, so the seventy-five-character width and the
+        #       null-versus-empty distinction at app/cpy/CVCRD01Y.cpy L29 and L30 are
+        #       stated in one place. On this response it carries the prompt at
+        #       app/cbl/COTRN02C.cbl L178, which that branch always sets.
+        returnMessage:
+          $ref: "#/components/schemas/ReturnMessage"
+
+    # WHY : Refactoring Rationale: THREE members, including the amount. An earlier
+    #       revision declared two and set additionalProperties false, while the Java
+    #       response record serialises a third -- the normalised monetary amount the
+    #       reference program rewrites before storing, at app/cbl/COTRN02C.cbl L442
+    #       to L446 -- with nothing suppressing it. The body a caller actually
+    #       receives was therefore invalid against its own schema, which a strict
+    #       client rejects outright. The amount is declared rather than suppressed
+    #       because it is the one submitted value the write can change, so a caller
+    #       that echoes what it sent would show a figure the ledger does not hold.
     TransactionCreated:
       type: object
       description: >-
         Confirmation that a transaction was written, carrying the identifier the
-        service assigned and the baseline's own success sentence.
-      required: [transactionId, returnMessage]
+        service assigned, the amount it was captured at, and the baseline's own
+        success sentence.
+      # WHY : Refactoring Rationale: THREE members, and an earlier revision
+      #       declared two while closing the object with additionalProperties.
+      #       The already-authored response record
+      #       services/transaction-service/.../dto/TransactionAddResponse.java
+      #       carries a third, the normalised amount, and it is present there for
+      #       a stated reason: it is the one submitted value the reference program
+      #       rewrites before storing, so a caller cannot compute it from what it
+      #       sent. A closed object missing a member the service emits is the worst
+      #       of the two failure modes available - a strict client would have
+      #       rejected a valid response outright.
+      required: [transactionId, amount, returnMessage]
       additionalProperties: false
       properties:
         transactionId:
@@ -1629,6 +2106,37 @@ components:
           description: >-
             The identifier the service assigned to the new transaction, and the
             value the Location header addresses.
+        # WHY : (1) Assumptions: the amount is published because the baseline
+        #       NORMALISES it and shows the operator the result, so reporting it is
+        #       transcription rather than addition. app/cbl/COTRN02C.cbl L383 to
+        #       L384 parse the keyed text through FUNCTION NUMVAL-C into
+        #       WS-TRAN-AMT-N, L385 moves that into the edited WS-TRAN-AMT-E, and
+        #       L386 writes the edited form back into the very screen field the
+        #       operator keyed; L456 to L458 then re-parse that rewritten field into
+        #       the record. A canonical sign and decimal placement are therefore
+        #       properties of the baseline's own behaviour, and a caller that never
+        #       received them back would have to read the record again to learn what
+        #       was stored.
+        #       (2) Assumptions: the member is required, because it is the one
+        #       submitted value the baseline rewrites and the service always has it
+        #       by the time a write succeeds. Only the return message is nullable
+        #       here, and its sentinel at app/cpy/CVCRD01Y.cpy L30 is what makes it
+        #       so.
+        #       (3) Alternatives Considered: omitting it and directing a caller to
+        #       the view operation for the stored value. Rejected because that
+        #       spends a second request to recover a value this response already
+        #       holds, and because the normalisation is exactly the difference
+        #       between what the caller sent and what the ledger now carries.
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/TransactionAmount"
+          description: >-
+            The normalised amount the transaction was captured at, at the nine
+            integer digits TRAN-AMT PIC S9(09)V99 declares at app/cpy/CVTRA05Y.cpy
+            L10 and carried as an exact decimal string. The baseline's own edited
+            form at app/cbl/COTRN02C.cbl L385 narrows to eight integer digits; the
+            migrated service carries the record's nine, and the divergence is
+            documented in docs/architecture/cobol-to-service-traceability.md.
         # WHY : Assumptions: the sentence is assembled, not a single constant, so it
         #       is reproduced as the baseline builds it. app/cbl/COTRN02C.cbl L728
         #       to L733 concatenates "Transaction added successfully. " and " Your
@@ -1653,13 +2161,58 @@ components:
     #       migrate. Admitting an amount here would create a payment the reference
     #       system cannot make and would let a caller leave a residual balance the
     #       baseline always zeroes.
+    # WHY : Refactoring Rationale: the property is named confirmation and the Java
+    #       record's component was renamed to match it, rather than the property being
+    #       renamed to match the component. A record component name is the wire name
+    #       in that package -- it declares no property-naming strategy and no
+    #       per-property annotation -- so the two spellings had to be reconciled, and
+    #       this one is the spelling the contract, its sibling create request and any
+    #       generated client share. Left unreconciled, a conformant client's value was
+    #       rejected as an unknown property by this closed object, and had it been
+    #       admitted it would have bound nothing: the component would read null on
+    #       every request, which on this operation means never confirmed and therefore
+    #       never paid.
+    # WHY : Trade-offs: only the account identifier is required. The confirmation is
+    #       optional because its absence is a meaningful state rather than an
+    #       omission: app/cbl/COBIL00C.cbl L173 to L191 routes a blank or low-values
+    #       confirmation to the prompt at L237, which asks for the payment to be
+    #       confirmed and posts nothing, and the Java component is nullable for
+    #       exactly that reason. Requiring it would leave that reachable state
+    #       unexpressible by a conformant client -- the same defect the rename above
+    #       repairs, arrived at from the other direction. A declining value reaches
+    #       the same preview outcome, so nothing is lost by a caller that always
+    #       sends one.
     BillPaymentRequest:
       type: object
       description: >-
         The account to pay and the confirmation that decides whether to pay it.
         There is no amount member, because the amount is always the account's
         entire current balance.
-      required: [accountId, confirmation]
+      # WHY : Refactoring Rationale: the member is named confirmation and is NOT
+      #       required, and the two halves of that were settled against different
+      #       evidence. The name: a record component name IS the published member
+      #       name in these services -- no property-naming strategy and no
+      #       per-property serialisation annotation is declared anywhere in them --
+      #       and the already-authored request record
+      #       services/transaction-service/.../dto/BillPaymentRequest.java calls
+      #       its component confirmation, as does the sibling add request and the
+      #       same member on TransactionCreateRequest below. Publishing the shorter
+      #       spelling here while the record binds the longer one refused every
+      #       contract-conformant body outright, because
+      #       spring.jackson.deserialization.fail-on-unknown-properties is true in
+      #       this module's application.yml and this object closes itself with
+      #       additionalProperties. Transformation rule T1 makes the copybook
+      #       normative for the value domain -- CONFIRMI PIC X(1) at
+      #       app/cpy-bms/COBIL00.CPY L72, one character, which the shared
+      #       Confirmation schema below carries -- and not for the wire spelling of
+      #       a screen control that is stored nowhere. The requiredness:
+      #       app/cbl/COBIL00C.cbl L182 to L194 answers a withheld confirmation by
+      #       displaying the payable balance without posting, so demanding the
+      #       member would remove the preview turn the baseline has and this
+      #       document's own BillPaymentPreview response describes; the record
+      #       component carries a width constraint and no null check, which admits
+      #       the same absent state.
+      required: [accountId]
       additionalProperties: false
       properties:
         accountId:
@@ -1674,25 +2227,48 @@ components:
             - $ref: "#/components/schemas/Confirmation"
           description: >-
             Whether to post the payment. A confirming value posts it; a declining
-            or unset value returns the payable balance without posting.
+            value, the empty string, or omitting the member returns the payable
+            balance without posting.
 
-    # WHY : Assumptions: four accepted values, both cases of each letter, because
-    #       the baseline accepts both cases explicitly. app/cbl/COBIL00C.cbl
-    #       evaluates the field at L173 to L191 with separate WHEN arms for 'Y' at
-    #       L174 and 'y' at L175, and for 'N' at L178 and 'n' at L179, and refuses
-    #       anything else at L185 to L187. Normalising to upper case here would
-    #       silently accept a value the baseline distinguishes at a source-line
-    #       level, and admitting only upper case would reject one it accepts.
+    # WHY : Assumptions: four accepted letters, both cases of each, because the
+    #       baseline accepts both cases explicitly. app/cbl/COBIL00C.cbl evaluates
+    #       the field at L173 to L191 with separate WHEN arms for 'Y' at L174 and
+    #       'y' at L175, and for 'N' at L178 and 'n' at L179, and refuses anything
+    #       else at L185 to L187. Normalising to upper case here would silently
+    #       accept a value the baseline distinguishes at a source-line level, and
+    #       admitting only upper case would reject one it accepts.
     #       app/cbl/COTRN02C.cbl uses the same convention and the same message at
     #       L184.
+    # WHY : Refactoring Rationale: the EMPTY string is admitted alongside the four
+    #       letters, and an earlier revision published a bare four-value
+    #       enumeration. That enumeration could not express the never-confirmed
+    #       state, which is a real state and not a missing input: a blank field
+    #       reaches app/cbl/COBIL00C.cbl L182 to L194, which reads the account and
+    #       DISPLAYS its balance without posting, and reaches
+    #       app/cbl/COTRN02C.cbl L178, which asks for another turn. Refusing a
+    #       blank value would turn the baseline's preview turn into a field error.
+    #       A pattern rather than an enumeration is what admits it, so the shape is
+    #       still machine-checked. Omitting the property entirely means the same
+    #       thing as sending the empty string, which is why it is not required.
+    # WHY : Assumptions: this pattern is EXACTLY the constraint the already-authored
+    #       request records carry, whose CONFIRM_VALUES is "[YyNn]?" - Bean
+    #       Validation anchors a pattern against the whole value, so that
+    #       expression and this one admit the same five spellings. An earlier
+    #       revision of those records admitted a run of white space as a sixth; over
+    #       HTTP a padded screen field has no counterpart, absence being spelled by
+    #       omission or by the empty string, so the white-space arm described a
+    #       value no client sends.
     Confirmation:
       type: string
       description: >-
         A single-character confirmation, as the baseline screens collect it:
         declared CONFIRMI PIC X(1) at app/cpy-bms/COBIL00.CPY L72. Y or y confirms
-        and N or n declines. Any other value is refused with "Invalid value. Valid
-        values are (Y/N)..." verbatim from app/cbl/COBIL00C.cbl L187.
-      enum: ["Y", "y", "N", "n"]
+        and N or n declines. The empty string, and omitting the property, are the
+        never-confirmed state, which previews rather than posting. Any other value
+        is refused with "Invalid value. Valid values are (Y/N)..." verbatim from
+        app/cbl/COBIL00C.cbl L187.
+      maxLength: 1
+      pattern: "^[YyNn]?$"
       examples:
         - "Y"
 
@@ -1725,7 +2301,13 @@ components:
             body alone cannot mistake a preview for a payment.
           const: false
         returnMessage:
-          $ref: "#/components/schemas/ReturnMessage"
+          allOf:
+            - $ref: "#/components/schemas/ReturnMessage"
+          description: >-
+            The prompt inviting the caller to confirm, verbatim
+            "Confirm to make a bill payment..." from app/cbl/COBIL00C.cbl L237,
+            or the refusal "You have nothing to pay..." from L198 when the
+            balance is not positive.
 
     BillPaymentResponse:
       type: object
@@ -1779,7 +2361,12 @@ components:
             own is unambiguous about whether money moved.
           const: true
         returnMessage:
-          $ref: "#/components/schemas/ReturnMessage"
+          allOf:
+            - $ref: "#/components/schemas/ReturnMessage"
+          description: >-
+            The sentence the baseline emits once the payment is posted, or null
+            when it emits none. It is carried verbatim from the program line that
+            supplies it, as every message in this contract is.
 
     # -------------------------------------------------------------------------
     # The problem shape. Every member below mirrors
@@ -1836,7 +2423,13 @@ components:
             second code.
           maxLength: 9
         message:
-          $ref: "#/components/schemas/ReturnMessage"
+          allOf:
+            - $ref: "#/components/schemas/ReturnMessage"
+          description: >-
+            The human-readable aggregate sentence for this failure, reproduced
+            verbatim from the baseline paragraph that detected it, or null where
+            the failure has no message of its own. The per-operation responses
+            above name the exact literal each status carries.
         severity:
           allOf:
             - $ref: "#/components/schemas/Severity"
@@ -1858,20 +2451,37 @@ components:
             logged or archived payload is self-describing without its envelope.
           minimum: 400
           maximum: 599
+        # WHY : Refactoring Rationale: the bound is 24, the width the shared
+        #       correlation filter enforces and mints at
+        #       (CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH), not the 20 an earlier
+        #       revision declared. Twenty is a real number -- it is the baseline's own
+        #       ERR-EVENT-KEY PIC X(20) at CCPAUERY.cpy L40, recorded by
+        #       ApiError.CORRELATION_ID_WIDTH as provenance -- but that record's own
+        #       documentation states the width is not enforced, because the identity
+        #       is generated by the transport. A minted identity is exactly 24
+        #       characters, so a contract declaring 20 would be contradicted by every
+        #       response that carried one.
         correlationId:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/CorrelationId"
           description: >-
             The identity of the unit of work that failed, inherited from the
             inbound request rather than invented, or the empty string when the
-            request carried none. It is the key to the operational record holding
-            the diagnostic detail this response withholds.
-          maxLength: 20
+            request carried none and none had been minted. It is the key to the
+            operational record holding the diagnostic detail this response
+            withholds.
         path:
           type: string
           description: >-
             The request path that failed, so a client reporting a problem does not
             have to reconstruct which call produced it, or the empty string when no
-            path is available.
+            path is available. Any run of sixteen or more consecutive digits in it
+            is rendered masked, as twelve or more asterisks followed by the final
+            four digits, so the masking rules are not circumvented by the
+            diagnostic field. A transaction identifier is sixteen digits and is
+            therefore masked here as well: it is indistinguishable from a primary
+            account number by inspection, and the correlation identifier on the
+            same response is what identifies the failed call precisely.
         timestamp:
           allOf:
             - $ref: "#/components/schemas/Timestamp26"

@@ -57,6 +57,20 @@
  * `ui/src/hooks/useAuth.ts`. This module therefore holds no identity state, no
  * message text and no navigation, and it instantiates no `ConfigProvider`.
  *
+ * One obligation runs the other way, from this module OUT to whoever composes it:
+ * the app shell must pass {@link ScreenHeaderProps.now} a SERVER-derived instant.
+ * It is stated here as well as on the prop because a shell author reads a module's
+ * contract before its prop list, and this is the one input whose omission changes
+ * observable behaviour rather than only appearance - the band silently falls back
+ * to the browser's clock and zone, where the baseline read one region clock in one
+ * zone for every terminal. That fallback is a registered divergence, D-7 in
+ * section 7.2 of `docs/architecture/cobol-to-service-traceability.md`, and the
+ * prop is the whole of its remedy. The obligation is deliberately NOT enforced by
+ * making the prop required: this component must stay renderable in isolation for
+ * tests, and a required clock input would make every test that does not care about
+ * time supply one anyway. The trade is that the contract is documented rather than
+ * type-checked, which is why it is written in both places.
+ *
  * WHY (non-obvious design decisions)
  * ----------------------------------
  * Assumptions: the two title constants are imported rather than written here,
@@ -126,14 +140,42 @@ import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from "../theme/tokens";
  * The four status-line prompt words the band paints beside its value slots,
  * verbatim from the mapsets.
  *
- * Assumptions: this is the 16-of-17 spelling. 16 base mapsets declare these as
- * `LENGTH=5` literals with no space before the colon - for example
- * `app/bms/COACTVW.bms` L29-L33 and L65-L69 - while `app/bms/COSGN00.bms`
- * L29-L33 alone declares `LENGTH=6` literals reading `Tran :`, `Prog :`,
- * `Date :` and `Time :`. The two forms differ only by one padding space in front
- * of the colon, which carries no meaning in either the 3270 or the browser
- * rendering, so the majority spelling is adopted for the one shared component
- * rather than parameterising the band on which mapset it is standing in for.
+ * Refactoring Rationale: these four strings live here rather than in
+ * `ui/src/messages/messages.ts`, and that is a ratified split rather than an
+ * oversight in the catalog's coverage. The catalog is the single owner of every
+ * user-visible string this tree carries across, and it draws its own boundary
+ * explicitly: at L157-L160 it names `Tran:`, `Date:`, `Prog:` and `Time:` among
+ * the literals it does NOT hold, and at L168-L171 it assigns them to this module
+ * by name, on the stated ground that a `.bms` `INITIAL=` value belongs to the
+ * component that renders it while a copybook constant or program literal belongs
+ * to the catalog. `ui/src/layout/PfKeyBar.tsx` carries the same reciprocal
+ * citation for the function-key legends, which the catalog delegates in the same
+ * sentence. The citation is repeated here, on the symbol itself, because the
+ * module header alone is not where a reader who greps for one of these four
+ * strings lands - and without it the split reads as a gap in the catalog rather
+ * than as its boundary.
+ *
+ * Trade-offs: what is accepted is that the answer to "which module owns this
+ * string?" depends on where the baseline holds it, so no single module is total.
+ * The alternative - absorbing the mapset text into the catalog - was rejected by
+ * the catalog itself for a reason that applies directly to these four: a prompt
+ * word is positional, meaningless apart from the slot it sits beside, so
+ * cataloguing it centrally separates it from the only thing that gives it meaning
+ * and invites the prompt and its value slot to drift apart. The risk this leaves
+ * is duplication, and it is contained by the citation above: both modules point at
+ * the same delegation, so a future editor moving one has to read the other.
+ *
+ * Assumptions: this is the 16-of-17 spelling, and the comparison is exact because
+ * all 17 base mapsets carry these four literals on the SAME four lines - the
+ * `INITIAL=` operands at L33, L46, L56 and L69 - so the only difference between
+ * them is the operand text and its declared width. 16 mapsets declare `LENGTH=5`
+ * with no space before the colon (`app/bms/COACTVW.bms` L31/L33, L44/L46,
+ * L54/L56, L67/L69); `app/bms/COSGN00.bms` alone declares `LENGTH=6` on the same
+ * four lines, reading `Tran :`, `Prog :`, `Date :` and `Time :`. The two forms
+ * differ only by one padding space in front of the colon, which carries no meaning
+ * in either the 3270 or the browser rendering, so the majority spelling is adopted
+ * for the one shared component rather than parameterising the band on which
+ * mapset it is standing in for.
  *
  * Trade-offs: the trailing colon is kept inside each value instead of being
  * appended at the render site. It is part of the measured literal, so keeping it
@@ -312,6 +354,38 @@ export interface ScreenHeaderProps {
    * `SEND-SIGNON-SCREEN` at L147) - so the value is the paint instant and does
    * not advance while the screen is displayed. A `Date` is accepted rather than
    * a `Dayjs` so that consumers and tests need no `dayjs` types of their own.
+   *
+   * Clock and timezone policy, stated because the default is NOT the faithful
+   * value. The baseline reads one clock in one zone: `FUNCTION CURRENT-DATE`
+   * returns the CICS region's local time, so every operator of a given region saw
+   * the same wall clock whatever their own machine said. Omitting this prop reads
+   * the BROWSER's clock instead, and formats it in the BROWSER's zone - two
+   * substitutions rather than one, because a client machine can be both skewed and
+   * in a different zone from the service. The consequence is user-visible in the
+   * exact slot the source sized at 8 characters: two operators looking at one
+   * record can read two different dates across a midnight boundary.
+   *
+   * Assumptions: the omitted case is therefore for isolated rendering - a test, or
+   * a screen viewed before an instant is available - and the app shell that
+   * composes this band is expected to pass a SERVER-derived instant, which is the
+   * only value that reproduces the single-clock property the baseline had. This
+   * component deliberately does not fetch one itself: a presentational shell
+   * element that acquired a clock source would own configuration it has no other
+   * reason to know about, and would become unrenderable in isolation.
+   *
+   * Trade-offs: the divergence is bounded rather than removed, and it is bounded
+   * here rather than hidden. Defaulting to no value at all - rendering the slots
+   * blank until a caller supplies an instant - was the alternative, and it was
+   * rejected because the baseline never showed an empty date, so a blank slot
+   * replaces a small, documented inaccuracy with a visible absence. Under AAP
+   * section 0.9.1 this is an intentional behavioural change, so it is registered as
+   * **D-7 - the header clock and the zone it is read in** in section 7.2 of
+   * `docs/architecture/cobol-to-service-traceability.md`, which is the single
+   * divergence register; that entry carries the baseline citations, the accepted
+   * cost and the verification contract, and it records that this band has no golden
+   * master because the online programs cannot run without a CICS runtime. The
+   * formats themselves stay verbatim, so only the clock and the zone differ, never
+   * the shape of what is rendered.
    */
   readonly now?: Date;
 }

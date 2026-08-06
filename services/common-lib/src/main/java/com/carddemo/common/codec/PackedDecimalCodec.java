@@ -473,8 +473,12 @@ public final class PackedDecimalCodec {
      * <p>Assumptions: zero always encodes with a positive sign nibble. The decimal type this method
      * accepts has no negative zero to carry, so a field that arrived carrying the negative nibble over
      * a zero value re-encodes carrying the positive one. This is the single documented departure from
-     * byte-identical round-tripping in this class, and it is stated at both ends -- here and in the
-     * class documentation -- so it is never met as a surprise in a failing comparison.</p>
+     * byte-identical round-tripping <em>on this plain pair of operations</em>, it is registered under
+     * identifier D-SIGNED-ZERO-PACKED in {@code docs/architecture/cobol-to-service-traceability.md},
+     * and it is stated at both ends -- here and in the class documentation -- so it is never met as a
+     * surprise in a failing comparison. A caller that must reproduce the field's bytes exactly uses
+     * {@link #decodePackedPreservingSign} with {@link #encodePackedPreservingSign} instead, which carry
+     * the nibble beside the value and therefore have no departure at all.</p>
      *
      * @param value the value to encode; must not be {@code null}, must carry a scale no greater than
      *     {@code decDigits}, and must have no more integer digits than {@code intDigits}
@@ -535,6 +539,133 @@ public final class PackedDecimalCodec {
      */
     public static byte[] encodePacked(BigDecimal value, int intDigits, int decDigits, boolean signed) {
         return encodePacked(value, intDigits, decDigits, signed, null, false);
+    }
+
+    /**
+     * One decoded packed field together with the literal sign nibble its final byte carried.
+     *
+     * <p><b>Purpose.</b> This pair exists for the case the plain value cannot express. The decimal type
+     * has no negative zero, so a field ending {@code 0x0D} over an all-zero magnitude and one ending
+     * {@code 0x0C} decode to the same value and the nibble that distinguished them is gone; and the
+     * alternate positive nibbles this codec accepts are likewise indistinguishable once decoded.
+     * Carrying the nibble beside the value keeps both, which is what lets
+     * {@link #encodePackedPreservingSign} reproduce the original bytes exactly.</p>
+     *
+     * <p>Alternatives Considered: carrying a boolean sign rather than the nibble itself, which would be
+     * enough for the negative-zero case alone. Rejected because this codec admits three sign nibbles
+     * and not two -- {@code 0x0C} for a signed non-negative value, {@code 0x0D} for a signed negative
+     * one and {@code 0x0F} for a field declared without the leading {@code S} -- so a boolean would
+     * still leave a caller unable to say which of the two non-negative nibbles a field carried. Keeping
+     * the nibble costs four bits and makes the pair byte-exact for every field the decoder accepts
+     * rather than for one case of it.</p>
+     *
+     * @param value the decoded value, carried at the field's declared scale, never {@code null}
+     * @param signNibble the low nibble of the field's final byte exactly as it was read, one of
+     *     {@code 0x0C}, {@code 0x0D} or {@code 0x0F}; {@code 0x0F} for an unsigned field
+     */
+    public record SignedPacked(BigDecimal value, int signNibble) {
+
+        /**
+         * Rejects a pair whose nibble is not one this codec emits, or which contradicts the value.
+         *
+         * <p>Assumptions: the admissible nibbles are exactly the three {@code signNibbleFor} produces,
+         * because a pair this record accepts must be one {@link #encodePackedPreservingSign} can lay
+         * down. The alternate sign nibbles {@code 0x0A}, {@code 0x0B} and {@code 0x0E} that some
+         * encoders emit are rejected here for the same reason the decoder rejects them, so the two ends
+         * of the round trip admit the same set rather than one being wider than the other.</p>
+         *
+         * <p>Assumptions: the nibble's sign class and the value's sign may disagree only at zero,
+         * because that is the only magnitude for which the value carries no sign of its own. A pair
+         * claiming the negative nibble over a positive magnitude is not a representable field, so it is
+         * refused here rather than producing bytes that would decode back to something else.</p>
+         *
+         * <p>Successful construction yields this record instance and no separate return value.</p>
+         *
+         * @param value the decoded value; must not be {@code null}
+         * @param signNibble the sign nibble the field carried
+         * @throws PackedDecimalException if the value is {@code null}, if the nibble is not
+         *     {@code 0x0C}, {@code 0x0D} or {@code 0x0F}, or if the value is non-zero and its own sign
+         *     disagrees with the nibble's sign class
+         */
+        public SignedPacked {
+            if (value == null) {
+                throw new PackedDecimalException("packed signed-field value is absent");
+            }
+            if (signNibble != SIGN_SIGNED_POSITIVE && signNibble != SIGN_SIGNED_NEGATIVE
+                    && signNibble != SIGN_UNSIGNED) {
+                throw new PackedDecimalException("packed sign nibble 0x"
+                        + HEX_DIGITS.charAt(signNibble & NIBBLE_MASK) + " is not one of the three this"
+                        + " codec emits, 0xC, 0xD or 0xF");
+            }
+            if (value.signum() != 0 && (value.signum() < 0) != (signNibble == SIGN_SIGNED_NEGATIVE)) {
+                throw new PackedDecimalException("packed sign nibble contradicts the value's own"
+                        + " sign, which may happen only at zero");
+            }
+        }
+    }
+
+    /**
+     * Decodes a packed field, keeping the literal sign nibble its final byte carried.
+     *
+     * <p>Behaviour is identical to {@link #decodePacked(byte[], int, int, int, boolean)} for the value;
+     * the difference is that the sign nibble is returned alongside it, so a signed zero and an alternate
+     * sign nibble both survive the decode. Pass the result to {@link #encodePackedPreservingSign} to
+     * reproduce the original bytes exactly.</p>
+     *
+     * @param source the record bytes to read from; must not be {@code null}
+     * @param offset the zero-based byte offset of the field within {@code source}; must not be negative
+     * @param intDigits the number of integer digit positions declared for the field
+     * @param decDigits the number of decimal digit positions declared for the field
+     * @param signed {@code true} when the picture carries a leading {@code S}, {@code false} otherwise
+     * @return the decoded value paired with the sign nibble the field carried, never {@code null}
+     * @throws PackedDecimalException if the geometry is inadmissible, the span does not fit, the pad
+     *     nibble is non-zero, a digit nibble is above nine, or the sign nibble is absent or contradicts
+     *     {@code signed}
+     */
+    public static SignedPacked decodePackedPreservingSign(byte[] source, int offset, int intDigits,
+            int decDigits, boolean signed) {
+        BigDecimal value = decodePacked(source, offset, intDigits, decDigits, signed);
+
+        // WHY : Assumptions: the nibble is read AFTER the full decode above rather than during it, so
+        //       every rejection the plain decoder performs still happens first and this method can
+        //       never report the nibble of a field the codec would refuse.
+        int width = packedWidth(intDigits, decDigits);
+        int nibble = nibbleAt(source, offset, width * NIBBLES_PER_BYTE - 1);
+        return new SignedPacked(value, nibble);
+    }
+
+    /**
+     * Encodes a decoded pair back into the exact bytes it came from, signed zero included.
+     *
+     * <p>This is the byte-exact inverse of {@link #decodePackedPreservingSign}: for every field that
+     * method accepts, encoding what it returned reproduces the original bytes with no exception at all.
+     * The plain {@link #encodePacked(BigDecimal, int, int, boolean)} canonicalises the sign nibble
+     * because its argument cannot carry one; this form can, so it does not canonicalise.</p>
+     *
+     * @param decoded the value and its sign nibble, as returned by
+     *     {@link #decodePackedPreservingSign}; must not be {@code null}
+     * @param intDigits the number of integer digit positions declared for the field
+     * @param decDigits the number of decimal digit positions declared for the field
+     * @param signed {@code true} when the picture carries a leading {@code S}, {@code false} otherwise
+     * @return a newly allocated array holding exactly the field's declared width in bytes, identical to
+     *     the bytes the pair was decoded from
+     * @throws PackedDecimalException if the pair is absent, if the geometry is inadmissible, if the
+     *     value overflows {@code intDigits}, if its scale exceeds {@code decDigits}, or if it is
+     *     negative in an unsigned field
+     */
+    public static byte[] encodePackedPreservingSign(SignedPacked decoded, int intDigits, int decDigits,
+            boolean signed) {
+        if (decoded == null) {
+            throw new PackedDecimalException("packed signed-field pair is absent");
+        }
+        byte[] canonical = encodePacked(decoded.value(), intDigits, decDigits, signed);
+
+        // WHY : Assumptions: only the sign nibble is rewritten, never a digit nibble and never the pad,
+        //       because that is the only position at which the canonical encoder and the source field
+        //       can differ. Copying the source bytes wholesale instead would let a caller smuggle
+        //       digits past every geometry check the encoder just performed.
+        setNibble(canonical, canonical.length * NIBBLES_PER_BYTE - 1, decoded.signNibble());
+        return canonical;
     }
 
     /**

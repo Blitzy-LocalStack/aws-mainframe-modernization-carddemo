@@ -60,7 +60,6 @@ class CobolEditMaskTest {
     @Test
     void reportDetailRegimeUsesBlankOrMinusLeadingSign() {
         // WHY: app/cpy/CVTRA07Y.cpy L30 declares the signed-negative detail picture.
-        // WHAT: Money.java L390 accepts exact two-place decimal text for mapper fixtures.
         // WHY : Assumptions: services/common-lib/src/main/java/com/carddemo/common/money/Money.java
         //       L390 keeps this test inside the exact money contract; a binary fraction primitive
         //       could reach a neighboring cent before the mapper sees it.
@@ -72,7 +71,6 @@ class CobolEditMaskTest {
         String negativeResult = CobolEditMask.formatReportDetailAmount(negative);
         String zeroResult = CobolEditMask.formatReportDetailAmount(zero);
 
-        // WHAT: PHASE 3 assigns polarity, totals, suppression, zero, and ceiling separate cases.
         // WHY : Alternatives Considered: one parameterized sweep was rejected because
         //       app/cpy/CVTRA07Y.cpy L30/L54/L60/L66 and app/cpy/CVTRA05Y.cpy L10 define distinct
         //       sign, suppression, and ceiling semantics that need distinct failure names.
@@ -90,12 +88,12 @@ class CobolEditMaskTest {
      */
     @Test
     void reportTotalRegimeAlwaysPrintsNonzeroPolarity() {
-        // WHY: app/cpy/CVTRA07Y.cpy L54, L60, and L66 declare the three totals pictures.
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L54, L60, and L66 declare the three totals
+        //       pictures.
         String positive = CobolEditMask.formatReportTotalAmount(Money.of("1234.56"));
         String negative = CobolEditMask.formatReportTotalAmount(Money.of("-1234.56"));
         String zero = CobolEditMask.formatReportTotalAmount(Money.of("0.00"));
 
-        // WHAT: CVTRA07Y.cpy L54, L60, and L66 repeat one plus picture in three bands.
         // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L54/L60/L66 require totals to stay separate
         //       from detail; sharing its positive-sign expectation would place a blank where a
         //       plus belongs in all three bands, changing each byte stream.
@@ -113,12 +111,12 @@ class CobolEditMaskTest {
      */
     @Test
     void reportDetailSuppressionBlanksLeadingDigitsAndCommas() {
-        // WHY: app/cpy/CVTRA07Y.cpy L30 places two commas inside the Z-edited integer region.
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L30 places two commas inside the Z-edited integer
+        //       region.
         String fractional = CobolEditMask.formatReportDetailAmount(Money.of("0.05"));
         String underThousand = CobolEditMask.formatReportDetailAmount(Money.of("999.99"));
         String grouped = CobolEditMask.formatReportDetailAmount(Money.of("1234.56"));
 
-        // WHAT: CVTRA07Y.cpy L30 places each comma between suppressible integer positions.
         // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L30 makes a separator left of the first
         //       significant digit part of the suppressed region; retaining it for 999.99 adds
         //       punctuation to blank bytes, while 1,234.56 has one significant group and comma.
@@ -137,10 +135,10 @@ class CobolEditMaskTest {
      */
     @Test
     void reportZeroSuppressesTheEntireFifteenCharacterItem() {
-        // WHY: app/cpy/CVTRA07Y.cpy L30 uses Z in every integer and fractional digit position.
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L30 uses Z in every integer and fractional digit
+        //       position.
         String zero = CobolEditMask.formatReportDetailAmount(Money.of("0.00"));
 
-        // WHAT: CVTRA07Y.cpy L30 declares Z at all eleven digit positions, including cents.
         // WHY : Alternatives Considered: visible forms 0.00, .00, +0.00, and 0 were rejected
         //       because app/cpy/CVTRA07Y.cpy L30 uses Z in the cents too, suppressing the complete
         //       fifteen-character item instead of exposing numeric or punctuation bytes.
@@ -160,11 +158,11 @@ class CobolEditMaskTest {
      */
     @Test
     void reportDetailAcceptsTheNineIntegerDigitCeiling() {
-        // WHY: app/cpy/CVTRA05Y.cpy L10 and app/cbl/CBTRN03C.cbl L134-L136 set the ceiling.
+        // WHY : Assumptions: app/cpy/CVTRA05Y.cpy L10 and app/cbl/CBTRN03C.cbl L134-L136 set the
+        //       ceiling.
         String positive = CobolEditMask.formatReportDetailAmount(Money.of("999999999.99"));
         String negative = CobolEditMask.formatReportDetailAmount(Money.of("-999999999.99"));
 
-        // WHAT: CVTRA05Y.cpy L10 and CBTRN03C.cbl L134-L136 declare S9(09)V99.
         // WHY : Assumptions: app/cpy/CVTRA05Y.cpy L10 and app/cbl/CBTRN03C.cbl L134-L136 make
         //       999999999.99 fill all nine integer positions and both cents; a smaller fixture
         //       leaves the ceiling unproved and a larger one belongs to the rejection path.
@@ -181,7 +179,7 @@ class CobolEditMaskTest {
      */
     @Test
     void unsignedDigitRegimePreservesEveryDeclaredPosition() {
-        // WHY: app/cpy/CVTRA07Y.cpy L24 declares TRAN-REPORT-CAT-CD as PIC 9(04).
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L24 declares TRAN-REPORT-CAT-CD as PIC 9(04).
         String zero = CobolEditMask.formatUnsignedDigits(0L, 4);
         String seven = CobolEditMask.formatUnsignedDigits(7L, 4);
         String full = CobolEditMask.formatUnsignedDigits(1234L, 4);
@@ -201,12 +199,11 @@ class CobolEditMaskTest {
      */
     @Test
     void sortEditedRegimePreservesZeroesAndEmitsNoSign() {
-        // WHY: app/jcl/PRTCATBL.jcl L56 declares EDIT=(TTTTTTTTT.TT).
+        // WHY : Assumptions: app/jcl/PRTCATBL.jcl L56 declares EDIT=(TTTTTTTTT.TT).
         String zero = CobolEditMask.formatSortEditedBalance(Money.of("0.00"));
         String positive = CobolEditMask.formatSortEditedBalance(Money.of("1234.56"));
         String negative = CobolEditMask.formatSortEditedBalance(Money.of("-1234.56"));
 
-        // WHAT: The AAP audits seven mapper forms plus the separate Money API string row.
         // WHY : Trade-offs: app/cpy/CVTRA07Y.cpy L30/L54, app/jcl/PRTCATBL.jcl L56,
         //       app/cbl/CORPT00C.cbl L77, and app/cbl/CBSTM03A.CBL L113/L137/L142 stay independent
         //       because substitution can erase .00, widen 12 to 14, move a sign, or add commas.
@@ -225,11 +222,11 @@ class CobolEditMaskTest {
      */
     @Test
     void apiMoneyStringRegimeKeepsScaleWithoutPadding() {
-        // WHY: services/common-lib/src/main/java/com/carddemo/common/money/Money.java L900 defines this row.
+        // WHY : Assumptions: services/common-lib/src/main/java/com/carddemo/common/money/Money.java
+        //       L900 defines this row.
         String zero = Money.of("0.00").toPlainString();
         String nonzero = Money.of("1234.56").toPlainString();
 
-        // WHAT: CobolEditMask.java L124-L141 assigns computation and rounding to its callers.
         // WHY : Assumptions: services/reporting-service/src/main/java/com/carddemo/reporting/mapper/
         //       CobolEditMask.java L124-L141 accepts exact two-place values, so a higher-scale
         //       fixture duplicates common-lib's tests and lets the two suites drift.
@@ -247,12 +244,11 @@ class CobolEditMaskTest {
      */
     @Test
     void signedZeroFilledRegimeUsesEightIntegerDigits() {
-        // WHY: app/cbl/CORPT00C.cbl L77 declares PIC +99999999.99.
+        // WHY : Assumptions: app/cbl/CORPT00C.cbl L77 declares PIC +99999999.99.
         String zero = CobolEditMask.formatSignedZeroFilledAmount(Money.of("0.00"));
         String positive = CobolEditMask.formatSignedZeroFilledAmount(Money.of("12345678.90"));
         String negative = CobolEditMask.formatSignedZeroFilledAmount(Money.of("-12345678.90"));
 
-        // WHAT: CORPT00C.cbl L77 contains eight integer 9 positions after its sign.
         // WHY : Assumptions: app/cbl/CORPT00C.cbl L77 contains eight integer positions and
         //       therefore 12 characters; reading the unrelated authorization form's ten positions
         //       creates 14 characters and shifts the remaining card image by two bytes.
@@ -271,7 +267,7 @@ class CobolEditMaskTest {
      */
     @Test
     void statementBalanceRegimeUsesTrailingSignWithoutGrouping() {
-        // WHY: app/cbl/CBSTM03A.CBL L113 declares ST-CURR-BAL as PIC 9(9).99-.
+        // WHY : Assumptions: app/cbl/CBSTM03A.CBL L113 declares ST-CURR-BAL as PIC 9(9).99-.
         String zero = CobolEditMask.formatStatementBalance(Money.of("0.00"));
         String positive = CobolEditMask.formatStatementBalance(Money.of("1234.56"));
         String negative = CobolEditMask.formatStatementBalance(Money.of("-1234.56"));
@@ -292,7 +288,8 @@ class CobolEditMaskTest {
      */
     @Test
     void statementAmountRegimeSuppressesOnlyIntegerZeroes() {
-        // WHY: app/cbl/CBSTM03A.CBL L137 and L142 declare the two PIC Z(9).99- fields.
+        // WHY : Assumptions: app/cbl/CBSTM03A.CBL L137 and L142 declare the two PIC Z(9).99-
+        //       fields.
         String zero = CobolEditMask.formatStatementAmount(Money.of("0.00"));
         String positive = CobolEditMask.formatStatementAmount(Money.of("1234.56"));
         String negative = CobolEditMask.formatStatementAmount(Money.of("-1234.56"));
@@ -315,10 +312,10 @@ class CobolEditMaskTest {
      */
     @Test
     void groupedReportOutputIgnoresHostileDefaultLocale() {
-        // WHY: app/cpy/CVTRA07Y.cpy L30 declares comma grouping and a period decimal point.
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L30 declares comma grouping and a period decimal
+        //       point.
         String result = CobolEditMask.formatReportDetailAmount(Money.of("1234567.89"));
 
-        // WHAT: CVTRA07Y.cpy L30 declares comma and period bytes independent of process locale.
         // WHY : Alternatives Considered: trusting the build locale was rejected because
         //       app/cpy/CVTRA07Y.cpy L30 declares comma grouping and a period decimal mark, while
         //       Locale.GERMANY swaps those byte classes without changing the field length.
@@ -339,7 +336,8 @@ class CobolEditMaskTest {
     @Test
     void concurrentFormattingIsByteIdentical()
             throws InterruptedException, ExecutionException {
-        // WHY: app/cpy/CVTRA07Y.cpy L54 declares the totals byte pattern exercised concurrently.
+        // WHY : Assumptions: app/cpy/CVTRA07Y.cpy L54 declares the totals byte pattern exercised
+        //       concurrently.
         Money amount = Money.of("999999999.99");
         String expected = CobolEditMask.formatReportTotalAmount(amount);
         List<Callable<String>> tasks = new ArrayList<>();
@@ -351,7 +349,6 @@ class CobolEditMaskTest {
         try {
             List<Future<String>> results = executor.invokeAll(tasks);
 
-            // WHAT: CobolEditMask.java L110-L122 rejects a shared mutable formatter.
             // WHY : Trade-offs: services/reporting-service/src/main/java/com/carddemo/reporting/
             //       mapper/CobolEditMask.java L110-L122 rejects locking and thread-local alternatives;
             //       128 calls over eight workers force 16 reuses each, exposing shared mutation.

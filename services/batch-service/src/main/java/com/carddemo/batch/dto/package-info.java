@@ -149,10 +149,26 @@
  * audits this file against, which is why the three real authorities are named
  * instead.</p>
  *
- * <h2>The roster: eleven types, and this charter</h2>
+ * <h2>The roster: eleven types, of which FOUR are landed</h2>
  *
  * <p>Eleven types, and no twelfth. The list is closed, so the question "which
- * type owns this contract" keeps a definite answer as the package fills:</p>
+ * type owns this contract" keeps a definite answer as the package fills.</p>
+ *
+ * <p>Refactoring Rationale: each entry below now states whether it is LANDED or PLANNED, and
+ * an earlier revision of this charter stated all eleven in the present tense. Four are
+ * authored at this checkpoint -- {@code BatchJobName}, {@code BusinessDate},
+ * {@code BatchReturnCode} and {@code DatasetGeneration} -- and seven are not. A closed roster
+ * written wholly in the present tense is worse than an open one, because a reader routing a
+ * question to a type has no way to tell a contract that exists from one that is merely
+ * intended, and will look for a file that is not there. The roster is still closed and still
+ * answers "which type owns this contract"; it now also answers "does it exist yet".</p>
+ *
+ * <p>Assumptions: the seven planned entries are NOT authored here as empty types to make the
+ * roster true. A type with no consumer cannot have its contract exercised, so it would be a
+ * placeholder standing where a reviewed contract is supposed to be, and the migration
+ * forbids exactly that. Each arrives with the job or service that consumes it.</p>
+ *
+ * <dl>
  *
  * <dl>
  *   <dt>{@code BatchJobName}</dt>
@@ -175,7 +191,7 @@
  *       {@code PROCEDURE DIVISION USING EXTERNAL-PARMS}.</dd>
  *
  *   <dt>{@code BatchJobParameters}</dt>
- *   <dd>The decoded container command line as one immutable record: the job
+ *   <dd>PLANNED, not yet authored. The decoded container command line as one immutable record: the job
  *       token, the business date, and the per-step arguments a step needs. This
  *       is the type at which an orchestration decision becomes a Java one, so
  *       it is also the type at which a malformed argument list must be rejected
@@ -188,7 +204,7 @@
  *       that the state's catch handler routes to failure notification.</dd>
  *
  *   <dt>{@code BatchRunSummary}</dt>
- *   <dd>The per-step run summary, written to the durable
+ *   <dd>PLANNED, not yet authored. The per-step run summary, written to the durable
  *       {@code batch.batch_run} ledger and echoed to standard output. Its
  *       members align with the ledger columns the module's own migration
  *       defines -- run identifier, step name, status, start and finish
@@ -196,7 +212,7 @@
  *       disagree about the same run.</dd>
  *
  *   <dt>{@code RejectReason}</dt>
- *   <dd>The four posting reject codes paired with their descriptions, carried
+ *   <dd>PLANNED, not yet authored. The four posting reject codes paired with their descriptions, carried
  *       across character for character: {@code INVALID CARD NUMBER FOUND} with
  *       reason 100 at {@code app/cbl/CBTRN02C.cbl:385-386},
  *       {@code ACCOUNT RECORD NOT FOUND} with reason 101 at lines 397 to 398,
@@ -205,7 +221,7 @@
  *       lines 417 to 418.</dd>
  *
  *   <dt>{@code PostingValidationResult}</dt>
- *   <dd>The outcome of validating one daily transaction: whether it may post,
+ *   <dd>PLANNED, not yet authored. The outcome of validating one daily transaction: whether it may post,
  *       and if not, which {@code RejectReason} explains why. The baseline
  *       expresses the same decision as a numeric test,
  *       {@code IF WS-VALIDATION-FAIL-REASON = 0} at
@@ -213,7 +229,7 @@
  *       reject path otherwise.</dd>
  *
  *   <dt>{@code DisclosureGroupKey}</dt>
- *   <dd>The three-component disclosure-group lookup key, and exactly three:
+ *   <dd>PLANNED, not yet authored. The three-component disclosure-group lookup key, and exactly three:
  *       {@code app/cpy/CVTRA02Y.cpy:6} declares
  *       {@code DIS-ACCT-GROUP-ID PIC X(10)}, line 7 declares
  *       {@code DIS-TRAN-TYPE-CD PIC X(02)} and line 8 declares
@@ -221,7 +237,7 @@
  *       the 50-byte disclosure-group record.</dd>
  *
  *   <dt>{@code InterestRateLookup}</dt>
- *   <dd>The rate-lookup result, including the two outcomes that are easy to
+ *   <dd>PLANNED, not yet authored. The rate-lookup result, including the two outcomes that are easy to
  *       collapse into one and must not be: the fallback to the group named
  *       {@code DEFAULT}, and a genuine rate of zero. The fallback is at
  *       {@code app/cbl/CBACT04C.cbl:436-438}, where a status of {@code '23'} on
@@ -234,20 +250,24 @@
  *   <dd>The date-and-generation coordinate that locates one dataset generation
  *       in object storage, spelled as a {@code dt=} prefix followed by a
  *       {@code gen=} prefix. It stands in for the baseline's relative
- *       generation reference: {@code app/jcl/DEFGDGB.jcl} defines six
- *       generation bases, at lines 25, 31, 37, 43, 49 and 55, every one of them
- *       carrying {@code LIMIT(5)} and {@code SCRATCH}.</dd>
+ *       generation reference. The type declares TEN families, which is the
+ *       baseline's own count across three defining jobs rather than the six of
+ *       any one of them: {@code app/jcl/DEFGDGB.jcl} defines six at lines 25,
+ *       31, 37, 43, 49 and 55, {@code app/jcl/DEFGDGD.jcl} three more at lines
+ *       28, 51 and 74, and {@code app/jcl/DALYREJS.jcl} the tenth at line 24 --
+ *       every one of the ten carrying {@code LIMIT(5)} and {@code SCRATCH}.</dd>
  *
  *   <dt>{@code BatchErrorEvent}</dt>
- *   <dd>The terminal error-sink message envelope, and the only queue payload
+ *   <dd>PLANNED, not yet authored. The terminal error-sink message envelope, and the only queue payload
  *       this module publishes. One publisher and one sink is the whole of this
  *       module's asynchronous surface; the request-and-reply exchanges of the
  *       migration belong to other bounded contexts.</dd>
  * </dl>
  *
- * <p>Assumptions: those eleven plus this charter make twelve compilation units
+ * <p>Assumptions: those eleven plus this charter WILL make twelve compilation units
  * in this directory, and a thirteenth is outside the package's assigned
- * contract. The count is stated because the roster is the mechanism by which a
+ * contract. The directory currently holds five: the four landed types and this
+ * charter. The count is stated because the roster is the mechanism by which a
  * reader routes a question to a type without opening eleven files, and an
  * unlisted type defeats that the moment it appears. The parent charter at
  * {@code com.carddemo.batch} closes its own inventory the same way, declaring

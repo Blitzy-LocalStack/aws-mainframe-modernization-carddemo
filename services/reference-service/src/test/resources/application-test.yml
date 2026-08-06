@@ -16,6 +16,12 @@
 #   profile is FULLY SELF-DESCRIBING and relies on no absent test source for its
 #   configuration contract.
 #
+#   The file has two blocks. `server` disables the base profile's TLS listener for
+#   a loopback test hop, and `spring` together with the `carddemo` keys beneath it
+#   supplies the environment substitutions that let the Spring context retain
+#   production mechanisms without contacting deployed infrastructure. A closing
+#   register at the foot of the file records the omissions that are deliberate.
+#
 # Parameters:
 #   Each property key is the YAML analogue of a parameter. Every value that
 #   differs from the base profile has an adjacent labelled rationale naming the
@@ -69,8 +75,6 @@ server:
   ssl:
     enabled: false
 
-# WHAT: Supplies the environment substitutions that let the Spring context
-#       retain production mechanisms without contacting deployed infrastructure.
 spring:
   cloud:
     aws:
@@ -256,19 +260,43 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          # WHY : (1) Alternatives Considered: `jwk-set-uri` was rejected
-          #       because it builds a Nimbus decoder eagerly and performs a key
-          #       fetch while the context starts. With no identity provider
-          #       reachable, every context test would fail before its first
-          #       assertion. (2) Assumptions: `.invalid` is reserved never to
-          #       resolve, and issuer-based discovery is deferred until a real
-          #       token is decoded. Controller tests use spring-security-test
-          #       mock JWTs carrying the carddemo-admin group for writes; reads
-          #       require authentication but not that group, and common-lib's
-          #       JwtRoleConverter maps cognito:groups to authorities.
-          #       (3) Trade-offs: this keeps the production resource-server
-          #       filter-chain shape but proves no signature validation because
-          #       no key material backs the stub issuer. Signature verification
+          # WHY : (1) Alternatives Considered: `jwk-set-uri` was rejected because
+          #       it names key material this repository must not carry, and it
+          #       removes no startup cost: it fetches the key set while the
+          #       context starts exactly as the issuer form fetches the provider
+          #       document.
+          #       (2) Refactoring Rationale: this note previously said
+          #       issuer-based discovery was DEFERRED until a real token was
+          #       decoded, and contrasted that with an eager `jwk-set-uri`. Both
+          #       halves of that contrast were wrong, and the correction comes
+          #       from running the process rather than from re-reading the API.
+          #       NimbusJwtDecoder.withIssuerLocation defers nothing: build()
+          #       calls processor(), which calls jwkSource(), which invokes the
+          #       supplier that issues
+          #       GET <issuer>/.well-known/openid-configuration. A context that
+          #       creates a decoder bean therefore attempts that request while it
+          #       refreshes, and against this issuer it fails with
+          #       UnknownHostException naming the host. That is true of the
+          #       auto-configured decoder and of the explicit one
+          #       config/SecurityConfig.java now declares.
+          #       (3) Trade-offs: the consequence is stated plainly so a test
+          #       author is not surprised by it. This value satisfies that class's
+          #       fallback-free @Value, so every test that does NOT load a Spring
+          #       context runs against the deployed property shape; a test that
+          #       DOES load one must register a reachable stub issuer through
+          #       dynamic properties, exactly as it already registers the
+          #       container-generated datasource triple. Keeping an unreachable
+          #       `.invalid` value stays deliberate: RFC 2606 reserves it, so the
+          #       failure is immediate and local and no unit test can reach a real
+          #       provider.
+          #       (4) Assumptions: controller tests use spring-security-test mock
+          #       JWTs carrying the carddemo-admin group for writes; reads require
+          #       authentication but not that group, and common-lib's
+          #       JwtRoleConverter maps cognito:groups to authorities without
+          #       decoding anything, so none of them needs the decoder at all.
+          #       (5) Trade-offs: this keeps the production resource-server
+          #       filter-chain shape but proves no signature validation because no
+          #       key material backs the stub issuer. Signature verification
           #       belongs to an environment test with an identity provider.
           issuer-uri: https://issuer.invalid/carddemo-reference-test
 
@@ -313,14 +341,63 @@ logging:
 #       itself. Such a test supplies its emulator coordinates dynamically and
 #       starts the prepared listener explicitly.
 carddemo:
+  security:
+    jwt:
+      # WHY : (1) Refactoring Rationale: this sub-block did not exist while the
+      #       base profile's three carddemo.security.jwt keys had no reader. They
+      #       have one now: config/SecurityConfig.java declares an explicit
+      #       JwtDecoder bean and takes all three through @Value, so the values are
+      #       consumed by constructor injection rather than by
+      #       configuration-property binding. That difference decides whether this
+      #       profile needs the sub-block at all. Property binding leaves an
+      #       unresolvable placeholder as literal text and does not raise, which is
+      #       why the base profile's datasource placeholders can stay unset here;
+      #       @Value calls resolveRequiredPlaceholders, which DOES raise, so the
+      #       base value ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} aborts bean
+      #       creation on any host that does not set that variable - which is every
+      #       build host. Without these three lines, every context-loading test in
+      #       this module fails before its first assertion.
+      #       (2) Assumptions: on this module the checks these values enable guard a
+      #       WRITE surface. The transaction-type and category routes accept POST,
+      #       PUT, PATCH and DELETE, and config/SecurityConfig.java splits
+      #       authorization by METHOD - reads authenticated, writes behind
+      #       carddemo-admin - so the authority derived from a token's group claim is
+      #       what stands between a caller and the reference data every other bounded
+      #       context depends on. A Cognito user pool mints an identity token and an
+      #       access token from the same signing key and both validate against the
+      #       configured issuer, so the token-use and client checks are what stop the
+      #       wrong token kind reaching that authority derivation at all.
+      #       (3) Assumptions: this string is NOT a credential and NOT a secret. A
+      #       Cognito app client id is a public identifier carried in every token
+      #       this service accepts; the value below is additionally fabricated and
+      #       visibly non-production, so it identifies nothing that exists. What it
+      #       buys is that common-lib's CognitoAccessTokenValidator is CONSTRUCTED
+      #       with a non-blank client id - the class treats blank as "skip the client
+      #       check" - so a test asserting that a token minted for a different client
+      #       of the same pool is rejected has a client to differ from.
+      #       (4) Trade-offs: the two adjacent claim values are repeated rather than
+      #       inherited so the complete accepted-token contract is readable in one
+      #       place, beside the three queue names below. The cost is that a
+      #       deliberate change to either in the base profile must be mirrored here
+      #       or the suite stops exercising the deployed contract. The two
+      #       carddemo.security.cognito group names are NOT repeated, because the
+      #       base declares each with the default infra/modules/cognito fixes, both
+      #       resolve with no environment at all, and JwtRoleConverter compares them
+      #       against its own compiled constants and refuses to start on a mismatch -
+      #       so overriding them here would test a vocabulary no deployment uses.
+      expected-client-id: reference-test-app-client
+      expected-token-use: access
+      required-scope: aws.cognito.signin.user.admin
+
   reference:
     inquiry:
       request-queue: reference-test-request
       reply-queue: reference-test-reply
       error-queue: reference-test-error
 
-# WHAT: Registers non-obvious omissions whose reasonable alternatives would
-#       change what the test profile proves or make it contact infrastructure.
+# Register of deliberate omissions -- each one is a value a reasonable
+# alternative would have set, and each would change what the test profile proves
+# or make it contact infrastructure.
 #
 #   1. No server.port override.
 #      Assumptions: the base value 8080 is shared with the Dockerfile and load

@@ -14,57 +14,14 @@
  * date and a trimmed string; that it can read nothing else is a tested property and not a
  * convention.</p>
  *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package declaration accepts no
- * parameter, yields no value and raises nothing, so this charter carries no parameter, return or
- * exception at-clause. The inapplicability is declared rather than passed over in silence, because
- * the migration's single user-specified rule, Explainability, names a docstring that omits
- * parameters, return values or purpose among its forbidden patterns, and a reader has to be able to
- * tell a declared inapplicability from an oversight. Of the four docstring elements that rule
- * enumerates, exactly one can apply to a compilation unit that declares nothing at all, and the
- * paragraph above discharges it.</p>
- *
- * <h2>Why this file exists at all</h2>
- *
- * <p>Assumptions: this test package descriptor exists solely because effective-POM test-source
- * scanning activates {@code JavadocPackage} over this directory. The documentation gate is declared
- * once in {@code services/pom.xml}, bound to the {@code validate} phase under the execution id
- * {@code checkstyle-documentation-gate}, and it sets test-source scanning on; that single setting is
- * what draws {@code src/test/java} inside the audited tree. Resolving the effective POM for this
- * module rather than reading the declaration is the check that settles it, because the setting is
- * inherited here and is not restated in this module's own descriptor. With scanning off this file
- * would carry no obligation and would not exist; with it on, the file is required, and the
- * requirement is the whole reason for the file rather than a side effect of it.</p>
- *
- * <p>Assumptions: the requirement is a pair of interlocking checks, and knowing which does what is
- * the difference between a charter and a placeholder. {@code JavadocPackage} is a file-set check, so
- * it sits at the configuration root and asserts only that a package descriptor FILE EXISTS in a
- * directory holding an audited compilation unit. {@code MissingJavadocPackage} is a tree check, so it
- * sits inside the syntax-tree walker and asserts that the file CARRIES JAVADOC. A descriptor reduced
- * to a bare package statement satisfies the first and fails the second, which is precisely why this
- * one is prose. The gate runs ahead of compilation on every local build and this module is first of
- * the nine in the reactor, so a descriptor that is missing or empty stops all nine on a developer's
- * own machine rather than in a pipeline. The descriptor the pair requires declares no type and no
- * member of any kind: it accepts no parameter, returns no value and raises nothing, which is the
- * substance of the second paragraph above and the reason that paragraph is not an omission.</p>
- *
- * <p>Alternatives Considered: two ways to make this file unnecessary were available and both were
- * rejected. Narrowing the scan to main sources would leave the test tree undocumented by
- * construction, and the house convention is explicit that every test, fixture builder, helper, mock
- * and runner routine carries a docstring, so the tree that most needs the obligation would be the one
- * tree nothing checked. Suppressing the package instead would contradict the companion suppressions
- * file, which reaches generated sources and test fixtures only and records in its own prose that the
- * test tree as a whole is never a candidate. Writing the charter is the smaller cost, and it is the
- * one that leaves the audit complete.</p>
- *
- * <p>Trade-offs: there is deliberately no in-code escape from any of this. The ruleset carries
- * ten enabled checks across 13 module declarations, and the gap between those two figures is not a
- * discrepancy: the configuration root, the syntax-tree walker and the suppression filter are two
- * containers and a filter rather than checks. None of the declarations is a comment-driven or an
- * annotation-driven suppression filter, so a violation in this file cannot be silenced where it
- * occurs and has to be fixed instead. The cost is that a genuinely exceptional case would need a
- * change to a shared configuration file reviewed by everyone; the benefit is that no reader has to
- * search a source tree for a local exemption before trusting the gate. Both figures are kept whole
- * on one line so that a search for either matches it.</p>
+ * <p>Alternatives Considered: asserting round-trip symmetry, which was rejected as the primary form
+ * and kept only as a secondary check. A round trip proves that this code base agrees with itself,
+ * which is exactly the property a wrong width or a wrong edit mask PRESERVES: encode and decode can
+ * share one mistaken assumption and still agree, so a codec can round-trip perfectly while emitting a
+ * field one character too wide for the reference program's receiver, or a sign character where COBOL
+ * emits a blank. Only a golden byte vector taken from the reference source catches that. Golden
+ * vectors are therefore the primary assertion form in this package and round trips are the secondary
+ * one.</p>
  *
  * <h2>The five production classes under test</h2>
  *
@@ -255,11 +212,7 @@
  * binary span at all, because storage kind is consulted before any charset is used. Decoding a whole
  * record as text is what turns sign bytes and packed nibbles into replacement characters, which is
  * why no path here does it.</p>
- *
- * <p>Assumptions: the em dash of the sentence quoted above is rendered here as an ASCII hyphen-minus,
- * because this compilation unit is ASCII-only while that Markdown file is not. The substitution is
- * declared so that a reader comparing the two byte for byte is not left wondering which of them
- * drifted; no word of the quotation is altered.</p>
+
  *
  * <h2>Three boundaries a test in this package must not cross</h2>
  *
@@ -348,11 +301,7 @@
  * or a network resource, and the whole package therefore runs on a machine with no emulator and no COBOL
  * compiler. Stating the closure is what lets a reader tell a class the contract never admitted from one
  * that has gone missing.</p>
- *
- * <p>Assumptions: the package under test is closed at exactly six Java files, the five classes listed
- * further above plus their own charter, and nothing in this test tree is a reason to add a seventh. Test
- * reports stay at this module's default {@code target/surefire-reports} location, which is where the
- * services pipeline collects them.</p>
+
  *
  * <p>Assumptions: two directories in this repository are called tests and they are not the same thing.
  * The repository root's {@code tests} directory is the COBOL three-layer functional-parity oracle, with
@@ -361,32 +310,5 @@
  * warning-level result is its green state. This package lives in the module's own test tree and its
  * build is binary: the documentation gate, the compiler and the test runner each pass or fail, and no
  * result here is ever described in the oracle's graded terms.</p>
- *
- * <h2>Authoring notes for this file</h2>
- *
- * <p>Trade-offs: this file is pure ASCII with no byte-order mark. Reproducing the typographic dashes
- * the surrounding prose uses would read closer to that prose, and it was rejected because this charter
- * quotes text carrying an em dash from a Markdown file that also carries a non-breaking hyphen. A
- * non-breaking hyphen is indistinguishable from an ordinary one on screen while behaving differently in
- * a search, and it is precisely what would turn a rationale label into a token that a search for the
- * label fails to find. Restricting the whole file to ASCII makes that failure mode unreachable and
- * keeps the bytes stable under any default charset, at the cost of plainer punctuation.</p>
- *
- * <p>Trade-offs: this file contains one Javadoc block and one package declaration and nothing else - no
- * type, no annotation, no import and no line comment. It carries no at-clause of any kind: none for
- * parameters, returns or exceptions, for the reason given in the second paragraph, and none for
- * authorship, version or release marker either, because the ruleset deliberately omits the entire
- * Javadoc-formatting family that would ask for them and the version history answers those questions
- * more reliably than a comment maintained by hand. There are no line comments because there are no
- * statements to annotate; the rationale that would sit beside code sits in a labelled paragraph
- * instead.</p>
- *
- * <p>Assumptions: every rationale above opens with one of the standard's labels written in the one
- * permitted form, plural, unparenthesised and colon-terminated, because that label is read by a search
- * before it is read by a person and a variant spelling makes a documented rationale read as absent.
- * Three of the standard's four labels appear here; the fourth exists for recording what was wrong with
- * code being replaced, and nothing in this net-new test tree replaces any. The repository's
- * reference-only suite tags its own rationale in a singular, parenthesised idiom, and that idiom is not
- * carried into this tree.</p>
  */
 package com.carddemo.common.codec;

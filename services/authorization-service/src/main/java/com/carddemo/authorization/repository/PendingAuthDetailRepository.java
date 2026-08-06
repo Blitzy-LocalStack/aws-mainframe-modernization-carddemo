@@ -104,45 +104,29 @@ public interface PendingAuthDetailRepository
             @Param("authDate") Integer authDate, @Param("authTime") Integer authTime, Limit limit);
 
     /**
-     * Resolves the account a card most recently authorized against.
-     *
-     * <p>Trade-offs: this is a NARROW substitute for the baseline's cross-reference read at
-     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 472 to 516, which resolves a card
-     * to an account through the cross-reference file. That file is owned by the account context, and this
-     * context holds no grant on it, so the resolution here uses the one card-to-account association this
-     * context DOES own: the account recorded on the card's own previous authorizations, which the ETL
-     * loads from the baseline extract along with everything else. When a card has no previous
-     * authorization the resolution yields nothing and the caller declines with reason {@code '3100'},
-     * which is the very reason the baseline returns on its own {@code CARD-NFOUND-XREF} path at line 704 --
-     * so the observable outcome for an unresolvable card is unchanged.</p>
-     *
-     * <p>Assumptions: "most recently" means the highest date-then-time pair, which the card-number index
-     * narrows and the sort then orders. Choosing the earliest instead would resolve to an account the card
-     * may since have been reissued against.</p>
-     *
-     * @param cardNum the sixteen-digit primary account number; must not be {@code null}
-     * @param limit how many associations to return, which the caller sets to one because it wants only
-     *     the most recent; must not be {@code null}
-     * @return the account identifiers this card has authorized against, most recent first, empty when
-     *     the card has no previous authorization
-     */
-    @Query("""
-            select d.id.accountId from PendingAuthDetail d
-             where d.cardNum = :cardNum
-             order by d.id.authDate desc, d.id.authTime desc
-            """)
-    List<Long> findAccountIdsByCardNum(@Param("cardNum") String cardNum, Limit limit);
-
-    /**
-     * Finds an authorization by the acquirer's transaction identifier.
+     * Finds an authorization by the durable idempotency key, the card and the transaction identifier.
      *
      * <p>Assumptions: this is how a REDELIVERED request is recognised as one already decided. The queue
      * suppresses duplicates only within its deduplication window, so a redelivery after that window
-     * reaches the consumer as a new message and must not be decided twice; the transaction identifier is
-     * the acquirer's own idempotency key and the supporting index makes the check a single seek.</p>
+     * reaches the consumer as a new message and must not be decided twice.</p>
      *
+     * <p>Refactoring Rationale: the lookup is by the PAIR and not by the transaction identifier alone,
+     * and the change is recorded because an earlier revision looked up the identifier on its own. That
+     * form was wrong in two directions at once. The identifier is a fifteen-character acquirer value at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} line 36, so two acquirers may
+     * legitimately issue the same one -- and a lookup by identifier alone would then return the FIRST
+     * card's decision to the second card's requester, answering an authorization for one card with the
+     * approval or decline recorded for another. It also had no supporting uniqueness at all, so the same
+     * query could match more than one row and the single-result contract would fail at runtime rather
+     * than at review. The unique constraint {@code uq_pending_auth_detail_card_transaction} declared in
+     * {@code V1__authorization.sql} makes this pair unique and indexes it, so this query is one seek and
+     * its single result is guaranteed by the schema rather than assumed by this interface.</p>
+     *
+     * @param cardNum the sixteen-character primary account number the request carried; must not be
+     *     {@code null}
      * @param transactionId the acquirer's transaction identifier; must not be {@code null}
-     * @return the authorization already recorded for that identifier, or an empty optional when none is
+     * @return the authorization already recorded for that card and identifier, or an empty optional when
+     *     none is
      */
-    Optional<PendingAuthDetail> findByTransactionId(String transactionId);
+    Optional<PendingAuthDetail> findByCardNumAndTransactionId(String cardNum, String transactionId);
 }

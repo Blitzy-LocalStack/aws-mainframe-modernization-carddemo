@@ -52,10 +52,24 @@ variable cannot be used because backend evaluation happens first.
 
 ```bash
 # Create the review artifact from the tracked non-secret values.
-terraform -chdir=infra/envs/dev plan -out=tfplan -var-file=terraform.tfvars
+# WHY : Assumptions: the artifact is named `dev.tfplan`, matching
+#       [`infra/README.md`](../../README.md), because a saved plan embeds the
+#       resolved value of every attribute the apply will set -- including the
+#       generated Aurora master password and the Cognito seed-user passwords -- and
+#       the repository ignore rules match on the `.tfplan` SUFFIX. A bare `tfplan`
+#       has no suffix to match and stays trackable:
+#       `git check-ignore -v infra/envs/dev/dev.tfplan` resolves, while the same
+#       command on `infra/envs/dev/tfplan` returns nothing.
+terraform -chdir=infra/envs/dev plan -out=dev.tfplan -var-file=terraform.tfvars
 
 # Apply exactly the reviewed artifact rather than replanning.
-terraform -chdir=infra/envs/dev apply tfplan
+terraform -chdir=infra/envs/dev apply dev.tfplan
+
+# Remove the artifact once the apply completes.
+# WHY : Trade-offs: an ignore rule reduces accidental staging and cannot defeat
+#       `git add -f`, so deleting the plan is the primary local safeguard and the
+#       naming convention above is the cheap backstop.
+rm -f infra/envs/dev/dev.tfplan
 ```
 
 `apply -auto-approve` is not the normal path because it replans instead of

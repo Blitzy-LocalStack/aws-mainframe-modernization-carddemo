@@ -356,6 +356,134 @@ public final class FixedWidthCodec {
     }
 
     /**
+     * Re-encodes a decoded record, reproducing the sign carrier of every signed zero it held.
+     *
+     * <p><b>Purpose.</b> This is the byte-exact counterpart of
+     * {@link #decodeRecord(byte[], CopybookLayout.RecordSpec)} for a caller that must write a record
+     * back exactly as it read it. {@link #encodeRecord(Map, CopybookLayout.RecordSpec)} reproduces every
+     * span except one: a signed field holding zero loses the distinction between the two zero sign
+     * carriers, because the decoded value is an exact decimal and that type has no negative zero. This
+     * form takes the record the values were decoded from and restores the carrier for exactly those
+     * fields, so the result equals the source byte for byte.</p>
+     *
+     * <p>Refactoring Rationale: the source record is an explicit argument rather than state remembered
+     * by a decode. A stateful codec that recalled the last record it decoded would be wrong the moment
+     * two records were in flight on two threads, and batch steps decode records in parallel; passing
+     * the source makes the dependency visible at the call site and keeps this class stateless.</p>
+     *
+     * <p>Assumptions: only the sign carrier of a signed zoned or packed field whose value is zero is
+     * taken from the source, and nothing else is. Copying whole spans from the source wherever they
+     * differed would let a stale byte survive a deliberate change to a field's value, which is the
+     * opposite of what a re-encode is for; restoring one carrier cannot change any value, because both
+     * carriers of a zero decode to the same zero.</p>
+     *
+     * <p>Trade-offs: a caller must hold the source record for the duration of the re-encode, which the
+     * plain form does not require. That cost is accepted because the alternative -- normalising and
+     * recording the difference as unavoidable -- makes a byte-for-byte comparison against a reference
+     * dataset fail on a record the migration handled perfectly, and an expected failing comparison is a
+     * comparison nobody reads.</p>
+     *
+     * @param fields the values keyed by exact copybook field name, as returned by a decode; never
+     *     {@code null}
+     * @param spec the record layout that defines every target interval; never {@code null}
+     * @param decodedFrom the record the values were decoded from, read only for the sign carriers of
+     *     signed zeroes; must be exactly {@code spec.reclen()} bytes and never {@code null}
+     * @return a newly allocated record of exactly {@code spec.reclen()} bytes, equal to
+     *     {@code decodedFrom} when {@code fields} still holds the values decoded from it
+     * @throws CopybookLayout.LayoutException if the supplied layout is invalid
+     * @throws RecordLengthException if {@code decodedFrom} is not exactly {@code spec.reclen()} bytes
+     * @throws FieldCodecException if the map is null, a key is unknown, a required value is absent, or a
+     *     field cannot be encoded
+     */
+    public static byte[] encodeRecordPreservingSign(Map<String, Object> fields,
+            CopybookLayout.RecordSpec spec, byte[] decodedFrom) {
+        return encodeRecordPreservingSign(fields, spec, decodedFrom, DEFAULT_CHARSET);
+    }
+
+    /**
+     * Re-encodes a decoded record byte-exactly using a field charset.
+     *
+     * <p>Behaviour is identical to
+     * {@link #encodeRecordPreservingSign(Map, CopybookLayout.RecordSpec, byte[])} except that the
+     * charset governs character-backed fields and blank padding, exactly as it does for
+     * {@link #encodeRecord(Map, CopybookLayout.RecordSpec, Charset)}.</p>
+     *
+     * <p>Assumptions: the sign carrier is restored as a BYTE copied from the source rather than as a
+     * character re-encoded through the charset. That is what keeps the operation correct for both
+     * accepted encodings without this class needing to know which byte a code page assigns to a given
+     * overpunch character.</p>
+     *
+     * @param fields the values keyed by exact copybook field name; never {@code null}
+     * @param spec the record layout that defines every target interval; never {@code null}
+     * @param decodedFrom the record the values were decoded from; must be exactly
+     *     {@code spec.reclen()} bytes and never {@code null}
+     * @param charset US-ASCII or IBM code page 037 for character-backed fields; may be {@code null}
+     *     only when no character-backed field or blank padding is encoded
+     * @return a newly allocated record of exactly {@code spec.reclen()} bytes
+     * @throws CopybookLayout.LayoutException if the supplied layout is invalid
+     * @throws RecordLengthException if {@code decodedFrom} is not exactly {@code spec.reclen()} bytes
+     * @throws FieldCodecException if the map is null, a key is unknown, a required value is absent, a
+     *     charset is unsupported, or a field cannot be encoded
+     */
+    public static byte[] encodeRecordPreservingSign(Map<String, Object> fields,
+            CopybookLayout.RecordSpec spec, byte[] decodedFrom, Charset charset) {
+        byte[] encoded = encodeRecord(fields, spec, charset);
+        if (decodedFrom == null) {
+            throw new FieldCodecException("record " + spec.name()
+                    + " cannot preserve sign carriers because the source record is absent");
+        }
+        if (decodedFrom.length != spec.reclen()) {
+            throw new RecordLengthException("record " + spec.name() + " expects exactly "
+                    + spec.reclen() + " bytes as the sign-carrier source but received "
+                    + decodedFrom.length);
+        }
+
+        for (CopybookLayout.FieldSpec field : spec.fields()) {
+            if (!isSignedNumeric(field) || !isZeroValued(fields.get(field.name()))) {
+                continue;
+            }
+            // WHY : Assumptions: the carrier occupies the LAST byte of the field in both regimes -- the
+            //       trailing overpunch character of a zoned field and the low nibble of a packed field's
+            //       final byte -- so one index serves both and no per-kind branch is needed. For the
+            //       packed case the whole byte is copied rather than the nibble alone, which is
+            //       equivalent here because that byte's high nibble is the field's low-order DIGIT and
+            //       every digit of a zero field is zero in the source and in the re-encoding alike.
+            int carrier = field.start() + field.length() - 1;
+            encoded[carrier] = decodedFrom[carrier];
+        }
+        return encoded;
+    }
+
+    /**
+     * Reports whether a field is one whose sign carrier a zero value would lose.
+     *
+     * @param field the field descriptor to classify; never {@code null}
+     * @return {@code true} for a signed zoned or packed field, {@code false} for every other field,
+     *     including a signed binary field, whose two's-complement zero has one representation only
+     */
+    private static boolean isSignedNumeric(CopybookLayout.FieldSpec field) {
+        return field.signed()
+                && (field.kind() == CopybookLayout.Kind.ZONED
+                        || field.kind() == CopybookLayout.Kind.PACKED);
+    }
+
+    /**
+     * Reports whether a decoded field value is an exact zero.
+     *
+     * @param value the decoded field value, which may be {@code null} or of any decoded type
+     * @return {@code true} when the value is a decimal or monetary zero, {@code false} otherwise
+     */
+    private static boolean isZeroValued(Object value) {
+        if (value instanceof BigDecimal decimal) {
+            return decimal.signum() == 0;
+        }
+        if (value instanceof Money money) {
+            return money.amount().signum() == 0;
+        }
+        return false;
+    }
+
+    /**
      * Encodes one value into its declared target interval using a character-field charset.
      *
      * @param value the value to encode according to {@code field.kind()}

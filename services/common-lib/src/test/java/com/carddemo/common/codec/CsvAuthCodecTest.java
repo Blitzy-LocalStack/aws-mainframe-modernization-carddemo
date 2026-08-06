@@ -1238,6 +1238,21 @@ class CsvAuthCodecTest {
      * that fit without truncation and raises for a tenth integer digit; this vector proves the
      * accepted shape remains exactly thirteen characters.</p>
      *
+     * <p>Assumptions: this case asserts what the WIRE admits and not what the system accepts, and the
+     * distinction is worth stating because the two differ deliberately.
+     * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy} line 27 declares an explicit sign
+     * position, so a negative amount is expressible on the wire and this codec must report it
+     * faithfully in both directions -- an encoder that emitted one and a decoder that refused to read
+     * it back would not be closed under its own contract, which is the defect the reply-amount case
+     * elsewhere in this class exists to prevent. Whether such an amount may be ACTED on is a different
+     * question and belongs to the consumer:
+     * {@code com.carddemo.authorization.dto.AuthorizationRequestPayload.isAmountWithinRecordDomain}
+     * states the record's own domain as zero through the greatest magnitude, and the queue consumer
+     * applies it immediately after decoding and before any lookup, so a negative amount is refused
+     * there rather than approved. Reading this case as an endorsement of a negative authorization would
+     * be a misreading of what a codec test can assert.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -2827,21 +2842,25 @@ class CsvAuthCodecTest {
     }
 
     /**
-     * A formatted negative reply raises {@code CsvAuthCodec.AuthMessageFormatException} for
-     * {@code PA-RL-APPROVED-AMT} under the real production parser.
+     * A formatted negative reply round-trips through the production parser unchanged.
      *
-     * <p>Assumptions: the formatter correctly emits the baseline mask
-     * {@code -       100.99}, but the parser removes pad only from the two ends of a token and then
-     * encounters a space in its integer digit run after the minus. The request corpus still covers a
-     * successful negative round trip; this assertion records why the reply corpus cannot truthfully
-     * make the same claim without changing production outside this assignment.</p>
+     * <p>Assumptions: the emitted field is the baseline mask {@code -       100.99} -- a minus in the
+     * fixed sign position of {@code PIC -zzzzzzzzz9.99}, declared at {@code COPAUA0C.cbl} line 66, then
+     * the zero-suppression blanks that the magnitude does not reach, then the digits. The parser reads the
+     * sign and then removes exactly that blank run, so the reply codec is closed under its own public
+     * contract: whatever {@code encodeReply} emits, {@code decodeReply} accepts and returns equal.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
-     * exception escapes the test.</p>
+     * <p>Assumptions: the whole reply is compared rather than the amount alone, so the assertion proves
+     * the round trip of the message and not merely of one field. An earlier revision asserted the
+     * opposite -- that this exact payload could not be decoded -- which recorded a real defect as though
+     * it were a contract; the parser now removes the pad the mask produces and the geometry assertions
+     * below are unchanged, so the closure is proved rather than excused.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the production negative reply mask exposes its documented parse asymmetry")
-    void negativeReplyCorpusCaseRecordsTheProductionParseAsymmetry() {
+    @DisplayName("the production negative reply mask decodes back to the same reply")
+    void negativeReplyCorpusCaseRoundTripsThroughTheProductionParser() {
         AuthReply negative = replyWith(Money.of("-100.99"));
         String encoded = CsvAuthCodec.encodeReply(negative);
 
@@ -2849,13 +2868,33 @@ class CsvAuthCodecTest {
         assertEquals(CsvAuthCodec.REPLY_WIRE_LENGTH, encoded.length());
         assertEquals(REPLY_DELIMITER_POSITIONS, delimiterPositionsOf(encoded));
 
+        AuthReply decoded = CsvAuthCodec.decodeReply(encoded);
+        assertEquals(negative, decoded);
+        assertEquals(Money.of("-100.99"), decoded.approvedAmount());
+        assertEquals(encoded, CsvAuthCodec.encodeReply(decoded));
+    }
+
+    /**
+     * A blank inside the integer digit run is still refused after the sign and its pad are read.
+     *
+     * <p>Assumptions: this is the counterpart of the round trip above and is what keeps the pad removal
+     * narrow. The pad is removed only where the mask can produce it, between the sign position and the
+     * first digit, so a token whose blank falls after a digit is not a zero-suppressed rendering of
+     * anything and is rejected rather than being silently read as the digits with the gap closed up.</p>
+     *
+     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * exception escapes the test.</p>
+     */
+    @Test
+    @DisplayName("a blank inside the integer digits is refused, not closed up")
+    void aBlankInsideTheIntegerDigitsIsRefused() {
         AuthMessageFormatException failure = assertThrows(
                 AuthMessageFormatException.class,
-                () -> CsvAuthCodec.decodeReply(encoded));
+                () -> CsvAuthCodec.parseMoney("-      1 0.99", REPLY_AMOUNT_FIELD));
+
         assertTrue(failure.getMessage().contains(REPLY_AMOUNT_FIELD));
         assertTrue(failure.getMessage().contains("digit position"));
         assertFalse(failure.getMessage().contains(CARD_NUM));
-        assertFalse(failure.getMessage().contains(encoded));
     }
 
     /**

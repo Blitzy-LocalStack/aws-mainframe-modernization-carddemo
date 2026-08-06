@@ -1,0 +1,389 @@
+# =============================================================================
+# services/batch-service/src/test/resources/application-test.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Supplies the Spring `test` profile overlay for batch-service, the bounded
+#   context that owns the nightly batch chain - pre-posting, posting, interest
+#   accrual, backup, combine and the export/import round trip - and the durable
+#   batch.batch_run step ledger that replaces the JCL restart contract. It keeps
+#   the production datastore, schema set, migration owner and job-launch posture
+#   while replacing only the environment-bound values that would make an isolated
+#   test context contact infrastructure, negotiate TLS against a container that
+#   serves none, or run a job the moment a context refreshed.
+#
+#   Spring's Config Data loader consumes this file whenever profile `test` is
+#   active. The six tests that exist in this module today - BatchJobNameTest,
+#   BatchReturnCodeTest, BusinessDateTest and DatasetGenerationTest over the dto
+#   package, DiagnosticRenderingTest over domain, and BatchApplicationTest over the
+#   module root - are plain unit tests and load no context at all, so nothing reads
+#   this file yet. It is authored now because the
+#   settings below are the ones a job or repository test needs settled BEFORE it is
+#   written, and because two of them - the job-launch flag and the schema
+#   validation mode - are the difference between a test suite that asserts
+#   something and one that starts a nightly chain against a container.
+#
+#   The file has two blocks, and no `server` block at all for the reason recorded
+#   below: `spring` supplies the environment substitutions that let the Spring
+#   context retain production mechanisms without contacting deployed
+#   infrastructure, and `logging` fixes the diagnostic surface. A closing register
+#   at the foot of the file records the omissions that are deliberate.
+#
+# Parameters:
+#   Each property key is the YAML analogue of a parameter. Every value that
+#   differs from the base profile, and every value restated from it, carries an
+#   adjacent labelled rationale naming the rejected alternative and the concrete
+#   failure that alternative causes. This file consumes no environment variable of
+#   its own: that is the point of it.
+#
+# Return values:
+#   The effective configuration handed to the Spring application context after
+#   this overlay is merged over src/main/resources/application.yml and the
+#   imported carddemo-common-defaults.yml.
+#
+# Exceptions or errors:
+#   A misspelled Spring property is silently ignored. A wrong value can instead
+#   negotiate TLS against a container that serves none, select `public`, demand
+#   tables four other bounded contexts own, contact AWS, or launch every job bean
+#   at context refresh. The last of those is the most damaging and the least
+#   obvious: a job that ran during a unit test would post transactions and accrue
+#   interest against whatever database the context resolved, and the test would
+#   report success. The adjacent comments identify each failure mode at the value
+#   that prevents it.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
+#     values and Exceptions on a module entry point. YAML has no docstring
+#     construct, so the mapping is: this header states Purpose; property keys are
+#     Parameters; the merged Spring Environment is the Return value; and each
+#     adjacent rationale states the failure raised or silently admitted by a wrong
+#     value. The trivial-accessor relief has no YAML analogue.
+#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
+#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
+#     same limit for YAML. This profile is therefore a review gate rather than a
+#     linter gate, which is why every non-obvious value and every deliberate
+#     absence is explained here.
+#   - Assumptions: every leaf path below already exists in the base profile. This
+#     overlay introduces NO key, which is a stronger property than the sibling
+#     test profiles hold and is possible here because the base already declares
+#     the SQS listener flag, the job-launch flag and the initialisation mode that
+#     a test profile would otherwise have to add.
+#   - Trade-offs: this module has NO server.ssl block to disable, unlike every
+#     sibling test profile. The base declares server.port and nothing else under
+#     server, because a batch task is invoked by a Step Functions state through
+#     ecs:runTask.sync rather than registered behind a load balancer, so there is
+#     no HTTPS target group to agree with and no listener to encrypt. The absence
+#     is recorded here so that a reader comparing test profiles does not add a
+#     TLS override for a listener that carries no traffic.
+# =============================================================================
+
+spring:
+  cloud:
+    aws:
+      # WHY : (1) Assumptions: a client cannot be built without a region, and the
+      #       base value is ${AWS_REGION} with no fallback, so a build host with no
+      #       such variable aborts context refresh. Even where the variable is
+      #       present, an unset value sends the SDK region chain to instance
+      #       metadata discovery, which times out rather than failing immediately.
+      #       A static test region stops both outcomes.
+      #       (2) Trade-offs: us-east-1 is a valid SDK region selector, not an
+      #       endpoint, account identifier or credential. No request is sent there:
+      #       the listener flag below stays false and this module publishes nothing
+      #       of its own - Step Functions invokes it rather than the reverse.
+      region:
+        static: us-east-1
+
+      sqs:
+        listener:
+          # WHY : (1) Assumptions: this restates the base value rather than
+          #       changing it, and it is restated because it is one of the two
+          #       flags that decide whether a test context does work. This module
+          #       declares the SQS starter for the client its jobs use, not for a
+          #       listener; false keeps the client, the annotation processor and the
+          #       default container factory in the context while no container
+          #       starts and no queue lookup or receive occurs.
+          #       (2) Alternatives Considered: setting spring.cloud.aws.sqs.enabled
+          #       to false was rejected because it removes the factory rather than
+          #       stopping the poll, which changes the context shape a job test
+          #       observes instead of only its behaviour.
+          auto-startup: false
+
+  # WHY : (1) Alternatives Considered: H2 or another in-process database was
+  #       rejected outright for this module more firmly than for any sibling. The
+  #       posting unit of work commits a transaction row, a category-balance row
+  #       and an account row together - transcribed from
+  #       app/cbl/CBTRN02C.cbl L424-L444 - across three schemas under one ACID
+  #       commit, and the category-balance step is an upsert whose create branch
+  #       and update branch must remain separately observable. A substitute engine
+  #       implements cross-schema qualification, conflict resolution and NUMERIC
+  #       arithmetic differently, so a passing assertion would say nothing about
+  #       the deployed engine. (2) Assumptions: spring-boot-testcontainers is
+  #       absent from this module's POM, so @ServiceConnection is not available. A
+  #       job or repository test registers the container-generated JDBC URL, user
+  #       name and credential dynamically, and those values take precedence over
+  #       the unresolved base properties, which is why no connection literal
+  #       appears here.
+  datasource:
+    hikari:
+      # WHY : (1) Assumptions: this restates the base statement verbatim, including
+      #       the ORDER of the five schemas, because the order is the resolution
+      #       order for an unqualified name and batch is deliberately first - the
+      #       Spring Batch job repository tables and batch_run are the only objects
+      #       this module creates, so an unqualified reference must find them before
+      #       it finds a same-named object in a schema this module only reads.
+      #       (2) Trade-offs: the container generates its own URL, so this file
+      #       cannot append a currentSchema parameter to it. The statement is
+      #       repeated as a session pin, and PostgreSQL resolves search-path names
+      #       lazily, so it succeeds before Flyway creates `batch`.
+      connection-init-sql: "SET search_path TO batch, ledger, account, card, reference"
+
+      data-source-properties:
+        # WHY : (1) Assumptions: the base profile requires verify-full and a CA
+        #       bundle because deployed PostgreSQL serves TLS and its parameter
+        #       group forces it. The stock PostgreSQL Testcontainer starts with TLS
+        #       off, so inheriting that mode rejects every connection with "The
+        #       server does not support SSL" before Flyway can run.
+        #       (2) Assumptions: this map merges per key rather than replacing
+        #       wholesale - each entry is bound as its own property - so the base
+        #       document's `options` entry survives untouched. That matters: the
+        #       lock and idle-in-transaction timeouts it sets are the guards that
+        #       stop a wedged posting transaction from holding an account row for
+        #       the length of a test run, and losing them here would make a
+        #       deadlock present as a hung build.
+        #       (3) Trade-offs: `disable` makes the loopback database hop
+        #       cleartext. The container holds only test data and is discarded with
+        #       the run; deployed connections keep verify-full from the base
+        #       profile.
+        sslmode: disable
+
+      # WHY : Trade-offs: no idle floor, against the base document's one. The base
+      #       keeps a floor so the first step of a nightly chain does not pay a
+      #       handshake; a test run has no nightly chain and reactor test forks can
+      #       hold several pools against one container at once, so draining to
+      #       empty is what keeps a parallel build inside the container's own
+      #       connection limit. The pool CEILING is deliberately not restated: the
+      #       base already sets it to four, which is the same figure every sibling
+      #       test profile chooses, so restating it would assert a decision this
+      #       file has not made.
+      minimum-idle: 0
+
+  flyway:
+    # WHY : Assumptions: Flyway remains enabled because this context is the
+    #       executable check of V1__batch.sql, which creates batch_run together
+    #       with the Spring Batch job-repository tables. batch_run is the
+    #       per-step idempotency key that replaces the JCL restart contract - the
+    #       baseline has none, its only RESTART= being commented out at
+    #       app/jcl/DEFGDGD.jcl L2 - so a test that ran against hand-created
+    #       tables would prove nothing about the mechanism that replaced it.
+    enabled: true
+    locations: classpath:db/migration
+
+    # WHY : (1) Assumptions: `schemas` names every schema Flyway manages, while
+    #       `default-schema` decides where its history table and unqualified
+    #       objects resolve. Both name `batch` ALONE, and that is the important
+    #       part: this module reads four other schemas through explicitly qualified
+    #       entity mappings and must never migrate any of them. Widening either
+    #       value would let this module's migration place objects in, or record
+    #       history against, a bounded context it does not own.
+    #       (2) Trade-offs: both values restate the base profile. The duplication
+    #       exposes the complete ownership boundary in the test overlay and stops a
+    #       base edit from changing what the suite proves without a visible
+    #       test-profile diff.
+    schemas: batch
+    default-schema: batch
+
+    # WHY : (1) Assumptions: the base deliberately sets this false because
+    #       data-migration/sql/V0__schemas_and_roles.sql owns deployed schemas,
+    #       owner roles and grants - including the narrowly-scoped cross-schema
+    #       write grants that let this module commit its three-table posting unit
+    #       of work as one transaction. A bare PostgreSQL container runs no V0, and
+    #       V1 deliberately contains no CREATE SCHEMA, CREATE ROLE or GRANT, so
+    #       false makes the first qualified CREATE TABLE fail on an absent schema.
+    #       True is the sanctioned test substitute for schema existence.
+    #       (2) Trade-offs: this creates `batch` only. The four schemas this module
+    #       reads are NOT created by it, which is exactly why the schema validation
+    #       mode below is `none` rather than `validate`; a test that needs those
+    #       tables supplies them itself. Reproducing V0 here was rejected because it
+    #       would duplicate cluster-level DDL, and the whole privilege graph, into a
+    #       per-service test resource and let the copy drift from its authority.
+    create-schemas: true
+
+    # WHY : Assumptions: a container starts empty, so there is no populated schema
+    #       to adopt as a baseline. Enabling baselining could mark an unexpected
+    #       pre-existing schema as migrated and skip V1, leaving the context to
+    #       fail against a job repository Flyway never created - and Spring Batch's
+    #       failure in that case names a missing sequence rather than a missing
+    #       migration.
+    baseline-on-migrate: false
+
+    # WHY : Assumptions: validation stays on, restating the base value. It compares
+    #       the checksum of each applied migration against the file on the
+    #       classpath, so an edit to an already-applied V1__batch.sql is reported
+    #       rather than ignored. In a container this can only fire when a test
+    #       reuses a database across runs, which is precisely the case where a
+    #       silently un-applied change would be hardest to notice.
+    validate-on-migrate: true
+
+  jpa:
+    hibernate:
+      # WHY : (1) Assumptions: `none` here, which is an intentional DIVERGENCE from
+      #       the base document's `validate` and from every sibling test profile,
+      #       and the reason is ownership rather than laxity. This module maps five
+      #       entities across FOUR schemas it does not own - Account and CardXref in
+      #       `account`, Transaction in `ledger`, DisclosureGroup in `reference`,
+      #       each carrying an explicit schema on its @Table - and only BatchRun in
+      #       the `batch` schema its own migration creates. Validation checks every
+      #       mapped table, so against a container holding only `batch` it aborts
+      #       context refresh on four tables this module is forbidden to create.
+      #       (2) Alternatives Considered: copying the three peer migrations onto
+      #       this module's test classpath so that `validate` could succeed.
+      #       Rejected because it would duplicate three other bounded contexts' DDL
+      #       into this module's test resources, where the copies would drift from
+      #       their authorities and a passing validation would then assert
+      #       agreement with a stale copy rather than with the real schema. The
+      #       cross-schema mapping agreement is checked where all eight migrations
+      #       have actually run.
+      #       (3) Trade-offs: entity drift against a peer schema is therefore not
+      #       caught by this profile. A job test that needs those tables applies
+      #       the peer migrations itself and may raise this value for its own
+      #       context, which is a visible act in a reviewable test rather than a
+      #       shared default that quietly demands four other modules' DDL.
+      ddl-auto: none
+
+    # WHY : Assumptions: this restates the base value so a repository test cannot
+    #       depend on a persistence session outliving its transaction. It matters
+    #       more here than in a request-scoped context: a chunk-oriented step
+    #       commits per chunk, and a lazily-mapped association resolved outside
+    #       that boundary would read a row from a different transaction than the
+    #       one the step is asserting about.
+    open-in-view: false
+
+    # WHY : Trade-offs: provider SQL is not written to standard output. That gives
+    #       up the shortest way to inspect a generated statement, but this switch
+    #       bypasses logger levels entirely, so once enabled no level can narrow
+    #       it - and a posting run over a seeded fixture emits a statement per
+    #       record, which would bury the assertion output completely.
+    show-sql: false
+
+  batch:
+    job:
+      # WHY : (1) Assumptions: this is the single most important value in the file,
+      #       and it restates the base rather than changing it precisely so that no
+      #       broader edit can flip it. Left at the framework default, Spring Batch
+      #       launches every Job bean in the context as soon as the application is
+      #       ready. In a test that means a context refresh would post transactions,
+      #       accrue interest and write dataset generations against whatever
+      #       database the context resolved, and the test would report success while
+      #       having mutated state no assertion described.
+      #       (2) Assumptions: false does NOT prevent a test from running a job.
+      #       JobLauncher and JobOperator remain available, so a job test launches
+      #       deliberately with its own parameters - which is also how the deployed
+      #       task runs, because a Step Functions state passes the job name and the
+      #       business date as container overrides rather than relying on
+      #       auto-launch. The test and the deployment therefore exercise the same
+      #       entry path.
+      #       (3) Trade-offs: the accepted cost is that a job test must name the job
+      #       it wants. That is preferred to the alternative, in which the set of
+      #       jobs a test runs is whatever happens to be on the classpath.
+      enabled: false
+
+  sql:
+    init:
+      # WHY : Assumptions: restated from the base rather than inherited, because the
+      #       mechanism it disables is one a test resource directory attracts. The
+      #       framework runs schema.sql or data.sql automatically the moment either
+      #       appears on the classpath, and this module owns a Flyway migration, so
+      #       such a file arriving beside this one - copied from a peer to seed a
+      #       fixture - would execute before Flyway and leave the history table
+      #       describing a schema it did not produce. Pinning `never` makes that
+      #       structurally impossible rather than merely unlikely, and it costs
+      #       nothing because a fixture belongs in a test's own setup.
+      mode: never
+
+# WHY : (1) Trade-offs: framework narration is reduced so one assertion or
+#       migration failure stays visible. The project package, Spring Batch and
+#       Flyway all stay at INFO, which is the level at which the three things a
+#       batch test actually asserts about are recorded: the reject reason a
+#       posting decision produced, the step and chunk boundaries the job crossed,
+#       and the migration version that was applied. (2) Assumptions: the two
+#       Hibernate categories stay at OFF, restating the base rather than the WARN
+#       every sibling uses. OFF is the base's own choice for this module because a
+#       batch run emits a statement and a parameter set per record processed, and
+#       the parameters are card numbers and account balances; at batch volumes even
+#       WARN-level accidents are large, and a run over a seeded fixture would
+#       otherwise write the whole fixture into the build log.
+logging:
+  level:
+    root: WARN
+    com.carddemo: INFO
+    org.springframework.batch: INFO
+    org.flywaydb: INFO
+    org.hibernate.SQL: OFF
+    org.hibernate.orm.jdbc.bind: OFF
+
+# Register of deliberate omissions -- each one is a value a reasonable
+# alternative would have set, and each would change what the test profile proves
+# or make it contact infrastructure.
+#
+#   1. No server.ssl override and no server.port override.
+#      Assumptions: the base declares no ssl block at all, because a batch task is
+#      invoked by a Step Functions state through ecs:runTask.sync rather than
+#      registered behind a load balancer, so there is no HTTPS target group to
+#      agree with. Port 8080 is retained because the container health check uses
+#      it; a test binds no listener, so moving the number would change a
+#      deployment value without solving a test constraint.
+#
+#   2. No spring.datasource url, username or password.
+#      Assumptions: configuration-property binding leaves an unresolvable
+#      placeholder as literal text rather than raising, so the three base
+#      datasource keys can stay unset in a context that opens no connection. A job
+#      or repository test registers the container-generated triple dynamically,
+#      which takes precedence. Committing a localhost connection string here was
+#      rejected because a default that resolves is a default that can be run
+#      against by accident - and the accident, for this module, is a posting run.
+#
+#   3. No spring.security or carddemo.security key.
+#      Assumptions: this module has no resource server and no filter chain. Its
+#      base profile declares no spring.security block, its POM declares neither
+#      the security nor the oauth2 resource-server starter, and it has no
+#      SecurityConfig class, because its caller is a Step Functions state assuming
+#      an IAM task role rather than a signed-on user presenting a token. A stub
+#      issuer or app client id here would describe a mechanism the module cannot
+#      load, and every sibling test profile carries them for the opposite reason.
+#
+#   4. No spring.jpa.properties.hibernate.jdbc fetch or batch size override.
+#      Assumptions: the base sets a fetch size of 100 and a batch size of 50, and
+#      both are behavioural rather than environmental: the first is what keeps a
+#      cursor walk lazy, and the second is what makes a chunk write one round trip
+#      instead of fifty. Halving either under test would make a step's observable
+#      round-trip behaviour differ from the deployed one, which is the property a
+#      job test exists to check.
+#
+#   5. No spring.config.import override.
+#      Assumptions: the base list already names the shared defaults document
+#      first and an optional Parameter Store subtree second. The second entry is
+#      optional and resolves to nothing on a build host, so it costs nothing;
+#      re-declaring the list to remove it would also require re-naming the shared
+#      defaults document, creating a second place for it to be named and a second
+#      chance to drop the console pattern that carries the correlation identifier.
+#
+#   6. No management.endpoints.web.exposure.include override.
+#      Assumptions: the base already narrows the surface to `health` alone, which
+#      is narrower than every sibling and is already what a test wants. Restating
+#      it would assert a decision this file has not made.
+#
+#   7. No spring.flyway.clean-disabled override.
+#      Assumptions: the base already keeps destructive clean disabled. A container
+#      is discarded as a whole and no test calls Flyway clean, so changing the
+#      inherited control would add no coverage and could normalize an operation
+#      that, in the deployed cluster, would drop the step ledger the restart
+#      contract depends on.
+#
+#   8. No cloud-service endpoint, ARN, bucket name, credential or account
+#      identifier.
+#      Assumptions: the static region above is a routing selector, not a network
+#      location or a credential. Alternatives Considered: naming a LocalStack
+#      endpoint in this shared profile was rejected because it would make every
+#      context in this module depend on an emulator even when no dataset-staging
+#      behaviour is under test; a test that needs one supplies its coordinates
+#      dynamically.
+# =============================================================================

@@ -1,5 +1,8 @@
 package com.carddemo.batch.dto;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
+
 /**
  * The object-storage coordinate of one dataset generation: which family, which business date, and
  * which generation number.
@@ -407,7 +410,7 @@ public record DatasetGeneration(
         //       change a stored identifier; a prefix is compared by no golden master, so
         //       normalising the prefix changes nothing that is checked.
         if (isSeparatedLayout(token)) {
-            return token.substring(0, SEPARATED_DATE_LENGTH);
+            return requireRealCalendarDate(token.substring(0, SEPARATED_DATE_LENGTH), token);
         }
 
         if (isCompactLayout(token)) {
@@ -415,9 +418,9 @@ public record DatasetGeneration(
             //       slices rather than by editing the token, so no method that mutates or replaces
             //       the token is reachable from here. The slices are fixed positions because the
             //       compact layout is positional: four year digits, two month, two day.
-            return token.substring(0, YEAR_END_INDEX)
+            return requireRealCalendarDate(token.substring(0, YEAR_END_INDEX)
                     + "-" + token.substring(YEAR_END_INDEX, COMPACT_MONTH_END_INDEX)
-                    + "-" + token.substring(COMPACT_MONTH_END_INDEX, COMPACT_DATE_LENGTH);
+                    + "-" + token.substring(COMPACT_MONTH_END_INDEX, COMPACT_DATE_LENGTH), token);
         }
 
         // WHY : Alternatives Considered: returning the token unchanged, or substituting a placeholder
@@ -431,6 +434,51 @@ public record DatasetGeneration(
                 + "' matches neither the separated layout YYYY-MM-DD nor the compact layout"
                 + " YYYYMMDD followed by two characters, so no dt= partition value can be derived"
                 + " from it");
+    }
+
+    /**
+     * Confirms that a rendered partition date names a day that exists, and returns it unchanged.
+     *
+     * <p>Refactoring Rationale: this check exists because the two layout tests above are SHAPE tests --
+     * they ask where the hyphens are and whether the rest are digits -- and a shape test cannot tell
+     * {@code 2022-07-18} from {@code 2022-99-99}. An earlier revision rendered whichever of the two it
+     * was given, and the second one is the more dangerous of the pair precisely because it looks
+     * well formed: the loader's own key pattern {@code dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/} at
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:27} matches it, so the objects
+     * would be written, indexed and then filed for ever under a day that never occurred. Nothing
+     * downstream would report an error; a generation would simply not be where any reader by date
+     * looks. Raising here stops the step at the coordinate that cannot exist, which is the same
+     * treatment the unmatched layout already receives.
+     *
+     * <p>Assumptions: the check runs on the DERIVED value and never on the token. The token is
+     * concatenated verbatim into {@code TRAN-ID PIC X(16)} at {@code app/cbl/CBACT04C.cbl:476-480}, so
+     * it must stay opaque and unparsed -- which is why {@code BusinessDate} tests its width alone and
+     * why this validation lives here rather than in that type's constructor. A prefix, by contrast, is
+     * compared by no golden master and is this module's own coordinate, so it may be held to a stricter
+     * standard than the identifier without altering any compared output.
+     *
+     * <p>Alternatives Considered: parsing with a lenient resolver, which would accept {@code 2022-02-30}
+     * by rolling it forward to the first of March. Rejected outright: it would file a generation under a
+     * date the caller did not name, which is worse than refusing, because the objects would then be
+     * both present and misattributed. {@code LocalDate.parse} resolves strictly, so a day that does not
+     * exist in its month is refused rather than moved -- including the twenty-ninth of February in a
+     * common year, which no digit-and-position test can catch.
+     *
+     * @param rendered the partition date already rendered in the separated layout {@code YYYY-MM-DD}
+     * @param token the token it was derived from, quoted in the diagnostic so a container log names the
+     *     offending input rather than only its rendering
+     * @return {@code rendered}, unchanged, when it names a day that exists
+     * @throws IllegalStateException if {@code rendered} does not resolve to a real calendar day
+     */
+    private static String requireRealCalendarDate(String rendered, String token) {
+        try {
+            LocalDate.parse(rendered);
+        } catch (DateTimeParseException impossible) {
+            throw new IllegalStateException("business-date token '" + token + "' renders the partition"
+                    + " date '" + rendered + "', which is not a day that exists, so no dt= partition"
+                    + " value can be derived from it", impossible);
+        }
+        return rendered;
     }
 
     /**

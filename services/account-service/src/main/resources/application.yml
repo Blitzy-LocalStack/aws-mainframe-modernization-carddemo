@@ -1,0 +1,1257 @@
+# =============================================================================
+# services/account-service/src/main/resources/application.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Base runtime configuration for the CardDemo account-service, the bounded
+#   context that owns the account master, the customer master and the card
+#   cross-reference. This file is the property-key contract for the whole
+#   module: the configuration classes under com.carddemo.account.config bind
+#   against the keys declared here, and application-dev.yml and
+#   application-prod.yml override the VALUES of these keys without adding a
+#   key, removing a key, or changing the shape of one.
+#
+#   The behaviour being configured comes from six programs and three record
+#   layouts, all of which are REFERENCE ONLY and are never modified:
+#   app/cbl/COACTVWC.cbl (account view), app/cbl/COACTUPC.cbl (account update),
+#   app/cbl/CBACT01C.cbl (sequential account read), app/cbl/CBACT03C.cbl
+#   (cross-reference read), app/cbl/CBCUS01C.cbl (customer read) and
+#   app/app-vsam-mq/cbl/COACCT01.cbl (the request/reply account inquiry); and
+#   app/cpy/CVACT01Y.cpy (the 300-byte account record), app/cpy/CVCUS01Y.cpy
+#   (the 500-byte customer record) and app/cpy/CVACT03Y.cpy (the 50-byte card
+#   cross-reference record), from which this module's three tables are derived.
+#
+#   State at this checkpoint, stated once here rather than repeated at every
+#   key that names one of them.
+#
+#   Present in this module today:
+#     - AccountApplication.java, the Spring Boot entry point, so the keys below
+#       are read by a context that actually starts.
+#     - config/SecurityConfig.java, which binds five of the keys declared
+#       below: spring.security.oauth2.resourceserver.jwt.issuer-uri, the three
+#       carddemo.security.jwt.* keys, and the two carddemo.security.cognito.*
+#       group names. Those keys are therefore NOT anticipatory: an absent value
+#       fails this module's context refresh today.
+#     - service/AddressValidationService.java, which reads no property at all -
+#       its allow-lists come from app/cpy/CSLKPCDY.cpy by way of
+#       reference-service, not from configuration - which is why no key below
+#       names it.
+#
+#   Contracted at later indexes of the same plan and NOT present today. Nothing
+#   below is to be read as a claim that any of these is being served, applied
+#   or compared:
+#     - db/migration/V1__account.sql, the single Flyway migration this module
+#       owns, creating accounts, customers and card_xref. Flyway does not fail
+#       on a location that resolves to nothing, so the service starts and
+#       reports zero migrations applied; the configured location below is the
+#       contract that migration will land at.
+#     - openapi/account-api.yaml, the hand-authored OpenAPI 3.1 contract of
+#       record, together with the api, service, repository, domain, dto and
+#       mapper classes a generated document would be derived from. Until they
+#       land the springdoc keys below publish an empty document.
+#     - service/InquiryMessageListener.java, the SQS consumer that replaces
+#       COACCT01's MQGET/MQPUT pair. The spring.cloud.aws keys below are
+#       nevertheless live rather than anticipatory, for the reason recorded on
+#       spring.cloud.aws.region: declaring the SQS starter in
+#       services/account-service/pom.xml puts its auto-configuration on the
+#       classpath, so the client bean is built as the context is constructed
+#       whether or not a listener exists to use it.
+#     - An adapter implementing service/AddressValidationService's nested
+#       ReferenceAddressLookup port. This one is called out separately because it
+#       is the reason a context refresh does NOT complete at this checkpoint, and
+#       a reader who runs the jar meets it rather than reading about it.
+#       AddressValidationService is annotated @Service and takes that port through
+#       its constructor; its own Javadoc records that the three allow-list tables
+#       are owned by reference-service and read across the service boundary, so
+#       the port is the seam and an adapter is the only place transport belongs.
+#       No adapter exists yet, so the context fails with
+#       UnsatisfiedDependencyException naming ReferenceAddressLookup, AFTER every
+#       setting in this file has been applied -- which was verified by running the
+#       jar: the pool below opens its connections with verified TLS, Flyway runs
+#       and reports zero migrations, and the failure arrives at bean wiring.
+#       Nothing in this file is implicated and nothing in it can resolve it; it is
+#       recorded here because the alternative is a reader concluding the
+#       configuration is at fault.
+#
+#   Every key below is declared now, deliberately: these are the decisions a
+#   module author needs settled BEFORE writing the first class, and a schema
+#   search path or a migration location retrofitted afterwards is exactly how a
+#   service ends up applying another context's migration into its own schema.
+#
+# Parameters:
+#   Environment variables this configuration consumes. They are listed by name
+#   only. No value for any of them appears in this file, in either profile that
+#   overrides it, or anywhere else in this repository.
+#
+#   SPRING_PROFILES_ACTIVE
+#     String. Selects application-dev.yml or application-prod.yml. Deliberately
+#     not baked into the container image, so one built image serves both
+#     environments and the environment is chosen at task launch.
+#   SPRING_DATASOURCE_URL
+#     String. Connection string for the Aurora cluster writer endpoint.
+#   SPRING_DATASOURCE_USERNAME
+#     String. The database role this service authenticates as, which is
+#     carddemo_account - the owner of the account schema created by
+#     data-migration/sql/V0__schemas_and_roles.sql at its L502-L503.
+#   SPRING_DATASOURCE_PASSWORD
+#     String. The credential for that role, injected from the managed
+#     credential store named in the notes on spring.datasource below.
+#   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+#     String. The user-pool issuer whose tokens this resource server validates.
+#   CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
+#     String. The single app client whose tokens this service accepts. Read by
+#     config/SecurityConfig.java. No fallback, for the reason recorded on it.
+#   CARDDEMO_COGNITO_ADMIN_GROUP_NAME
+#   CARDDEMO_COGNITO_USER_GROUP_NAME
+#     Strings. Optional overrides of the two group names. Both default to the
+#     names infra/modules/cognito fixes, so a local run needs neither.
+#   CARDDEMO_SERVER_TLS_CERTIFICATE
+#   CARDDEMO_SERVER_TLS_PRIVATE_KEY
+#     PEM content. The listener's certificate and key, injected as container
+#     secrets. Neither is stored in the task definition or in Terraform state.
+#   CARDDEMO_DB_SSL_ROOT_CERT
+#     String. Optional path override for the certificate bundle the JDBC driver
+#     verifies the cluster against. Defaults to the path the service image
+#     places the managed bundle at.
+#   AWS_REGION
+#     String. The deployment region. Required to START, not merely to reach
+#     AWS; see the note on spring.cloud.aws.region.
+#   CARDDEMO_ENVIRONMENT
+#     String. The environment label. Consumed by the shared defaults document
+#     this file imports, and by the Parameter Store prefix both profiles build.
+#   CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE
+#   CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE
+#   CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE
+#     Strings. The three SQS queue names replacing COACCT01's queue triple.
+#   SERVER_PORT
+#     Integer. Overrides the listen port. The value declared below is the
+#     contract the image and the load balancer are built against, so an
+#     override has to be made in all three places at once.
+#   MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+#     Comma-separated string. Widens or narrows the actuator surface. This is an
+#     environment-variable override and NOT one of the four profile axes listed
+#     in the closing block: neither profile restates the exposure list, so the
+#     three endpoints named below answer in every environment unless an operator
+#     sets this variable deliberately.
+#
+# Return values:
+#   The effective Environment handed to the Spring application context, and
+#   nothing else. This file returns no value to application code; its output is
+#   the resolved Environment that the configuration classes then read. That
+#   Environment yields: one TLS listener on the port below; one pooled
+#   DataSource whose every connection has its schema search path pinned to
+#   account and requires fully verified TLS; a Flyway run that applies
+#   db/migration/V1__account.sql into that schema before the JPA
+#   EntityManagerFactory is built, once that migration lands; a JWT
+#   resource-server configuration whose decoder additionally enforces the three
+#   Cognito claim checks; an SQS client able to serve a listener once one
+#   lands; an actuator surface answering GET /actuator/health, /actuator/info
+#   and the metrics scrape path; a served OpenAPI 3.1 document, once
+#   openapi/account-api.yaml lands; and the base log levels the two profiles
+#   adjust.
+#
+# Exceptions or errors:
+#   Startup failure modes a reader will actually meet, in the order the context
+#   reaches them.
+#
+#   1. Unresolved placeholder. Nine of the variables above are required, and
+#      they are exactly the nine written as a bare placeholder below: the three
+#      datasource variables, the issuer URI, the expected client id, the two
+#      TLS PEM values, the region, and the three queue names. Any one of them
+#      being unset aborts context refresh with IllegalArgumentException "Could
+#      not resolve placeholder", naming the variable that is missing. That is
+#      the intended outcome and the reason there is no fallback. The remaining
+#      variables are optional overrides Spring binds when present, so an unset
+#      one changes nothing rather than failing startup.
+#   2. Rejected claim configuration. config/SecurityConfig.java validates its
+#      own inputs before it builds a decoder: a carddemo.security.jwt.
+#      expected-token-use other than "access", or a blank expected client id,
+#      raises IllegalStateException naming the key. A blank value that resolved
+#      would silently disable the corresponding check, which is why the class
+#      refuses it rather than accepting it.
+#   3. Missing region. The SQS client bean cannot be built without a region, so
+#      a context with no AWS_REGION fails even though this module sends no
+#      message today.
+#   4. Unreachable database. HikariCP abandons the first connection attempt
+#      after connection-timeout and the context fails to start, rather than the
+#      task going healthy and then failing every read it is sent.
+#   5. Migration that cannot apply. FlywayException aborts startup. The three
+#      realistic causes are a checksum mismatch on an already-applied
+#      V1__account.sql, the migration role lacking CREATE on the account
+#      schema, and an account schema that already holds objects but has no
+#      Flyway history table, which fails rather than silently baselining.
+#   6. Absent or unreachable issuer. The resource server resolves the issuer's
+#      signing keys during startup, so a wrong or unreachable issuer fails the
+#      context instead of producing a service that rejects every token it is
+#      ever presented.
+#
+# WHY (non-obvious design decisions):
+#   1. Flyway migrates the account schema and is deliberately NOT permitted to
+#      create it: data-migration/sql/V0__schemas_and_roles.sql is the exclusive
+#      authority for schemas, roles and grants, and its completion is a
+#      precondition of this service starting. Recorded on
+#      spring.flyway.create-schemas.
+#   2. GET /actuator/health is at a single unchanging path and is not
+#      token-protected, because the two things that poll it cannot present a
+#      token. Recorded on management.endpoints.web.
+#   3. Port 8080 is a contract with the container image and with the security
+#      groups, not a local preference. Recorded on server.port.
+#   4. Hibernate never emits DDL. Three characteristics these three tables
+#      genuinely need - the encrypted columns, the optimistic-locking version
+#      columns, and the secondary index replacing the CXACAIX alternate index -
+#      cannot be derived from a JPA entity. Recorded on
+#      spring.jpa.hibernate.ddl-auto.
+#   5. Every pooled connection pins its schema search path to the one schema
+#      this context owns. Recorded on
+#      spring.datasource.hikari.connection-init-sql.
+#   5a. Every pooled connection also requires fully verified TLS, declared as
+#      driver properties rather than trusted to the injected URL, which matters
+#      here because the rows behind this pool carry the encrypted national
+#      identifier and government-issued identifier columns. Recorded on
+#      spring.datasource.hikari.data-source-properties.
+#   6. Everything environment-specific is an unresolved placeholder with no
+#      fallback value, so absent configuration fails fast instead of starting
+#      against the wrong environment. Recorded on spring.datasource.
+#   7. This context runs NO transactional outbox, which is the exact opposite
+#      of authorization-service, and the difference is drawn from the baseline
+#      rather than from preference. Recorded on carddemo.account.inquiry.
+#   8. The property SHAPES in this file are identical in every environment; the
+#      two profiles vary values along four axes and no others. Recorded in the
+#      closing block at the end of the file.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Assumptions: (1) every value in this block is read by something built outside
+#       this repository tree - the container image, the load balancer target
+#       group, or the JDK's TLS stack - so none of them is free to change on its
+#       own; (2) they are grouped first because everything below them is reached
+#       through this listener.
+# -----------------------------------------------------------------------------
+server:
+
+  # Assumptions: 8080 is a three-way contract and not a preference. The
+  #   HEALTHCHECK and EXPOSE instructions in services/account-service/Dockerfile
+  #   name it, the load-balancer target group forwards to it, and the security
+  #   group permits load-balancer-to-application traffic on exactly this port.
+  #   Changing it here alone produces a task that listens where nothing polls.
+  #
+  # Assumptions: a port above 1024 is required rather than conventional. The
+  #   image runs as a non-root user, and a non-root process cannot bind a port
+  #   below 1024, so 80 or 443 would fail at bind time inside the container and
+  #   the task would never reach a listening state.
+  port: 8080
+
+  ssl:
+    # WHY : (1) Assumptions: this block is not optional and is not a hardening
+    #       extra. infra/modules/ecs-service constrains the target protocol to
+    #       the single value HTTPS, and that one variable sets the protocol of
+    #       both the target group and its health check. A task serving cleartext
+    #       therefore has every probe arrive over TLS against a listener that
+    #       cannot complete a handshake: the task never turns healthy, is
+    #       deregistered, and is replaced, while the process itself looks fine in
+    #       its own logs.
+    #       (2) Alternatives Considered: terminating TLS at the load balancer and
+    #       leaving this hop cleartext, which is the more common shape. Rejected
+    #       because what crosses the private application subnets on this hop is
+    #       the bearer token in the Authorization header together with account
+    #       and customer records - including the masked national identifier and
+    #       the postal address. Being inside a VPC bounds who can observe that
+    #       traffic; it does not make the traffic unreadable, and the design
+    #       requires encryption in transit end to end rather than up to the edge.
+    #       (3) Assumptions: the port does NOT change with the scheme. 8080 is
+    #       pinned by the Dockerfile's EXPOSE and by the security group above, so
+    #       this encrypts the existing listener in place rather than moving it to
+    #       8443. Renumbering would require both of those artifacts to change in
+    #       the same commit; the number carries no meaning beyond agreement
+    #       between them.
+    enabled: true
+
+    # WHY : (1) Alternatives Considered: a PKCS12 or JKS keystore baked into the
+    #       image, which is the older convention. Rejected on two counts: a
+    #       private key committed into an image layer is readable by anyone who
+    #       can pull the image, and one keystore in one image means both
+    #       environments share a key, so a compromise anywhere is a compromise
+    #       everywhere.
+    #       (2) Assumptions: both values arrive as PEM CONTENT from Secrets
+    #       Manager, injected by the ECS task definition's container secrets
+    #       mechanism, which resolves them at task start so neither is stored in
+    #       the task definition, in Terraform state or in plan output. These two
+    #       properties accept PEM content as readily as a path, which is what
+    #       makes an environment-injected value work at all.
+    #       (3) Trade-offs: neither placeholder carries a fallback, matching the
+    #       datasource contract below. An absent certificate stops startup
+    #       instead of silently falling back to cleartext, which would present as
+    #       a healthy service that had quietly stopped meeting the requirement
+    #       this block exists for.
+    certificate: ${CARDDEMO_SERVER_TLS_CERTIFICATE}
+    certificate-private-key: ${CARDDEMO_SERVER_TLS_PRIVATE_KEY}
+
+    # Assumptions: the two versions are named rather than left to the JDK
+    #   default, which on some distributions still negotiates TLS 1.1 and 1.0.
+    #   Both are withdrawn and have practical attacks against them. Naming 1.2
+    #   and 1.3 holds the same floor the alb module pins on its listener, so one
+    #   floor applies at every hop instead of each module choosing its own.
+    protocol: TLS
+    enabled-protocols: TLSv1.2,TLSv1.3
+
+  # Assumptions: this service is to consume an SQS queue, so a task being
+  #   replaced may hold an in-flight inquiry whose reply has not yet been
+  #   published. Graceful shutdown lets the listener finish the message it holds
+  #   instead of the task dying mid-handler, which would leave the request to
+  #   reappear after the visibility timeout and be answered twice. The setting
+  #   is declared now rather than with the listener because it also bounds the
+  #   in-flight HTTP requests this module already serves.
+  shutdown: graceful
+
+spring:
+
+  application:
+    # Assumptions: this string must equal the Maven artifactId in
+    #   services/account-service/pom.xml character for character, because two
+    #   things downstream derive from it rather than from the module directory.
+    #   common-lib's com.carddemo.common.observability.MetricsConfig reads
+    #   spring.application.name and publishes it as the service common tag on
+    #   every metric, and the log group each task writes to is named from the
+    #   same value. A mismatch does not fail anything - it splits one deployable
+    #   into two identities, so a dashboard grouping by service shows a gap where
+    #   this module should be and an alarm aggregating over that tag quietly
+    #   stops covering it.
+    name: account-service
+
+  config:
+    # WHY : (1) Assumptions: the shared defaults document is imported FIRST and
+    #       from the classpath. It carries the ONE console log pattern that renders
+    #       the four mapped-diagnostic-context keys -- the correlation and edge
+    #       identities CorrelationIdFilter publishes and the two tracing keys
+    #       Micrometer contributes -- so without this import every line this
+    #       service logged would omit the values that tie a request to its caller
+    #       and to its trace. It is listed first so anything the parameter store
+    #       publishes still outranks it.
+    #       (2) Assumptions: both remote locations carry the `optional:` prefix,
+    #       and that prefix is what makes profile-free and offline start-up real
+    #       rather than aspirational. Without it an unreachable control plane -- a
+    #       developer machine with no credentials, a task whose endpoint policy is
+    #       still settling -- is a hard start-up failure instead of a start that
+    #       falls through to the injected environment variables this document
+    #       already reads. The two starters that resolve them are on the classpath
+    #       for exactly this: services/account-service/pom.xml declares the
+    #       parameter-store and the secrets-manager starter, and the two services
+    #       that also declare them both import their locations, so this module
+    #       follows a pattern rather than inventing one.
+    #       (3) Assumptions: the path segments match what the roots actually
+    #       create. infra/envs/dev/main.tf names each parameter
+    #       ${parameter_prefix}/${environment}/${service}/${variable} with
+    #       parameter_prefix = "/carddemo", so the prefix below resolves to exactly
+    #       the namespace this service's own parameters live in. A path missing the
+    #       environment segment would resolve, find nothing, and -- because the
+    #       import is optional -- say nothing about it.
+    #       (4) Trade-offs: the environment label is the one placeholder in this
+    #       file that carries a default. It needs one because an unresolved
+    #       placeholder inside this key aborts the earliest configuration-loading
+    #       phase, before `optional:` can take effect; a label that always resolves
+    #       keeps that phase survivable off-platform while every VALUE imported
+    #       through the prefix still has no fallback. The label is a label, not a
+    #       location or a credential, so defaulting it discloses nothing.
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:local}/account/"
+      - "optional:aws-secretsmanager:/carddemo/${CARDDEMO_ENVIRONMENT:local}/account/"
+
+  # Assumptions: this bounds the graceful shutdown enabled above. Twenty seconds
+  #   is longer than the five-second inquiry poll declared below plus the handler
+  #   it feeds, so a task being replaced finishes the message it holds; and it is
+  #   shorter than the deregistration delay the load balancer applies, so the
+  #   task is already out of rotation before the timer starts. A longer value
+  #   would delay every deployment by the difference; a shorter one would cut a
+  #   poll that had just returned a message.
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  cloud:
+    aws:
+
+      # Assumptions: a region is required for this module to START, not merely
+      #   to reach AWS, and that is the non-obvious part. Declaring
+      #   spring-cloud-aws-starter-sqs in services/account-service/pom.xml puts
+      #   its auto-configuration on the classpath, and the SQS client bean is
+      #   built as the context is constructed rather than on first use. A client
+      #   cannot be built without a region, so a context with no region fails
+      #   even though this module publishes and receives nothing today.
+      #   Credentials behave differently and are NOT needed to start, because
+      #   they are resolved on first call rather than at build time.
+      #
+      # Assumptions: no fallback, deliberately, and no region name appears in
+      #   this repository. AWS_REGION is the same variable the SDK's own
+      #   resolution chain consults first, so declaring it here changes nothing
+      #   about how a deployed task resolves its region; what it buys is a
+      #   failure that NAMES the missing variable instead of the chain's own
+      #   message, which reports an inability to reach the instance metadata
+      #   service and sends a reader looking for an EC2 problem a Fargate task
+      #   does not have.
+      #
+      # Trade-offs: a baked default such as a single hard-coded region would let
+      #   a JVM with no environment at all start, and is refused. The deployment
+      #   is single-region, so a default that disagreed with it would point every
+      #   queue operation at a region holding none of the queues, and the first
+      #   visible symptom would be a queue-not-found abort far from its cause.
+      region:
+        static: ${AWS_REGION}
+
+      sqs:
+
+        # Assumptions: this is the one setting whose DEFAULT is actively harmful
+        #   here, which is why it is declared rather than inherited. Verified
+        #   against the pinned spring-cloud-aws-sqs 4.1.0 rather than assumed:
+        #   io.awspring.cloud.sqs.listener.QueueNotFoundStrategy declares exactly
+        #   two constants, FAIL and CREATE, and the container options builder
+        #   defaults to CREATE. Left unset, a listener pointed at a queue that
+        #   does not exist CREATES one - and the queue it creates is not the queue
+        #   this system is designed around. infra/modules/sqs provisions each
+        #   queue with a dead-letter queue at a maxReceiveCount of 5 and SSE-KMS
+        #   encryption; an application-created queue has neither, so a poison
+        #   message loops instead of being parked and the payload sits unencrypted
+        #   at rest.
+        #
+        # Trade-offs: the accepted cost is that a developer running this service
+        #   against an empty local emulator must create the three queues first,
+        #   rather than having them appear. That is preferred to the alternative
+        #   failure, which is silent: with CREATE the service starts healthy
+        #   against queues nothing else publishes to, and the absence of traffic
+        #   looks like an idle system rather than a misconfigured one.
+        queue-not-found-strategy: fail
+
+        listener:
+
+          # Assumptions: five seconds is transcribed from the baseline, not
+          #   chosen. app/app-vsam-mq/cbl/COACCT01.cbl physical line 337 reads
+          #   "MOVE 5000 TO MQGMO-WAITINTERVAL", and physical lines 347 and 350
+          #   compute MQGMO-OPTIONS as MQGMO-SYNCPOINT + MQGMO-WAIT, so the wait
+          #   interval is the blocking receive the baseline actually performs.
+          #   5000 ms is WaitTimeSeconds=5 on the target, which preserves the
+          #   baseline's throughput characteristics instead of silently changing
+          #   them: a shorter poll bills more empty receives, and a longer one
+          #   lengthens the shutdown drain bounded above.
+          #
+          # Assumptions: poll-timeout is the property that carries this value,
+          #   and the name is not self-evident. Verified first-hand against the
+          #   pinned 4.1.0 artifacts rather than from documentation: the published
+          #   configuration metadata describes
+          #   spring.cloud.aws.sqs.listener.poll-timeout as "The maximum amount
+          #   of time for a poll to SQS", and
+          #   io.awspring.cloud.sqs.listener.source.AbstractSqsMessageSource
+          #   carries getPollTimeout together with waitTimeSeconds, which is the
+          #   ReceiveMessage parameter it becomes. The neighbouring
+          #   max-delay-between-polls is a different quantity - the pause between
+          #   consecutive polls - and setting that one instead would leave the
+          #   receive itself short-polling.
+          poll-timeout: 5s
+
+          # Assumptions: ten is the ReceiveMessage maximum the service accepts,
+          #   so this asks for the largest batch a single poll can return rather
+          #   than a tuned number. It stands in for the baseline's own batching
+          #   discipline: COACCT01 answers requests in a bounded loop rather than
+          #   one request per program invocation, and a full-batch receive keeps
+          #   that shape while spending one API call where ten would otherwise be
+          #   billed.
+          max-messages-per-poll: 10
+
+          # Trade-offs: this ceiling is deliberately equal to the batch size
+          #   above and no larger. Each in-flight inquiry occupies a database
+          #   connection from the pool sized below while it reads the account, the
+          #   customer and the cross-reference, so a concurrency ceiling above the
+          #   pool maximum would convert queue depth into connection-acquisition
+          #   waits and time out handlers that would otherwise have succeeded.
+          #   The accepted cost is that a deeper backlog drains at this rate
+          #   instead of faster.
+          max-concurrent-messages: 10
+
+
+
+  # -----------------------------------------------------------------------------
+  # Assumptions: (1) every value in this block arrives from outside the
+  #       repository - the Aurora writer endpoint, the role name and the
+  #       credential - and not one of them has a fallback; (2) the pool settings
+  #       below are the two profiles' first permitted axis of variation, so each
+  #       records what its own number costs rather than leaving a reader to infer
+  #       it from the default.
+  # -----------------------------------------------------------------------------
+  datasource:
+
+    # Trade-offs: none of the three values below has a fallback, so an unset
+    #   variable aborts startup with a named placeholder rather than producing a
+    #   running service. The alternative - a working default such as a localhost
+    #   connection string and a development credential - was rejected because a
+    #   default that resolves is a default that can be deployed by accident: a
+    #   task launched with a mis-typed variable name would silently fall back and
+    #   come up healthy against the wrong database, and nothing in the health
+    #   check or the logs would say so. Failing to start is loud, immediate and
+    #   attributable, and that is the compromise accepted here.
+    #
+    # Assumptions: these arrive as environment variables set by the container
+    #   task definition, which sources non-secret values from Systems Manager
+    #   Parameter Store and the credential from Secrets Manager, both populated
+    #   from Terraform module outputs. The credential itself is generated at apply
+    #   time by the hashicorp/random provider directly into Secrets Manager, so it
+    #   exists only there and never passes through this repository. Section 0.5.3.5
+    #   of the migration plan states the governing rule verbatim: "No service
+    #   hard-codes an endpoint."
+    #
+    # Assumptions: the ${...} form survives the build untouched, and that is not
+    #   incidental. spring-boot-starter-parent puts every application*.yml under
+    #   src/main/resources through resource filtering, but it also sets
+    #   resource.delimiter to @ and turns useDefaultDelimiters off, so Maven
+    #   substitutes only @...@ here and leaves ${...} for Spring to resolve at run
+    #   time. Writing these in the @SPRING_DATASOURCE_URL@ form instead would
+    #   resolve them during packaging and freeze a build-machine value into the
+    #   image, which is the failure this note exists to prevent.
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+    # Refactoring Rationale: the three characteristics this block declares - how
+    #   many concurrent readers there may be, what isolation a read gets, and what
+    #   is recoverable afterwards - were previously declared per file in a
+    #   region-wide resource definition, at app/csd/CARDDEMO.CSD:1-11 for ACCTDAT,
+    #   :37-48 for CCXREF, :50-61 for CUSTDAT and :63-74 for CXACAIX. The programs
+    #   that depended on those settings could neither see them nor ship with them,
+    #   so a program and the file characteristics it assumed were versioned and
+    #   deployed separately. Declaring them here puts them in the same deployable
+    #   as the code that depends on them, so a change to either travels with the
+    #   other and a task cannot run against characteristics it was not built for.
+    #
+    #   This is a difference in where the declaration lives, not a judgement about
+    #   the baseline: a region-wide definition is the right shape when many
+    #   programs share one CICS region, and it has no equivalent in a per-service
+    #   container that owns its own connections.
+    hikari:
+
+      # Assumptions: Hikari publishes its pool metrics and names its own threads
+      #   using this string. Left unset the pool is called HikariPool-1, which is
+      #   what every other pooled service would also be called, so a shared
+      #   metrics view could not tell one service's saturated pool from another's.
+      pool-name: account-service-pool
+
+      # Assumptions: there is no baseline number to preserve here, and that is
+      #   worth stating because most values in this file are derived from one. All
+      #   four files this context replaces were defined with STRINGS(1) -
+      #   app/csd/CARDDEMO.CSD:4 for ACCTDAT, :41 for CCXREF, :54 for CUSTDAT and
+      #   :67 for CXACAIX - so the baseline platform served each of them through
+      #   exactly one string and its concurrency ceiling was one. Concurrent pooled
+      #   access is a capability the relational engine provides and the
+      #   indexed-file platform did not, so pool sizing is a new degree of freedom
+      #   the migration introduces, not a tunable carried across.
+      #
+      # Trade-offs: the number below is a starting point that the two profiles
+      #   vary along the permitted sizing axis, and it is deliberately small. The
+      #   quantity that has to fit the cluster's connection budget is not this
+      #   number but the product of it with the task count and with every other
+      #   service doing the same, so raising it in one service silently spends a
+      #   shared allowance. The accepted cost is that a burst beyond this many
+      #   concurrent database operations waits for a connection instead of opening
+      #   one.
+      maximum-pool-size: 10
+
+      # Trade-offs: keeping a floor of idle connections means the first request
+      #   after a quiet period does not pay connection establishment and the TLS
+      #   handshake inside the request. The accepted cost is that those
+      #   connections are held while nothing is using them, which in an
+      #   environment configured to release database capacity when idle keeps a
+      #   small amount of it awake. The floor is therefore two rather than the pool
+      #   maximum.
+      minimum-idle: 2
+
+      # Trade-offs: ten seconds rather than the thirty-second default. The
+      #   specific consequence of the default is a cascade: during pool exhaustion
+      #   each waiting request occupies its servlet thread for thirty seconds, the
+      #   thread pool saturates, the health endpoint is served by that same pool
+      #   and stops answering, the load balancer deregisters the task, and a
+      #   database slowdown has become a task replacement loop. A shorter wait
+      #   fails the individual request and leaves the task answerable. The accepted
+      #   cost is that a genuinely slow but recovering database sheds requests it
+      #   would eventually have served.
+      connection-timeout: 10000
+
+      # Assumptions: five minutes bounds how long an unused connection is held.
+      #   It exists for the same reason the idle floor above is two rather than
+      #   ten: a pool that grew during a burst and never shrank would keep database
+      #   capacity awake for the rest of the task's life.
+      idle-timeout: 300000
+
+      # Assumptions: a connection must be retired by the pool before anything
+      #   between the pool and the engine retires it. If an idle-connection reaper
+      #   closes a socket the pool still believes is good, the pool hands that
+      #   socket to a caller and the first statement on it fails with a broken-pipe
+      #   error that reads like an application defect rather than an infrastructure
+      #   timeout. Fifteen minutes sits below the reaping windows these connections
+      #   pass through.
+      max-lifetime: 900000
+
+      # Assumptions: read committed is pinned here rather than inherited from the
+      #   engine default, so a change to that default cannot move this service's
+      #   isolation level without a change to this file. The baseline read all four
+      #   of its files with READINTEG(UNCOMMITTED) - app/csd/CARDDEMO.CSD:3, :40,
+      #   :53 and :66 - and defined them RECOVERY(NONE) at :9, :46, :59 and :72
+      #   with JOURNAL(NO) at :7, :44, :57 and :70, so reads could observe
+      #   uncommitted changes and nothing was logged for recovery.
+      #   Committed-read isolation, encryption at rest and automated backups are
+      #   capabilities the relational engine provides that the indexed-file
+      #   platform did not; the baseline behaves one way, this service behaves the
+      #   other, and the divergence is recorded in
+      #   docs/architecture/cobol-to-service-traceability.md.
+      #
+      # Assumptions: committed-read is also what makes the optimistic-locking
+      #   check this context depends on meaningful rather than decorative.
+      #   app/cbl/COACTUPC.cbl already performs that check by hand: it snapshots
+      #   the pre-edit record into ACUP-OLD-DETAILS at physical line 669, carries
+      #   WS-DATACHANGED-FLAG declared at line 168 with its 88-level
+      #   DATA-WAS-CHANGED-BEFORE-UPDATE at line 521, and issues SYNCPOINT
+      #   ROLLBACK at line 4100 when the rewrite finds the record changed. Here
+      #   that becomes a JPA version column, and the 409 Conflict it produces comes
+      #   from common-lib's GlobalExceptionHandler rather than from this module.
+      transaction-isolation: TRANSACTION_READ_COMMITTED
+
+      # Assumptions: app/cpy/CVACT01Y.cpy, app/cpy/CVCUS01Y.cpy and
+      #   app/cpy/CVACT03Y.cpy are the three records this bounded context owns, so
+      #   account is its single schema and holds exactly three tables. Cross-schema
+      #   access is not part of this service's contract. The concrete consequence
+      #   of pinning the search path is that an unqualified table name in a query
+      #   or a migration cannot silently resolve into another bounded context's
+      #   schema; it either finds the object in account or it fails.
+      #
+      # Alternatives Considered: appending currentSchema=account to the JDBC URL,
+      #   which is the more usual way to do this. It is not available here because
+      #   the URL is an opaque placeholder in this file - appending a parameter
+      #   would mean either splitting the URL into parts this file assembles, or
+      #   requiring whoever sets the variable to remember the parameter, and the
+      #   second of those fails silently when forgotten. Pool initialisation SQL
+      #   keeps the pin in the file that asserts it.
+      #
+      # Assumptions: this runs safely even before the schema's tables exist.
+      #   PostgreSQL does not validate schema names when the search path is set,
+      #   resolving them lazily instead, so the statement succeeds and Flyway then
+      #   applies its migration. It does NOT excuse a missing schema: create-schemas
+      #   below is false, so a database on which the bootstrap DDL never ran fails
+      #   at the migration rather than here, and the message names the absent
+      #   schema.
+      connection-init-sql: "SET search_path TO account"
+
+      # WHY : Assumptions: the URL above arrives from the platform as an opaque
+      #   string, so this file cannot inspect it and cannot rely on it carrying any
+      #   TLS parameter. Driver properties set here are handed to the driver
+      #   alongside the URL, so a URL with no ssl parameter still negotiates on
+      #   these terms. Stating them here is the only way this file can REQUIRE
+      #   verified encryption rather than hope for it, and it matters more for this
+      #   context than most: the rows behind this pool carry the encrypted national
+      #   identifier and government-issued identifier columns derived from
+      #   app/cpy/CVCUS01Y.cpy, together with every cardholder's postal address.
+      # WHY : Assumptions: verify-full is the strongest mode the driver offers and
+      #   the only one that closes the whole gap. `require` encrypts and accepts
+      #   ANY certificate, so it defeats a passive listener but not an active one;
+      #   `verify-ca` checks the chain but not the host name, so a valid
+      #   certificate issued for a different host is accepted. Only verify-full
+      #   checks both, which is what makes the endpoint reached the endpoint the
+      #   credential was issued for.
+      # WHY : Assumptions: this is the CLIENT half of a two-sided requirement. The
+      #   cluster parameter group sets rds.force_ssl, so the server refuses an
+      #   unencrypted connection outright. Neither half is redundant: without the
+      #   server flag a misconfigured client could downgrade, and without these
+      #   properties a forced-TLS server would still accept a connection that
+      #   verified no certificate at all.
+      # WHY : Assumptions: verify-full needs a trust anchor, and this driver has no
+      #   option to fall back to the JVM trust store, so the bundle path is
+      #   explicit. The default names where the service image places the managed
+      #   certificate bundle; an environment holding it elsewhere overrides the
+      #   variable rather than editing this file. A missing bundle fails the
+      #   connection with a message naming the file, which is correct: connecting
+      #   with no trust anchor is precisely what this setting prevents.
+      data-source-properties:
+        sslmode: verify-full
+        sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
+
+  # -----------------------------------------------------------------------------
+  # Assumptions: (1) this module maps three entities onto three tables in one
+  #       schema, so the settings here are about boundaries rather than about
+  #       mapping breadth; (2) the DDL decision is the load-bearing one and is
+  #       recorded on ddl-auto below.
+  # -----------------------------------------------------------------------------
+  jpa:
+
+    hibernate:
+
+      # Alternatives Considered: letting Hibernate generate the schema, with
+      #   ddl-auto set to update or to create. Evaluated and rejected, because
+      #   three characteristics these tables genuinely need cannot be derived from
+      #   a JPA entity, and all three come from the REFERENCE ONLY baseline rather
+      #   than from taste.
+      #
+      #   First, two columns are stored encrypted as BYTEA and returned masked -
+      #   the national identifier and the government-issued identifier declared in
+      #   app/cpy/CVCUS01Y.cpy - and an entity attribute cannot express "encrypted
+      #   at rest, masked on the way out"; the migration and the mapper together
+      #   do. Second, card_xref carries idx_card_xref_account_id, the secondary
+      #   index that replaces the CXACAIX alternate index defined at
+      #   app/csd/CARDDEMO.CSD:63-74 and described there as ALTERNATE INDEX TO
+      #   CCXREF VIA ACCOUNT KEY; a generated schema would create the table
+      #   without it and every lookup by account would degrade to a scan that
+      #   still returned the right answer, so nothing would fail and the loss
+      #   would show up only as latency. Third, the fixed widths and decimal
+      #   scales are the contract - the account balance columns are NUMERIC(12,2)
+      #   because app/cpy/CVACT01Y.cpy declares PIC S9(10)V99 - and a generated
+      #   column would be whatever the provider inferred from the Java type.
+      #
+      # Assumptions: `none` rather than `validate` in the base profile. Validation
+      #   is the right setting where a migration has just run and the mappings
+      #   should be checked against it, which is exactly what the test profile
+      #   does; in a deployed task the migration has already been gated, and a
+      #   validation failure there would abort a task that a deployment pipeline
+      #   had already accepted. The migration itself is db/migration/V1__account.sql,
+      #   authored at a later index of the same plan, so today this key describes
+      #   which component will own the DDL rather than DDL that has been applied.
+      ddl-auto: none
+
+    # Trade-offs: Spring Boot leaves this true by default, which binds the
+    #   EntityManager - and with it a pooled connection - from the moment the
+    #   controller is entered until the response has been written. The specific
+    #   consequence is that connections are held during response serialisation,
+    #   which needs no database at all, so the pool exhausts at a concurrency well
+    #   below maximum-pool-size and the symptom appears as connection-timeout
+    #   errors under load that no slow query explains. Setting it false confines
+    #   connection use to the transactional service methods. The accepted cost is
+    #   that a lazily-mapped association touched after the service method returns
+    #   raises LazyInitializationException instead of quietly issuing another
+    #   query, which is the correct place for that mistake to surface.
+    open-in-view: false
+
+    # Assumptions: statement echo is off in the base configuration and is one of
+    #   the two diagnostics the dev overlay may raise. It writes to standard
+    #   output rather than through a logger, so it cannot be narrowed by a level
+    #   once enabled - which is why the decision belongs in a profile rather than
+    #   being left to a logging change.
+    show-sql: false
+
+    properties:
+      hibernate:
+        # Assumptions: this is the same schema the pool's initialisation SQL pins
+        #   and the same one Flyway migrates into, declared a third time because
+        #   Hibernate qualifies generated SQL from its own setting rather than from
+        #   the connection's search path. Leaving it unset would work only for as
+        #   long as the search path happens to agree, so the two are stated
+        #   together rather than one being inferred from the other.
+        default_schema: account
+
+  # -----------------------------------------------------------------------------
+  # Assumptions: (1) schema ownership and code ownership ship in the same
+  #       deployable, so the three tables and the entities that map them cannot be
+  #       applied out of step; (2) three of the settings below - create-schemas,
+  #       baseline-on-migrate and clean-disabled - decide what happens when the
+  #       schema is not in the state expected, and none of them papers over it, so
+  #       each records its own consequence rather than leaving a reader to infer it
+  #       from the default.
+  # -----------------------------------------------------------------------------
+  flyway:
+
+    # Assumptions: migration runs in-process at startup, before the JPA
+    #   EntityManagerFactory is built, so the tables exist by the time anything
+    #   maps them. The alternative of applying migrations from a separate step
+    #   would let a task start against a schema its own code predates.
+    enabled: true
+
+    # Assumptions: this is Flyway's own default and is declared rather than
+    #   inherited, so the directory holding this module's DDL is visible in the
+    #   same block that turns Hibernate's off. The path resolves inside the jar,
+    #   which is what makes the migration travel with the code that maps it: a task
+    #   cannot apply a migration from a different build than the one it is running.
+    locations: classpath:db/migration
+
+    # Assumptions: account is the only schema this module touches, and it holds
+    #   exactly three tables, because app/cpy/CVACT01Y.cpy, app/cpy/CVCUS01Y.cpy
+    #   and app/cpy/CVACT03Y.cpy are the only records this bounded context owns.
+    #   The two settings below therefore name the same schema while doing
+    #   different jobs, and both are stated rather than one being left to follow
+    #   the other: the first is the set Flyway is permitted to manage, and the
+    #   second is where it places its history table and how it resolves an
+    #   unqualified object name inside a migration. Naming the second explicitly is
+    #   what keeps each service's migration state in its own schema, so one
+    #   service's history cannot be truncated by another's.
+    schemas: account
+    default-schema: account
+
+    # Assumptions: data-migration/sql/V0__schemas_and_roles.sql is the EXCLUSIVE
+    #   authority for schemas, roles and grants in this system. It creates the
+    #   account schema owned by carddemo_account at its L502-L503, together with
+    #   the eight login roles, the NOLOGIN owner of the reporting schema, the
+    #   credential binding for every role, and the whole cross-schema privilege
+    #   graph - including the narrowly-scoped write grants that let batch-service
+    #   post a transaction and update an account in one commit. Its completion is a
+    #   deployment precondition of this service rather than something this service
+    #   can substitute for, so this flag is false: Flyway may migrate the account
+    #   schema and may not create it.
+    #
+    # Trade-offs: the cost is that a bare database, including one started by
+    #   Testcontainers for a repository integration test, now needs its schema
+    #   created before this service can migrate. The test profile supplies that for
+    #   itself, which is a visible act in a reviewable test resource rather than a
+    #   production default that conceals a missing precondition. The alternative of
+    #   making this module's own migration create what it needs was rejected
+    #   outright: it would put CREATE ROLE and GRANT statements into
+    #   V1__account.sql - privileged, cluster-wide statements in a per-service
+    #   migration, which is exactly the coupling schema-per-service exists to
+    #   avoid.
+    create-schemas: false
+
+    # Assumptions: false is stated explicitly rather than left to the default,
+    #   because the failure it prevents is silent. Were it true, an account schema
+    #   that already held objects but no Flyway history table would be marked as
+    #   already-migrated and V1__account.sql would never run, so a table missing
+    #   the version column, or carrying VARCHAR where CHAR(16) is required, would
+    #   pass startup unnoticed and only diverge later, under load, in comparisons.
+    #   With it false that situation aborts startup and names itself.
+    baseline-on-migrate: false
+
+    # Assumptions: Flyway's own default already disables clean, and it is restated
+    #   here so that no profile, environment variable or configuration import can
+    #   enable it without an edit to this file. The operation drops every object in
+    #   the managed schema; in this context that is the account master, the
+    #   customer master and the cross-reference in one statement, and there is no
+    #   confirmation step between the call and the drop.
+    clean-disabled: true
+
+
+  # -----------------------------------------------------------------------------
+  # Refactoring Rationale: (1) identity is asserted by a signed token rather than
+  #       by a field the client sends, which is the whole point of the change
+  #       recorded below; (2) only the issuer is configured here - which routes
+  #       require which authority is code, and lives in config/SecurityConfig.java.
+  # -----------------------------------------------------------------------------
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+
+          # Refactoring Rationale: the baseline carried identity in storage the
+          #   client echoed back. app/cpy/COCOM01Y.cpy L19-L44 declares
+          #   CDEMO-USER-ID PIC X(8) and CDEMO-USER-TYPE PIC X(1) inside the
+          #   COMMAREA that every online program passes to the terminal and
+          #   receives again on the next turn, so a client could in principle
+          #   assert its own user type. Here the group claim is signed by the
+          #   issuer named below and the client cannot assert anything. That is a
+          #   security improvement rather than a port, and it is recorded as such
+          #   in docs/architecture/security-and-identity.md.
+          #
+          # Assumptions: common-lib's JwtRoleConverter maps the cognito:groups
+          #   claim onto Spring Security authorities. This file supplies the issuer
+          #   and nothing else; the route-to-authority mapping is code, not
+          #   configuration, and lives in config/SecurityConfig.java. That class
+          #   guards every account, customer and cross-reference route behind
+          #   authentication and declares no admin-only route, because
+          #   app/cbl/COMEN01C.cbl reaches the account view and update
+          #   transactions from the ordinary user menu rather than from the
+          #   administrative one.
+          #
+          # Trade-offs: no fallback, for the same reason given on the datasource
+          #   above. A default issuer that resolved would produce a service that
+          #   validates tokens against the wrong authority, which is worse than one
+          #   that does not start, because it looks like it is working.
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+
+
+# -----------------------------------------------------------------------------
+# Trade-offs: (1) the health path is a deployment contract and is documented as
+#       one, not as a convenience; (2) the surface is kept to three endpoints
+#       because exposing an endpoint here is what makes it EXIST, and an endpoint
+#       that exists is one more thing reachable from inside the private network.
+#       Whether it answers without a token is a separate decision made in
+#       config/SecurityConfig.java, which opens /actuator/health/** alone and
+#       leaves info and the scrape path behind the filter chain -- so the list
+#       below and that class are two independent narrowings of the same surface,
+#       and neither substitutes for the other.
+# -----------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+
+      # Assumptions: two components consume GET /actuator/health at exactly this
+      #   path, and neither of them can present a token. The load balancer target
+      #   group polls it to decide whether a task receives traffic, and the
+      #   HEALTHCHECK instruction in services/account-service/Dockerfile polls it
+      #   to decide whether the container is alive. The endpoint is safe to leave
+      #   unauthenticated because it exposes no business data - show-details and
+      #   show-components below are both set to never, so the response body is a
+      #   status word and nothing else.
+      #
+      #   Moving this path, or requiring a token on it, breaks load-balancer
+      #   registration and container liveness together and in the same deployment:
+      #   the task would come up, answer nothing the balancer accepted, be
+      #   deregistered, and be replaced. Authorization for every other route is
+      #   implemented in config/SecurityConfig.java, not here.
+      base-path: /actuator
+
+      exposure:
+
+        # Trade-offs: three endpoints rather than the single default, and
+        #   deliberately not the wildcard. health is the deployment contract above;
+        #   info identifies which build a task is running, which is what makes a
+        #   report of a defect attributable to a version; prometheus is the scrape
+        #   path, and without it the dashboards and alarms the Terraform
+        #   observability module provisions have nothing to read and report healthy
+        #   silence rather than an error. The accepted cost of naming three is that
+        #   adding a fourth needs an edit here or an override through the exposure
+        #   variable; the wildcard was rejected because it would also publish heap
+        #   dumps, the environment listing and the mappings, none of which anything
+        #   polls and all of which describe the service to anything that reaches
+        #   the port.
+        include: health,info,prometheus
+
+  endpoint:
+    health:
+
+      # Assumptions: this key does NOT create /actuator/health/liveness or
+      #   /actuator/health/readiness. Spring Boot 4.1.0 publishes both group paths
+      #   regardless of its value - measured, not assumed, by running one service
+      #   image three times with the property unset, explicitly false and
+      #   explicitly true, and probing both paths in each case: all three answered
+      #   200 on both. What the key declares is that those groups are backed by
+      #   the application-availability state rather than left as an empty group,
+      #   so a future orchestrator check can distinguish "started but not ready"
+      #   from "failed". The aggregate at /actuator/health remains the path the two
+      #   consumers above use, and none of this changes what the aggregate reports.
+      # Refactoring Rationale: this rationale previously said that enabling the
+      #   groups "adds" the two paths alongside the aggregate. That reads as a
+      #   statement about reachability, and it is false on this Boot version - a
+      #   reader sizing an ingress rule or a probe configuration from it would
+      #   conclude the two paths are absent unless this key is set, when they are
+      #   in fact reachable either way. The key is retained rather than deleted
+      #   because it still expresses the intended backing for the groups and
+      #   because the three sibling web contexts declare it identically; a no-op
+      #   deletion here would make this module differ from them for a reason no
+      #   reader of one file could see.
+      probes:
+        enabled: true
+
+      # Assumptions: both settings below are narrowed so the response body is a
+      #   status word and nothing else, which is the property the unauthenticated
+      #   health path above depends on. They suppress two different things and so
+      #   are both stated: the first withholds each contributor's own detail, and
+      #   the second withholds the list of which contributors are registered at
+      #   all. Either one left open would let an endpoint reachable from inside the
+      #   network describe this service's dependencies - for this module the
+      #   database, its validation query and the SQS client - to anything that
+      #   reached the port. Widening either is one of the four permitted profile
+      #   axes; the base value is the narrow one so that widening is always a
+      #   deliberate act.
+      show-details: never
+      show-components: never
+
+# -----------------------------------------------------------------------------
+# Assumptions: (1) the served document has to agree with a hand-authored
+#       contract, so the settings below are chosen to make disagreement visible;
+#       (2) the version is pinned rather than inherited for the reason recorded on
+#       it.
+# -----------------------------------------------------------------------------
+springdoc:
+
+  # Assumptions: services/account-service/src/main/resources/openapi/account-api.yaml
+  #   is to be the hand-authored OpenAPI 3.1 contract of record for this service,
+  #   and ui/src/api/accounts.ts is to be written against it. The document
+  #   springdoc generates from the controllers is therefore not a second source of
+  #   truth - it is a check on the first. The two must agree, and any difference
+  #   between them is a bug in whichever side drifted, not a formatting artifact
+  #   to be tolerated. Neither that contract nor the controllers a generated
+  #   document would come from exists at this checkpoint; each is authored at a
+  #   later index of the same plan, so the keys below settle where the contract
+  #   will be published rather than describing a document served today.
+  api-docs:
+
+    # Assumptions: stated explicitly because the library's two defaults for this
+    #   setting disagree. Its autoconfiguration is conditional on the property with
+    #   match-if-missing, so an absent property leaves the endpoint served; but the
+    #   backing properties object declares the field as a plain boolean with no
+    #   initialiser, so anything reading that object while the property is absent is
+    #   told the document is disabled. Setting it true makes the two agree, which is
+    #   why the line is here rather than left to the default.
+    enabled: true
+
+    # Assumptions: this is the library's default path, pinned so that the path
+    #   that ui/src/api/accounts.ts and any contract comparison will fetch cannot
+    #   move under a library upgrade. A moved path does not fail a build; it
+    #   returns 404 to whatever was fetching the document.
+    path: /v3/api-docs
+
+    # Assumptions: pinned rather than inherited. This release already defaults to
+    #   the 3.1 form, so the line changes nothing today; it is here because the
+    #   contract of record is 3.1 and a future default reverting to 3.0 would serve
+    #   a document in a different specification version than the file it is checked
+    #   against, and the resulting mismatch would be reported as contract drift
+    #   when it was really a library default moving underneath.
+    version: openapi_3_1
+
+  # Assumptions: also the library's default, pinned for the same reason as the
+  #   document path above. This page is a human entry point only - nothing
+  #   automated depends on it - so it is declared and left at one value rather than
+  #   being varied per environment, which would put it outside the four permitted
+  #   axes recorded in the closing block.
+  swagger-ui:
+    path: /swagger-ui.html
+
+  # Trade-offs: sorting the generated document's keys costs a little serialisation
+  #   work on each request for it, and buys a document that is diffable. Without it
+  #   the key order follows reflection order, which can change between builds for
+  #   reasons that have nothing to do with the API, so a diff against
+  #   account-api.yaml would report noise and the drift check that comparison
+  #   exists to perform would stop being trusted.
+  writer-with-order-by-keys: true
+
+# -----------------------------------------------------------------------------
+# Trade-offs: (1) these are the floor, and adjusting them is the first of the four
+#       axes the two profiles may vary; (2) two of the five exist to keep
+#       cardholder and customer data out of log storage, which is recorded on them
+#       individually rather than asserted here.
+# -----------------------------------------------------------------------------
+logging:
+  level:
+
+    # Trade-offs: info rather than debug for both of the levels below. Debug at the
+    #   root emits framework internals on every request, and debug on this module's
+    #   own package emits the validation chain transcribed from
+    #   app/cbl/COACTUPC.cbl on every field of every update - and that program
+    #   validates 128 screen fields. The accepted cost of not having either by
+    #   default is that reproducing a problem at that depth needs a profile change;
+    #   the cost of having them would be paid on every request in every
+    #   environment, including production.
+    #
+    # Assumptions: the second entry is the package root every class in this module
+    #   sits under, so one level governs the whole context. It is stated separately
+    #   from the root level because the two are raised for different reasons and a
+    #   profile commonly raises one without the other.
+    root: INFO
+    com.carddemo: INFO
+
+    # Assumptions: Flyway announces at info level which migration it applied and
+    #   which it skipped. That line is the only durable record that
+    #   V1__account.sql ran against a given task's database, so raising this to
+    #   warn would remove the evidence needed to answer whether a schema is
+    #   current.
+    org.flywaydb: INFO
+
+    # Assumptions: the SQS listener container's own package is declared here, at
+    #   warn, so that the two profiles have a key to override rather than a key to
+    #   introduce - the closing block's contract is that a profile varies values
+    #   and never the shape, and a logger the base did not name would breach it.
+    #   Warn is the right floor: at warn a genuine visibility or acknowledgement
+    #   fault is reported and routine polling is not, and routine polling here is
+    #   one receive every five seconds for the lifetime of every task.
+    #
+    # Assumptions: this level is live today even though
+    #   service/InquiryMessageListener.java is authored at a later index. The SQS
+    #   client bean is built as the context is constructed, for the reason recorded
+    #   on spring.cloud.aws.region, so a client that cannot resolve its region
+    #   reports through this logger from the first run.
+    io.awspring.cloud.sqs: WARN
+
+    # Assumptions: statement logging is off in the base configuration because this
+    #   service's statements carry account and customer identifiers in their
+    #   predicates, and its parameter binding carries the plaintext side of the
+    #   masked identifier columns as bound values. Turning either on ships that
+    #   material into log storage, where the masking applied at the API edge by
+    #   common-lib's GlobalExceptionHandler and by this module's mapper does not
+    #   reach. The dev profile may raise the statement logger; neither profile may
+    #   raise the bind logger, and the reason it must not is this one rather than
+    #   log volume.
+    org.hibernate.SQL: WARN
+    org.hibernate.orm.jdbc.bind: WARN
+
+# -----------------------------------------------------------------------------
+# Alternatives Considered: (1) each key below is either a security control the
+#       framework publishes no key for, or a queue name the baseline itself took
+#       from configuration rather than from code, so both are declared here instead
+#       of being written into a service class; (2) they live under a single
+#       carddemo namespace so that everything non-standard in this module is
+#       findable in one place.
+# -----------------------------------------------------------------------------
+carddemo:
+
+  # WHY : (1) Assumptions: validating the issuer is not validating the token. The
+  #       issuer-uri above makes the filter chain verify the signature, the issuer
+  #       and the time claims, and that is where its guarantees end. One user pool
+  #       mints TWO token kinds from the same signing key: an access token, whose
+  #       token_use claim is `access`, and an identity token, whose token_use claim
+  #       is `id`. Both are validly signed by the configured issuer, so without the
+  #       check below an identity token - meant to describe a user to a client,
+  #       never to authorize an API call - would be accepted as authorization here.
+  #       It is also the token a browser is most likely to have to hand, which is
+  #       what makes the gap reachable rather than theoretical. On this service
+  #       specifically the consequence is concrete: the update route rewrites the
+  #       account master, and the customer route returns a postal address and a
+  #       masked national identifier.
+  #       (2) Assumptions: one pool can hold more than one app client, and a token
+  #       minted for a different client of this pool carries this pool's issuer.
+  #       Binding the accepted client id closes that.
+  #       (3) Alternatives Considered: expressing this through the framework's own
+  #       spring.security.oauth2.resourceserver.jwt.audiences key, which is the
+  #       obvious declarative route and is wrong here. A Cognito ACCESS token
+  #       carries no aud claim at all - the client id travels in client_id instead -
+  #       so an audience validator would reject every access token the sign-on flow
+  #       issues while accepting the identity tokens this block exists to refuse. It
+  #       would invert the control.
+  #       (4) Assumptions: these keys are read by config/SecurityConfig.java, which
+  #       installs common-lib's CognitoAccessTokenValidator behind the framework's
+  #       own default validator and ahead of the group mapping, so a token failing
+  #       any of the three never reaches JwtRoleConverter and no authority is
+  #       derived from it. common-lib's security package owns the group mapping
+  #       alone and explicitly no token validation, so the validator belongs to each
+  #       service; the property shape is identical in every service so the seven
+  #       web filter chains cannot diverge in what they accept.
+  #       (5) Trade-offs: required-scope names the scope the pool grants to a token
+  #       obtained through its authentication API rather than a custom
+  #       resource-server scope. Custom scopes are granted only through the OAuth
+  #       flows this design does not use, so requiring one would reject every token
+  #       the sign-on flow can produce. What the value still buys is decisive: an
+  #       identity token carries no scope claim whatsoever, so requiring any scope
+  #       at all is a second, independent rejection of the wrong token kind, and it
+  #       is the same claim the API Gateway route authorization scopes assert at the
+  #       edge, so edge and service agree rather than each guessing.
+  security:
+    jwt:
+      expected-token-use: access
+      expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
+      required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are declared here, in the same shape
+    #       every other context declares them, and are read by
+    #       config/SecurityConfig.java -- which hands them to the shared
+    #       JwtRoleConverter. The converter compares each against its own compiled
+    #       constant and refuses to start on a mismatch, so this pair is what turns
+    #       a user pool whose groups were renamed into a startup failure instead of
+    #       a service that authenticates every request and authorizes none.
+    #       Trade-offs: the fallbacks are the two names infra/modules/cognito fixes
+    #       as non-overridable, so a local run needs no environment at all, while a
+    #       deployment that renames a group sets the variables and fails fast if the
+    #       new name and the compiled constant disagree. A no-default form was
+    #       considered and rejected here specifically: unlike the client id, which
+    #       is deployment-specific and must never be guessed, these two names are
+    #       part of the application's own authorization vocabulary and a wrong value
+    #       is caught by the converter rather than being silently accepted.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
+
+  account:
+    inquiry:
+      # WHY : (1) Assumptions: all three names arrive from the environment and none
+      #       is written here, and the reason is drawn from the baseline rather than
+      #       from a general preference. app/app-vsam-mq/cbl/COACCT01.cbl declares
+      #       01 QUEUE-INFO. at physical line 92, holding four PIC X(48) queue-name
+      #       fields at physical lines 93 to 96, and every one of them is
+      #       initialised VALUE SPACES and filled at run time. The baseline already
+      #       treats a queue name as configuration rather than as code, so writing
+      #       one here would be LESS faithful to it, not more.
+      #       (2) Assumptions: the baseline's names cannot survive as written in any
+      #       case. SQS permits only alphanumerics, hyphens and underscores in a
+      #       queue name, with a dot appearing solely as the ".fifo" suffix, so a
+      #       dotted uppercase name of the CARD.DEMO.* form is not a legal SQS queue
+      #       name. The target names are carddemo-inquiry-request-<env>,
+      #       carddemo-inquiry-reply-<env> and carddemo-error-<env>, they carry an
+      #       environment suffix this file cannot know, and the renaming is recorded
+      #       in docs/architecture/messaging-contracts.md.
+      #       (3) Alternatives Considered: FIFO queues, as the authorization flow
+      #       uses. Rejected because account inquiry has no ordering requirement -
+      #       each inquiry is independent and its reply is routed by correlation
+      #       rather than by position. The authorization flow needs FIFO with a
+      #       message group derived from the card number because authorizations for
+      #       one card must be applied in order; imposing the same here would
+      #       serialise independent inquiries behind one another and cap throughput
+      #       to no purpose. These three are standard queues, each with a
+      #       dead-letter queue at a maxReceiveCount of 5 and SSE-KMS, provisioned
+      #       by infra/modules/sqs.
+      #       (4) Assumptions: delete-on-success acknowledgement plus the queue's
+      #       visibility timeout is the whole of the delivery contract for this
+      #       flow, and NO transactional outbox is needed. COACCT01 reads and
+      #       replies inside one unit of work - physical line 347 computes
+      #       MQGMO-OPTIONS as MQGMO-SYNCPOINT and physical line 475 computes
+      #       MQPMO-OPTIONS as MQPMO-SYNCPOINT - so there is no window in which the
+      #       work is committed and the reply is lost. That is the opposite of the
+      #       authorization consumer, which reads and publishes with
+      #       MQGMO-NO-SYNCPOINT and MQPMO-NO-SYNCPOINT at
+      #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L389 and L753 and
+      #       therefore does need an outbox to close that window. Reading the two
+      #       flows as one discipline would either add machinery this service has no
+      #       need of or drop machinery that service cannot do without.
+      #       (5) Assumptions: NO bean in this module binds these three keys at this
+      #       checkpoint. The module's compiled surface is AccountApplication, this
+      #       package's SecurityConfig and AddressValidationService, and none of them
+      #       reads carddemo.account.inquiry.*; the keys are declared here so that a
+      #       listener bean CAN resolve its annotation once InquiryMessageListener is
+      #       authored, which is the class the service package charter names as the
+      #       carrier of the asynchronous inquiry flow. Stating that plainly matters
+      #       because the three values below are the only fallback-free placeholders
+      #       in this file that do NOT abort startup when unset: a placeholder read
+      #       through @Value is resolved with resolveRequiredPlaceholders and raises,
+      #       whereas an unbound key is never resolved at all. A reader who assumed a
+      #       consumer existed would therefore expect a missing variable to fail fast
+      #       here, and would size the deployment's required-variable list wrongly in
+      #       both directions - treating these as optional once a listener lands, or
+      #       hunting a startup failure that cannot occur before it does.
+      request-queue: ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE}
+      reply-queue: ${CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE}
+      error-queue: ${CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE}
+
+# =============================================================================
+# Closing notes
+# -----------------------------------------------------------------------------
+# Alternatives Considered: setting management.metrics.tags.service,
+#   management.metrics.tags.environment and management.metrics.tags.version here.
+#   Those keys exist and would work - they were checked against this Spring Boot
+#   release rather than assumed - so their absence is a decision and not an
+#   omission. It was rejected because common-lib's MetricsConfig already
+#   contributes exactly those three common tags for every service, and declaring
+#   them again here would give one tag set two sources. The specific consequence
+#   of that duplication is that this module's tag values could drift from its
+#   siblings' after a single-file edit, and a dashboard grouping by service would
+#   then show one deployable as two series while an alarm aggregating over the tag
+#   would quietly stop covering it. What this file contributes to the tag set
+#   instead is the inputs: spring.application.name above supplies the service
+#   value, the imported shared defaults supply the environment and version values,
+#   and the prometheus endpoint in the exposure list keeps the surface those tags
+#   decorate reachable.
+#
+# Assumptions: this base file owns the common SHAPES - the listener, the
+#   datasource, the pool, Flyway, JPA, the resource server, the SQS client, the
+#   actuator, the served contract and the log levels - and application-dev.yml and
+#   application-prod.yml override VALUES only. That is a contract, because both
+#   profile files are written against it, so it is stated here rather than left as
+#   a convention.
+#
+#   Four axes of variation are permitted, and only four: log levels; Hikari
+#   connection-pool sizing, including the acquisition timeout a pausing dev
+#   cluster needs; the breadth of the actuator health detail; and the statement
+#   echo flag spring.jpa.show-sql. Nothing else may differ between the two.
+#
+#   Six axes are forbidden outright: service topology, route structure, schema
+#   ownership, identity mechanism, use of a message transport, and datastore type.
+#   A profile that changed any of those would no longer be the same service
+#   configured differently.
+#
+#   The concrete consequence of holding the shapes invariant is diagnostic:
+#   because dev and prod differ only in those four values, a defect reproduced in
+#   dev is reproducible in prod, and a failure seen only in prod is attributable
+#   to data or to capacity rather than to configuration drift. Without the
+#   invariant, every prod-only failure would first have to be cleared of being a
+#   configuration difference before it could be investigated as anything else.
+#
+# Assumptions: this module runs no scheduled job and no batch job, so there is no
+#   spring.batch key and no scheduling key here. services/account-service/pom.xml
+#   declares neither spring-boot-starter-batch nor spring-boot-starter-quartz, and
+#   both files record the absence for the same reason: an added key with no
+#   artifact behind it is silently ignored, and an added artifact with no caller
+#   enlarges the image and the task role's permissions for nothing. The sequential
+#   read programs this context absorbs - app/cbl/CBACT01C.cbl, CBACT03C.cbl and
+#   CBCUS01C.cbl - are read paths behind endpoints here, not scheduled jobs; the
+#   nightly chain lives in batch-service and is driven by Step Functions.
+#
+# Assumptions: there is deliberately no spring.sql.init key. This module owns a
+#   Flyway migration, so the framework's schema.sql and data.sql mechanism must
+#   never also run; the absence is safe here because no such file exists in this
+#   module and Flyway is the declared owner of the DDL. reporting-service pins the
+#   key explicitly because it owns no relational object at all and therefore has a
+#   different failure to prevent.
+# =============================================================================
+

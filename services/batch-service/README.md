@@ -315,8 +315,8 @@ unit of work**, in this order, at `:440-442`:
 
 In the target these are one `@Transactional` boundary, per transformation rule T5.
 
-Alternatives Considered, quoting the architecture decision this module
-implements: *"Rather than fragment that into a saga, `batch-service` runs against
+Alternatives Considered: the architecture decision this module implements states
+it directly -- *"Rather than fragment that into a saga, `batch-service` runs against
 the one Aurora cluster using a dedicated database role holding narrowly-scoped
 cross-schema write grants on `ledger.*` and `account.*` only, so the unit of work
 remains a single ACID commit. A transactional-outbox-plus-compensating-reversal
@@ -878,11 +878,41 @@ the batch context.
 
 | Class | Present | Purpose |
 |---|---|---|
-| `BatchConfig` | Yes | Chunk-oriented steps and the durable job repository. **This is the only module in the repository that owns one.** |
-| `DataSourceConfig` | Yes | The batch database role, the `search_path`, and connection-pool sizing |
-| `SqsConfig` | Where a job publishes or consumes | Queue wiring; the listener does not auto-start, because a job runs on command rather than on arrival |
-| `OpenApiConfig` | **No** | See below |
-| `SecurityConfig` | **No** | See below |
+| [`DataSourceConfig`](src/main/java/com/carddemo/batch/config/DataSourceConfig.java) | **Yes** | Binds the HikariCP pool from `spring.datasource.hikari`, and verifies once, before any step runs, that the connection's effective schema is the one Flyway was configured to migrate |
+| `BatchConfig` | **Not yet — planned** | Chunk-oriented step definitions and their reader, processor and writer wiring. **This will be the only module in the repository that owns one.** See below for why it is absent rather than empty |
+| `SqsConfig` | Planned, where a job publishes or consumes | Queue wiring; the listener will not auto-start, because a job runs on command rather than on arrival |
+| `OpenApiConfig` | **No — excluded** | See §9.1 |
+| `SecurityConfig` | **No — excluded** | See §9.1 |
+
+Refactoring Rationale: this table previously recorded both `BatchConfig` and
+`DataSourceConfig` as present when the `config/` directory did not exist at all, and
+§13.1 contradicted it in the same document. The two rows are now distinguished, because
+"present", "planned" and "excluded" are three different statements and collapsing them
+loses the one a reader needs: an excluded class will never arrive and needs no follow-up,
+a planned one is a commitment, and only a present one can be relied on.
+
+Assumptions: `DataSourceConfig`'s verification carries more weight in this module than in
+any sibling. Every other service initialises its connections with a single-schema search
+path, so an ordering mistake has nothing to resolve against and fails at the first
+unqualified statement. This module's path is `batch, ledger, account, card, reference` —
+five schemas, because the posting unit of work commits the transaction, the category
+balance and the account together and is kept a single ACID commit rather than fragmented
+into a saga. A reordered path would therefore still resolve an unqualified write, against
+a real table in the wrong schema, so the failure would be a plausible row rather than an
+error. The check compares the pool's effective schema against Flyway's separately
+configured default, which proves the two settings agree instead of deriving one from the
+other — if they ever disagreed this module would migrate one schema and write into
+another, and each setting alone would look correct.
+
+Assumptions: `BatchConfig` is absent rather than authored empty because a step definition
+has nothing to define until the jobs exist — `job/` currently holds only its package
+charter, and the seven job types §2 assigns it are later-index artifacts. Alternatives
+Considered: authoring it now with the job repository and transaction manager registered
+in it. Rejected on two counts: Spring Boot already auto-configures both from the data
+source, so the registration would restate a framework default and then have to be kept in
+step with it; and a configuration class whose stated purpose is chunk-oriented steps,
+holding no step, reads to the next author as though the steps had been considered and
+omitted.
 
 ### 9.1 Why there is no `OpenApiConfig`, no `SecurityConfig`, and no API contract
 
@@ -940,7 +970,8 @@ connection outright.
 
 ### 9.3 What is deliberately not on the classpath
 
-Alternatives Considered, for each library a reader might reasonably expect:
+Alternatives Considered: each library below is one a reader might reasonably
+expect on the classpath, and each is absent for a stated reason.
 
 - **No resilience library and no circuit breaker.** Retry lives in the Spring
   Framework core that arrives with the parent. The annotation attribute is
@@ -976,28 +1007,44 @@ Alternatives Considered, for each library a reader might reasonably expect:
 ### 10.1 Build and test
 
 ```bash
-# WHAT: build common-lib and this module, run the unit tests through Surefire and
-#       the repository integration tests through Failsafe, and package the
-#       executable jar the container image copies.
+# WHAT: build common-lib and this module, run the unit tests through Surefire,
+#       reach the Failsafe integration tier, and package the executable jar the
+#       container image copies.
+# WHY the integration tier is named but not credited: Failsafe is bound in the
+#       parent POM and does execute here, but neither of the two selected modules
+#       contributes an `*IT` class yet, so it currently selects nothing and
+#       reports zero tests. Assumptions: stating that plainly matters more than
+#       reading well -- an earlier revision of this comment said the command
+#       "run[s] the repository integration tests", which would have let a reader
+#       treat §10.4's container-backed atomicity assertion as already proven when
+#       no test asserts it. The one landed integration test in the reactor lives
+#       in a sibling module, at
+#       `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRepositoryIT.java`,
+#       and is the working reference for the shape this module's own `*IT` takes.
 # WHY : Assumptions: common-lib supplies both the main jar and the test artifact
 #       carrying the shared architecture rules, so it must be built first; -am
 #       builds it from the reactor rather than resolving a published version.
 #       This is the form to use while working inside this module - see the note
-#       below for why it is also the form that completes today.
+#       below for why a module-scoped build is the form to reach for.
 mvn -B -f services/pom.xml -pl common-lib,batch-service -am clean verify
 ```
 
-**The whole-reactor build does not complete, for a reason outside this module.**
-`mvn -B -f services/pom.xml clean verify` halts at the first module whose Spring
-Boot entry point is not yet authored, with `Unable to find main class` from the
-repackage goal, and every module after it in the reactor order is skipped —
-including this one. Assumptions: this module is not the cause and is not affected
-on its own terms. Its entry point exists, it declares the repackage plugin itself
-(§9 explains why a module must opt in), and the module-scoped command above
-packages `batch-service-1.0.0-SNAPSHOT.jar` successfully. The module-scoped form is
-therefore the one to run against this module, and it exercises exactly the same
-gates — the documentation gate, the enforcer rules, Surefire, and Failsafe — on the
-two modules it selects.
+**The whole-reactor build completes.** `mvn -B -f services/pom.xml clean verify`
+succeeds for all ten modules, and it is what
+[`.github/workflows/services-ci.yml`](../../.github/workflows/services-ci.yml) runs as
+its authoritative gate.
+
+Refactoring Rationale: this paragraph previously stated the opposite — that the reactor
+build halted at the first module whose Spring Boot entry point was not authored, with
+`Unable to find main class` from the repackage goal, skipping every later module
+including this one. That was accurate when written and is no longer: all eight services
+now declare an entry point, so `repackage` completes for each of them. It is restated
+rather than deleted because the module-scoped command above is still the one to use while
+working inside this module, and a reader needs to know that the reason has changed — it is
+now iteration speed, not a broken reactor. Trade-offs: the module-scoped form builds two
+modules instead of ten, so it is faster and its output is easier to read, but it cannot
+detect a change here that breaks a sibling. Run the whole-reactor form before pushing;
+CI runs it regardless.
 
 ```bash
 # WHAT: run the documentation gate alone against this module, without compiling.
@@ -1044,24 +1091,40 @@ java -jar services/batch-service/target/batch-service-1.0.0-SNAPSHOT.jar \
 
 ### 10.4 What the tests must prove
 
-Each test below exists to pin one rule from §4, and the rule it pins is what makes
-it worth running rather than its coverage contribution:
+Each test below pins one rule from §4, and the rule it pins is what makes it worth
+running rather than its coverage contribution.
 
-| Test | What it proves |
-|---|---|
-| `PostingValidationServiceTest` | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
-| The exit-status test | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
-| `CategoryBalanceServiceTest` | The create path and the update path **separately**, so an upsert that collapsed them would fail |
-| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent** across a multi-row fixture set, the truncating rounding mode, the `DEFAULT` fallback, and the corrected final-account flush |
-| `ExportJob` / `ImportJob` round trip | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
-| The business-date test | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
-| `*RepositoryIT` | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |
+**None of the seven is landed yet.** The test directory holds
+`BatchJobNameTest`, `BatchReturnCodeTest`, `BusinessDateTest`,
+`DatasetGenerationTest` and `DiagnosticRenderingTest` — 166 tests over the
+argument, return-code, business-date, dataset-generation and safe-diagnostic
+contracts — and none of the service or job classes these seven name has been
+authored, so none of these seven can exist. Refactoring Rationale: this section
+previously opened with "Each test below **exists**", which read as an inventory of
+landed coverage and made the container-backed atomicity assertion below look
+already proven. The table is a specification of required tests, so it stays; what
+changes is that it says so, and the **Status** column makes each row's state
+checkable against `ls` rather than inferable from tone.
 
-Trade-offs: the repository tests pay a real container start rather than using an
+| Test | Status | What it proves |
+|---|---|---|
+| `PostingValidationServiceTest` | planned | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
+| The exit-status test | planned | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
+| `CategoryBalanceServiceTest` | planned | The create path and the update path **separately**, so an upsert that collapsed them would fail |
+| `InterestCalculationServiceTest` | planned | The multiply-before-divide result **to the cent** across a multi-row fixture set, the truncating rounding mode, the `DEFAULT` fallback, and the corrected final-account flush |
+| `ExportJob` / `ImportJob` round trip | planned | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
+| The business-date test | planned | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
+| `*RepositoryIT` | planned | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |
+
+Trade-offs: the repository test will pay a real container start rather than use an
 in-memory engine, deliberately. The property under test is multi-schema
 search-path resolution, real grant enforcement, and real transactional semantics —
 none of which an in-memory substitute reproduces faithfully, so a test that passed
-against one would prove nothing about the thing that matters.
+against one would prove nothing about the thing that matters. This is settled
+rather than open: the sibling `TransactionRepositoryIT` in `transaction-service`
+already runs on a real PostgreSQL container under `@ServiceConnection` and applies
+the module's Flyway migration inside it, so the mechanism is demonstrated and this
+module's `*IT` follows it rather than choosing again.
 
 **Three assertions must be demonstrably green before this module is considered
 done:**
@@ -1170,9 +1233,9 @@ hide a blocked dependency.
   transcribed from a job.
 - **`CBACT04C` and `CBTRN01C` publish no return code of their own** (§12.3), so
   their migrated steps report only clean success or hard failure.
-- **The seven job beans, the business-rule services, and the configuration classes
-  described in §2, §4, and §9 are the module's target contract.** The process
-  entry point, the closed set of job tokens, the business-date validation, the
+- **The seven job beans, the business-rule services, and `BatchConfig` described in
+  §2, §4, and §9 are the module's target contract.** The process entry point,
+  `DataSourceConfig`, the closed set of job tokens, the business-date validation, the
   cross-schema domain mappings, and the `batch` schema migration are authored; no
   `Job` bean is registered yet, so once the §13.2 preconditions hold an invocation
   with a valid token reaches a by-name resolution failure that reports both the
@@ -1240,12 +1303,12 @@ of those decisions; each row points at the section that argues it.
 is the governing written convention. In code, purpose belongs in the
 language-standard documentation block — the Javadoc, or, for a language that has
 none, the file-header comment block — and an inline comment carries a canonical
-rationale label and nothing else. The paired form is written `// WHAT:` and
-`// WHY :` in Java, `-- WHAT:` and `-- WHY :` in SQL, and `# WHAT:` and `# WHY :`
+rationale label and nothing else. The paired what-and-why form is written with the
+comment marker of each language — two slashes in Java, two hyphens in SQL, a hash
 in the Dockerfile and in the fenced command blocks of this document. Assumptions:
-the `WHAT:` half belongs to a file header or to a command block and **never** to a
+the what half belongs to a file header or to a command block and **never** to a
 statement, because a comment restating the statement beneath it is the first
-pattern Rule 1 forbids. The label widths are deliberate — `WHAT:` takes no space
+forbidden pattern the convention names. The label widths are deliberate — `WHAT:` takes no space
 before its colon and `WHY :` takes one, so both are eight characters wide and their
 text starts in the same column.
 
@@ -1296,7 +1359,7 @@ abbreviation is not an accepted variant.
 | Interest is truncated per category row and then summed, not summed and then truncated | Assumptions: | `app/cbl/CBACT04C.cbl:464-467` | §4.4 |
 | The interest sequence counter increments before use and is never reset across the run | Assumptions: | `app/cbl/CBACT04C.cbl:474`, counter `:173` | §4.7 |
 | A two-character literal moved into a four-digit numeric field is stored as `0005` | Assumptions: | `app/cbl/CBACT04C.cbl:483`, field `app/cpy/CVTRA05Y.cpy:7` | §4.7 |
-| Repository integration tests pay a real container start rather than using an in-memory engine | Trade-offs: | `app/cbl/CBTRN02C.cbl:440-442`; grants in `data-migration/sql/V0__schemas_and_roles.sql` | §10.4 |
+| The planned repository integration test will pay a real container start rather than use an in-memory engine | Trade-offs: | `app/cbl/CBTRN02C.cbl:440-442`; grants in `data-migration/sql/V0__schemas_and_roles.sql`; demonstrated by `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRepositoryIT.java` | §10.4 |
 | The dataset bucket name is resolved from configuration and is absent from this document | Assumptions: | `services/batch-service/src/main/resources/application.yml` | §6.1, §9.2 |
 
 ## 16. Standing prohibitions
@@ -1309,8 +1372,8 @@ thirteen sections. Each is argued where it is stated.
    divergence (§8).
 2. **Never modify or re-pin `tests/**` or `scripts/**`.** Their aggregate
    warn-level return code **is** the green state, caused solely by D-1, and
-   reporting it as a regression wastes a debugging cycle on a known, documented,
-   unfixable baseline defect (§8.1).
+   reporting it as a regression wastes a debugging cycle on a known, documented
+   baseline defect that is explicitly out of scope for fixing in COBOL (§8.1).
 3. **`common-lib` is the only sibling dependency.** No dependency on
    `transaction-service`, `account-service`, or any other service, and no
    cross-service `domain` import; the architecture rules forbid it (§4.2).

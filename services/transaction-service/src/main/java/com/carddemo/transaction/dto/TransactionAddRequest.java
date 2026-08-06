@@ -1,11 +1,21 @@
 package com.carddemo.transaction.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
+import jakarta.validation.Constraint;
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+import jakarta.validation.Payload;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
  * The capture payload of the migrated transaction-add screen, carrying the twelve transaction
@@ -20,17 +30,6 @@ import jakarta.validation.constraints.Size;
  * permitted to hold them. The reference COBOL is the specification, so this shape encodes the
  * field set, the widths, the scale and the validation rules that specification already states
  * rather than redefining them.
- *
- * <p><b>Return values, exceptions or errors.</b> A record declaration returns no value and raises
- * nothing, so this docstring carries no {@code @return} and no {@code @throws} at-clause; the two
- * predicate methods below carry their own. The inapplicability is declared rather than left
- * silent, because the Explainability rule's line 39 forbids a docstring that omits return values,
- * and a reader has to be able to tell a declared inapplicability from an oversight. The record's
- * components are the parameters of its canonical constructor, so the parameters element of that
- * rule is answered by the fourteen {@code @param} at-clauses below and not by a separate
- * paragraph. Nothing here declares a checked exception: a component is a carrier, and a rejected
- * submission is reported as data through {@code com.carddemo.common.error.ApiError} rather than
- * raised.
  *
  * <h2>Where the component set comes from, and where the order comes from</h2>
  *
@@ -112,11 +111,18 @@ import jakarta.validation.constraints.Size;
  * neither component can see the other. Leaving it to the service layer was rejected because the
  * violation would then be raised after binding and outside the accumulated violation set, so a
  * submission with no key and three other defects would answer with two separate shapes on two
- * separate paths. Declaring a custom class-level constraint annotation was rejected because it
- * would add a file to a package whose charter closes its inventory at eight. What is used instead
- * is {@code isKeySelectionValid()} below, a documented predicate carrying an assertion constraint:
- * a getter constraint is evaluated in the same pass as every component constraint, so the
- * violation joins the same accumulated set and reaches the same per-field array.
+ * separate paths. What is used instead is {@link ExactlyOneKey}, a class-level constraint declared as
+ * a NESTED annotation of this record: a class-level constraint is evaluated in the same pass as every
+ * component constraint, so the violation joins the same accumulated set and reaches the same per-field
+ * array, and its validator attributes the violation to {@code accountId} and {@code cardNumber} so a
+ * client can display it beside the two inputs it concerns.
+ *
+ * <p>Alternatives Considered: declaring that annotation and its validator as files of their own, which
+ * is the arrangement a reader is most likely to expect. Rejected because the sibling charter closes
+ * this package's inventory at eight files, and the rule is a property of this one payload rather than a
+ * shared constraint any other request could reuse, so nesting keeps the inventory closed and keeps the
+ * rule beside the components it reads. Nesting the annotation inside the type it annotates is legal and
+ * is exercised by this file's own declaration below.
  *
  * <p>Assumptions: the account path rewrites the value it was given. Lines 204 to 207 convert the
  * submitted characters to a number and move that number straight back into the same screen field,
@@ -204,16 +210,27 @@ import jakarta.validation.constraints.Size;
  * <p>Assumptions: a blank field raises the empty message alone and never the composition message
  * as well, matching the reference, where the two live in separate constructs at lines 251 to 320
  * and 322 to 336 and the first sends the screen before the second is reached. Every digit and
- * shape expression here therefore admits the blank state, leaving blankness to the presence
- * constraint. The blank state is an absent value, an empty one, or one made up entirely of white
- * space, because the reference selects on a field being spaces or low values and a fixed-position
- * terminal delivers an untouched field as spaces, so white space is blankness there too. A
- * submission blank in one field and malformed in another still reports both, one entry each.
+ * shape expression here therefore admits the empty spelling, leaving blankness to the presence
+ * constraint. A submission blank in one field and malformed in another still reports both, one entry
+ * each.
+ *
+ * <p>Refactoring Rationale: the admitted spelling of blankness is an absent value or an EMPTY one,
+ * and an earlier revision also admitted a value made up entirely of white space. The reason it did
+ * was sound on the terminal -- the reference selects on a field being spaces or low values, and a
+ * fixed-position screen delivers an untouched field as spaces -- and it does not carry over to
+ * HTTP, where an unfilled value arrives as an omitted member or an empty string and never as a run
+ * of pad bytes. The white-space arm therefore described a value no client sends while widening every
+ * expression that carried it, and it left this record disagreeing with
+ * {@code openapi/transaction-api.yaml}, which admits no such spelling for any of these fields.
+ * The private presence test below still folds white space into absence where a rule asks whether a
+ * value was supplied at all, because that question is about a caller's intent rather than about a
+ * value's shape.
  *
  * <h2>Accumulation replaces short-circuiting, and the baseline warrants it</h2>
  *
- * <p>Trade-offs: the reference short-circuits and this record accumulates, which is a registered
- * divergence rather than an accident. Each reference check sets an error flag, moves one message,
+ * <p>Trade-offs: the reference short-circuits and this record accumulates, which is registered as
+ * <b>D-ERROR-ACCUMULATION</b> in {@code docs/architecture/cobol-to-service-traceability.md} rather
+ * than being an accident. Each reference check sets an error flag, moves one message,
  * positions the cursor and sends the screen immediately, so an operator sees exactly one error per
  * turn even when several fields are wrong. Declarative validation evaluates every constraint and
  * collects every violation, and transformation rule T7 asks for a per-field error array, so
@@ -308,7 +325,8 @@ import jakarta.validation.constraints.Size;
  * {@code PIC S9(9)V99} at line 58 with nine integer digits; line 385 moves that into
  * {@code WS-TRAN-AMT-E}, declared {@code PIC +99999999.99} at line 59 with eight; and line 386
  * writes that narrower edited form back over the screen field. This request accepts all nine, which
- * is a registered divergence.
+ * is registered as <b>D-AMOUNT-RECORD-WIDTH</b> in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.
  *
  * <p>Assumptions: the edited widths differ between reference screens deliberately, so neither is a
  * general rule to generalise from. {@code app/cbl/COBIL00C.cbl} declares the same eight-digit
@@ -320,8 +338,9 @@ import jakarta.validation.constraints.Size;
  * <p>Assumptions: the shared money type's own domain is wider than this field's and cannot serve as
  * the bound. It admits ten integer digits, because it also carries account balances, so a
  * ten-digit amount would be constructed successfully and would then not fit the nine-digit record.
- * {@code isAmountWithinRecordDomain()} below closes that gap, and it is expressed in whole cents so
- * that no arbitrary-precision decimal appears anywhere in this file.
+ * {@link AmountWithinRecordDomain} below closes that gap on the {@code amount} component itself, and
+ * its validator is expressed in whole cents so that no arbitrary-precision decimal appears anywhere in
+ * this file.
  *
  * <p>Trade-offs: the message that reports an over-wide amount names the eight-digit specimen while
  * this record accepts nine, and the mismatch is accepted rather than edited away. The reference
@@ -335,7 +354,10 @@ import jakarta.validation.constraints.Size;
  *
  * <p>The framing below is the only one used: the baseline does one thing, the Java implements
  * another, and the divergence is documented in the migration traceability register rather than
- * introduced silently. The repository states the same discipline for its own suite at
+ * introduced silently. The three narrowed text fields are registered together as
+ * <b>D-TEXT-RECORD-WIDTH</b> in {@code docs/architecture/cobol-to-service-traceability.md}, and the
+ * amount as <b>D-AMOUNT-RECORD-WIDTH</b> above. The repository states the same discipline for its
+ * own suite at
  * {@code tests/README.md} lines 555 and 556, which encode the specification rather than redefine
  * it. Nothing under {@code app/} is edited by this record or by any statement in this docstring.
  *
@@ -421,29 +443,12 @@ import jakarta.validation.constraints.Size;
  * annotated with a size constraint in a module that had not re-declared it would compile and then
  * fail at run time rather than at build time.
  *
- * <p>Alternatives Considered: Lombok was evaluated and rejected because its generated accessors
- * cannot carry the Javadoc the Explainability rule requires at its line 15, and the repository
- * ruleset grants no annotation-based exemption that would excuse a generated member, so a
- * Lombok-built type either fails the documentation gate or has to be suppressed out of it -- and no
- * suppression is available to source under this directory. A Java 21 record gives the same brevity
- * with members that can be documented. MapStruct was rejected on a separate ground: mapping this
- * shape onto the reference record is not mechanical. It drops {@code FILLER}, masks a primary
- * account number to its last four digits, suppresses a card verification value entirely, encrypts
- * protected identifiers and renames misspelled baseline fields, and each of those needs a
- * justification at the mapping site that a generated mapper has nowhere to hold.
+ * <p>Alternatives Considered: Lombok and MapStruct were both evaluated and both rejected for this
+ * package as a whole; {@code com.carddemo.transaction.dto}'s package charter carries the reasoning,
+ * which turns on generated members being undocumentable and on copybook-to-transfer-object mapping
+ * being non-mechanical. A Java 21 record with hand-written mapping is what replaces them.
  *
  * <h2>The documentation contract this record is held to</h2>
- *
- * <p>Assumptions: one user-specified rule governs this migration, Explainability, and it does not
- * conflict with the repository's own convention, with the migration plan or with itself. Conflicts:
- * none. The four rationale categories it names at its lines 31 to 34 are the same four the house
- * convention at {@code tests/README.md} lines 544 to 549 already names, and that convention names
- * the same docstring quartet of purpose, parameters, returns and exceptions at its lines 545 and
- * 546. No resolution between them was necessary. Its validation gate at line 43 is conjunctive, so
- * a complete docstring and a labelled rationale are each independently fatal when absent, and the
- * gate is cited from that line rather than from line 29, whose weaker wording states the same
- * obligation as a recommendation. The labels above are written in the single accepted form: plural
- * except for the refactoring category, unparenthesised, colon-terminated and unemphasised.
  *
  * <p>Trade-offs: this file is pure ASCII with no byte-order mark, and the restriction is
  * load-bearing rather than cosmetic. The house convention cited above is written at
@@ -499,56 +504,58 @@ import jakarta.validation.constraints.Size;
  *     {@code YYYY-MM-DD}; the ten-character date portion of {@code TRAN-PROC-TS PIC X(26)} at line
  *     17, keyed at {@code TPROCDTI PIC X(10)} on line 108 of the map; required, at most ten
  *     characters, and checked to the same depth as the origination date
- * @param confirm the operator's confirmation, as a single character; a screen control rather than a
- *     record field, from {@code CONFIRMI PIC X(1)} at line 138 of the map; at most one character
- *     and restricted to the affirmative and negative characters the reference recognises, null or
- *     blank
- *     when the submission is the first turn of the confirmation exchange
+ * @param confirmation the operator's confirmation, as a single character; a screen control rather
+ *     than a record field, from {@code CONFIRMI PIC X(1)} at line 138 of the map; at most one
+ *     character and restricted to the affirmative and negative characters the reference recognises,
+ *     null or blank when the submission is the first turn of the confirmation exchange
  */
+@TransactionAddRequest.ExactlyOneKey
 public record TransactionAddRequest(
-    // WHAT: the first of the two key alternatives, individually optional.
     // WHY : Assumptions: COTRN02C.cbl line 209 fills the card number from the cross-reference when
     //       this field is the one supplied, so requiring both would reject a submission the
-    //       reference accepts. The pairing rule is asserted by isKeySelectionValid() below, which
-    //       is the only place either component can see the other.
+    //       reference accepts. The pairing rule is carried by the ExactlyOneKey constraint on this
+    //       record, whose validator is the only place either component can see the other, and which
+    //       reports its violation against this component and cardNumber rather than against a name no
+    //       submitted field carries.
     @Size(max = ACCOUNT_ID_WIDTH)
-    @Pattern(regexp = DIGITS_ONLY, message = ACCOUNT_ID_NOT_NUMERIC)
+    @Pattern(regexp = ACCOUNT_ID_DIGITS, message = ACCOUNT_ID_NOT_NUMERIC)
     String accountId,
     @NotBlank(message = TYPE_CODE_REQUIRED)
     @Size(max = TYPE_CODE_WIDTH)
-    // WHAT: digit composition on a field the record declares as characters.
     // WHY : Assumptions: CVTRA05Y.cpy line 6 declares PIC X(02) while COTRN02C.cbl lines 322 to
     //       336 reject a non-numeric value with the message at line 325. Two sources state two
     //       constraints and both are carried; neither is treated as an error in the other.
-    @Pattern(regexp = DIGITS_ONLY, message = TYPE_CODE_NOT_NUMERIC)
+    @Pattern(regexp = TYPE_CODE_DIGITS, message = TYPE_CODE_NOT_NUMERIC)
     String typeCode,
     @NotBlank(message = CATEGORY_CODE_REQUIRED)
     @Size(max = CATEGORY_CODE_WIDTH)
-    @Pattern(regexp = DIGITS_ONLY, message = CATEGORY_CODE_NOT_NUMERIC)
+    @Pattern(regexp = CATEGORY_CODE_DIGITS, message = CATEGORY_CODE_NOT_NUMERIC)
     String categoryCode,
     @NotBlank(message = SOURCE_REQUIRED)
     @Size(max = SOURCE_WIDTH)
     String source,
-    // WHAT: the record's hundred characters, not the screen's sixty.
     // WHY : Trade-offs: COTRN02.CPY line 90 keys sixty and CVTRA05Y.cpy line 9 holds a hundred.
     //       Constraining to sixty would discard capacity the record demonstrably holds; the cost is
     //       that a client rendering a fixed-width column may receive more than it can show.
     @NotBlank(message = DESCRIPTION_REQUIRED)
     @Size(max = DESCRIPTION_WIDTH)
     String description,
-    // WHAT: the amount, typed as the shared exact-decimal value rather than as a general-purpose
-    //       decimal or a primitive.
     // WHY : Assumptions: MoneyModule binds its serialiser and deserialiser to this exact type, so
     //       the declared type is what selects the quoted-string wire form. Substituting a bare
     //       decimal here compiles and runs and silently reads and writes a JSON number instead.
-    //       The nine-integer-digit bound is asserted by isAmountWithinRecordDomain() below, because
-    //       the framework's digit constraint has no validator for this type and annotating it would
-    //       raise at validation time rather than reject the value.
+    // WHY : Refactoring Rationale: the nine-integer-digit bound is declared HERE, on the component,
+    //       through a constraint of this file's own rather than through a predicate over the whole
+    //       record. The framework's digit constraint has no validator for this type, which is why a
+    //       constraint had to be written; an earlier revision wrote it as a boolean predicate named
+    //       isAmountWithinRecordDomain(), and a violation of it was then reported against a property
+    //       called amountWithinRecordDomain that no submitted field is named after. A client cannot
+    //       attach that to an input, so the bound now reports against amount.
     @NotNull(message = AMOUNT_REQUIRED)
+    @AmountWithinRecordDomain
     Money amount,
     @NotBlank(message = MERCHANT_ID_REQUIRED)
     @Size(max = MERCHANT_ID_WIDTH)
-    @Pattern(regexp = DIGITS_ONLY, message = MERCHANT_ID_NOT_NUMERIC)
+    @Pattern(regexp = MERCHANT_ID_DIGITS, message = MERCHANT_ID_NOT_NUMERIC)
     String merchantId,
     @NotBlank(message = MERCHANT_NAME_REQUIRED)
     @Size(max = MERCHANT_NAME_WIDTH)
@@ -559,15 +566,13 @@ public record TransactionAddRequest(
     @NotBlank(message = MERCHANT_ZIP_REQUIRED)
     @Size(max = MERCHANT_ZIP_WIDTH)
     String merchantZip,
-    // WHAT: the second of the two key alternatives, individually optional.
     // WHY : Assumptions: COTRN02C.cbl line 223 fills the account identifier from the
     //       cross-reference when this field is the one supplied, which is the mirror of line 209.
     //       Digits-only rather than numeric because 30 of the 300 card numbers in
     //       app/data/ASCII/dailytran.txt begin with a zero that a numeric type would discard.
     @Size(max = CARD_NUMBER_WIDTH)
-    @Pattern(regexp = DIGITS_ONLY, message = CARD_NUMBER_NOT_NUMERIC)
+    @Pattern(regexp = CARD_NUMBER_DIGITS, message = CARD_NUMBER_NOT_NUMERIC)
     String cardNumber,
-    // WHAT: one shape constraint for the whole date, not one per character group.
     // WHY : Assumptions: COTRN02C.cbl lines 353 to 366 are five alternatives sharing a single
     //       action block, so the reference raises one message for a malformed date however many of
     //       its five conditions hold. Five separate constraints would answer with up to five
@@ -580,14 +585,27 @@ public record TransactionAddRequest(
     @Size(max = DATE_WIDTH)
     @Pattern(regexp = ISO_DATE_SHAPE, message = PROCESS_DATE_FORMAT)
     String processDate,
-    // WHAT: the value domain only, leaving the blank case to pass this constraint.
     // WHY : Assumptions: COTRN02C.cbl lines 169 to 188 answer a blank confirmation with the prompt
     //       at line 178, which asks for another turn rather than complaining about a value, and
     //       answer any unrecognised character with the complaint at line 184. Only the second is a
     //       field error, so blank is admitted here and the prompt is the service layer's to emit.
+    // WHY : Refactoring Rationale: the component is spelled confirmation, matching the property the
+    //       published contract now declares and the sibling bill-payment request. A record component
+    //       name is the wire name in this package -- no property-naming strategy and no
+    //       per-property annotation is declared anywhere in it -- so the two spellings had to be
+    //       reconciled in one direction or the other, and the wire spelling is the one a client and
+    //       three contracts share. The alternative, annotating the component with its wire name, was
+    //       rejected for the same reason as on the bill-payment request: one package-wide rule is
+    //       cheaper to verify than a per-property exception.
+    // WHY : Assumptions: both request bodies of this contract publish the member as confirmation
+    //       against one shared single-character schema and set additionalProperties to false, so
+    //       two spellings for one screen field would put a client in the position of sending a
+    //       different name to two operations that read the same copybook field. With
+    //       `spring.jackson.deserialization.fail-on-unknown-properties` true in this module's
+    //       application.yml, the wrong one of the two would be refused outright.
     @Size(max = CONFIRM_WIDTH)
     @Pattern(regexp = CONFIRM_VALUES, message = CONFIRM_INVALID_VALUE)
-    String confirm) {
+    String confirmation) {
 
   /**
    * The declared width of the account identifier, from {@code ACTIDINI PIC X(11)} at line 60 of
@@ -680,29 +698,79 @@ public record TransactionAddRequest(
   public static final long AMOUNT_MAGNITUDE_LIMIT_CENTS = 99_999_999_999L;
 
   /**
-   * The expression a digit-bearing identifier is held to, admitting the blank state.
+   * The expression an exactly-eleven-digit account identifier is held to, admitting absence.
    *
-   * <p>Assumptions: the blank state is admitted deliberately so that a blank required field reports
-   * against its presence constraint alone. The reference keeps the two tests in separate constructs
-   * -- the presence chain at {@code app/cbl/COTRN02C.cbl} lines 251 to 320 and the composition
-   * tests at lines 322 to 336 -- and sends the screen from the first before reaching the second, so
-   * a blank field there never draws the composition message. An expression rejecting the blank
-   * state would report both for one field the operator simply left empty.
+   * <p>Refactoring Rationale: the digit run is EXACT and an earlier revision of this record held
+   * every digit field to one shared expression admitting ANY number of digits. Eleven is the
+   * whole identifier -- {@code CC-ACCT-ID PIC X(11)} at line 34 of {@code app/cpy/CVCRD01Y.cpy},
+   * matching {@code ACTIDINI PIC X(11)} at line 60 of {@code app/cpy-bms/COTRN02.CPY} -- and the
+   * committed extract is zero-padded to it, so a shorter run is not a partial identifier but one
+   * that matches no row. The published contract declares the same exact width, and an earlier
+   * revision of the two disagreed: this record accepted three digits where
+   * {@code openapi/transaction-api.yaml} refused them, so a request one side called valid the other
+   * called malformed and nothing compared them.
    *
-   * <p>Assumptions: the blank alternative covers white space and not merely emptiness, because the
-   * reference tests a field for being spaces or low values and a fixed-position terminal delivers
-   * an untouched field as spaces. Admitting emptiness alone would leave the commonest form of a
-   * blank field drawing a composition complaint it should not draw.
+   * <p>Assumptions: the empty arm is retained because this component is individually optional --
+   * exactly one of it and the card number is supplied, which {@link ExactlyOneKey} decides -- so a
+   * caller that supplies the other must be able to omit this one without drawing a composition
+   * message for a field it deliberately left out. The same arm on a REQUIRED component, below,
+   * exists for the neighbouring reason: the reference keeps presence and composition in separate
+   * constructs -- the presence chain at {@code app/cbl/COTRN02C.cbl} lines 251 to 320 and the
+   * composition tests at lines 322 to 336 -- and sends the screen from the first before reaching the
+   * second, so a field left empty there never draws a composition message and must not draw one
+   * here either.
    *
-   * <p>Assumptions: white space mixed with digits is rejected rather than trimmed, which is what
-   * the reference does. The class test it applies at lines 323 and 329 holds for a field of digits
-   * throughout and fails for one carrying a space anywhere, so a partly filled digit field draws
-   * the composition message there and draws it here.
+   * <p>Assumptions: white space mixed with digits is rejected rather than trimmed, which is what the
+   * reference does. The class test it applies at lines 323 and 329 holds for a field of digits
+   * throughout and fails for one carrying a space anywhere, so a partly filled digit field draws the
+   * composition message there and draws it here.
    *
    * <p>Assumptions: the upper bound on length is carried by the width constraint on each component
-   * rather than repeated here, so that an over-long value reports once.
+   * rather than by these expressions, so an over-long value reports once.
    */
-  public static final String DIGITS_ONLY = "(\\s*|[0-9]+)";
+  public static final String ACCOUNT_ID_DIGITS = "|[0-9]{11}";
+
+  /**
+   * The expression an exactly-sixteen-digit card number is held to, admitting absence.
+   *
+   * <p>Assumptions: sixteen is {@code CARD-NUM PIC X(16)} at line 5 of
+   * {@code app/cpy/CVACT02Y.cpy} and {@code TRAN-CARD-NUM PIC X(16)} at line 15 of
+   * {@code app/cpy/CVTRA05Y.cpy}, which agree, and 30 of the 300 card numbers in
+   * {@code app/data/ASCII/dailytran.txt} begin with a zero -- so the width is part of the value and
+   * not merely a ceiling on it.
+   */
+  public static final String CARD_NUMBER_DIGITS = "|[0-9]{16}";
+
+  /**
+   * The expression the exactly-two-digit transaction type code is held to.
+   *
+   * <p>Assumptions: two is {@code TRAN-TYPE-CD PIC X(02)} at line 6 of
+   * {@code app/cpy/CVTRA05Y.cpy}, and the reference tests the field NOT NUMERIC at line 331 of
+   * {@code app/cbl/COTRN02C.cbl}. The empty arm is present so that a value left empty reports once,
+   * against the presence constraint, rather than drawing a composition message as well.
+   */
+  public static final String TYPE_CODE_DIGITS = "|[0-9]{2}";
+
+  /**
+   * The expression the exactly-four-digit transaction category code is held to.
+   *
+   * <p>Assumptions: four is {@code TRAN-CAT-CD PIC 9(04)} at line 7 of
+   * {@code app/cpy/CVTRA05Y.cpy} and the committed extract carries {@code 0001} at one-based bytes
+   * 19 to 22 of the first record of {@code app/data/ASCII/dailytran.txt}, so the leading zeros are
+   * data. The empty arm is present so that a value left empty reports once, against the presence
+   * constraint.
+   */
+  public static final String CATEGORY_CODE_DIGITS = "|[0-9]{4}";
+
+  /**
+   * The expression the exactly-nine-digit merchant identifier is held to.
+   *
+   * <p>Assumptions: nine is {@code TRAN-MERCHANT-ID PIC 9(09)} at line 11 of
+   * {@code app/cpy/CVTRA05Y.cpy}, and the reference tests it NOT NUMERIC at line 432 of
+   * {@code app/cbl/COTRN02C.cbl}. The empty arm is present so that a value left empty reports once,
+   * against the presence constraint.
+   */
+  public static final String MERCHANT_ID_DIGITS = "|[0-9]{9}";
 
   /**
    * The expression either submitted date is held to, admitting the blank state.
@@ -712,8 +780,14 @@ public record TransactionAddRequest(
    * and two numeric characters -- expressed once because those five alternatives share a single
    * action block at lines 359 to 363 and so yield one message rather than five. The framework
    * matches the whole value, so the expression needs no anchors.
+   *
+   * <p>Alternatives Considered: admitting a run of white space, which an earlier revision did.
+   * Rejected because both date components are required, so absence is already reported by their
+   * presence constraints, and over HTTP a padded screen field has no counterpart: an unfilled value
+   * arrives omitted or empty rather than as spaces. The empty arm is kept so that a caller sending
+   * an empty string draws the presence message rather than two messages for one omission.
    */
-  public static final String ISO_DATE_SHAPE = "(\\s*|[0-9]{4}-[0-9]{2}-[0-9]{2})";
+  public static final String ISO_DATE_SHAPE = "|[0-9]{4}-[0-9]{2}-[0-9]{2}";
 
   /**
    * The expression the confirmation is held to, admitting the blank state.
@@ -722,8 +796,16 @@ public record TransactionAddRequest(
    * negative characters in both cases, so all four are admitted. The blank state is admitted
    * because lines 175 and 176 place spaces and low values on the negative branch, which asks for
    * another turn rather than reporting a bad value.
+   *
+   * <p>Refactoring Rationale: the admitted spellings are the empty string and the four letters, and
+   * an earlier revision additionally admitted a run of white space. That arm described a value no
+   * HTTP client sends -- a screen field is always a character field of its declared width, so an
+   * unfilled position reached the reference program as a pad byte, whereas over HTTP absence arrives
+   * as an omitted member or the empty string. It also left this record and the published contract
+   * disagreeing: {@code openapi/transaction-api.yaml} declares the domain as {@code ^[YyNn]?$},
+   * which admits exactly the five spellings this expression now admits.
    */
-  public static final String CONFIRM_VALUES = "(\\s*|[YyNn])";
+  public static final String CONFIRM_VALUES = "[YyNn]?";
 
   /**
    * The message reported when a submitted account identifier is not made up of digits, verbatim
@@ -861,55 +943,193 @@ public record TransactionAddRequest(
   public static final String CONFIRM_INVALID_VALUE = "Invalid value. Valid values are (Y/N)...";
 
   /**
-   * Reports whether exactly one of the two key alternatives was supplied.
+   * Requires exactly one of the two key alternatives, reporting against both of them.
    *
-   * <p>Assumptions: {@code app/cbl/COTRN02C.cbl} lines 193 to 230 select on the account identifier
-   * first and the card number second, and each branch then fills the field the operator left empty
-   * from the cross-reference -- the card number at line 209 and the account identifier at line 223.
+   * <p><b>Purpose.</b> This is the pairing rule of the transaction-add screen expressed as a
+   * class-level constraint, because it is the only rule here that has to see two components at
+   * once. {@code app/cbl/COTRN02C.cbl} lines 193 to 230 select on the account identifier first and
+   * the card number second, and each branch then fills the field the operator left empty from the
+   * cross-reference -- the card number at line 209 and the account identifier at line 223.
    * Supplying both is therefore not a richer submission but a contradiction, since one of the two
    * would be overwritten by a lookup; supplying neither reaches the third branch at lines 224 to
    * 229. Exclusive disjunction is what those three branches describe.
    *
-   * <p>Assumptions: this is declared as a constrained predicate rather than left to the service
+   * <p>Refactoring Rationale: a class-level constraint whose validator names the two components
+   * replaces the {@code @AssertTrue} predicate an earlier revision declared. Bean Validation derives
+   * a property path for a predicate constraint from the METHOD it annotates, so that revision
+   * reported its violation against a property named {@code keySelectionValid} -- a name no submitted
+   * field carries and no form control can be bound to, so a client received an error it could not
+   * display beside an input. The validator below suppresses the default violation and raises one per
+   * key component instead, so the two entries a client receives name {@code accountId} and
+   * {@code cardNumber} and are actionable. The alternative of leaving the predicate in place and
+   * translating the synthetic name downstream was rejected: the translation table would live in the
+   * shared error advice, which would then have to know a name declared in one service's request type.
+   *
+   * <p>Assumptions: the constraint is declared on the type rather than being deferred to the service
    * layer so that its violation joins the same accumulated set as every component constraint and
    * reaches the same per-field array. A check performed after binding would answer on a separate
    * path, so a submission with no key and other defects would produce two shapes instead of one.
    *
-   * @return {@code true} when exactly one of the account identifier and the card number carries a
-   *     value, and {@code false} when both were supplied or neither was
+   * <p>An annotation type declares no parameters, returns no value and raises nothing, so no
+   * parameter, return or exception at-clause appears on this block; the three members below carry
+   * their own.
    */
-  @AssertTrue(message = KEY_FIELD_REQUIRED)
-  public boolean isKeySelectionValid() {
-    // WHY : Assumptions: exclusive disjunction is the whole rule, so it is written as one operator
-    //       rather than as a pair of nested tests that would have to agree with each other.
-    return isSupplied(accountId) ^ isSupplied(cardNumber);
+  @Documented
+  @Target(ElementType.TYPE)
+  @Retention(RetentionPolicy.RUNTIME)
+  @Constraint(validatedBy = KeySelectionValidator.class)
+  public @interface ExactlyOneKey {
+
+    /**
+     * The message both raised violations carry.
+     *
+     * @return the reference wording of {@link TransactionAddRequest#KEY_FIELD_REQUIRED}
+     */
+    String message() default KEY_FIELD_REQUIRED;
+
+    /**
+     * The validation groups this constraint belongs to.
+     *
+     * @return an empty array, because this request is validated in the default group only
+     */
+    Class<?>[] groups() default {};
+
+    /**
+     * The payload a client may attach to a violation of this constraint.
+     *
+     * @return an empty array, because no metadata is attached
+     */
+    Class<? extends Payload>[] payload() default {};
   }
 
   /**
-   * Reports whether the submitted amount fits the nine integer digits the reference record holds.
+   * Bounds the submitted amount to the nine integer digits the reference record holds.
    *
-   * <p>Assumptions: the framework's own digit constraint has no validator for the shared money
-   * type, so annotating the component with one would raise at validation time instead of rejecting
-   * the value. Declaring the bound as a constrained predicate keeps it declarative and puts its
-   * violation in the same accumulated set as the component constraints.
+   * <p><b>Purpose.</b> {@code TRAN-AMT} is {@code PIC S9(09)V99} at line 10 of
+   * {@code app/cpy/CVTRA05Y.cpy}, so nine integer digits is the widest amount the record can hold.
+   * The framework's own digit constraint has no validator for the shared money type, so annotating
+   * the component with it would raise at validation time instead of rejecting the value, which is why
+   * this constraint exists at all.
    *
-   * @return {@code true} when no amount was supplied or when the amount fits nine integer digits at
-   *     a scale of two, and {@code false} when its magnitude is wider than the record can hold
+   * <p>Refactoring Rationale: declared as a component constraint so a violation reports against
+   * {@code amount}, the member a client submitted, rather than against the synthetic property name a
+   * boolean predicate would have produced.
+   *
+   * <p>An annotation type declares no parameters, returns no value and raises nothing, so no
+   * parameter, return or exception at-clause appears on this block; the three members below carry
+   * their own.
    */
-  @AssertTrue(message = AMOUNT_FORMAT)
-  public boolean isAmountWithinRecordDomain() {
-    // WHY : Assumptions: an absent amount is reported once, by the presence constraint on the
-    //       component, so this predicate has to accept null rather than report a second violation
-    //       for the same defect -- and rather than dereference it.
-    if (amount == null) {
-      return true;
+  @Documented
+  @Target({ElementType.RECORD_COMPONENT, ElementType.FIELD, ElementType.PARAMETER,
+      ElementType.METHOD})
+  @Retention(RetentionPolicy.RUNTIME)
+  @Constraint(validatedBy = AmountDomainValidator.class)
+  public @interface AmountWithinRecordDomain {
+
+    /**
+     * The message a violation carries.
+     *
+     * @return the reference wording of {@link TransactionAddRequest#AMOUNT_FORMAT}
+     */
+    String message() default AMOUNT_FORMAT;
+
+    /**
+     * The validation groups this constraint belongs to.
+     *
+     * @return an empty array, because this request is validated in the default group only
+     */
+    Class<?>[] groups() default {};
+
+    /**
+     * The payload a client may attach to a violation of this constraint.
+     *
+     * @return an empty array, because no metadata is attached
+     */
+    Class<? extends Payload>[] payload() default {};
+  }
+
+  /**
+   * Enforces {@link ExactlyOneKey} and attributes its violation to the two key components.
+   *
+   * <p>Assumptions: the validator is declared here beside the request it validates rather than in a
+   * package of its own, because the rule is a property of this one payload and of no other. It holds
+   * no state and reads nothing outside the value handed to it, so a single instance is safe for the
+   * framework to share across requests.
+   */
+  public static final class KeySelectionValidator
+      implements ConstraintValidator<ExactlyOneKey, TransactionAddRequest> {
+
+    /**
+     * Reports whether exactly one of the two key alternatives was supplied.
+     *
+     * @param request the bound request, which the framework may pass as {@code null} when the body
+     *     itself was absent
+     * @param context the context a violation is raised through; never {@code null}
+     * @return {@code true} when exactly one of the account identifier and the card number carries a
+     *     value, and {@code false} when both were supplied or neither was
+     */
+    @Override
+    public boolean isValid(TransactionAddRequest request, ConstraintValidatorContext context) {
+      // WHY : Assumptions: an absent request is reported valid here rather than false, because the
+      //       absence of a body is a different failure with its own diagnostic and reporting a key
+      //       error for it would name two fields the client never sent.
+      if (request == null) {
+        return true;
+      }
+      // WHY : Assumptions: exclusive disjunction is the whole rule, so it is written as one operator
+      //       rather than as a pair of nested tests that would have to agree with each other.
+      if (isSupplied(request.accountId()) ^ isSupplied(request.cardNumber())) {
+        return true;
+      }
+
+      // WHY : Assumptions: the default violation is suppressed and replaced by one violation per key
+      //       component, so the accumulated set a client receives names submitted fields only. Both
+      //       are raised rather than one, because either field can be the one the operator should
+      //       change and the request alone cannot say which.
+      context.disableDefaultConstraintViolation();
+      String template = context.getDefaultConstraintMessageTemplate();
+      context.buildConstraintViolationWithTemplate(template)
+          .addPropertyNode("accountId")
+          .addConstraintViolation();
+      context.buildConstraintViolationWithTemplate(template)
+          .addPropertyNode("cardNumber")
+          .addConstraintViolation();
+      return false;
     }
-    // WHY : Assumptions: whole cents are exact and lossless here, because the shared type fixes the
-    //       scale at two and bounds the magnitude, so the unscaled value is at most twelve digits
-    //       and fits the return type. Comparing against both signed limits rather than an absolute
-    //       value keeps the negative extreme from needing a special case of its own.
-    long cents = amount.unscaledCents();
-    return cents >= -AMOUNT_MAGNITUDE_LIMIT_CENTS && cents <= AMOUNT_MAGNITUDE_LIMIT_CENTS;
+  }
+
+  /**
+   * Enforces {@link AmountWithinRecordDomain} against the shared money type.
+   *
+   * <p>Assumptions: the validator holds no state and reads nothing outside the value handed to it, so
+   * a single instance is safe for the framework to share across requests.
+   */
+  public static final class AmountDomainValidator
+      implements ConstraintValidator<AmountWithinRecordDomain, Money> {
+
+    /**
+     * Reports whether an amount fits the nine integer digits the reference record holds.
+     *
+     * @param amount the submitted amount, which is {@code null} when none was supplied
+     * @param context the context a violation would be raised through; never {@code null}
+     * @return {@code true} when no amount was supplied or when the amount fits nine integer digits at
+     *     a scale of two, and {@code false} when its magnitude is wider than the record can hold
+     */
+    @Override
+    public boolean isValid(Money amount, ConstraintValidatorContext context) {
+      // WHY : Assumptions: an absent amount is reported once, by the presence constraint on the
+      //       component, so this validator accepts null rather than reporting a second violation for
+      //       the same defect -- and rather than dereferencing it.
+      if (amount == null) {
+        return true;
+      }
+      // WHY : Assumptions: whole cents are exact and lossless here, because the shared type fixes the
+      //       scale at two and bounds the magnitude, so the unscaled value is at most twelve digits
+      //       and fits the comparison type. Comparing against both signed limits rather than an
+      //       absolute value keeps the negative extreme from needing a special case of its own.
+      long cents = amount.unscaledCents();
+      return cents >= -AMOUNT_MAGNITUDE_LIMIT_CENTS && cents <= AMOUNT_MAGNITUDE_LIMIT_CENTS;
+    }
   }
 
   /**
@@ -926,5 +1146,73 @@ public record TransactionAddRequest(
    */
   private static boolean isSupplied(String value) {
     return value != null && !value.isBlank();
+  }
+
+  /**
+   * Renders this request for a log or a diagnostic with the primary account number masked.
+   *
+   * <p>Refactoring Rationale: a record generates a rendering that names every component verbatim,
+   * and one of this record's fourteen components is a primary account number. Nothing has to be
+   * written wrongly for that rendering to escape: a request interpolated into a log statement,
+   * carried in an assertion message, or picked up by a framework tracing a rejected body produces it
+   * automatically. Overriding it here makes the masking a property of the TYPE, so it holds for
+   * every present and future caller rather than depending on each one remembering -- which matters
+   * most on precisely this type, because a request that fails validation is both the case that gets
+   * logged and the case in which no handler has yet had a chance to mask anything.</p>
+   *
+   * <p>Assumptions: the two key alternatives are treated differently, and the asymmetry is
+   * deliberate. The account identifier is rendered in full because it is a system key rather than
+   * protected data -- it addresses the resource in a request path and correlates a run, and the
+   * migrated contracts publish it unmasked -- while the card number is masked because the migration
+   * plan's sections 0.4.1.9 and 0.7.8 require exactly that everywhere but one administrative read.
+   * Masking both would make a log unusable for locating the submission while withholding nothing
+   * further.</p>
+   *
+   * <p>Alternatives Considered: omitting the card number entirely rather than masking it. Rejected
+   * because either key alternative may be the one a client supplied -- the reference fills whichever
+   * was omitted from the cross-reference -- so a rendering that drops the card number cannot show
+   * what a card-only submission actually contained, which is the submission whose validation
+   * failures most need diagnosing. The last four digits show it without supplying a usable
+   * number.</p>
+   *
+   * <p>Trade-offs: the amount is rendered in full. It is not protected data on its own, it is
+   * frequently the reason a submission was refused, and the shared money type already renders it as
+   * an exact decimal rather than as an approximation.</p>
+   *
+   * @return a single-line rendering naming this type and all fourteen components, with the card
+   *     number reduced to a mask and its last four digits; the component is labelled as masked so
+   *     that no reader mistakes it for a value that could be resubmitted
+   */
+  @Override
+  public String toString() {
+    return "TransactionAddRequest[accountId="
+        + accountId
+        + ", typeCode="
+        + typeCode
+        + ", categoryCode="
+        + categoryCode
+        + ", source="
+        + source
+        + ", description="
+        + description
+        + ", amount="
+        + amount
+        + ", merchantId="
+        + merchantId
+        + ", merchantName="
+        + merchantName
+        + ", merchantCity="
+        + merchantCity
+        + ", merchantZip="
+        + merchantZip
+        + ", maskedCardNumber="
+        + CardNumberMasker.mask(cardNumber)
+        + ", originDate="
+        + originDate
+        + ", processDate="
+        + processDate
+        + ", confirmation="
+        + confirmation
+        + ']';
   }
 }

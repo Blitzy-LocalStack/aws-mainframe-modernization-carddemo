@@ -58,22 +58,51 @@ public class JwtDecoderConfig {
     private final List<String> requiredScopes;
 
     /**
-     * Captures the three configured values this module validates against.
+     * Captures the configured values this module validates against.
+     *
+     * <p>Refactoring Rationale: the three {@code carddemo.security.jwt.*} keys are read here, and an
+     * earlier revision read two differently-named keys instead -- {@code carddemo.security.app-client-id}
+     * and {@code carddemo.security.required-scopes}. That was a real divergence rather than a naming
+     * preference. Every service in this repository, including this one, declares the
+     * {@code carddemo.security.jwt.*} shape in its {@code application.yml}, and the infrastructure
+     * injects {@code CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} into every task, so the old names
+     * resolved to nothing a deployment set: the client-id default was BLANK, the shared validator reads
+     * blank as "skip this check", and this service silently accepted a token minted for any client of
+     * the pool while its own configuration file said otherwise.</p>
+     *
+     * <p>Assumptions: the client id now has NO fallback, so a task started without it fails at startup
+     * rather than serving requests with one of the three checks quietly disabled. The token-kind value
+     * is asserted against the shared validator's compiled constant for the same reason the sibling
+     * contexts assert it -- the property exists so the requirement is visible to an operator, and the
+     * assertion is what keeps the visible value and the enforced value from drifting apart.</p>
      *
      * @param issuerUri the user pool's issuer location, taken from the same property the framework
      *     would have used, so that one value configures both the key resolution and the issuer check
+     * @param expectedTokenUse the token kind this service accepts, which must equal
+     *     {@link CognitoAccessTokenValidator#ACCESS_TOKEN_USE}
      * @param appClientId the user-pool app client id the Cognito module outputs; a token naming a
-     *     different client is refused
+     *     different client is refused, and a blank value is refused outright
      * @param requiredScopes the scopes of which a token must carry at least one, as a comma-separated
-     *     list; the default is the scope this bounded context publishes, so a deployment that has not
-     *     set the value still refuses a token minted for another context
+     *     list, so a token minted for another context is refused here
+     * @throws IllegalStateException if {@code expectedTokenUse} does not name the access token, or if
+     *     {@code appClientId} is {@code null} or blank
      */
     public JwtDecoderConfig(
             @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}") String issuerUri,
-            @Value("${carddemo.security.app-client-id:${CARDDEMO_COGNITO_APP_CLIENT_ID:}}")
-                    String appClientId,
-            @Value("${carddemo.security.required-scopes:carddemo/reporting.read}")
-                    List<String> requiredScopes) {
+            @Value("${carddemo.security.jwt.expected-token-use}") String expectedTokenUse,
+            @Value("${carddemo.security.jwt.expected-client-id}") String appClientId,
+            @Value("${carddemo.security.jwt.required-scope}") List<String> requiredScopes) {
+
+        if (!CognitoAccessTokenValidator.ACCESS_TOKEN_USE.equals(expectedTokenUse)) {
+            throw new IllegalStateException("carddemo.security.jwt.expected-token-use must be \""
+                    + CognitoAccessTokenValidator.ACCESS_TOKEN_USE + "\"");
+        }
+
+        if (appClientId == null || appClientId.isBlank()) {
+            throw new IllegalStateException(
+                    "carddemo.security.jwt.expected-client-id must name the app client");
+        }
+
         this.issuerUri = issuerUri;
         this.appClientId = appClientId;
         this.requiredScopes = List.copyOf(requiredScopes);

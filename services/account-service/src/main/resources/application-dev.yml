@@ -1,0 +1,252 @@
+# =============================================================================
+# services/account-service/src/main/resources/application-dev.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The dev profile overlay for the CardDemo account bounded context, the
+#   migration target of COBOL programs COACTVWC, COACTUPC, CBACT01C, CBACT03C,
+#   CBCUS01C and COACCT01. It overrides VALUES ONLY, on keys that
+#   application.yml beside it already declares, and it introduces no key that is
+#   absent there. Ten leaf values are set. Nine of them sit on the four axes the
+#   base document's closing block permits a profile to vary - log verbosity,
+#   connection-pool sizing including the acquisition timeout, actuator health
+#   detail breadth, and the statement echo flag. The tenth is
+#   spring.config.import, which is not an axis at all: a profile's import list
+#   REPLACES the base document's, so every overlay must re-declare the shared
+#   defaults document, and the reason is recorded at that key.
+#
+#   Nothing here changes topology and nothing here changes security posture. The
+#   listener still serves TLS on the same port, the datasource is still the
+#   Aurora writer endpoint resolved from the platform, the same three tables are
+#   reached through the same pinned search path under the same carddemo_account
+#   role, Flyway still owns the DDL and still may not create the schema, and
+#   identity still arrives as a signed token whose token_use, client and scope
+#   claims config/SecurityConfig.java checks before common-lib's JwtRoleConverter
+#   maps its groups to authorities. A defect reproduced in dev is therefore
+#   reproducible in prod, because the only difference between the two
+#   environments is the value of these eight keys.
+#
+#   No endpoint, credential, identifier, queue name, region or bucket appears
+#   below, and no stand-in for one. Every such value stays an unresolved
+#   placeholder in application.yml and is injected by the platform at deployment.
+#
+# Parameters:
+#   Each property key is the YAML analogue of a parameter. This overlay consumes
+#   exactly one environment variable of its own:
+#
+#   CARDDEMO_ENVIRONMENT
+#     String. The environment label that completes the Parameter Store prefix
+#     below. Defaults to `dev` here, which is the profile this file serves, so a
+#     developer running with this profile and no label still reads the right
+#     subtree. The same variable is read by the shared defaults document as the
+#     environment metric tag, and there is exactly one spelling of it in this
+#     repository - two names for one value means a task definition can set one, a
+#     metric tag can read the other, and the mismatch shows up as an empty
+#     dashboard rather than as an error.
+#
+# Return values:
+#   The effective configuration handed to the Spring application context after
+#   this overlay is merged over src/main/resources/application.yml and the
+#   imported carddemo-common-defaults.yml.
+#
+# Exceptions or errors:
+#   A misspelled Spring property is silently ignored rather than reported, so a
+#   typo here does not fail startup - it leaves the base value in force and the
+#   intended change simply never happens. That is why every key below is spelled
+#   against the base document rather than from memory, and why the rationale on
+#   each one names the base value it replaces. The one failure this file can
+#   cause is a wrong Parameter Store prefix, and it too is silent: the import is
+#   optional, so an unmatched prefix resolves nothing and startup continues on
+#   whatever the environment supplied directly. The root logger is raised to INFO
+#   below precisely so that the line recording what each import resolved is
+#   printed.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
+#     values and Exceptions on a module entry point. YAML has no docstring
+#     construct, so the mapping is: this header states Purpose; property keys are
+#     Parameters; the merged Spring Environment is the Return value; and each
+#     adjacent rationale states what a wrong value silently admits. The
+#     trivial-accessor relief has no YAML analogue.
+#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
+#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
+#     same limit for YAML. No linter in this project inspects this file, so the
+#     obligation rests on that written standard and on review, and no comment
+#     here claims a gate enforces something it does not.
+#   - Assumptions: the dev cluster is provisioned with a minimum capacity of
+#     zero, and Aurora pauses an instance only while no connection initiated by
+#     user activity exists. That one platform rule is what makes pool sizing a
+#     correctness question in this file rather than a tuning one, and it is why
+#     the acquisition timeout is LENGTHENED here rather than shortened.
+#   - Trade-offs: three settings a dev overlay conventionally carries are
+#     deliberately NOT restated. The actuator exposure list stays exactly as the
+#     base closes it, because widening what a process publishes is not a change
+#     in sizing and this overlay has no standing to make one. The bind-parameter
+#     logger is restated at the base value rather than omitted, and the reason is
+#     recorded on it. And the idle and lifetime ceilings stay as the base sets
+#     them, because with a floor of one the base idle ceiling already releases
+#     the connections a burst created.
+#   - Alternatives Considered: a logging back-end configuration file, the
+#     conventional way to vary verbosity per environment. Rejected because the
+#     whole configuration here is expressed as properties, and such a file in
+#     this folder would take over the appender chain wholesale, so the console
+#     pattern that carries the correlation, trace and span identifiers would
+#     silently stop applying.
+# =============================================================================
+
+spring:
+  config:
+    # WHY : (1) Assumptions: the prefix is /carddemo/<environment>/account/ - the
+    #       same three-part shape every context uses, so one Terraform module
+    #       writes them all and one IAM policy can grant read on exactly one
+    #       context's subtree. The resolver behind the `aws-parameterstore:`
+    #       location comes from spring-cloud-aws-starter-parameter-store, which
+    #       services/account-service/pom.xml declares; without that artifact the
+    #       location prefix would be unrecognised rather than merely empty.
+    #       (2) Assumptions: the import is `optional:`, so a developer running
+    #       against a local database with no AWS credentials at all still starts.
+    #       Making it mandatory would couple a local run to a cloud account for no
+    #       benefit; the values that genuinely must be present are the
+    #       no-default placeholders in application.yml, which fail loudly on their
+    #       own.
+    #       (3) Trade-offs: this list REPLACES the base document's single-string
+    #       import rather than adding to it, so the shared defaults document is
+    #       named again here. Omitting it would silently drop the shared log
+    #       pattern in this profile only, and the correlation identifier would
+    #       vanish from dev logs alone - which is the hardest form of this mistake
+    #       to notice, because the environment where a reader would look for it is
+    #       the one where it went missing.
+    import:
+      - "classpath:/carddemo-common-defaults.yml"
+      - "optional:aws-parameterstore:/carddemo/${CARDDEMO_ENVIRONMENT:dev}/account/"
+
+  datasource:
+    hikari:
+      # WHY : Trade-offs: four connections rather than the base document's ten,
+      #       which inverts the usual direction of a dev overlay. One Aurora
+      #       cluster is shared with the seven peer services and a dev cluster sits
+      #       at the bottom of its capacity range, so its connection budget is far
+      #       smaller than the figure the base was sized against. A pool left at
+      #       the base width would spend that budget here, and the symptom would
+      #       surface in the other services as refused connections rather than in
+      #       this one - which is the harder fault to trace. Four is enough for a
+      #       browser session, an inquiry handler and a migration at once. The
+      #       accepted cost is that a load test against dev queues on the pool,
+      #       which is the correct place for it to queue.
+      maximum-pool-size: 4
+
+      # WHY : (1) Assumptions: Aurora pauses only while no connection initiated by
+      #       user activity exists, so any floor above zero keeps a dev cluster
+      #       awake for the whole life of the task. One is kept rather than zero
+      #       deliberately: this context serves interactive account and customer
+      #       reads, and a floor of zero would make every first request after an
+      #       idle period pay a fresh handshake on top of a possible resume.
+      #       (2) Trade-offs: the accepted cost is that a dev cluster provisioned
+      #       with a zero minimum will not actually pause while a task of this
+      #       service is running. That is a cost in dev capacity and it is
+      #       preferred to making the interactive path in the environment used for
+      #       exploration the slowest one.
+      minimum-idle: 1
+
+      # WHY : Assumptions: thirty seconds rather than the base document's ten. A
+      #       dev cluster with auto-pause enabled takes roughly fifteen seconds to
+      #       resume, and the base timeout would fail every first request after a
+      #       pause with a pool-acquisition error that looks like a saturated pool
+      #       rather than a sleeping database. Thirty seconds absorbs one resume
+      #       without turning a genuine outage into an indefinite hang. It is
+      #       lengthened HERE and only here: prod restates the base value, so the
+      #       cascade the base note describes still applies where load is real.
+      connection-timeout: 30000
+
+  jpa:
+    # WHY : (1) Trade-offs: statements are echoed in dev and not in prod. This is
+    #       the one diagnostic that genuinely helps when the update path's
+    #       optimistic-locking predicate does not match the row a tester expects,
+    #       and it is safe here only because the bind-parameter logger stays at
+    #       WARN below - the statement text names columns, the parameters would
+    #       name cardholders.
+    #       (2) Assumptions: this switch writes to standard output rather than
+    #       through a logger, so it cannot be narrowed by a level once enabled.
+    #       That is why the decision is expressed as a profile value rather than as
+    #       a logging change, and why prod restates it as false instead of relying
+    #       on its own log levels to contain it.
+    show-sql: true
+
+logging:
+  level:
+    # WHY : (1) Assumptions: DEBUG on the project package root so the validation
+    #       chain transcribed from app/cbl/COACTUPC.cbl is inspectable field by
+    #       field, which is what the 128-field update screen actually needs during
+    #       development. This is the key the base document declares, and it governs
+    #       common-lib's shared kernel as well as this module's own classes.
+    #       (2) Trade-offs: a narrower logger naming only this module's package
+    #       would leave the shared kernel at INFO and cut the output roughly in
+    #       half. It is not used, because it would be a key the base document does
+    #       not declare and the base's closing block makes shape invariance a
+    #       contract rather than a habit. The output that broader level adds is
+    #       also the output most often wanted here: the correlation filter and the
+    #       error advice that shape every response to an account request both live
+    #       in the shared kernel, so an investigation that stopped at this module's
+    #       boundary would be missing the two components a caller actually observes.
+    com.carddemo: DEBUG
+
+    # WHY : (1) Alternatives Considered: leaving the root logger at the base INFO
+    #       and raising only the project package. Rejected because the
+    #       misconfiguration this environment actually produces is invisible under
+    #       it: the Parameter Store import above is optional, so a wrong prefix
+    #       resolves nothing and startup continues on unresolved placeholders. The
+    #       line recording what each import resolved comes from the framework's own
+    #       configuration machinery rather than from this module's package.
+    #       (2) Trade-offs: INFO rather than DEBUG. DEBUG at the root would lower
+    #       every framework package this service neither owns nor diagnoses,
+    #       leaving the lines worth reading a minority of the output.
+    root: INFO
+
+    # WHY : Assumptions: the SQS listener container's own package is raised from
+    #       the base document's WARN because the questions that arise in dev about
+    #       the inquiry flow are about polling, visibility and acknowledgement
+    #       rather than about the reply itself, and the reply is already logged by
+    #       this module. The consumer that will use it is authored at a later index
+    #       of the same plan; the level is raised now because the client bean this
+    #       logger describes is built at context construction whether or not a
+    #       listener exists, so a client that cannot resolve its region is
+    #       diagnosable from the first run.
+    io.awspring.cloud.sqs: DEBUG
+
+    # WHY : Trade-offs: the bind-parameter logger is restated at the base WARN
+    #       rather than omitted, and it stays at WARN even here - especially here.
+    #       At TRACE it writes every bound value, and the values include account
+    #       identifiers and the plaintext side of the encrypted identifier columns;
+    #       a dev database seeded from the baseline extract holds the same kind of
+    #       data as prod, so the argument that "it is only dev" does not hold.
+    #       show-sql above gives the statement text, which answers the question
+    #       without the values. Restating it is what makes a later broader level
+    #       change unable to raise it by accident.
+    org.hibernate.orm.jdbc.bind: WARN
+
+management:
+  # WHY : Assumptions: only the health endpoint's detail breadth is touched. The
+  #       exposure list, which decides WHICH endpoints answer at all, is not
+  #       restated and so stays exactly as the base closes it at health, info and
+  #       prometheus.
+  endpoint:
+    health:
+      # WHY : (1) Assumptions: the dev load balancer is internal and the actuator
+      #       path is not routed through the public front door, so the payload
+      #       widened here is reachable only from inside the private network. This
+      #       is the one setting the base document explicitly leaves to a profile,
+      #       noting that the development overlay may widen it and the production
+      #       overlay does not.
+      #       (2) Trade-offs: a detail payload names the datasource and the schema
+      #       the connection reaches, which turns a "why is the pool empty"
+      #       investigation from a guess into a reading. That disclosure is
+      #       acceptable inside a private network and is NOT acceptable in prod,
+      #       where anything able to reach the probe path could read the data-tier
+      #       layout from it. PROD KEEPS never.
+      #       (3) Alternatives Considered: when-authorized, the middle setting,
+      #       which looks like the cautious choice. Rejected because both pollers
+      #       of this endpoint are unauthenticated - the load balancer target group
+      #       and the container health check, neither of which can present a token
+      #       - so when-authorized would return the same bare status as never while
+      #       appearing to be configured. That is the worse outcome because it
+      #       misleads the next reader instead of merely restricting them.
+      show-details: always

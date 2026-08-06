@@ -202,8 +202,42 @@
 # WHY : Assumptions: services/batch-service/Dockerfile exposes port 8080 and its
 #       health command probes that exact port. No second management port is used,
 #       so the listener and probe cannot drift onto different sockets.
+# WHY : Refactoring Rationale: the listener is bound to the LOOPBACK address and
+#       not to every interface, which is what the framework does when no address
+#       is given. The distinction is not cosmetic in this module. The only client
+#       of this listener is the container's own HEALTHCHECK, which reaches it at
+#       http://127.0.0.1:8080/actuator/health from inside the same network
+#       namespace; nothing outside the task has any reason to call it, and
+#       nothing is configured to - the edge route table publishes no batch route
+#       and the load balancer has no batch target group. Bound to every
+#       interface, the same listener would also be reachable on the task's own
+#       elastic network interface for the lifetime of every batch run, which on
+#       a Fargate task in awsvpc networking means reachable from anything the
+#       task's security group admits. Bound to loopback it is reachable only
+#       from inside the task, so the health endpoint's exposure is exactly its
+#       one consumer.
+# WHY : Alternatives Considered: (1) leaving the default all-interfaces bind and
+#       relying on the security group to admit nothing, which was the position
+#       before this key existed. Rejected because it makes a network reachability
+#       property depend on a rule in another repository tree staying correct,
+#       where this one line makes it a property of the process. (2) declaring a
+#       separate management.server.port on loopback and leaving the main port
+#       bound wide, which is the shape a service publishing an API would use.
+#       Rejected because this module publishes no API, so the second socket would
+#       exist solely to be closed and the probe and the listener could then drift
+#       onto different ports. (3) adding the security starters so the endpoint
+#       could authenticate instead. Rejected for the reason recorded at
+#       services/batch-service/pom.xml:228-239: it would oblige the credential-
+#       free image HEALTHCHECK to carry a credential, and it would protect a
+#       liveness probe rather than any operation that changes state.
+# WHY : Trade-offs: an operator cannot reach this endpoint from outside the task
+#       to diagnose a run, and a sidecar in a different network namespace could
+#       not scrape it. Both costs are accepted: the run's diagnosis is the job's
+#       own log stream and its durable step ledger in batch.batch_run, and no
+#       sidecar is deployed alongside this task.
 server:
   port: 8080
+  address: 127.0.0.1
 
 spring:
 
@@ -307,7 +341,7 @@ spring:
       # Assumptions: this module PUBLISHES to the error queue and consumes
       #   nothing, so no listener container should ever start. Leaving the
       #   framework free to start one would reintroduce the exact hazard
-      #   services/batch-service/pom.xml:197-207 records for an embedded
+      #   services/batch-service/pom.xml:202-222 records for an embedded
       #   servlet container: a queue listener is a non-daemon poller, so it
       #   would keep the JVM alive after the last job step had finished, the
       #   task would never reach a terminal state, the invoking state would

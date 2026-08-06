@@ -1,9 +1,19 @@
 package com.carddemo.authorization.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
+import jakarta.validation.Constraint;
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+import jakarta.validation.Payload;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
  * Carries one inbound pending-authorization request in the eighteen-field order its copybook
@@ -338,11 +348,12 @@ public record AuthorizationRequestPayload(
         @NotNull @Size(max = PROCESSING_CODE_WIDTH) @Pattern(regexp = DIGITS_ONLY)
                 String processingCode,
         // Assumptions: no size constraint accompanies this component, and its absence is the
-        //   decision. The bound belongs to the money type, which admits ten integer places and two
-        //   decimal places and refuses anything larger; a character-count constraint here would
-        //   describe the edited wire rendering instead, and the two are different quantities that
-        //   would then disagree the moment either moved.
-        @NotNull Money transactionAmount,
+        //   decision. A character-count constraint here would describe the edited wire rendering
+        //   instead, and the two are different quantities that would then disagree the moment either
+        //   moved. What DOES accompany it is the record's own value domain, argued at the annotation
+        //   below: the money type bounds the magnitude and admits a negative, and a negative
+        //   authorization amount is not a smaller charge but a credit the requester grants itself.
+        @NotNull @AmountWithinRecordDomain Money transactionAmount,
         @NotNull @Size(max = MERCHANT_CATEGORY_CODE_WIDTH) String merchantCategoryCode,
         @NotNull @Size(max = ACQUIRER_COUNTRY_CODE_WIDTH) String acquirerCountryCode,
         @NotNull @Size(max = POS_ENTRY_MODE_WIDTH) @Pattern(regexp = DIGITS_ONLY)
@@ -473,4 +484,179 @@ public record AuthorizationRequestPayload(
      * executable positions, which is what lets two constraints come to disagree about it.
      */
     private static final String DIGITS_ONLY = "[0-9]+";
+
+    /**
+     * Reports whether an amount is inside the domain the pending-authorization record accepts.
+     *
+     * <p><b>Purpose.</b> This is the ONE statement of that domain, published so that the constraint
+     * below and the queue consumer apply the identical rule rather than two rules that agree today.
+     * The domain is zero through {@code 9999999999.99} inclusive: the magnitude comes from
+     * {@code PA-TRANSACTION-AMT PIC S9(10)V99 COMP-3} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} line 33, and the exclusion of the
+     * negative half is argued below.</p>
+     *
+     * <p>Refactoring Rationale: nothing stated this domain before, and the omission was not a
+     * validation gap but a wrong outcome. The wire picture {@code PIC +9(10).99} at
+     * {@code CCPAURQY.cpy} line 27 carries an explicit sign, so a negative amount is expressible and
+     * the codec decodes one faithfully; the decision paragraph then compares it against the available
+     * amount, finds a negative is never greater, and APPROVES. The approval adds the amount to the
+     * account's reserved balance, so a negative request released credit rather than reserving it --
+     * on the one field the requester chooses freely. The reference program performs no such check and
+     * would behave the same way, so refusing the value is a divergence and is registered as
+     * {@code D-NEGATIVE-AUTH-AMOUNT} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Alternatives Considered: expressing the bounds with the standard decimal-minimum and
+     * decimal-maximum constraints. Rejected because those constraints accept only the platform's
+     * numeric and character-sequence types, and this component is a {@link Money}; applying them here
+     * raises an unexpected-type failure when the validator first inspects the record, which surfaces
+     * as a start-up or first-request error rather than as a rejected value.</p>
+     *
+     * <p>Alternatives Considered: leaving the rule in the consumer alone, where the live path needs
+     * it. Rejected because this record is the other carrier of the same request, and a domain rule
+     * that exists on one carrier and not the other is how the two came to disagree in the first
+     * place. One predicate, two call sites, no second reading.</p>
+     *
+     * @param amount the amount to judge, or {@code null} when none was supplied
+     * @return {@code true} when the amount is zero or positive and within the record's magnitude,
+     *     {@code false} when it is negative or too large; {@code true} for {@code null}, because
+     *     requiredness is the separate concern of the annotation beside this one
+     */
+    public static boolean isAmountWithinRecordDomain(Money amount) {
+        if (amount == null) {
+            return true;
+        }
+        return !amount.isNegative() && amount.amount().compareTo(Money.MAX_MAGNITUDE) <= 0;
+    }
+
+    /**
+     * Constrains an amount to the domain {@link #isAmountWithinRecordDomain(Money)} defines.
+     *
+     * <p>Assumptions: this is declared as a nested member of the record it constrains rather than as a
+     * seventh file in this package, because the package charter names six record types as the complete
+     * set and this annotation has exactly one subject. Nesting keeps the rule, its validator and the
+     * component they apply to in one declaration a reader can take in at once.</p>
+     */
+    @Documented
+    @Constraint(validatedBy = AuthorizationRequestPayload.AmountDomainValidator.class)
+    @Target({ElementType.FIELD, ElementType.PARAMETER, ElementType.RECORD_COMPONENT})
+    @Retention(RetentionPolicy.RUNTIME)
+    public @interface AmountWithinRecordDomain {
+
+        /**
+         * The message reported when the amount falls outside the record's domain.
+         *
+         * @return the violation message
+         */
+        String message() default "transactionAmount must be between 0.00 and 9999999999.99,"
+                + " the domain PA-TRANSACTION-AMT PIC S9(10)V99 COMP-3 accepts for a charge";
+
+        /**
+         * The validation groups this constraint belongs to.
+         *
+         * @return the groups, empty by default so the constraint is always applied
+         */
+        Class<?>[] groups() default {};
+
+        /**
+         * The payload types a client may attach to this constraint.
+         *
+         * @return the payload types, empty by default
+         */
+        Class<? extends Payload>[] payload() default {};
+    }
+
+    /**
+     * Applies the record's amount domain on behalf of {@link AmountWithinRecordDomain}.
+     *
+     * <p>Assumptions: the whole of the rule is delegated to
+     * {@link #isAmountWithinRecordDomain(Money)} rather than restated here, so the constraint and the
+     * consumer cannot come to differ. A null is accepted for the reason that method documents.</p>
+     */
+    public static final class AmountDomainValidator
+            implements ConstraintValidator<AmountWithinRecordDomain, Money> {
+
+        /**
+         * Creates the validator.
+         *
+         * <p>Assumptions: the specification requires a public no-argument constructor, which the
+         * validation provider invokes reflectively. It is written out rather than left implicit
+         * because the documentation gate requires a docstring on every constructor.</p>
+         */
+        public AmountDomainValidator() {
+            // Assumptions: empty by design. This validator holds no configuration, so there is
+            // nothing to initialise from the annotation instance.
+        }
+
+        /**
+         * Judges one amount against the record's domain.
+         *
+         * @param amount the amount supplied, which may be {@code null}
+         * @param context the constraint context, unused because the default message names the domain
+         *     and no per-value detail could be added without quoting the amount
+         * @return {@code true} when the amount is acceptable, {@code false} when it is not
+         */
+        @Override
+        public boolean isValid(Money amount, ConstraintValidatorContext context) {
+            return isAmountWithinRecordDomain(amount);
+        }
+    }
+
+    /**
+     * Renders this payload for a log or a diagnostic with the primary account number masked.
+     *
+     * <p>Refactoring Rationale: a record generates a rendering that names every component
+     * verbatim, and one of this record's eighteen components is a primary account number. Nothing
+     * has to be written wrongly for that rendering to escape: a payload interpolated into a log
+     * statement, carried in an assertion message, or picked up by a framework that traces a rejected
+     * message produces it automatically. Overriding it here makes the masking a property of the
+     * TYPE, so it holds for every present and future caller instead of depending on each one
+     * remembering -- which is the difference between a rule and a convention, and this type is
+     * handled on a consumer path where a failure is exactly when something gets logged.</p>
+     *
+     * <p>Assumptions: this type is the shape of a message read off a queue, so it is the one payload
+     * in this context that is BOTH untrusted in origin and carries a card number. The masking here
+     * addresses only what it discloses; neutralising control characters in a value about to be
+     * logged is the separate concern of
+     * {@code com.carddemo.common.observability.LogSafeText}, applied by the site that writes the log
+     * line rather than by the type being written.</p>
+     *
+     * <p>Alternatives Considered: (1) omitting the card number entirely, which is what
+     * {@code com.carddemo.batch.domain.Transaction} does. Rejected here because the transaction
+     * identifier alone does not locate an authorization: the persisted composite key is the account
+     * and the authorization instant, and an operator reading a consumer failure needs to know which
+     * card the message concerned. The last four digits supply that without supplying a usable
+     * number. (2) rendering only the components a failure needs and dropping the merchant block.
+     * Rejected because a consumer failure is usually a validation refusal on one of the eighteen
+     * components, and a rendering that omits fifteen of them cannot say which.</p>
+     *
+     * <p>Trade-offs: the money component is rendered in full, and that is deliberate. An amount is
+     * not protected data on its own, it is frequently the reason a message was refused, and this
+     * context's own persisted layouts carry it beside the masked card number for the same reason.</p>
+     *
+     * @return a single-line rendering naming this type and all eighteen components, with the card
+     *     number reduced to a mask and its last four digits; the component is labelled as masked so
+     *     that no reader mistakes it for a value that could be replayed onto a queue
+     */
+    @Override
+    public String toString() {
+        return "AuthorizationRequestPayload[authDate=" + authDate
+                + ", authTime=" + authTime
+                + ", maskedCardNumber=" + CardNumberMasker.mask(cardNumber)
+                + ", authType=" + authType
+                + ", cardExpiryDate=" + cardExpiryDate
+                + ", messageType=" + messageType
+                + ", messageSource=" + messageSource
+                + ", processingCode=" + processingCode
+                + ", transactionAmount=" + transactionAmount
+                + ", merchantCategoryCode=" + merchantCategoryCode
+                + ", acquirerCountryCode=" + acquirerCountryCode
+                + ", posEntryMode=" + posEntryMode
+                + ", merchantId=" + merchantId
+                + ", merchantName=" + merchantName
+                + ", merchantCity=" + merchantCity
+                + ", merchantState=" + merchantState
+                + ", merchantZip=" + merchantZip
+                + ", transactionId=" + transactionId + ']';
+    }
 }

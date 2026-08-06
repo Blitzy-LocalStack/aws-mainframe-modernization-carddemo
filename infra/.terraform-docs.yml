@@ -479,8 +479,8 @@ settings:
   #       setting it false to make every directory report only its constraint,
   #       which would remove the discrepancy by removing the useful half; and
   #       ignoring module locks per directory, which this configuration has no
-  #       expression for. Assumption for anyone running the drift gate: regenerate
-  #       and check from a clean checkout, or remove a module's own lock first, so
+  #       expression for. Assumptions: anyone running the drift gate regenerates
+  #       and checks from a clean checkout, or removes a module's own lock first, so
   #       that a per-directory init cannot be mistaken for a contract change.
   lockfile: true
 

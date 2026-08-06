@@ -34,12 +34,12 @@
 --   resources rather than here, and each is named with the key that pins it.
 --
 --   - Target schema: card. Pinned three times over, by spring.flyway.schemas
---     and spring.flyway.default-schema (application.yml:572-573) and by
---     spring.jpa.properties.hibernate.default_schema (:535). The second of
+--     and spring.flyway.default-schema in application.yml, and by
+--     spring.jpa.properties.hibernate.default_schema beside them. The second of
 --     the Flyway pair also decides where the schema history table lives,
 --     which is what keeps this module's migration state out of every other
 --     module's.
---   - Discovery location: classpath:db/migration (application.yml:561). The
+--   - Discovery location: classpath:db/migration, set by spring.flyway.locations. The
 --     file name is part of that contract, not decoration: a capital V, the
 --     version 1, two underscores, then the description. Renaming it or
 --     altering the prefix removes the script from discovery, and a location
@@ -52,7 +52,7 @@
 --     data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
 --     authority for schemas, roles and grants in this system. The schema and
 --     owner for this context are established at V0:505-506. Because
---     spring.flyway.create-schemas is false (application.yml:605), this
+--     spring.flyway.create-schemas is false in application.yml, this
 --     script may migrate the card schema and may not create it.
 --   - The executing role: the schema's owning role. V0 keys its cross-schema
 --     read privileges on that role using ALTER DEFAULT PRIVILEGES at
@@ -77,7 +77,7 @@
 --   the bootstrap named above, and this context owns one table with no
 --   reference data to load, so there is no second migration in this module.
 --
---   Because spring.jpa.hibernate.ddl-auto is none (application.yml:510),
+--   Because spring.jpa.hibernate.ddl-auto is none in application.yml,
 --   Hibernate emits no DDL and validates nothing. Every object listed above
 --   exists at runtime only because this script created it, and anything
 --   omitted here is simply absent from the running system.
@@ -86,42 +86,39 @@
 --   The failure modes a reader will actually meet, so that each one reads as
 --   intended behaviour rather than as a defect in this file.
 --
---   1. Absent schema. create-schemas is false, so applying this script to a
---      database on which the bootstrap never ran fails naming the schema it
---      wanted, instead of quietly producing a second card schema owned by
---      whichever role happened to connect and carrying none of the
---      privileges V0 grants.
---   2. Insufficient privilege. The executing role needs CREATE on schema
---      card. This is one of the three causes the sibling configuration
---      enumerates for a migration that cannot apply
---      (application.yml:113-116).
---   3. Missing PostgreSQL support module. The migration engine and its
---      PostgreSQL dialect are separate Maven coordinates, and
---      services/card-service/pom.xml declares the dialect module at
---      :324-327 precisely because the engine alone cannot match a PostgreSQL
---      connection. Neither coordinate carries a version; the aggregator
---      manages both, and nothing here should ever add one. The failure
---      surfaces at application startup with no compile-time signal, so a
---      build that succeeded is not evidence that this script can run.
---   4. Missing migration autoconfiguration. With the Flyway starter off the
+--   1. Absent schema, or insufficient privilege. create-schemas is false and
+--      the executing role needs CREATE on schema card, so applying this script
+--      to a database on which the bootstrap never ran fails naming the schema
+--      it wanted, instead of quietly producing a second card schema owned by
+--      whichever role happened to connect and carrying none of the privileges
+--      V0 grants. The sibling configuration enumerates the three causes of a
+--      migration that cannot apply, in its own header.
+--   2. Missing PostgreSQL support module. The migration engine and its
+--      PostgreSQL dialect are separate Maven coordinates, and this module's
+--      pom.xml declares org.flywaydb:flyway-database-postgresql precisely
+--      because the engine alone cannot match a PostgreSQL connection. Neither
+--      coordinate carries a version; the aggregator manages both, and nothing
+--      here should ever add one. The failure surfaces at application startup
+--      with no compile-time signal, so a build that succeeded is not evidence
+--      that this script can run.
+--   3. Missing migration autoconfiguration. With the Flyway starter off the
 --      classpath, every spring.flyway.* key binds to nothing and this script
---      never runs at all, while the service starts and reports healthy
---      against a database that has no cards table (pom.xml:276-283 and
---      :300-310).
---   5. Checksum mismatch. Flyway refuses to re-run a script whose checksum
---      changed after it was applied. Treat this file as immutable from its
+--      never runs at all, while the service starts and reports healthy against
+--      a database that has no cards table. This module's pom.xml states that
+--      dependency where it declares org.springframework.boot:
+--      spring-boot-starter-flyway, which is the coordinate that activates the
+--      autoconfiguration.
+--   4. Checksum mismatch, or pre-existing objects with no history. Flyway
+--      refuses to re-run a script whose checksum changed after it was applied,
+--      and with baseline-on-migrate false a card schema that already holds
+--      objects but carries no history table aborts startup rather than being
+--      recorded as already migrated. Treat this file as immutable from its
 --      first successful application onward: a correction arrives as a new
---      versioned migration, never as an edit here.
---   6. Pre-existing objects with no history. baseline-on-migrate is false
---      (application.yml:613), so a card schema that already holds objects
---      but carries no history table aborts startup rather than being
---      recorded as already migrated, which would leave a table of the wrong
---      shape in place and undetected.
---   7. No destructive path exists. spring.flyway.clean-disabled is true in
---      application-prod.yml:228, and this script contains no clean, no drop
---      and no truncate of its own, so there is nothing here for such a
---      request to act on. Those statements are out of scope for this file by
---      design.
+--      versioned migration, never as an edit here, because the alternative
+--      leaves a table of the wrong shape in place and undetected.
+--   5. No destructive path exists. clean is disabled by the profile overlay,
+--      and this script contains no clean, no drop and no truncate of its own,
+--      so there is nothing here for such a request to act on.
 --
 -- Provenance:
 --   Every app/** path cited in this file is REFERENCE-ONLY and is never
@@ -152,7 +149,7 @@
 -- WHY : Assumptions: every object below is written schema-qualified as
 --       card.<object> rather than left to the connection's search path. The
 --       pooled datasource does pin that path to this one schema
---       (application.yml:431), so an unqualified name would resolve
+--       (the connection-init-sql search path in application.yml), so an unqualified name would resolve
 --       correctly today; the qualification is what keeps the script
 --       deterministic when something other than that pool applies it, which
 --       the repository integration test and any operator-run session both

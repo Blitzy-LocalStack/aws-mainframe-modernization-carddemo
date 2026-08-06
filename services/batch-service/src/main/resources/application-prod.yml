@@ -12,9 +12,9 @@
 #   a round trip carries, and how loudly the module logs.
 #
 #   The framework activates this document when SPRING_PROFILES_ACTIVE=prod is
-#   present in the task environment. infra/modules/ecs-service/main.tf:367 lists
-#   that variable among the task's environment keys and
-#   infra/envs/prod/main.tf:1025 sets it from the environment name, so ONE image
+#   present in the task environment. infra/modules/ecs-service lists that
+#   variable among the container's environment keys and infra/envs/prod sets it
+#   from the environment name, so ONE image
 #   runs in either environment and the profile stays a deployment-time choice
 #   rather than a build-time one. Neither this document nor application.yml sets
 #   the variable, because a file that selected its own profile would make both
@@ -29,42 +29,53 @@
 #   file beside application-dev.yml: the two hold the same keys, and the
 #   difference in their values is the whole environment delta.
 #
-#   This module is NOT a server. Every invocation is a short-lived container
+#   This module PUBLISHES NO API. Every invocation is a short-lived container
 #   task that one state of the orchestration starts with --job and
 #   --business-date as container command arguments; it runs exactly one of the
 #   seven jobs and exits, and the orchestration reads its process exit status.
 #   Nothing in this file may turn it into a long-running process, and nothing
 #   may interfere with that status.
 #
+#   One precision, because the earlier wording of the sentence above claimed
+#   more than is true and a reader acting on it would draw the wrong conclusion
+#   about this task's network footprint: the task DOES run an embedded servlet
+#   container while a job is running. services/batch-service/pom.xml declares
+#   spring-boot-starter-web and spring-boot-starter-actuator so that the image
+#   HEALTHCHECK has a health endpoint to probe, and that is the whole of the
+#   listener's purpose. Two properties keep it from making this a server. It is
+#   bound to the loopback address by the server.address key of application.yml,
+#   so it is reachable only from inside the task; and it exposes the health
+#   endpoint alone, with details suppressed. It also cannot outlive the job:
+#   BatchApplication closes the context and calls System.exit with the job
+#   status.
+#
 # Inputs (the "parameters" this document consumes):
 #   Activation:
 #     SPRING_PROFILES_ACTIVE (string environment variable) -- must equal `prod`;
 #       placed by the task definition, never here.
-#   Keys it overrides, with the line application.yml declares each on. Eleven of
-#   the twelve appear in the base; the twelfth is the same single addition
-#   application-dev.yml makes at its L145, and it is argued at the key:
-#     spring.config.import -- ordered list of config-data location strings,
-#       L265.
+#   Keys it overrides, named by path because a key path locates the base
+#   declaration durably where a line number does not. Eleven of the twelve
+#   appear in application.yml; the twelfth, connection-timeout, is the same
+#   single addition application-dev.yml makes, and it is argued at the key:
+#     spring.config.import -- ordered list of config-data location strings.
 #     spring.datasource.hikari.connection-timeout -- integer milliseconds;
-#       base absent.
-#     spring.datasource.hikari.minimum-idle -- integer connection count, L457.
+#       absent from the base, added by both overlays.
+#     spring.datasource.hikari.minimum-idle -- integer connection count.
 #     spring.datasource.hikari.data-source-properties.options -- PostgreSQL
-#       session-option string, L511.
-#     spring.jpa.show-sql -- boolean, L653.
-#     spring.jpa.properties.hibernate.jdbc.fetch_size -- integer row count,
-#       L672.
-#     spring.jpa.properties.hibernate.jdbc.batch_size -- integer statement
-#       count, L694.
-#     logging.level.com.carddemo -- log-level string, L763.
-#     logging.level.org.springframework.batch -- log-level string, L772.
-#     logging.level.org.flywaydb -- log-level string, L773.
-#     logging.level.org.hibernate.SQL -- log-level string, L790.
-#     logging.level.org.hibernate.orm.jdbc.bind -- log-level string, L791.
+#       session-option string.
+#     spring.jpa.show-sql -- boolean.
+#     spring.jpa.properties.hibernate.jdbc.fetch_size -- integer row count.
+#     spring.jpa.properties.hibernate.jdbc.batch_size -- integer statement count.
+#     logging.level.com.carddemo -- log-level string.
+#     logging.level.org.springframework.batch -- log-level string.
+#     logging.level.org.flywaydb -- log-level string.
+#     logging.level.org.hibernate.SQL -- log-level string.
+#     logging.level.org.hibernate.orm.jdbc.bind -- log-level string.
 #   Environment variables it reads:
 #     CARDDEMO_ENVIRONMENT (string environment variable) -- an environment
 #       LABEL, never a location, a credential or an endpoint. It is the one
 #       placeholder here carrying a default, for the reason
-#       application.yml:239-245 records: an unresolved placeholder inside
+#       the rationale carried at `spring.config.import` in application.yml records: an unresolved placeholder inside
 #       spring.config.import aborts the earliest configuration-loading phase,
 #       before the `optional:` prefix can take effect.
 #   Values it does NOT supply and must never supply:
@@ -84,33 +95,34 @@
 #   application.yml and is absent here on purpose, because restating one would
 #   fork the decision and trimming one would break the module:
 #     the ordered FIVE-schema search path -- batch, ledger, account, card,
-#       reference -- at L416, applied once per PHYSICAL pooled connection, which
-#       is what also pins Flyway's own connections without a second
-#       declaration;
+#       reference -- carried on the pooled connection's `options`, applied once
+#       per PHYSICAL connection, which is what also pins Flyway's own
+#       connections without a second declaration;
 #     Flyway scoped to classpath:db/migration and to the `batch` schema for both
 #       the migration and its history table, creating no schema and with
-#       cleaning disabled, L531-L600;
-#     the persistence provider held to validate-only, L632, so a mapping that
+#       cleaning disabled;
+#     `spring.jpa.hibernate.ddl-auto` held to validate, so a mapping that
 #       disagrees with a physical table stops the task at startup rather than
 #       mid-chunk;
 #     the job-repository tables left to resolve through that search path rather
-#       than through a prefix property, L722-L731;
+#       than through a table-prefix property;
 #     exactly one non-distributed datasource and therefore the single
-#       auto-configured transaction manager, L354-L371, which is what keeps the
-#       three-write posting unit of work at app/cbl/CBTRN02C.cbl:440-442 a
-#       single atomic commit;
-#     the maximum pool size at L447 and the connection leak detector at L473,
-#       both argued as explicit non-overrides under WHY below;
-#     TLS at verify-full with its explicit trust anchor, L509-L510, of which
-#       only the sibling map entry is replaced below;
-#     the framework's own startup job launcher left off, L731, so that job
-#       selection stays with the container command and nothing here gives the
-#       task a second source of truth;
+#       auto-configured transaction manager, which is what keeps the three-write
+#       posting unit of work at app/cbl/CBTRN02C.cbl:440-442 a single atomic
+#       commit;
+#     `spring.datasource.hikari.maximum-pool-size` and
+#       `leak-detection-threshold`, both argued as explicit non-overrides under
+#       WHY below;
+#     TLS at verify-full with its explicit trust anchor, of which only the
+#       sibling `options` map entry is replaced below;
+#     `spring.batch.job.enabled` left false, so that job selection stays with
+#       the container command and nothing here gives the task a second source of
+#       truth;
 #     and no listening socket of any kind.
 #   It also leaves the process exit-status contract entirely alone -- 0 clean, 4
 #   completed with rejects, 8 or more a hard failure -- which
-#   BatchApplication.exitStatusOf at L709 translates from the constants at L306,
-#   L319 and L330. No key in this file grades anything.
+#   BatchApplication.exitStatusOf translates from the BatchReturnCode constants.
+#   No key in this file grades anything.
 #
 # Fails when:
 #   - `prod` Aurora capacity is ever scaled to zero. The connection budget below
@@ -139,11 +151,11 @@
 #     numbers for every record in the input feed.
 #
 # Deliberate omissions, so that each absence reads as a decision:
-#   - Assumptions: no management.* and no server.*, even though three authored
-#     peer overlays set management.endpoints.web.exposure.include. This module
-#     declares neither the actuator nor the web starter, and
-#     services/batch-service/pom.xml:211-252 argues both rejections, so both
-#     namespaces would bind to nothing here and be accepted without complaint.
+#   - Assumptions: no management.* and no server.*, even though peer overlays in
+#     other contexts set management.endpoints.web.exposure.include. This module
+#     declares neither the actuator nor the web starter -- its pom.xml argues
+#     both rejections beside its dependency set -- so both namespaces would bind
+#     to nothing here and be accepted without complaint.
 #   - Trade-offs: no logback-spring.xml and no retention key. Retention is a
 #     property of the CloudWatch log group infra/modules/observability
 #     provisions, not of this artifact: the container writes to standard output
@@ -177,7 +189,7 @@
 #     publishes no contract and serves no request, so there is nothing to
 #     advertise and nothing to authorise; there is no
 #     services/batch-service/src/main/resources/openapi/ directory for the same
-#     reason, and services/batch-service/pom.xml:211-252 records why the
+#     reason, and this module's pom.xml records beside its dependency set why the
 #     request-driven starters are absent.
 #   - Trade-offs: no statement_timeout, no read replica, no second datasource,
 #     no cache and no queue-listener enablement. The first is argued at the
@@ -194,10 +206,9 @@
 #   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has no
 #   docstring construct, so this header block is the module-entry-point
 #   equivalent, and every key below carries an adjacent rationale under one of
-#   the four canonical labels, as the project's single user-specified rule,
-#   Rule 1 "Explainability", requires. That standard also fixes the comment FORM
-#   used here: its `# WHAT:` / `# WHY :` twin idiom belongs to fenced command
-#   blocks in prose and is forbidden on a statement in a configuration file, so
+#   the four canonical labels. The same standard fixes the comment FORM used
+#   here: the paired what-and-why comment idiom belongs to fenced command blocks
+#   in prose and is not written above a statement in a configuration file, so
 #   purpose lives in this header and each key comment carries a labelled why and
 #   nothing else.
 # -----------------------------------------------------------------------------
@@ -225,16 +236,14 @@
 #     again at the key itself rather than left for an operator to rediscover.
 #   - Trade-offs: the maximum pool size is deliberately NOT overridden, even
 #     though this profile runs the whole production feed rather than a fixture.
-#     application.yml:434-447 fixes it at a floor strictly above one because the
-#     job repository writes step and job execution state in a transaction
-#     SEPARATE from the chunk transaction, so a pool of one deadlocks this
-#     module outright; and it sizes the ceiling by how many transactions ONE job
-#     runs concurrently rather than by feed volume, because a task that runs one
-#     job and exits serves no traffic. Raising it here would draw on a
-#     connection budget eight peer roles share with this one without making any
-#     job finish, so only the floor of warm connections is raised below.
+#     The base sizes `spring.datasource.hikari.maximum-pool-size` by how many
+#     transactions ONE job runs concurrently -- never by feed volume, because a
+#     task that runs one job and exits serves no traffic -- and its rationale is
+#     carried at that key. Raising it here would draw on a connection budget
+#     eight peer roles share without making any job finish, so only the floor of
+#     warm connections is raised below.
 #   - Trade-offs: the connection leak detector is likewise NOT restated. Its
-#     threshold at application.yml:459-473 is deliberately set ABOVE the
+#     threshold, `spring.datasource.hikari.leak-detection-threshold` in application.yml, is deliberately set ABOVE the
 #     server-side idle-in-transaction ceiling, so that a connection stuck INSIDE
 #     a transaction is terminated by the server while the client-side detector
 #     reports only the checked-out-but-idle case an unclosed streaming read
@@ -259,7 +268,7 @@
 #     make, which is why five logging keys appear below holding the base's own
 #     values. The base holds this module's categories level with the root and
 #     floors statement and bind logging OFF; application-dev.yml raises the
-#     first three at its L250 and L261-L262 because a `dev` feed is
+#     first three at those same three keys because a `dev` feed is
 #     fixture-sized and the reason to run a job there is to watch it. Under this
 #     profile the feed is the whole production feed, so the same raise would
 #     emit per-record and per-chunk lines for an entire run; and the two bind
@@ -274,7 +283,7 @@ spring:
 
   # WHY : (1) Assumptions: the same MECHANISM as the base and as its matched
   #       pair, addressed at a different tier -- an `optional:aws-parameterstore:`
-  #       import, exactly as application.yml:265-267 declares it, with only the
+  #       import, exactly as application.yml declares it at `spring.config.import`, with only the
   #       default environment label changed to `prod`. The path is a logical
   #       Parameter Store prefix, not an endpoint, and it names no value.
   #       (2) Refactoring Rationale: inheriting the base's `local` default
@@ -330,7 +339,7 @@ spring:
       #       Two is also the number of transactions this module has open
       #       CONCURRENTLY at its narrowest, because the job repository writes step
       #       and job execution state in a transaction SEPARATE from the chunk
-      #       transaction, as application.yml:434-447 records, so pre-warming both
+      #       transaction, as application.yml records at `spring.datasource.hikari.maximum-pool-size`, so pre-warming both
       #       means neither pays its own establishment cost inside the batch
       #       window. What is given up is that a job running only set-based
       #       statements holds a second connection it may never check out, against
@@ -342,7 +351,7 @@ spring:
 
       # Trade-offs: two of the three bounds the base sets are tightened and the
       #       third stays absent. Lock waiting and idle-in-transaction are
-      #       shortened relative to application.yml:511 because this is the profile
+      #       shortened relative to the base value in application.yml because this is the profile
       #       in which holding the batch window open has a cost: states 1 and 11 of
       #       the orchestrated chain, QuiesceOnlineWrites and ResumeOnlineWrites at
       #       infra/modules/step-functions-batch/main.tf:58, bracket that window,
@@ -371,14 +380,14 @@ spring:
       #       produces. Lowering the ceiling widens that gap rather than closing
       #       it.
       # Assumptions: only this map ENTRY is replaced. sslmode and sslrootcert are
-      #       separate entries of the same map at application.yml:509-510 and are
+      #       separate entries of the same map under `spring.datasource.hikari.data-source-properties` in application.yml and are
       #       inherited unchanged, so verify-full and its explicit trust anchor
       #       still apply under this profile.
       data-source-properties:
         options: "-c lock_timeout=20000 -c idle_in_transaction_session_timeout=180000"
 
   jpa:
-    # Trade-offs: held at application.yml:653 rather than raised, and restated
+    # Trade-offs: held at the base value in application.yml rather than raised, and restated
     #       rather than merely inherited because this is the profile in which it
     #       would be reached for: after a production run fails, an operator wants
     #       to see the statements. This key echoes them through the
@@ -409,7 +418,7 @@ spring:
           #       batch.batch_run, neither of which
           #       depends on how many rows shared a round trip.
           # Assumptions: the value must stay strictly positive.
-          #       application.yml:658-672 records that the driver opens a
+          #       application.yml records at `hibernate.jdbc.fetch_size` that the driver opens a
           #       server-side cursor only when a positive fetch size and
           #       auto-commit off BOTH hold, so a zero here would buffer the entire
           #       result in the client and fail on feed size alone rather than on
@@ -437,11 +446,11 @@ spring:
           #       a wider group of statements. That is accepted because the chunk
           #       transaction rolls back whole either way, so there is no partly
           #       applied work to attribute, and because the validate-only setting
-          #       at application.yml:632 exists to stop a schema-contract mismatch
+          #       at `spring.jpa.open-in-view` in application.yml exists to stop a schema-contract mismatch
           #       reaching a run at all.
           # Alternatives Considered: hibernate.order_inserts and
           #       hibernate.order_updates are deliberately still NOT set, for the
-          #       reason application.yml:679-693 gives -- they raise grouping by
+          #       reason application.yml gives at `hibernate.jdbc.batch_size` -- they raise grouping by
           #       REORDERING statements across entity types, which would move the
           #       physical order further from the transcribed order of those same
           #       three writes and buy nothing the single transaction does not
@@ -460,7 +469,7 @@ logging:
     #       number or a card verification value: the masking that suppresses those
     #       lives in the mapper layer, and a debug statement that formats an
     #       entity directly is the easiest way to defeat it.
-    # Trade-offs: the root floor at application.yml:755 is deliberately not
+    # Trade-offs: the root floor `logging.level.root` in application.yml is deliberately not
     #       touched in EITHER direction, which is why it is absent here. Raising it
     #       would emit third-party debug output for an entire feed; lowering it
     #       below the base's floor would suppress the framework's own step and
@@ -481,7 +490,7 @@ logging:
     org.flywaydb: INFO
 
     # Trade-offs: this rationale governs BOTH keys below, which preserve the
-    #       floor at application.yml:775-791 rather than leaving it unset, and it
+    #       floor application.yml sets on `org.hibernate.SQL` and `org.hibernate.orm.jdbc.bind` rather than leaving it unset, and it
     #       is a data-protection floor rather than a volume control. A bound
     #       parameter in this module carries the primary account number of every
     #       transaction in the feed. These two categories sit UNDERNEATH the

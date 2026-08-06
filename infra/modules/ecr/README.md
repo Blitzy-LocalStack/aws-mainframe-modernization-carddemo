@@ -232,7 +232,7 @@ Every row is build-failing; no row is an advisory check.
 | Material policy | Checkov's explicit Terraform material-control set over `infra/`, replacing a nominal `HIGH,CRITICAL` selector that the offline distribution cannot populate | Selected IAM, encryption, audit, network, messaging, workload, and registry findings are all absent |
 | Sensitive-value scan | Gitleaks over migration-owned tracked files | No committed authentication material is introduced outside the immutable reference trees |
 
-Trade-off: the offline Checkov distribution does not expose severity metadata,
+Trade-offs: the offline Checkov distribution does not expose severity metadata,
 so a literal `HIGH,CRITICAL` selector would select no checks and report a false
 green. The workflow records the full result set and gates an explicit
 material-control list; maintaining that list is accepted in exchange for a
@@ -248,7 +248,7 @@ The lint gate names its load-bearing rules explicitly:
 `terraform_comment_syntax` pins the `#` form used by every why-comment in this
 directory and rejects a parallel `//` convention.
 
-Assumption: the material-policy gate is satisfied by construction here:
+Assumptions: the material-policy gate is satisfied by construction here:
 `scan_on_push` is forced true, encryption is forced to a customer-managed key,
 and no public repository policy exists. The absence of an
 `aws_ecr_repository_policy` resource is part of the access-control design, not
@@ -266,14 +266,14 @@ CICS baseline also demonstrates the ambiguity being removed: `CARDDLIB` and
 `COM2DOLL` pointed to the same dataset, and execution depended on ranking and
 enablement state rather than on an immutable artifact identity.
 
-Trade-off: a registry refuses a second push under an existing tag, including a
+Trade-offs: a registry refuses a second push under an existing tag, including a
 retry after a partially failed publishing run. The workflow must use a fresh
 release tag for different bytes; its default is the commit SHA. That cost is
 accepted because it is what makes a tag a trustworthy deployment identity.
 
 ### Server-side scanning
 
-Assumption: scan-on-push means the registry scans each image after it is
+Assumptions: scan-on-push means the registry scans each image after it is
 pushed, so neither service CI nor deployment CI contains a separate
 container-image scanning step. That absence is deliberate. The registry-side
 scan is post-push and does not block publication, so no caller may treat it as a
@@ -305,7 +305,7 @@ states, and a dev publishing run could claim a tag that prod expects to select.
 The `<name_prefix>-<environment>/<artifact>` composition gives each state a
 disjoint namespace.
 
-Assumption: repository names contain no account identifier because an ECR
+Assumptions: repository names contain no account identifier because an ECR
 namespace is already scoped by account and region. Adding the same identifier
 to every name would repeat scope the registry already supplies without
 preventing any collision this module can create.
@@ -317,25 +317,25 @@ both roots and silently collapse the namespace.
 
 ### Retention follows immutable release tags
 
-Assumption: every deployment adds a new immutable release tag, normally the
+Assumptions: every deployment adds a new immutable release tag, normally the
 reviewed commit SHA, so the tagged set grows monotonically. A count bound of 30
 therefore caps that growth while retaining the most recent rollback candidates.
 An age-only rule was rejected because a service with no recent deployment could
 lose its last known-good image solely because time passed.
 
-Assumption: untagged manifests are not addressable by any task definition.
+Assumptions: untagged manifests are not addressable by any task definition.
 They can result from an interrupted push, a build-cache manifest, or a child
 manifest whose index was removed. The separate 14-day rule leaves a bounded
 inspection and retry window while ensuring those layers do not accumulate
 without limit.
 
-Trade-off: the ten generation-dataset bases in the baseline each used a bounded
+Trade-offs: the ten generation-dataset bases in the baseline each used a bounded
 generation count with automatic scratch, so bounded retention preserves the
 discipline that artifact stores must not grow indefinitely. The analogy stops
 at that principle: generation limits governed datasets, while these rules
 govern container images.
 
-Assumption: the untagged rule has priority 1 and the `tagStatus = "any"` rule
+Assumptions: the untagged rule has priority 1 and the `tagStatus = "any"` rule
 has priority 2. The broader selector must have the highest priority; reversing
 them would let the count rule consume untagged manifests before the age window
 could decide their eligibility.
@@ -361,7 +361,7 @@ but architecture-divergent repository. `kms_key_arn` is required,
 
 ### Deletion is explicit
 
-Trade-off: `force_delete` defaults to false even though clean teardown is an
+Trade-offs: `force_delete` defaults to false even though clean teardown is an
 acceptance criterion. A populated repository contains the deployable artifacts
 needed for rollback or redeployment; allowing an ordinary destroy to erase them
 would turn a targeting mistake into data loss. The default makes deletion fail
@@ -371,7 +371,7 @@ the same choice for its state bucket.
 
 ### Provider ownership and additive tags
 
-Assumption: this module declares no `provider "aws"` block. It inherits the
+Assumptions: this module declares no `provider "aws"` block. It inherits the
 calling root's configured provider, including region and `default_tags`; an
 explicit `tags` input supplies repository-specific additions. Root-level
 default tags and module-level tags therefore compose additively, and an empty
@@ -383,7 +383,7 @@ would bind region and default-tag policy inside a reusable module. A
 deterministic and no random value is consumed; declaring it would fail
 `terraform_unused_required_providers`.
 
-Assumption: the module has no backend or cloud block because a called module
+Assumptions: the module has no backend or cloud block because a called module
 has no independent state. It also has no caller-identity data source: every
 repository URL is read from the provider-computed `repository_url` attribute,
 so there is no second, manually assembled copy of the address to drift from the
@@ -402,12 +402,12 @@ than lists. A list position is not a property of a repository; reordering it
 could make a task definition select another bounded context's image while both
 plan and apply still succeed.
 
-Assumption: `registry_id` reads the first value from the deterministically
+Assumptions: `registry_id` reads the first value from the deterministically
 key-ordered repository map. That is safe because input validation requires the
 exact non-empty ten-name set, and every repository created by one provider
 configuration belongs to the same registry.
 
-Assumption: each lifecycle policy references
+Assumptions: each lifecycle policy references
 `aws_ecr_repository.this[each.key].name` rather than repeating the composed
 string. The resource reference creates the dependency edge that prevents policy
 attachment from racing repository creation.

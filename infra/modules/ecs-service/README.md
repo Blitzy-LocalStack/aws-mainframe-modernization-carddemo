@@ -24,12 +24,14 @@ sizing, and retention, and the module turns those inputs into an ECS Fargate
 task runtime. It can add a long-running, load-balanced service and autoscaling,
 or stop at the task definition, roles, and log group for an orchestrated task.
 
-This README exists because the Explainability rule requires it. AAP §0.2.1.6
-lists a README in every Terraform module, and AAP §0.8.1 defines that README as
-the **prose half** of the HCL documentation obligation. The file-header comments
-and resource rationales in the `.tf` files, the variable/output descriptions
-checked by [TFLint](../../.tflint.hcl), and the generated contract checked by
-[terraform-docs](../../.terraform-docs.yml) form the mechanical half.
+Read this README to find out what the module composes, which inputs it
+requires, and why each non-obvious argument is set the way it is; HCL has no
+docstring construct, so this file is where that reasoning lives. AAP §0.2.1.6
+lists a README in every Terraform module for exactly that reason. The
+file-header comments and resource rationales in the `.tf` files, the
+variable/output descriptions checked by [TFLint](../../.tflint.hcl), and the
+generated contract checked by [terraform-docs](../../.terraform-docs.yml) carry
+the machine-checkable part of the same obligation.
 
 Assumptions: the module is consumed only through an environment root. It holds
 no backend and no environment state of its own, so applying this directory

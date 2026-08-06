@@ -88,7 +88,13 @@
 > `authorization-service` (D-5, D-6), `batch-service` (D-1, D-3),
 > `reporting-service` (D-2), and `account-service`, `card-service`,
 > `transaction-service` and `reference-service` through the structural divergences
-> in [§7.3](#73-structural-divergences-that-are-not-defects). Eight sibling
+> in [§7.3](#73-structural-divergences-that-are-not-defects). **One consumer is not
+> a service:** the user-interface shell under `ui/src/layout` consumes it for
+> [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in), which belongs to no
+> service because the header band it concerns is realised as a client-side component
+> rather than behind an endpoint — the same reason two programs appear in
+> [§2.9](#29-realised-as-user-interface-routes-rather-than-as-a-service) with no
+> service owner. Eight sibling
 > documents name this document as the owner of the register they defer to.
 >
 > **Measured implementation status.** Every baseline figure and line citation below
@@ -632,6 +638,7 @@ L547, L560, L595, L608, L639, L778, L846, L931** and **L975**.
 | `READ-USER-SEC-FILE` | L209 | `CognitoIdentityService.authenticate` | The credential check. The direct comparison is at **L223**; registered as [D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward) |
 | the administrator branch | L232 | client-side navigation to `/admin` | Chosen from the signed group claim rather than from a client-supplied field |
 | the user branch | L237 | client-side navigation to `/menu` | As above |
+| `POPULATE-HEADER-INFO` | L177 | `ui/src/layout/ScreenHeader.tsx` | The shared two-row title band. Its target owner is a **client-side component, not a service method** — the paragraph paints the screen's own frame, which the target renders in the browser. The clock read at **L179** is registered as [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in). The band is authored **once** and reused because the baseline shares nothing here: 12 of the 17 screen-painting programs declare this paragraph by this name and the other five do the same work under a `1100-SCREEN-INIT` or `3100-SCREEN-INIT` paragraph, so the target replaces 17 copies with one component |
 
 Where a program's paragraph structure is analysed in depth by a sibling, the
 analysis is cited rather than repeated:
@@ -885,6 +892,16 @@ register — eight sibling documents defer to it.
 > **ID** · **Baseline behaviour**, with exact path and line · **Target behaviour** ·
 > **Category** · **Why the difference is accepted** · **Where it is verified.**
 
+The entries in [§7.4](#74-divergences-claimed-by-shipped-code) carry one further part,
+**Files**, naming the source files that implement the divergence.
+Refactoring Rationale: those entries exist because shipped source cites them, so the
+lookup has to work in both directions -- from a comment to its entry, and from an entry
+back to every file that claims it. Without the file list the reverse direction is a
+repository-wide search for a phrase, which is how the entries came to be missing in the
+first place. The first six entries predate any code citing them by identifier and are
+left at six parts rather than being back-filled, because inventing a file list for an
+entry no file names would assert a link that does not exist.
+
 **The register describes differences, not repairs.** For each entry it states what the
 COBOL does, cites the line, states what the target does, and labels the pair a
 **documented divergence**. No entry asserts that any baseline source was edited,
@@ -1079,6 +1096,99 @@ each produce one registered divergence.
   [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) own the
   transport and schema halves respectively.
 
+#### D-7 — the header clock and the zone it is read in
+
+* **Baseline behaviour.** Every screen paint reads one clock in one zone.
+  [`app/cbl/COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) declares
+  `POPULATE-HEADER-INFO` at **L177** and its first statement is
+  `MOVE FUNCTION CURRENT-DATE TO WS-CURDATE-DATA` at **L179**; the paragraph is
+  reached from `SEND-SIGNON-SCREEN` at **L145** through
+  `PERFORM POPULATE-HEADER-INFO` at **L147**, immediately before the
+  `EXEC CICS SEND MAP` that paints the screen. `FUNCTION CURRENT-DATE` returns the
+  **CICS region's** local date and time, so every terminal attached to a given
+  region read the same wall clock in the same zone whatever the operator's own
+  machine said. The captured value is reformatted through
+  [`app/cpy/CSDAT01Y.cpy`](../../app/cpy/CSDAT01Y.cpy) — `WS-CURDATE-MM-DD-YY` at
+  **L30–L35** produces `MM/DD/YY` and `WS-CURTIME-HH-MM-SS` at **L36–L41** produces
+  `HH:MM:SS`, each eight characters with literal separators held in `FILLER` — and
+  moved into the mapset's two right-hand slots;
+  [`app/bms/COSGN00.bms`](../../app/bms/COSGN00.bms) **L47–L51** sizes `CURDATE` at
+  `LENGTH=8`, `POS=(1,71)`, `INITIAL='mm/dd/yy'`. **This is not one program's
+  habit.** 17 of the 18 members of [`app/cbl`](../../app/cbl) matching `CO*.cbl`
+  read the clock this way — every one that paints a screen; the single exception is
+  `COBSWAIT`, the retired batch wait utility, which paints none.
+* **Target behaviour.** `ui/src/layout/ScreenHeader.tsx` renders the same two
+  formats in the same two slots and takes the instant as an **optional prop**. The
+  application shell is expected to supply a **server-derived** instant, which is the
+  only value that reproduces the baseline's single-clock property. When the prop is
+  omitted the component reads the **browser's** clock and formats it in the
+  **browser's** zone — two substitutions rather than one, because a client machine
+  can be both skewed and in a different zone from the service.
+* Trade-offs: the divergence is bounded to the omitted case rather than removed,
+  and it is bounded at the one prop that controls it.
+* **Why the difference is accepted.** **There is no region clock left to read.** The
+  baseline's single clock was a property of the single region every terminal attached
+  to; the target has no region but a horizontally-scaled set of stateless handlers —
+  the shape that the state elimination in
+  [§7.3](#73-structural-divergences-that-are-not-defects) is what makes possible — so
+  no one machine's wall clock is the authority any more, and the single-clock
+  property can be restored only by having the *service* supply the instant, which is
+  precisely what the prop exists for. The named consequence of omitting it
+  is user-visible and is stated rather than hidden: two operators looking at one
+  record across a midnight boundary can read two different dates in the
+  eight-character date slot. Rendering the slots **blank** until a caller supplies an
+  instant was the alternative and was rejected, because the baseline never showed an
+  empty date, so a blank slot trades a small documented inaccuracy for a visible
+  absence. Everything except the clock and the zone is preserved: the two formats,
+  their separators, their widths and their positions are carried across verbatim, so
+  the *shape* of what is rendered never differs — only which clock produced it.
+* **Where it is verified.** Component tests render the band with an **injected**
+  instant and assert both formats, so the format contract is asserted independently
+  of any clock; the default path is verified by the deliberate **absence** of an
+  assertion about it, because a test asserting a wall-clock value would be asserting
+  the test runner's clock rather than the component's behaviour. Like
+  [D-1](#d-1--the-exportimport-record-key-declaration) this divergence has **no
+  golden master to compare against** — the online programs cannot be run end to end
+  without a CICS runtime ([`tests/README.md`](../../tests/README.md) §1.1), so the
+  source's own format declarations in `CSDAT01Y.cpy` and the mapsets are the oracle
+  instead of a produced output. The band's **typographic** treatment is owned by
+  [`design-token-reference.md`](design-token-reference.md) §4.2, which resolves the
+  title band to a heading token; the two **formats** are owned by no sibling and are
+  therefore cited above from the copybook directly, because a working-storage
+  reformatting group is a presentation-layer field layout and the schema document
+  maps persisted records.
+
+> Assumptions: **the paragraph name is not the population.** Grepping for
+> `POPULATE-HEADER-INFO` finds **12** programs, not 17, and a reader who stopped
+> there would register this divergence against two thirds of the screens it actually
+> affects. The remaining five — `COACTUPC` (**L2668**), `COACTVWC` (**L431**),
+> `COCRDLIC` (**L642**), `COCRDSLC` (**L427**) and `COCRDUPC` (**L1052**) — do the
+> same work in a `1100-SCREEN-INIT` or `3100-SCREEN-INIT` paragraph instead. The
+> measurable surface that covers all 17 is therefore the clock call itself,
+> `FUNCTION CURRENT-DATE`, not the paragraph that contains it:
+>
+> ```bash
+> # WHAT: the 17 screen-painting programs that read the region clock, and the 12
+> #       that happen to name the paragraph POPULATE-HEADER-INFO.
+> # WHY : Assumptions: the two figures are different and only the first is the
+> #       divergence's population. Reporting the paragraph count as the program
+> #       count understates it by five, and the five it drops are the account and
+> #       card screens - the densest ones in the target.
+> grep -rl 'FUNCTION CURRENT-DATE' app/cbl/CO*.cbl | wc -l   # 17
+> grep -rl 'POPULATE-HEADER-INFO'  app/cbl/CO*.cbl | wc -l   # 12
+> ```
+>
+> Assumptions: **the two slots are the same width in the copybook but not in every
+> mapset.** Both reformatting groups are eight characters, and `CURDATE` is declared
+> `LENGTH=8` at **L47** of all 17 base mapsets — but `CURTIME` is declared `LENGTH=8`
+> at **L70** of 16 of them and `LENGTH=9` in
+> [`COSGN00.bms`](../../app/bms/COSGN00.bms) alone, where its `INITIAL` operand is
+> the nine-character `'Ahh:mm:ss'`. The eight-character COBOL value is therefore
+> left-justified into a nine-character slot on the sign-on screen only. It is
+> recorded because a reader checking "eight characters" against that one mapset would
+> find a 9 and conclude the figure above is wrong, when in fact the copybook value is
+> eight and the outlier is the slot.
+
 ### 7.3 Structural divergences that are not defects
 
 These are recorded separately so that a reader does not mistake a deliberate design
@@ -1158,6 +1268,427 @@ so treating the missing driver as evidence that the function is unwanted would d
 real capability on the strength of an absence. Owned by
 [`batch-orchestration.md`](batch-orchestration.md), which places it as a state of the
 batch chain.
+
+### 7.4 Divergences claimed by shipped code
+
+Every entry below is claimed as registered by a comment or docstring in shipped
+source. Six of them are cited **by identifier** and the identifier here is the
+identifier used there, character for character; the remaining ten were cited
+generically as "registered" or "documented" without an identifier, so an identifier
+is assigned here and added at each citing site, because a claim of registration that
+names nothing cannot be checked.
+
+Refactoring Rationale: these entries are authored because their absence made the
+register's own opening sentence false. A file that says a difference "is registered
+in this document" and finds no entry has stated something untrue, and the reader who
+goes looking is left unable to tell an omission from a difference nobody intended.
+The register is the mechanism the standing constraint relies on, so a gap in it is
+not a documentation shortfall but a failure of the constraint itself.
+
+Assumptions: the reverse direction matters as much as this one. Any future difference
+claimed in code must acquire an entry here **and** cite it by identifier, and any
+entry here must name the files that implement it, so that the two sides can be
+reconciled by search rather than by reading. That is the only discipline under which
+a register of this size stays true.
+
+#### C-ROUNDING — interest accrual truncates in the baseline and rounds half-up here
+
+* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the
+  monthly interest at **L464-L465** and stores the quotient into a fixed-scale field
+  with **no `ROUNDED` phrase**; a search for that phrase across all 652 lines of the
+  program returns no match. A store into a fixed-scale item without it discards the
+  surplus digits, so the baseline behaviour is **truncation toward zero**.
+* **Target behaviour.** `Money` implements half-up as the general contract and exposes
+  the accrual entry point with the rounding mode as an explicit parameter, so a caller
+  states which of the two documented behaviours it wants and a test can assert either.
+* **Category.** Documented divergence — arithmetic rounding mode.
+* **Why the difference is accepted.** The plan requires half-up for money, and the
+  difference is exactly one cent and only on a quotient landing exactly on a half
+  cent. On the vectors the reference fixtures carry the two modes agree: a balance of
+  `1000.00` at a rate of `2.50` yields `2.08333...` and both return `2.08`. They part
+  company only at an exact half cent, as with `1000.80` at `2.50`, where the quotient
+  is `2.0850` exactly, truncation returns `2.08` and half-up returns `2.09`. Making
+  the mode a parameter rather than a silent choice is what keeps the difference
+  visible at the call site instead of buried in a constant.
+* **Where it is verified.** `MoneyTest` asserts both modes on the half-cent vectors
+  above, and the multiply-then-divide order is asserted separately
+  ([§3.2](#32-cbact04c--interest-accrual)).
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`.
+
+#### D-SIGNED-ZERO-ZONED — the plain zoned pair normalises a negative-zero overpunch
+
+* **Baseline behaviour.** A zoned-decimal field carries its sign in the low-order
+  byte, and the overpunch table admits a **negative zero** — the byte `}` for a value
+  of minus nothing — distinctly from the positive `{`. The seed carries both forms;
+  [`app/data/ASCII/tcatbal.txt`](../../app/data/ASCII/tcatbal.txt) record 1 uses `{`
+  as a positive-zero low-order digit, and a `}` in the same position is a different
+  byte holding the same numeric value.
+* **Target behaviour.** `ZonedDecimalCodec`'s plain `decode`/`encode` pair yields a
+  `BigDecimal`, which has **no negative zero**, so a `}`-signed zero decodes to zero
+  and re-encodes as `{`. The byte is not preserved on that path. A separate
+  sign-representation-preserving pair — `decodePreservingSign`/`encodePreservingSign`
+  over a `SignedZoned(value, negativeSign)` carrier — reproduces the original byte
+  exactly, and `FixedWidthCodec.encodeRecordPreservingSign` routes every signed zoned
+  field whose value is zero through it.
+* **Category.** Documented divergence — sign representation of zero on the plain
+  numeric path only.
+* **Why the difference is accepted.** The loss is a property of the target's numeric
+  type and not a choice: no exact decimal type in the platform can hold minus zero, so
+  a plain numeric round trip cannot reproduce the byte at any price. Rather than
+  changing the numeric type, the codec offers a second pair whose carrier keeps the
+  sign alongside the value, so byte-exact round-tripping is available where a record
+  must be reproduced and the ordinary arithmetic path stays free of a representation
+  concern it has no use for.
+* **Where it is verified.**
+  `signPreservingPairReproducesTheNegativeZeroOverpunchByteForByte`,
+  `signPreservingPairReproducesANonZeroNegativeSpan`,
+  `signPreservingPairRefusesASignThatContradictsANonZeroValue` and
+  `theSignPreservingRecordEncoderReproducesSignedZeroesByteForByte`, each of which also
+  asserts the documented normalisation of the plain pair so the divergence is pinned
+  from both sides.
+* **Files.**
+  `services/common-lib/src/main/java/com/carddemo/common/codec/ZonedDecimalCodec.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/codec/FixedWidthCodec.java`.
+
+#### D-SIGNED-ZERO-PACKED — the plain packed pair normalises the zero sign nibble
+
+* **Baseline behaviour.** A packed-decimal (`COMP-3`) field carries its sign in the
+  low-order nibble, and a zero value may arrive with `0xC` (positive), `0xD`
+  (negative) or `0xF` (unsigned). All three occur in the baseline's packed records —
+  the export record at [`app/cpy/CVEXPORT.cpy`](../../app/cpy/CVEXPORT.cpy) and the
+  two authorization segments — and all three denote the same numeric value.
+* **Target behaviour.** `PackedDecimalCodec`'s plain pair yields a `BigDecimal` and
+  re-encodes a zero with one canonical nibble, so the original is not preserved. The
+  sign-preserving pair `decodePackedPreservingSign`/`encodePackedPreservingSign` over a
+  `SignedPacked(value, signNibble)` carrier reproduces the original nibble, admitting
+  exactly the three nibbles the codec itself emits.
+* **Category.** Documented divergence — sign representation of zero on the plain
+  numeric path only.
+* **Why the difference is accepted.** For the reason given under
+  `D-SIGNED-ZERO-ZONED`: the target's exact decimal type cannot express the
+  distinction, so it is carried beside the value rather than inside it. Admitting only
+  `0xC`, `0xD` and `0xF` is deliberate — a carrier that accepted the alternate
+  encodings `0xA`, `0xB` and `0xE` would promise to reproduce bytes this codec never
+  emits, which is a claim it cannot keep.
+* **Where it is verified.** `signPreservingPackedPairReproducesBothZeroSignNibbles`,
+  `signPreservingPackedPairReproducesSignedAndUnsignedFields` and
+  `signPreservingPackedPairRefusesAnInadmissibleNibble`.
+* **Files.**
+  `services/common-lib/src/main/java/com/carddemo/common/codec/PackedDecimalCodec.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/codec/FixedWidthCodec.java`.
+
+#### D-NEGATIVE-AUTH-AMOUNT — an out-of-domain authorization amount is refused
+
+* **Baseline behaviour.** [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+  performs **no domain check** on the requested transaction amount. It compares the
+  amount against the available credit, finds that a negative value is never greater,
+  and **approves**; the approval then adds the amount to the account's reserved
+  balance, so a negative request releases credit rather than reserving it — on the one
+  field the requester chooses freely.
+* **Target behaviour.** `AuthorizationRequestPayload` bounds the amount to
+  `0.00 .. 9999999999.99` and the listener refuses an out-of-domain value immediately
+  after decode, **before** any lookup, decision or mutation.
+* **Category.** Documented divergence — added input-domain validation.
+* **Why the difference is accepted.** The refused values are ones the baseline
+  processes into a wrong state rather than ones it processes differently: a negative
+  amount inverts the meaning of the reservation, and an amount wider than the stored
+  field cannot be persisted at all. Refusing before any lookup means the divergence
+  cannot alter an approval decision for any value the baseline handled correctly,
+  which bounds it to exactly the inputs that had no correct handling.
+* **Where it is verified.** `AuthorizationRequestListenerTest` asserts refusal at the
+  domain boundary and that no repository interaction occurs on a refused message;
+  `AuthorizationPayloadDomainTest` asserts the accepted and rejected bounds.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/dto/AuthorizationRequestPayload.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`.
+
+#### D-SUMMARY-LIMIT-REFRESH — stored limits are refreshed only when the account was read
+
+* **Baseline behaviour.** `COPAUA0C.cbl` moves the account master's credit limit and
+  cash limit into the pending-authorization summary **unconditionally**, at **L810**
+  and **L811**. On the one path where the card resolves but the account master is
+  missing, its own **L451** never populated that working storage, so the move writes
+  whatever the previous message left there — or zero on the first message of the task.
+* **Target behaviour.** The listener refreshes the stored limits **only when the
+  account record was actually read**, leaving the previously stored values in place
+  otherwise.
+* **Category.** Documented divergence — conditional refresh of a stored field.
+* **Why the difference is accepted.** Reproducing the unconditional move would destroy
+  a real credit limit and then decline every subsequent authorization on that account
+  for want of funds — a persistent wrong state produced by an uninitialised read, not
+  a behaviour any reader of the program would defend. The divergence is confined to the
+  single path where the account master is absent; on every path where it is present the
+  two implementations write the same values.
+* **Where it is verified.** `AuthorizationRequestListenerTest` covers the missing-account
+  path and asserts the stored limits are unchanged, and the present-account path and
+  asserts they are refreshed.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`.
+
+#### D-DECLINED-AMT-CURRENT — the declined total accumulates this request's amount
+
+* **Baseline behaviour.** `COPAUA0C.cbl` adds `PA-TRANSACTION-AMT` to the running
+  declined total at **L821**, but that detail-segment field is not populated until
+  **L885**, in the following paragraph. The total it accumulates is therefore the
+  **previous** message's amount, or zero for the first message of a task.
+* **Target behaviour.** The listener adds the **current** request's amount to the
+  declined total.
+* **Category.** Documented divergence — corrected accumulation source.
+* **Why the difference is accepted.** A running total that is off by one message
+  describes nothing at all: it is neither the current amount nor a meaningful history,
+  and on the first message of every task it is zero. The divergence changes which value
+  is added, not when or whether the total is maintained, and the corresponding
+  approved-side total is unaffected because its source is populated before use.
+* **Where it is verified.** `AuthorizationRequestListenerTest` asserts the declined
+  total after a decline equals that message's own amount, and after two declines equals
+  their sum.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`.
+
+#### D-AMOUNT-RECORD-WIDTH — the transaction amount is bounded by the record, not the screen
+
+* **Baseline behaviour.** `TRAN-AMT` is `PIC S9(09)V99` at **L10** of
+  [`app/cpy/CVTRA05Y.cpy`](../../app/cpy/CVTRA05Y.cpy) — nine integer digits — while
+  the add-transaction screen accepts eight.
+  [`app/cbl/COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) validates only eight digits from
+  the second character at **L341**, parses the field into `WS-TRAN-AMT-N` at
+  **L383-L384** (declared `PIC S9(9)V99` at **L58**, nine digits), moves that into
+  `WS-TRAN-AMT-E` at **L385** (declared `PIC +99999999.99` at **L59**, eight), and
+  writes the narrower edited form back over the screen field at **L386**.
+* **Target behaviour.** `TransactionAddRequest` accepts all **nine** integer digits,
+  bounded by a constraint expressed in whole cents so the record's own domain is the
+  limit.
+* **Category.** Documented divergence — accepted input width.
+* **Why the difference is accepted.** Constraining the request to the display width
+  would discard capacity the records demonstrably hold and would make the request
+  depend on which screen submitted it. The edited widths differ between reference
+  screens deliberately — [`app/cbl/COBIL00C.cbl`](../../app/cbl/COBIL00C.cbl) declares
+  the same eight-digit transaction-amount edit at **L55** and a ten-digit balance edit
+  at **L56** — so neither is a general rule. The over-wide message is carried across
+  unchanged even though it names the eight-digit specimen, because transformation rule
+  T8 forbids rewording a user-visible string and the message is the correct one for the
+  condition the baseline raises it on.
+* **Where it is verified.** `TransactionApiContractTest` binds the published amount
+  pattern and the record constraint together, so a narrowing on either side fails.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`.
+
+#### D-TEXT-RECORD-WIDTH — three text fields are carried at record width, not screen width
+
+* **Baseline behaviour.** The screen narrows three of the four text fields below the
+  record's declared width: the description is `PIC X(100)` in the record and appears as
+  `TDESCI PIC X(60)` at **L90** of the symbolic map, the merchant name is `PIC X(50)`
+  and appears as `MNAMEI PIC X(30)` at **L120**, and the merchant city is `PIC X(50)`
+  and appears as `MCITYI PIC X(25)` at **L126**. The merchant postal code is the one
+  field the screen does not narrow, matching the record at `MZIPI PIC X(10)` on
+  **L132**.
+* **Target behaviour.** `TransactionAddRequest` carries all four at **record** width.
+* **Category.** Documented divergence — accepted input width.
+* **Why the difference is accepted.** For the reason given under
+  `D-AMOUNT-RECORD-WIDTH`: the record is the storage contract and the screen is one
+  presentation of it, so binding the request to the presentation would discard capacity
+  the record holds. What is accepted is that a client rendering into a fixed-width
+  column has to decide for itself what to do with the surplus, which is a client
+  concern the baseline resolved by having only one client.
+* **Where it is verified.** `TransactionApiContractTest` compares each published
+  `maxLength` with the constraint on the corresponding record component.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`.
+
+#### D-ERROR-ACCUMULATION — every violation is reported, not only the first
+
+* **Baseline behaviour.** Each validation check in `COTRN02C.cbl` sets an error flag,
+  moves one message, positions the cursor and sends the screen immediately, so an
+  operator sees exactly **one** error per turn even when several fields are wrong.
+* **Target behaviour.** Declarative validation evaluates every constraint and the
+  response carries a per-field error array with **every** violation, while the
+  aggregate message latches to the first failure exactly as the baseline's single
+  message does.
+* **Category.** Documented divergence — error reporting granularity.
+* **Why the difference is accepted.** Transformation rule T7 asks for a per-field error
+  array, so accumulation is the intended target shape rather than an accident of the
+  validation framework. The baseline itself already separates the two channels — one
+  latched message and one highlighted field — which is why the aggregate message can
+  keep the baseline's behaviour while the array adds the rest. What is accepted is that
+  a submission with four defects answers once with four entries where the baseline would
+  have answered four times with one.
+* **Where it is verified.** The class-level constraints on `TransactionAddRequest`
+  together with `GlobalExceptionHandler`'s handling of global violations, which is what
+  makes a class-level violation appear in the array rather than vanish.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java`.
+
+#### D-EDIT-MASK-OVERFLOW — a value too wide for its edit mask raises instead of truncating
+
+* **Baseline behaviour.** Moving a value into a narrower edited field discards
+  high-order digits **without signalling**. Two measured instances:
+  [`app/cbl/CORPT00C.cbl`](../../app/cbl/CORPT00C.cbl) **L77** moves nine integer digits
+  into an eight-position mask, yielding a well-formed amount one thousandth of the
+  original; and [`app/cbl/CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) **L484** moves a
+  balance declared `PIC S9(10)V99` at **L7** of
+  [`app/cpy/CVACT01Y.cpy`](../../app/cpy/CVACT01Y.cpy) into a nine-digit field, so any
+  balance of a thousand million or more loses one high-order digit.
+* **Target behaviour.** `CobolEditMask` raises on overflow, naming the offending
+  magnitude, its scale and the mask that could not hold it.
+* **Category.** Documented divergence — overflow signalling.
+* **Why the difference is accepted.** A truncated amount is the
+  plausible-number-that-is-wrong this class exists to prevent, and it is unrecoverable
+  downstream because the truncated string carries no evidence of the digits it lost.
+  The guard is not an expected path for the report masks: the three accumulators that
+  feed them are declared `PIC S9(09)V99` at **L134-L136** of
+  [`app/cbl/CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl), exactly the nine positions the
+  masks provide. It stays reachable only because the shared money type admits ten
+  integer digits, so the narrowing decision belongs to the caller assembling the band —
+  the only place that can decide what a balance too wide for its own field should show.
+* **Where it is verified.** `ReportingDtoMapperTest` asserts the exact edited forms
+  within the mask's width and the raise beyond it, for both masks.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CobolEditMask.java`.
+
+#### D-AUTH-REASON-WIDTH — the composed authorization reason is capped at the screen's twenty
+
+* **Baseline behaviour.** The authorization reason is one composed field, not two.
+  [`COPAUS1C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl) moves the
+  four-character reason code into the first positions, overlays a separator at position
+  5 at **L326**, and moves the description from position 6 onward at **L327**, writing a
+  `'9999'` and `'ERROR'` pair at **L321-L323** when the table lookup finds no entry. The
+  receiving field is `AUTHRSNO PIC X(20)` at **L248** of
+  [`app/cpy-bms/COPAU01.cpy`](../../app/cpy-bms/COPAU01.cpy), corroborated by
+  `AUTHRSNI PIC X(20)` at **L84**, and the move at L327 targets `AUTHRSNO(6:)` — a
+  reference-modified receiver of exactly fifteen positions — so COBOL **truncates the
+  sixteenth character** of the description on the way in.
+* **Target behaviour.** `PendingAuthDetailResponse` carries the composed reason as one
+  component bounded at **20** characters, reproducing that truncation.
+* **Category.** Documented divergence — a corrected earlier target width, now matching
+  the baseline exactly.
+* **Why the difference is accepted.** This entry records a **narrowing back** to
+  parity, not a departure from it. An earlier revision of the response carried 21
+  characters on the stated ground that retaining the whole sixteen-character
+  description was worth one character of divergence; that reasoning inverted the
+  contract, because the twenty-first character exists nowhere in the baseline — not on
+  the screen, not in the receiving field and not in any stored value. Carrying it made
+  the payload wider than the only observable form of the value and would have let a
+  projection publish a character the screen it mirrors cannot show. The composed field
+  is also kept as one component rather than split into a code and a description,
+  because splitting would invent two fields where the screen carried one and the
+  `'9999'` fallback has no separate code field to live in.
+* **Where it is verified.** `AuthorizationPayloadDomainTest` asserts the twenty-character
+  bound and the composed shape, including the fallback pair.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/dto/PendingAuthDetailResponse.java`.
+
+#### D-REPORT-HANDLE — report submission returns an addressable execution handle
+
+* **Baseline behaviour.** [`CORPT00C.cbl`](../../app/cbl/CORPT00C.cbl) submits a report
+  by writing job-control images to a transient data queue mapped to the internal reader
+  — the `TDQUEUE(JOBS)` definition at **L502** of
+  [`app/csd/CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) — and **returns nothing**. A
+  malformed submission is discovered only when the reader consumes it.
+* **Target behaviour.** `ReportSubmissionResponse` returns an execution identifier
+  synchronously on acceptance, and a refused submission is an error response rather
+  than a discarded record.
+* **Category.** Documented divergence — submission acknowledgement.
+* **Why the difference is accepted.** The queue-and-internal-reader mechanism has no
+  cloud analogue and is retired ([§5.1](#51-retired-with-an-analogue--function-preserved-mechanism-replaced));
+  its replacement starts a state-machine execution, which has an identity, so returning
+  nothing would discard information the new mechanism produces for free. The divergence
+  is in what the caller learns, not in which reports are produced or in their content.
+* **Where it is verified.** Report submission tests assert an identifier on acceptance
+  and an error response on refusal.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/dto/ReportSubmissionResponse.java`.
+
+#### D-EMPTY-PAGE — an unmatched card search answers with an empty page, not a screen message
+
+* **Baseline behaviour.** [`COCRDLIC.cbl`](../../app/cbl/COCRDLIC.cbl) reports an
+  unmatched search as a **message on the same screen**, leaving the operator on the
+  list with nothing listed.
+* **Target behaviour.** Both the card list operation and the card lookup operation
+  answer **200 with an empty `items` array** and the page envelope's cursors null.
+* **Category.** Documented divergence — representation of an empty result.
+* **Why the difference is accepted.** A query that matched nothing **succeeded**, and
+  404 would tell a client that the collection itself does not exist — a different and
+  wrong statement. The baseline had one client and could put the distinction in prose on
+  the screen; a published contract has to put it in the status code and the body, and an
+  empty collection is the accurate encoding of it. The user-visible message itself is not
+  lost: it is carried in the message catalogue and rendered by the screen that shows the
+  empty list.
+* **Where it is verified.** `CardApiContractTest` asserts that the list and lookup
+  operations publish a 200 carrying the page envelope and declare no 404, so a later
+  edit that reintroduced one fails.
+* **Files.** `services/card-service/src/main/resources/openapi/card-api.yaml`,
+  `ui/src/api/cards.ts`, `ui/src/messages/messages.ts`.
+
+#### D-CVV-UNTOUCHED — a card update leaves the enciphered verification column untouched
+
+* **Baseline behaviour.** [`COCRDUPC.cbl`](../../app/cbl/COCRDUPC.cbl) moves a
+  never-populated working-storage field into the card record it writes, at
+  **L1464-L1465**. No screen displays or captures that value, so the write stores
+  whatever the field happened to hold.
+* **Target behaviour.** An update carries no such value and leaves the stored
+  enciphered verification column **unchanged**.
+* **Category.** Documented divergence — a field excluded from an update.
+* **Why the difference is accepted.** Reproducing the move would overwrite a stored
+  verification value with an uninitialised one on every update, which destroys data on a
+  path no operator can see or intend. The verification value is additionally one the
+  migration's disclosure rules forbid returning on any endpoint, so there is no target
+  path on which a client could supply a correct replacement. The divergence is confined
+  to that one column; every other column the baseline's update writes is written here.
+* **Where it is verified.** `CardApiContractTest` asserts the update request schema
+  declares no verification component, so a later addition fails.
+* **Files.** `services/card-service/src/main/resources/openapi/card-api.yaml`.
+
+#### D-LASTKEY-RECEIVED — the page cursor names only rows the caller received
+
+* **Baseline behaviour.** After filling a page of seven, `COCRDLIC.cbl` captures the
+  seventh row's key at **L1194-L1195**, then issues one further read at **L1197** purely
+  to discover whether anything follows — and on finding a row it **overwrites** the
+  captured key with that row's key at **L1212-L1214**. The value it retains therefore
+  identifies the **eighth** record on a page of seven, a row the terminal never
+  displayed.
+* **Target behaviour.** The page envelope's `lastKey` names the last row the caller
+  **actually received**, and `hasNext` carries the look-ahead result separately.
+* **Category.** Documented divergence — cursor identity.
+* **Why the difference is accepted.** Splitting the two facts is what makes the cursor
+  verifiable: every token a client is given corresponds to something it holds, so a
+  client can check a returned cursor against its own page rather than trusting a value
+  that names a row it never saw. The baseline conflated them because one field carried
+  both, and the observable paging behaviour is unchanged — the same rows appear on the
+  same pages, in the same order, with the same next-page availability.
+* **Where it is verified.** `CardApiContractTest` asserts all seven page members are
+  required and that `lastKey` is nullable exactly when `items` may be empty;
+  `PageResponse`'s own tests assert the look-ahead sets `hasNext` without moving the
+  cursor.
+* **Files.** `services/card-service/src/main/resources/openapi/card-api.yaml`,
+  `services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java`.
+
+#### D-PASSWORD-CHALLENGE — the credential-change exchange has no baseline counterpart
+
+* **Baseline behaviour.** [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) compares a
+  stored eight-character password directly at **L211-L256** and has **no notion** of a
+  credential that must be changed before use. There is no such exchange to migrate.
+* **Target behaviour.** `POST /api/v1/auth/challenge` completes a
+  `NEW_PASSWORD_REQUIRED` challenge by exchanging a single-use session for a new
+  credential.
+* **Category.** Documented divergence — an operation added with no baseline source.
+* **Why the difference is accepted.** It follows necessarily from `D-4`, the entry that
+  records the plaintext credential field not being carried forward: identity moved to a
+  managed user pool whose seeded users are provisioned with temporary passwords, which
+  makes this exchange the **first** thing every provisioned user does. Declining it
+  would leave every seeded user unable to sign on at all. Because there is no baseline
+  counterpart, **no message literal is carried across** and none of the three sign-on
+  sentences is reused — inventing a fourth sign-on message would breach transformation
+  rule T8 in the opposite direction, by presenting new text as though it were the
+  baseline's.
+* **Where it is verified.** `AuthApiContractTest` asserts the operation is
+  unauthenticated in both the contract and the filter chain, that its response
+  discriminates on the outcome, and that the session and new-password components are
+  write-only and required.
+* **Files.** `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
+  `services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java`.
+
 
 
 ## 8. Inventory caveats a reader will otherwise contradict
@@ -1445,13 +1976,14 @@ linked. Each sibling owns detail that this index cites rather than restates.
 | [`security-and-identity.md`](security-and-identity.md) | Identity mapping, authorization policy, credential non-carry-forward, encryption and network isolation |
 | [`observability.md`](observability.md) | Logs, metrics, traces, alarms, the fourteen error-emission call sites and the warn-is-green interpretation |
 | [`design-token-reference.md`](design-token-reference.md) | The mapset-to-route and field-to-token presentation mapping, including the response-driven field-error highlight |
-| [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows, including the four rationale labels and the `# WHAT:` / `# WHY :` idiom |
+| [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows, including the four rationale labels and the paired what-and-why comment idiom |
 
 The root [`README.md`](../../README.md) and
 [`MIGRATION_README.md`](../../MIGRATION_README.md) are this document's declared
 consumers. The in-repository precedent for the explainability convention is
-[`tests/README.md`](../../tests/README.md) §12; no claim is made that
-`CONTRIBUTING.md` already carries that convention.
+[`tests/README.md`](../../tests/README.md) §12, and
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) states the convention for the migrated
+trees.
 
 ---
 

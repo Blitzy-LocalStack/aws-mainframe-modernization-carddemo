@@ -1,18 +1,11 @@
-import {
-  Alert,
-  Button,
-  Descriptions,
-  Flex,
-  Result,
-  Spin,
-  Typography,
-} from "antd";
+import { Button, Descriptions, Flex, Result, Spin, Typography } from "antd";
 import { useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import { useNavigate, useParams } from "react-router";
 
 import { getCard } from "../../api/cards";
 import type { CardDetail } from "../../api/cards";
+import { MessageBand } from "../../layout/MessageBand";
 import { cardEditPath, isOpaqueCardId } from "../../routes/cards";
 import { navigationHandler } from "../../routes/navigation";
 
@@ -91,7 +84,22 @@ export function CardDetailScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       <Typography.Title level={2}>Card detail</Typography.Title>
-      {error === null ? null : <Alert type="error" message={error} showIcon />}
+      {/*
+       * Refactoring Rationale: the screen's outcome goes through MessageBand
+       * rather than a raw antd Alert rendered only when `error` is non-null.
+       * Two things were wrong with the conditional Alert. It reserved no space,
+       * so the descriptions below jumped down the moment a retrieval failed --
+       * whereas row 23 of the 3270 screen this replaces always existed whether
+       * or not it held text, which is the invariant MessageBand encodes and
+       * asserts. And it bypassed the 75-character content contract of
+       * CCARD-ERROR-MSG / CCARD-RETURN-MSG (app/cpy/CVCRD01Y.cpy L28-L29) that
+       * the band is the single enforcement point for.
+       * Assumptions: no `severity` is passed. The band defaults to "error",
+       * which is the only appearance the source field ever had -- COLOR=RED on
+       * 21 of 21 mapsets -- and passing it explicitly would restate a default
+       * this screen has no reason to vary.
+       */}
+      <MessageBand message={error} />
       {card === null ? null : (
         <Descriptions bordered column={2}>
           <Descriptions.Item label="Card">

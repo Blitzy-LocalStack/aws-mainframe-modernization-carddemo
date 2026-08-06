@@ -87,9 +87,14 @@
  * {@code TransactionTypeService} owns the parent side and
  * {@code TransactionCategoryService} the child side.
  *
- * <p>That 409 mapping is INHERITED, not declared here.
- * {@code ReferenceApplication} already registers the shared handler with
- * {@code @Import(GlobalExceptionHandler.class)}. Assumptions: Spring
+ * <p>That 409 mapping is INHERITED, not declared here. The shared kernel's own
+ * {@code CardDemoCommonAutoConfiguration} registers the handler, which the
+ * framework loads from that module's registration resource, so this context
+ * receives it without naming it. Refactoring Rationale: an earlier design had
+ * {@code ReferenceApplication} import it explicitly and this charter described
+ * that; it was superseded because a registration a service has to remember is a
+ * registration a service can omit, and the symptom is a framework-shaped error
+ * body escaping from one service while the others answer in the migrated shape. Assumptions: Spring
  * selects one handler per exception type, so a second
  * {@code @RestControllerAdvice} anywhere in this module would take
  * precedence unpredictably and could turn the 409 back into a 500. No
@@ -219,7 +224,7 @@
  *       {@code DisclosureGroupMapper}, which performs no arithmetic; this
  *       package never constructs {@code Money} directly. Assumptions:
  *       {@code com.carddemo.common.money.MoneyModule}, already active
- *       through {@code ReferenceApplication}, binds its serialiser to the
+ *       through the shared kernel's auto-configuration, binds its serialiser to the
  *       {@code Money} type, so a response field left as
  *       {@code BigDecimal} would quietly serialise as a JSON number where
  *       a JSON string is required.</li>

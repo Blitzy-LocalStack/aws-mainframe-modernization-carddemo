@@ -164,8 +164,18 @@ import com.carddemo.common.money.Money;
  * discovered. Decoding either overpunched zero yields the same value. Encoding a zero always emits
  * the opening brace, the canonical positive-zero overpunch. A closing-brace zero therefore normalises
  * to an opening brace across a round trip, and that is the one and only span for which the law above
- * does not hold. The baseline stores the distinction, the Java does not represent it, and the
- * divergence is recorded in the migration's traceability matrix.</p>
+ * does not hold <em>on the plain pair of operations</em>. The baseline stores the distinction and
+ * {@link BigDecimal} cannot, and the divergence is registered under identifier D-SIGNED-ZERO-ZONED in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ *
+ * <p>Refactoring Rationale: the exception is confined to the plain pair rather than being the whole
+ * class's behaviour, and {@link #decodePreservingSign} with {@link #encodePreservingSign} is the pair
+ * that has no exception at all. An earlier revision offered only the plain pair and documented the
+ * normalisation as unavoidable, which conflated two different claims: that the target numeric type
+ * cannot represent a negative zero, which is true, and that the codec therefore cannot reproduce the
+ * span, which is not -- the sign is a property of the span and can be returned beside the value. A
+ * loader that must write a dataset back byte for byte now has an operation whose contract says so,
+ * and the normalising pair remains available for the majority of callers that only ever read.</p>
  *
  * <h2>The zoned fields this class serves</h2>
  *
@@ -553,6 +563,146 @@ public final class ZonedDecimalCodec {
         }
 
         return assemble(raw, width, decDigits, signed, lowOrderDigit, negative);
+    }
+
+    /**
+     * One decoded zoned span together with the trailing-sign overpunch its bytes actually carried.
+     *
+     * <p><b>Purpose.</b> This pair exists for the one case the plain value cannot express: a signed
+     * zero. {@link BigDecimal} has no negative zero, so a closing-brace zero and an opening-brace zero
+     * decode to the same value and the byte that told them apart is gone. Carrying the sign beside the
+     * value keeps it, which is what lets {@link #encodePreservingSign} reproduce the original span byte
+     * for byte and lets the round-trip law of this class hold without exception on this path.</p>
+     *
+     * <p>Refactoring Rationale: the sign is carried as a component of a returned pair rather than by
+     * making the decoded value itself signed-zero-aware. The alternative available was a wrapper
+     * numeric type that models a signed zero and is accepted everywhere money is accepted, and it was
+     * rejected because it would put a second numeric representation into the money path -- exactly the
+     * duplication the shared kernel exists to prevent -- to serve one representational detail that no
+     * arithmetic anywhere in the migration consumes. A pair confines the detail to the two codec calls
+     * that need it.</p>
+     *
+     * <p>Trade-offs: a caller that needs byte-exact re-encoding must use this pair and its encoder
+     * rather than the plain {@link #decode(CharSequence, int, int, boolean)} and
+     * {@link #encode(BigDecimal, int, int, boolean)}. That is deliberate: the plain pair stays the
+     * simplest thing for the overwhelming majority of callers, which read a value and never re-emit
+     * the span they read it from, while a loader that must reproduce a dataset byte for byte states
+     * that requirement by choosing this pair. The divergence of the plain pair on a negative zero is
+     * registered in {@code docs/architecture/cobol-to-service-traceability.md} rather than left to be
+     * discovered.</p>
+     *
+     * @param value the decoded value, carried at the field's declared scale, never {@code null}
+     * @param negativeSign whether the span's trailing character was a NEGATIVE overpunch; for a
+     *     non-zero value this always agrees with the value's own sign, and for a zero it is the only
+     *     surviving record of which of the two zero overpunches the span carried
+     */
+    public record SignedZoned(BigDecimal value, boolean negativeSign) {
+
+        /**
+         * Rejects a pair whose stated sign contradicts the value's own sign.
+         *
+         * <p>Assumptions: the two components may disagree only at zero, because that is the only
+         * magnitude for which the value carries no sign of its own. A pair claiming a negative
+         * overpunch over a positive magnitude is not a representable span, so it is refused at
+         * construction rather than producing a span that would decode back to something else.</p>
+         *
+         * <p>Successful construction yields this record instance and no separate return value.</p>
+         *
+         * @param value the decoded value; must not be {@code null}
+         * @param negativeSign whether the span carried a negative overpunch
+         * @throws ZonedDecimalException if the value is {@code null}, or if it is non-zero and its own
+         *     sign disagrees with {@code negativeSign}
+         */
+        public SignedZoned {
+            if (value == null) {
+                throw failure("zoned signed-span value is absent", null, null);
+            }
+            if (value.signum() != 0 && (value.signum() < 0) != negativeSign) {
+                throw failure("zoned signed-span sign " + (negativeSign ? "negative" : "positive")
+                        + " contradicts the value's own sign, which may happen only at zero", null,
+                        value.toPlainString());
+            }
+        }
+    }
+
+    /**
+     * Decodes one fixed-width zoned-decimal span, keeping the overpunch its final byte carried.
+     *
+     * <p>Behaviour is identical to {@link #decode(CharSequence, int, int, boolean)} for the value; the
+     * difference is that the sign the span carried is returned alongside it, so a signed zero survives
+     * the decode. Pass the result to {@link #encodePreservingSign} to reproduce the original span byte
+     * for byte, including a closing-brace zero.</p>
+     *
+     * @param raw the exact field characters, already sliced from the record; its length must equal
+     *     {@code intDigits + decDigits}
+     * @param intDigits the number of digit positions before the implied decimal point
+     * @param decDigits the number of digit positions after the implied decimal point
+     * @param signed whether the picture clause carries a leading {@code S}, taken from the field's
+     *     declared geometry and never inferred from the characters
+     * @return the decoded value paired with the overpunch class of the span's final character; an
+     *     unsigned field always reports a non-negative sign, never {@code null}
+     * @throws ZonedDecimalException if the span is absent, if its length is not the declared width, if
+     *     any character of the digit body is not an ASCII digit, if the final character of a signed
+     *     field is not a recognised trailing-sign overpunch, or if either digit count is invalid
+     */
+    public static SignedZoned decodePreservingSign(CharSequence raw, int intDigits, int decDigits,
+            boolean signed) {
+        BigDecimal value = decode(raw, intDigits, decDigits, signed);
+
+        // WHY : Assumptions: the sign is read from the span AFTER the full decode above rather than
+        //       during it, so every rejection the plain decoder performs still happens first and this
+        //       method cannot classify the sign of a span the codec would refuse. The cost is one
+        //       extra character inspection per field, which is immaterial beside the decode itself.
+        boolean negative = signed
+                && NEGATIVE_OVERPUNCH.indexOf(raw.charAt(widthOf(intDigits, decDigits) - 1)) >= 0;
+        return new SignedZoned(value, negative);
+    }
+
+    /**
+     * Encodes a decoded pair back into the exact span it came from, signed zero included.
+     *
+     * <p>This is the byte-exact inverse of {@link #decodePreservingSign}: for every span that method
+     * accepts, encoding what it returned reproduces the original characters with no exception at all.
+     * The plain {@link #encode(BigDecimal, int, int, boolean)} normalises a negative zero to the
+     * positive-zero overpunch because its argument cannot carry the distinction; this form can, so it
+     * does not normalise.</p>
+     *
+     * <p>Assumptions: the sign component governs only the zero case. For a non-zero value the
+     * canonical constructor has already established that the two components agree, so the overpunch
+     * this method writes is the one the magnitude implies either way.</p>
+     *
+     * @param decoded the value and its overpunch class, as returned by {@link #decodePreservingSign};
+     *     must not be {@code null}
+     * @param intDigits the number of digit positions before the implied decimal point
+     * @param decDigits the number of digit positions after the implied decimal point
+     * @param signed whether the picture clause carries a leading {@code S}, so that the final
+     *     character is written as a trailing-sign overpunch
+     * @return exactly {@code intDigits + decDigits} characters, identical to the span the pair was
+     *     decoded from
+     * @throws ZonedDecimalException if the pair is absent, if the value carries more decimal places
+     *     than {@code decDigits} can hold, if its magnitude needs more digit positions than the field
+     *     provides, if it is negative and the field is unsigned, or if either digit count is invalid
+     */
+    public static String encodePreservingSign(SignedZoned decoded, int intDigits, int decDigits,
+            boolean signed) {
+        if (decoded == null) {
+            throw failure("zoned signed-span pair is absent", null, null);
+        }
+        String canonical = encode(decoded.value(), intDigits, decDigits, signed);
+        if (!signed || !decoded.negativeSign() || decoded.value().signum() != 0) {
+            return canonical;
+        }
+
+        // WHY : Assumptions: only the final character is rewritten, and only for a negative zero,
+        //       because that is the only position and the only value at which the canonical encoder
+        //       and the source span can differ. Rewriting more than the overpunch -- returning the
+        //       source span wholesale, for instance -- would let a caller smuggle bytes past every
+        //       geometry check the encoder just performed.
+        int width = widthOf(intDigits, decDigits);
+        int lowOrderDigit = canonical.charAt(width - 1) == POSITIVE_OVERPUNCH.charAt(0)
+                ? 0
+                : POSITIVE_OVERPUNCH.indexOf(canonical.charAt(width - 1));
+        return canonical.substring(0, width - 1) + NEGATIVE_OVERPUNCH.charAt(lowOrderDigit);
     }
 
     /**

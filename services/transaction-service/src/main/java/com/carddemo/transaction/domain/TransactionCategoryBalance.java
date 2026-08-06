@@ -9,6 +9,8 @@ import jakarta.persistence.Table;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.util.Objects;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * The running balance one account holds within one transaction type and category, mapping
@@ -118,6 +120,31 @@ import java.util.Objects;
  * the accrual truncates rather than rounds. The arithmetic and its rounding mode are owned by
  * {@code batch-service} and named on {@link Money}. This type stores the balance and computes
  * nothing.
+ *
+ * <h2>Fixed-width columns are bound as CHAR explicitly</h2>
+ *
+ * <p>Assumptions: every member below whose column {@code db/migration/V1__ledger.sql} declares CHAR(n) carries
+ * {@code @JdbcTypeCode(SqlTypes.CHAR)} beside its {@code @Column}. There are two such members here --
+ * the two-character type code and the four-character category code of the
+ * composite key -- and the annotation is not decoration. A Java String otherwise selects the JDBC
+ * VARCHAR binding, so the driver sends a varying-length parameter for a column the database
+ * has blank padded to its declared width; the two are then compared under padding rules the
+ * reference programs never relied on, and a lookup by a value shorter than the declared width
+ * can miss a row that is present. This is the same annotation the batch and authorization
+ * contexts already carry on their own fixed-width columns, so one mechanism spans the
+ * migration rather than one per context.
+ *
+ * <p>Alternatives Considered: {@code columnDefinition = "CHAR(n)"} on each member, which
+ * would also fix the binding. Rejected because it embeds vendor DDL in a mapping that has no
+ * authority to create this table -- {@code db/migration/V1__ledger.sql} does -- so the physical width would then be
+ * stated in two places able to disagree. The declared length together with the standard CHAR
+ * type code says the same thing without a second definition.
+ *
+ * <p>Trade-offs: a binding is only verifiable where something verifies it, and
+ * {@code ddl-auto: none} on the deployed profiles deliberately verifies nothing because the
+ * migration owns the schema. {@code src/test/resources/application-test.yml} therefore sets
+ * {@code ddl-auto: validate}, so a repository test running against a migrated database fails
+ * on a type or width disagreement instead of a deployed environment discovering it.
  *
  * <h2>The batch context agrees with this type through the schema, never through code</h2>
  *
@@ -338,20 +365,36 @@ public class TransactionCategoryBalance {
     }
 
     /**
-     * Returns a diagnostic rendering of the identity and the balance.
+     * Returns a diagnostic rendering of the identity alone.
      *
-     * <p>Assumptions: this row is safe to render in full, and the absence of masking here is a finding
-     * rather than an omission. The record at {@code app/cpy/CVTRA01Y.cpy} lines 4 to 10 carries three
-     * codes and one money amount and nothing else -- no card number, no cardholder name and no other
-     * account-holder detail -- so no field on it is reached by the migration's masking rules. An
-     * entity that did carry a primary account number would render a masked form or no rendering at
-     * all, which is why the difference is stated here instead of being left to inference.</p>
+     * <p>Refactoring Rationale: the balance is omitted, and an earlier revision rendered it beside the
+     * identity. That revision reasoned that the record at {@code app/cpy/CVTRA01Y.cpy} lines 4 to 10
+     * carries three codes and one money amount and nothing else -- no card number, no cardholder name,
+     * no other account-holder detail -- so no field on it is reached by the migration's masking rules.
+     * The reading of the record is correct and the conclusion does not follow, because it tests the
+     * fields against the masking rules only and a running balance is not protected by being
+     * impersonal. A rendering reaches a log, which is retained, aggregated and readable by every
+     * holder of log access; one line per row across a posting or interest run therefore accumulates
+     * into a per-account, per-category statement of what every balance was, which is the substance of
+     * this file rather than an incidental detail of it.
      *
-     * @return the composite identity and the balance, in that order
+     * <p>Assumptions: the identity is rendered whole. Its three components are an account identifier
+     * and two reference codes, and the migration's disclosure rules name the primary account number,
+     * the card verification value, the national identifier and the government-issued identifier --
+     * not the internal account identifier, which the published contracts of this context carry in full
+     * as eleven digits. Withholding the identity as well would leave a rendering that names no row and
+     * so serves no diagnostic purpose at all.
+     *
+     * <p>Trade-offs: a reader diagnosing a balance discrepancy from logs alone now sees which row was
+     * touched but not what it held, and must read the row to learn that. That is accepted: the
+     * accessor above returns the balance to any caller that needs it, and a test asserting a balance
+     * asserts it through that accessor rather than through this string.
+     *
+     * @return the composite identity, and no monetary value
      */
     @Override
     public String toString() {
-        return "TransactionCategoryBalance[id=" + this.id + ", balance=" + this.balance + "]";
+        return "TransactionCategoryBalance[id=" + this.id + "]";
     }
 
     /**
@@ -446,6 +489,7 @@ public class TransactionCategoryBalance {
         //   transaction tables in this schema give the same code, so a lookup across them needs no
         //   cast. Its position between the account and the category is what makes an account's rows
         //   arrive grouped by type within the account.
+        @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "type_cd", nullable = false, updatable = false)
         private String typeCd;
 
@@ -468,6 +512,7 @@ public class TransactionCategoryBalance {
         //   intact. The column is fixed-width, so a shorter value is stored space-padded and reads
         //   back padded, which would not compare equal to the value written; the first record of
         //   app/data/ASCII/tcatbal.txt carries 0001 in these bytes and that is the form the key takes.
+        @JdbcTypeCode(SqlTypes.CHAR)
         @Column(name = "category_cd", nullable = false, updatable = false)
         private String categoryCd;
 
@@ -575,9 +620,16 @@ public class TransactionCategoryBalance {
         /**
          * Returns a diagnostic rendering of the three components in key order.
          *
-         * <p>Assumptions: an identity is safe to render in full. It carries an account identifier and
-         * two reference codes and no cardholder data, and the components are rendered in key order so
-         * that the text reads the same way the composite key sorts.</p>
+         * <p>Assumptions: this identity is rendered in full, and the reason is narrower than "an
+         * identity is safe", which is what an earlier revision claimed. Its three components are an
+         * account identifier and two reference codes; the migration's disclosure rules name the
+         * primary account number, the card verification value, the national identifier and the
+         * government-issued identifier, and the internal account identifier is none of those -- the
+         * published contracts of this context carry it in full as eleven digits, so withholding it
+         * from a log while publishing it to a client would defend nothing. No monetary value and no
+         * cardholder datum is a component here, and the enclosing type withholds the one monetary
+         * value it does hold. The components are rendered in key order so that the text reads the way
+         * the composite key sorts.</p>
          *
          * @return the account, type code and category code, in that order
          */

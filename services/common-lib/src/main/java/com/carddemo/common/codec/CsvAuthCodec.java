@@ -279,7 +279,7 @@ public final class CsvAuthCodec {
      * The greatest number of characters a payload may carry before it is parsed at all.
      *
      * <p>Assumptions: the two declared wire lengths are {@code REQUEST_WIRE_LENGTH} and
-     * {@code REPLY_WIRE_LENGTH}, 170 and 63 characters, and the reference program's own put buffer is
+     * {@code REPLY_WIRE_LENGTH}, 169 and 63 characters, and the reference program's own put buffer is
      * 200 bytes, declared at line 108 of {@code COPAUA0C.cbl}. The bound is set at 512, which is more
      * than twice the largest of those, so no payload the contract admits is affected and no legitimate
      * transport framing is refused.</p>
@@ -1488,7 +1488,19 @@ public final class CsvAuthCodec {
                     + MONEY_NEGATIVE_SIGN + "'", null);
         }
 
-        String unsigned = value.substring(digitsStart);
+        // WHY : Assumptions: the pad run BETWEEN the sign position and the first digit is removed here,
+        //       and removing it is what closes this codec under its own reply contract. The reply amount
+        //       is rendered through PIC -zzzzzzzzz9.99, declared at app/app-authorization-ims-db2-mq/
+        //       cbl/COPAUA0C.cbl line 66 and moved into the put buffer at its line 720, whose sign
+        //       occupies a FIXED leading position while the zero-suppression characters blank every
+        //       leading integer position the magnitude does not reach -- so -100.99 renders as a minus,
+        //       seven blanks and then 100.99. Stripping only the two ENDS of the token, which is what an
+        //       earlier revision did, left those interior blanks in the integer digit run and the parser
+        //       then rejected a token this same class had just emitted. The pad is removed only where the
+        //       mask can produce it, immediately after the sign; a blank appearing anywhere else still
+        //       reaches the digit check below and is still refused, so a token such as '1 0.99' remains
+        //       an error rather than becoming 10.99.
+        String unsigned = stripLeadingPad(value.substring(digitsStart));
         int pointIndex = unsigned.indexOf(MONEY_DECIMAL_POINT);
         if (pointIndex < 0) {
             throw fieldFailure(fieldName, "carries no '" + MONEY_DECIMAL_POINT + "'; the picture"
@@ -1914,6 +1926,26 @@ public final class CsvAuthCodec {
         }
 
         return value.substring(0, end);
+    }
+
+    /**
+     * Removes the leading pad characters from a field value.
+     *
+     * @param value the field value, or the portion of it that follows a sign position
+     * @return the value with every leading pad character removed, which may be empty
+     */
+    private static String stripLeadingPad(String value) {
+        // WHY : Assumptions: this exists as its own operation rather than reusing the surrounding-pad
+        //       form because the caller has already consumed the sign position, so the run to remove is
+        //       the zero-suppression pad that sits between that position and the first digit. Reusing the
+        //       surrounding form there would additionally strip the token's trailing end, which for a
+        //       money token holds the two mandatory decimal digits and must never be shortened.
+        int start = 0;
+        while (start < value.length() && value.charAt(start) == PAD) {
+            start++;
+        }
+
+        return value.substring(start);
     }
 
     /**

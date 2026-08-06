@@ -69,7 +69,7 @@ calling roots are authored, module validation can only prove the syntax and
 internal contracts of the modules that exist; it cannot prove environment
 composition.
 
-> **Assumptions:** a module validated or linted in isolation does not behave the
+> Assumptions: a module validated or linted in isolation does not behave the
 > same as the same module reached through its caller. On its own, every
 > caller-supplied variable is unset, so a root's `init -backend=false` +
 > `validate` is what actually exercises a module's inputs against real values.
@@ -140,10 +140,10 @@ tempted to relax.
 
 | Constraint | Value | Declared in | Reasoning |
 |---|---|---|---|
-| `required_version` | `>= 1.15.0` | the sixteen modules | **Trade-offs:** an open-ended floor rather than an exact pin. A module is consumed by a caller whose own CLI version it cannot control, so a floor lets Terraform intersect every constraint in the graph and select one satisfying CLI, where an exact pin in sixteen places would have to be edited in sixteen places. |
-| `required_version` | `~> 1.15.0` | the three roots | **Assumptions:** a root is the directory an operator actually runs, so it is the right place to bound the minor line as well as the floor. Validated on **1.15.8**. |
-| `hashicorp/aws` | `~> 6.56` | all nineteen directories | **Assumptions:** the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.81.0** onward, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. **Alternatives Considered:** a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
-| `hashicorp/random` | `~> 3.9` | `envs/dev`, `envs/prod`, `modules/secrets`, `modules/cognito` — and **deliberately nowhere else** | **Assumptions:** this provider generates the database and Cognito seed-user passwords at apply time and writes them straight into Secrets Manager, which is the mechanism that keeps generated credentials out of the repository structurally rather than by reviewer vigilance. It is declared at the two roots so Terraform resolves **one** release for the whole module graph, and in the two modules that actually generate values. It is absent from `infra/bootstrap` on purpose: nothing there generates a random value, and suffixing the state bucket name with a random identifier would make that name unreproducible for an operator who had lost the local state file. |
+| `required_version` | `>= 1.15.0` | the sixteen modules | Trade-offs: an open-ended floor rather than an exact pin. A module is consumed by a caller whose own CLI version it cannot control, so a floor lets Terraform intersect every constraint in the graph and select one satisfying CLI, where an exact pin in sixteen places would have to be edited in sixteen places. |
+| `required_version` | `~> 1.15.0` | the three roots | Assumptions: a root is the directory an operator actually runs, so it is the right place to bound the minor line as well as the floor. Validated on **1.15.8**. |
+| `hashicorp/aws` | `~> 6.56` | all nineteen directories | Assumptions: the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.81.0** onward, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. Alternatives Considered: a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
+| `hashicorp/random` | `~> 3.9` | `envs/dev`, `envs/prod`, `modules/secrets`, `modules/cognito` — and **deliberately nowhere else** | Assumptions: this provider generates the database and Cognito seed-user passwords at apply time and writes them straight into Secrets Manager, which is the mechanism that keeps generated credentials out of the repository structurally rather than by reviewer vigilance. It is declared at the two roots so Terraform resolves **one** release for the whole module graph, and in the two modules that actually generate values. It is absent from `infra/bootstrap` on purpose: nothing there generates a random value, and suffixing the state bucket name with a random identifier would make that name unreproducible for an operator who had lost the local state file. |
 
 ### 3.2 Which files in this tree are tracked in git
 
@@ -158,7 +158,7 @@ Two of these routinely surprise people, so both are stated explicitly.
 - **`.terraform.lock.hcl` is tracked, deliberately.** It is the provider
   dependency lock that records the exact provider versions and their checksums,
   and it is what makes `terraform init` reproduce the same provider set for CI and
-  for every operator. **Assumptions:** it is *generated* by `terraform init` and
+  for every operator. Assumptions: it is *generated* by `terraform init` and
   then committed — it is never hand-authored. One lives in each of the three
   roots, and none in the modules, because a lock file belongs to the root that
   resolves the provider graph.
@@ -202,7 +202,7 @@ resources yet.
 
 ### 4.1 Why `ecr` provisions exactly ten repositories
 
-**Assumptions:** an ECR repository is needed per **container image**, not per Maven
+Assumptions: an ECR repository is needed per **container image**, not per Maven
 module, and those two counts differ by one. There are **nine** Maven modules under
 `services/` but only **eight** service images: `services/common-lib` is the shared
 kernel library that the eight services compile against, so it has no Dockerfile
@@ -324,7 +324,7 @@ workflow must run the same nineteen-directory loop and a policy scan with an
 explicit severity threshold. Neither workflow nor policy-scan configuration is
 present today.
 
-> **Assumptions:** this README is hand-authored prose and is deliberately **not** a
+> Assumptions: this README is hand-authored prose and is deliberately **not** a
 > `terraform-docs` target. The generator emits a table of a directory's
 > requirements, providers, resources, inputs and outputs, and `infra/` holds no
 > `.tf` files of its own — so there is nothing here for it to describe. It must
@@ -420,7 +420,7 @@ Set `CARDDEMO_ENV` to `dev` or `prod`.
 )
 ```
 
-> **Trade-offs:** name the saved plan so the ignore rules actually catch it. A
+> Trade-offs: name the saved plan so the ignore rules actually catch it. A
 > saved plan is not a summary of a diff: it embeds the resolved value of every
 > attribute the apply will set, which for this stack includes the Aurora master
 > password and the Cognito seed-user passwords the `random` provider generates.
@@ -440,7 +440,7 @@ by short-lived OIDC federated role assumption against a deployment role
 (`<role-arn>`); no long-lived AWS access key exists anywhere in this repository.
 It also builds and pushes the ten container images to ECR ahead of the apply.
 
-**Roll-forward and rollback.** **Alternatives Considered:** blue-green and
+**Roll-forward and rollback.** Alternatives Considered: blue-green and
 canary deployment are out of scope, so the target ECS services use rolling
 deployments. A roll-forward changes the immutable image tag or HCL value in a
 reviewed commit and applies the resulting saved plan. A rollback is **not a
@@ -627,7 +627,7 @@ Two environment-level settings interact with this, and both are
 
 - **`prod` resists destruction on purpose.** It sets deletion protection and
   requires a final snapshot, so a `prod` destroy fails until those are changed
-  deliberately in `terraform.tfvars` and re-applied. **Trade-offs:** teardown of
+  deliberately in `terraform.tfvars` and re-applied. Trade-offs: teardown of
   `prod` therefore takes two deliberate steps instead of one, which is accepted
   because the failure it prevents — an accidental single-command destruction of
   the production datastore — is unrecoverable, while the cost is one extra
@@ -662,7 +662,7 @@ The completed roots must expose one symmetric input surface and call the same
 modules. A future full-root plan comparison, not the current declarations alone,
 is what proves that topology is identical.
 
-> **Trade-offs:** `dev` is deliberately **under-sized rather than differently
+> Trade-offs: `dev` is deliberately **under-sized rather than differently
 > shaped**. Giving `dev` a cheaper topology — a single availability zone, a
 > public database subnet, no VPC endpoints — would cut its cost further, and it
 > was rejected: the moment the two environments differ in shape, `dev` stops
@@ -673,7 +673,7 @@ is what proves that topology is identical.
 
 ### 8.1 Aurora capacity has a coupled constraint
 
-**Assumptions:** these constraints belong to the provider and the engine, not to
+Assumptions: these constraints belong to the provider and the engine, not to
 this package's own preferences, and getting any of them wrong produces an apply
 error rather than a silently degraded cluster.
 
@@ -722,7 +722,7 @@ are listed together because each one closes a route the others leave open:
    required tracked deliverables, as [§3.2](#32-which-files-in-this-tree-are-tracked-in-git)
    explains.
 
-> **Assumptions:** limb 5 carries less than it appears to, and this is stated so it
+> Assumptions: limb 5 carries less than it appears to, and this is stated so it
 > is not mistaken for a control it is not. An ignore rule keeps a path out of
 > `git status` and out
 > of an unqualified `git add`, which removes the most likely route to a committed
@@ -776,7 +776,7 @@ contract.
 - **Encryption.** Four KMS customer-managed keys with rotation, covering Aurora,
   S3, Secrets Manager and SQS.
 
-> **Assumptions:** the mainframe's external security manager (RACF) has **no cloud
+> Assumptions: the mainframe's external security manager (RACF) has **no cloud
 > analogue and is not ported**. Its role is filled by least-privilege IAM task
 > roles plus Cognito groups, and that substitution is documented as a *mapping* in
 > `docs/architecture/security-and-identity.md` rather than emulated in HCL.
@@ -784,7 +784,7 @@ contract.
 > structure that resembles the original and enforces something subtly different,
 > which is worse than an explicit mapping a reader can check.
 
-> **Assumptions:** single region, three availability zones. Multi-region and
+> Assumptions: single region, three availability zones. Multi-region and
 > disaster-recovery topology are out of scope for this migration, so no module
 > provisions a second region, a global database or cross-region replication.
 
@@ -800,7 +800,7 @@ synchronously with timeout, retry and catch handling, while states 1 and 11
 bracket the run with a read-only flag. `docs/architecture/batch-orchestration.md`
 maps the target states to the JCL jobs they replace.
 
-> **Assumptions:** the retry count of five is the baseline's own number, not an
+> Assumptions: the retry count of five is the baseline's own number, not an
 > arbitrary choice. Every job in `app/scheduler/CardDemo.controlm` carries
 > `MAXRERUN="5"` (15 occurrences), and each of its folders wraps its work in the
 > same `CLOSEFIL` → work → `OPENFIL` bracket. The same five is why the SQS
@@ -825,7 +825,7 @@ is 4 or lower", which becomes an explicit `Choice` preserving the soft-warn tier
 
 ### 11.1 Ten generation-dataset families
 
-**Assumptions:** there are **ten** generation-dataset bases in the baseline, not six.
+Assumptions: there are **ten** generation-dataset bases in the baseline, not six.
 The count is easy to get wrong because they are declared in three different jobs,
 and provisioning only the obvious six would silently lose four families:
 
@@ -863,7 +863,7 @@ dead-letter queue at `maxReceiveCount` 5 and SSE-KMS encryption.
 | Inquiry reply | Standard | `CARDDEMO.RESPONSE.QUEUE` |
 | Error sink | Standard | `CARD.DEMO.ERROR` |
 
-**Assumptions:** the FIFO/standard split is not uniform because the baseline's two
+Assumptions: the FIFO/standard split is not uniform because the baseline's two
 messaging disciplines are not the same. The authorization pair is FIFO because
 per-card ordering is observable behaviour in the baseline, and a purpose-scoped
 opaque HMAC token supplies one stable message group per card without placing the
@@ -913,7 +913,7 @@ two environment READMEs or `infra/bootstrap/README.md` exists. [§5](#5-static-v
 checks the full nineteen-file set and reports each absence instead of sampling
 one module and calling the gate complete.
 
-> **Trade-offs:** the two gates verify *presence*, not *quality*. A `description`
+> Trade-offs: the two gates verify *presence*, not *quality*. A `description`
 > that reads `"the region"` satisfies `terraform_documented_variables` completely
 > while explaining nothing, and no linter can tell a real rationale from a
 > plausible-sounding one. Three of the four forbidden patterns in the governing

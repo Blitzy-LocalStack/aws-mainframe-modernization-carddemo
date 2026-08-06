@@ -64,9 +64,9 @@ import java.util.regex.Pattern;
  * <p>{@code executionArn} is instead a durable, addressable orchestration handle returned
  * synchronously on acceptance, so the caller holds an identity it can observe and a refused
  * submission is an error response rather than a discarded record. The reference writes card images
- * and returns nothing; the Java returns a handle; the difference is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register. This file
- * cites the register and defines no entry in it.
+ * and returns nothing; the Java returns a handle; the difference is registered as
+ * <b>D-REPORT-HANDLE</b> in {@code docs/architecture/cobol-to-service-traceability.md}, which owns
+ * that register. This file cites the entry and defines no entry in it.
  *
  * <p>Assumptions: {@code executionArn} is the one component with no width bound, because no
  * artifact declares a width for it. It has no reference counterpart at all, the submission it
@@ -199,7 +199,8 @@ import java.util.regex.Pattern;
  * <p>Everything under {@code app/} that this file cites is reference material and remains
  * byte-identical; no statement here describes an edit to it. Two framings are used and no third:
  * the reference does one thing, the Java does another, and the difference is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}; or the Java encodes a stated rule.
+ * {@code docs/architecture/cobol-to-service-traceability.md} -- for this record, as the entry
+ * {@code D-REPORT-HANDLE}; or the Java encodes a stated rule.
  * The documentation convention this file follows, including the spelling of the four rationale
  * labels above, is {@code docs/CODE_DOCUMENTATION_STANDARD.md}. A type declaration accepts no
  * argument list of its own and raises nothing, so of the four docstring elements only purpose and

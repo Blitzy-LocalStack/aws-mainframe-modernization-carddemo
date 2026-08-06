@@ -9,10 +9,11 @@
  * not the set of files present beside this one today. The migration lands its
  * artifacts in plan order and this charter is authored first, so at the checkpoint
  * that authored it this directory holds this charter and the eight subpackages
- * named below, and twenty of the twenty-one production classes now exist across
- * them; the one outstanding is {@code FixedWidthCodec} in {@code codec}. A type or test named below that has
- * no file yet is therefore <b>planned</b>, not missing, and a count below is a
- * target total rather than a measurement of the directory.</p>
+ * named below, and <b>all twenty-one production classes now exist</b> across them:
+ * the module's production inventory is complete, so nothing named below is
+ * outstanding. A <em>test</em> named below that has no file yet is therefore
+ * <b>planned</b>, not missing, and a count below is a target total that the
+ * production tree now meets exactly.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work
@@ -110,20 +111,20 @@
  *
  * <h2>The count canon</h2>
  *
- * <p><b>These are target totals, not a measurement of the tree.</b> The plan assigns
+ * <p><b>The target totals and the measurement now agree.</b> The plan assigns
  * this module <b>21 production classes</b> and <b>9</b> package charter files, for
  * <b>30</b> compilation units when it is complete. The module now holds the 9 charters
- * and <b>20</b> of those production classes, for 29 compilation units; the one
- * outstanding class is {@code FixedWidthCodec} under {@code codec}, authored at a
- * later index of the same plan. The breakdown
- * is arithmetic rather than opinion, and it is recorded here so that a later reader
- * can tell a class that has not landed yet from a class that was never planned:
+ * and <b>all 21</b> of those production classes, for <b>30</b> compilation units, so the
+ * module is closed at its target. The landed column is retained rather than deleted
+ * because it is what lets a later reader tell a class that has not landed yet from a
+ * class that was never planned, and it must be updated with the class that closes a
+ * package -- the entry that closed {@code codec} was {@code FixedWidthCodec}:
  *
  * <pre>
  * package             production classes   charter   compilation units   landed
  * common (this root)                   1         1                   2      2/2
  * common.money                         2         1                   3      3/3
- * common.codec                         5         1                   6      5/6
+ * common.codec                         5         1                   6      6/6
  * common.error                         3         1                   4      4/4
  * common.web                           3         1                   4      4/4
  * common.security                      3         1                   4      4/4
@@ -133,8 +134,8 @@
  * </pre>
  *
  * <p>The first three numeric columns are the target. The fourth is what exists at
- * this checkpoint over that target, so a reader can see at a glance that
- * {@code codec} is the only package short of its target. Its column total is 29 of 30.
+ * this checkpoint over that target, so a reader can see at a glance that <b>no</b>
+ * package is short of its target. Its column total is 30 of 30.
  *
  * <p>Read down the table. Cross-check by production class:
  * 1 + 2 + 5 + 3 + 3 + 3 + 1 + 1 + 2 = 21, the root contributing one. Cross-check by
@@ -150,7 +151,7 @@
  * independently, by class and by compilation unit. The total and the breakdown
  * are stated together for that reason: a bare total invites a reader to trust
  * it, whereas a breakdown lets a reader re-derive it and reject any figure that
- * does not add up. Any class count for this package other than 18 fails both
+ * does not add up. Any class count for this package other than 21 fails both
  * sums and is wrong.
  *
  * <h2>The dependency arrow points inward only</h2>

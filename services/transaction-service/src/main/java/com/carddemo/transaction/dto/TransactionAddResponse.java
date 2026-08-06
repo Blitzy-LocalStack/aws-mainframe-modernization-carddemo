@@ -14,19 +14,6 @@ import com.carddemo.common.money.Money;
  * this shape encodes the field set, the widths and the scale that specification already states
  * rather than redefining them.
  *
- * <p><b>Return values, exceptions or errors.</b> A record declaration returns no value and raises
- * nothing, so this docstring carries no {@code @return} and no {@code @throws} at-clause. The
- * inapplicability is declared rather than left silent, because the Explainability rule's line 39
- * forbids a docstring that omits return values, and a reader has to be able to tell a declared
- * inapplicability from an oversight. That rule attaches the exceptions element at its line 21, and
- * the house convention at {@code tests/README.md} lines 544 to 549 names the same docstring
- * quartet of purpose, parameters, returns and exceptions at its lines 545 and 546; neither element
- * has a subject in a declaration that cannot raise. The record's components are the parameters of
- * its canonical constructor, so the parameters element is answered by the three {@code @param}
- * at-clauses below and not by a separate paragraph. Nothing here declares a checked exception: a
- * component is a carrier, and the validation that can fail belongs to the request side of this
- * package and to the shared error type named further down.
- *
  * <h2>Three components, and why the full record is deliberately not echoed</h2>
  *
  * <p>Alternatives Considered: giving this response the same fourteen components the detail
@@ -154,11 +141,19 @@ import com.carddemo.common.money.Money;
  * component of the three that may be null.
  *
  * <p>Assumptions: the text this component carries is the reference program's own, character for
- * character. {@code app/cbl/COTRN02C.cbl} moves {@code 'Confirm to add this transaction...'} at
- * line 178 while the capture awaits confirmation, and
- * {@code 'Invalid value. Valid values are (Y/N)...'} at line 184 when the confirmation value is
- * neither of the two it accepts. Each ends in three full stops, and neither is reworded,
- * repunctuated or retitled on its way through this component.
+ * character. This shape is the body of a completed capture, so the text it carries is the sentence
+ * {@code app/cbl/COTRN02C.cbl} assembles at lines 728 to 733 from
+ * {@code 'Transaction added successfully. '} and {@code ' Your Tran ID is '} around the assigned
+ * identifier, including the two consecutive spaces that join produces before {@code Your}. The two
+ * other strings that branch reaches are cited here because they are easy to attribute to this
+ * component and belong elsewhere:
+ * {@code 'Confirm to add this transaction...'} at line 178 is the withheld-confirmation turn, which
+ * the published contract answers with its own preview shape because the identifier is minted inside
+ * {@code ADD-TRANSACTION} at lines 442 to 449, which that turn never reaches, and
+ * {@code 'Invalid value. Valid values are (Y/N)...'} at line 184 is a value-domain
+ * complaint about one field, so it travels in the per-field error array of
+ * {@code com.carddemo.common.error.ApiError} rather than in a message line. Each ends in three full
+ * stops, and none is reworded, repunctuated or retitled on its way across.
  *
  * <h2>What this type deliberately does not carry</h2>
  *
@@ -209,26 +204,10 @@ import com.carddemo.common.money.Money;
  * echo is the client's own state, retained by the client. That separation is what makes the three
  * components below sufficient rather than austere.
  *
- * <p>Alternatives Considered: Lombok was evaluated and rejected because its generated accessors
- * cannot carry the Javadoc the Explainability rule requires at its line 15, and the repository
- * ruleset grants no annotation-based exemption that would excuse a generated member, its
- * {@code MissingJavadocMethod} module clearing {@code allowedAnnotations} outright, so a
- * Lombok-built type either fails the documentation gate or has to be suppressed out of it, and
- * {@code config/checkstyle/suppressions.xml} admits no entry for source under this directory. A
- * Java 21 record gives the same brevity with members that can be documented. MapStruct was
- * rejected on a separate ground: mapping the reference record onto this shape is not mechanical. It
- * drops {@code FILLER}, masks the primary account number to its last four digits, suppresses a card
- * verification value entirely, encrypts protected identifiers and renames misspelled baseline
- * fields, and each of those needs a justification at the mapping site that a generated mapper has
- * nowhere to hold.
- *
- * <p>Assumptions: one user-specified rule governs this migration, Explainability, and it does not
- * conflict with the repository's own convention or with the migration plan. Conflicts: none. The
- * four rationale categories it names at its lines 31 to 34 are the same four the house convention
- * at {@code tests/README.md} lines 544 to 549 already names, and that convention names the same
- * docstring quartet at its lines 545 and 546. No resolution between them was necessary, and every
- * label above is written in the single accepted form: plural where the rule writes it plural,
- * unparenthesised, colon-terminated and unemphasised.
+ * <p>Alternatives Considered: Lombok and MapStruct were both evaluated and both rejected for this
+ * package as a whole; {@code com.carddemo.transaction.dto}'s package charter carries the reasoning,
+ * which turns on generated members being undocumentable and on copybook-to-transfer-object mapping
+ * being non-mechanical. A Java 21 record with hand-written mapping is what replaces them.
  *
  * @param transactionId the identifier the server generated for the captured transaction, from
  *     {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}; borne as digit
@@ -244,20 +223,16 @@ import com.carddemo.common.money.Money;
  *     that may be null
  */
 public record TransactionAddResponse(
-    // WHAT: the generated identifier, borne as digit characters rather than as a numeric type.
     // WHY : Assumptions: CVCRD01Y declares every identifier twice over the same bytes, as
     //       characters at line 34 and as a number at line 36, and 30 of the 300 seed records in
     //       app/data/ASCII/dailytran.txt carry a card number beginning with a zero. A numeric
     //       component would drop such a leading zero on the way out while still comparing equal
     //       on the way in.
     String transactionId,
-    // WHAT: the transaction amount, typed as the shared exact-decimal value rather than as a
-    //       general-purpose decimal or a primitive.
     // WHY : Assumptions: the shared Jackson module binds its serialiser to this exact type, so
     //       the declared type is what selects the quoted-string wire form. Substituting a bare
     //       decimal here compiles and runs and silently emits a JSON number instead.
     Money amount,
-    // WHAT: the return message, and the only nullable component of the three.
     // WHY : Assumptions: CVCRD01Y line 30 attaches a low-values sentinel to this field alone,
     //       and line 28's error message carries none, so absence is representable for this one
     //       field and null is what represents it. Spaces are a different state and are not

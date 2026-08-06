@@ -7,11 +7,25 @@
  * <p>Assumptions: every inventory, class name and count in this charter
  * describes the subtree's <b>target contract</b> as the migration plan assigns
  * it, not the set of files present beside this one today. The migration lands
- * its artifacts in plan order and this charter is authored first, so at the
- * checkpoint that authored it this directory holds this charter and nothing
- * else, and none of the five subpackages named below exists yet. A test named
+ * its artifacts in plan order and this charter was authored first. A test named
  * here that has no file is therefore <b>planned</b>, not missing, and a count
  * here is a target total rather than a measurement of the directory.
+ *
+ * <p>What is present today, so that the distinction above is checkable rather
+ * than merely declared: four of the seven subpackages exist -- {@code dto},
+ * {@code domain}, {@code repository} and {@code architecture} -- and two of them
+ * carry a test class, {@code TransactionApiContractTest} in {@code dto} and
+ * {@code FixedWidthMappingTest} in {@code domain}. The {@code api},
+ * {@code service} and {@code mapper} subpackages hold nothing yet, and every
+ * class named for them below is planned.
+ *
+ * <p>Refactoring Rationale: this paragraph previously stated that the directory
+ * held this charter and nothing else and that none of the subpackages existed.
+ * Both halves stopped being true as tests landed, and a state sentence that goes
+ * stale is worse than no state sentence, because a reader who checks it against
+ * the file system and finds it wrong has no way to tell which of the remaining
+ * claims are also stale. It is now written as an enumeration a reader can verify
+ * against the tree in one listing.
  *
  * <p>Alternatives Considered: withholding this charter until the tests it
  * governs exist. Rejected, because this file is what the authors of those tests
@@ -99,13 +113,24 @@
  *       job's behaviour.</li>
  * </ul>
  *
- * <h2>The five subpackages, and what each one holds</h2>
+ * <h2>The seven subpackages, and what each one holds</h2>
  *
- * <p>Every test class in this subtree sits in one of five leaf subpackages, and
+ * <p>Every test class in this subtree sits in one of seven leaf subpackages, and
  * the subpackage a test belongs to is decided by the kind of test it is rather
  * than by the program it covers:
  *
  * <ul>
+ *   <li><b>{@code dto}</b> -- the published-contract tests, which compare a
+ *       request or response record with the independently authored OpenAPI
+ *       document that describes it. One class:
+ *       {@code TransactionApiContractTest}. A test here needs neither a
+ *       container nor a test double, because both sides of the comparison are
+ *       declarations.</li>
+ *   <li><b>{@code domain}</b> -- the entity-mapping and diagnostic-rendering
+ *       tests. One class: {@code FixedWidthMappingTest}. What it covers is the
+ *       explicit fixed-length binding on every {@code CHAR} column and the values
+ *       an entity rendering withholds, both of which regress without failing any
+ *       build.</li>
  *   <li><b>{@code api}</b> -- the web-layer slice tests, each standing up the
  *       REST layer alone with its collaborators replaced. Two classes:
  *       {@code TransactionControllerTest}, covering the three transaction
@@ -139,6 +164,18 @@
  * share a collaborator while still needing their transcribed rules asserted
  * separately. Sizing that package from the production classes instead would
  * leave one of the four screens with no unit test of its own.
+ *
+ * <p>Refactoring Rationale: the roster read five subpackages before {@code dto}
+ * and {@code domain} were added to it, and it read five while {@code dto} already
+ * held a test class -- so the closed set excluded a package that existed, which
+ * makes a closed set worse than an open one: it reads as governance while the
+ * governed thing sits outside it. Each of the two additions is its own kind of
+ * test rather than a variant of an existing one. A contract test compares two
+ * declarations and could not go in {@code api}, which stands up a web layer, nor
+ * in {@code service}, which asserts a transcribed rule. A mapping-and-rendering
+ * test asserts what a persistence annotation binds and what an object discloses,
+ * which is neither a query -- so not {@code repository}, whose tests pay for a
+ * container -- nor a copybook representation concern, so not {@code mapper}.
  *
  * <h2>The Surefire and Failsafe split is carried by class names alone</h2>
  *
@@ -234,11 +271,14 @@
  *
  * <h2>The count canon, and the charters that deliberately do not exist</h2>
  *
- * <p>This subtree holds six package charter files: this one, and one in each of
- * the five subpackages named above. The figure is recorded so that a reader can
- * tell a charter that is missing from a charter that was never intended, and so
- * that the negative boundary below rests on arithmetic that can be re-checked
- * rather than on an argument that has to be re-made.
+ * <p>This subtree will hold eight package charter files: this one, and one in
+ * each of the seven subpackages named above. Five exist today -- this one and the
+ * charters in {@code dto}, {@code domain}, {@code repository} and
+ * {@code architecture} -- and the remaining three arrive with their packages. The
+ * figure is recorded so that a reader can tell a charter that is missing from a
+ * charter that was never intended, and so that the negative boundary below rests
+ * on arithmetic that can be re-checked rather than on an argument that has to be
+ * re-made.
  *
  * <p>Assumptions: NO charter file exists at
  * {@code services/transaction-service/src/test/java}, at
@@ -279,8 +319,8 @@
  * reasonable alternative exists, and mirroring a charter at every path level for
  * symmetry is exactly such an alternative.
  *
- * <p>Assumptions: the six-file count holds only while no test class sits
- * directly in this directory, and all test classes belong to the five leaf
+ * <p>Assumptions: the eight-file count holds only while no test class sits
+ * directly in this directory, and all test classes belong to the seven leaf
  * subpackages. Were a test class ever placed here, nothing about this file would
  * change: it is already present and already carries Javadoc, which is the whole
  * reason it is authored unconditionally rather than on discovering that

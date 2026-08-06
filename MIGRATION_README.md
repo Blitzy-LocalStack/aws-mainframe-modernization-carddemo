@@ -17,10 +17,18 @@ repository `.venv`.
 ## Build
 
 ```bash
-# WHAT: compile and test the Java reactor with its documentation and architecture gates.
+# WHAT: compile, test and PACKAGE the Java reactor with its documentation and
+#       architecture gates.
 # WHY : Assumptions: common-lib supplies shared security, money, codec, and
 #       architecture contracts, so a reactor build is the minimum coherent unit.
-mvn -B -f services/pom.xml clean test
+# WHY : Refactoring Rationale: this was `clean test`, which stopped short of two
+#       things the deployment depends on. `verify` additionally runs the Spring Boot
+#       repackage goal, which produces the executable jar each service Dockerfile
+#       copies, and it reaches the integration-test phase Failsafe binds to. Building
+#       with `test` therefore left the jars unbuilt and the integration suite unrun
+#       while still reporting success, and it is not what CI gates on --
+#       .github/workflows/services-ci.yml runs `clean verify`.
+mvn -B -f services/pom.xml clean verify
 ```
 
 ```bash
@@ -107,7 +115,7 @@ Run the target-stack gates:
 # WHAT: execute the Java, UI, Python, and Terraform static validation suites.
 # WHY : Assumptions: each package has a language-specific gate, while the
 #       combined run detects cross-package drift before review.
-mvn -B -f services/pom.xml clean test
+mvn -B -f services/pom.xml clean verify
 (cd ui && npm run typecheck && npm run lint && npm test && npm run build)
 source .venv/bin/activate
 ruff check data-migration

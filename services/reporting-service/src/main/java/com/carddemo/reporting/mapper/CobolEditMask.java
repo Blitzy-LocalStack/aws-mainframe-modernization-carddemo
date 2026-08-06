@@ -150,8 +150,10 @@ import java.util.Objects;
  * plausible-number-that-is-wrong this class exists to prevent, and it is unrecoverable
  * downstream because the truncated string carries no evidence of the digits it lost. Each method
  * therefore raises, naming the offending magnitude, its scale, and the mask that could not hold
- * it. The divergence from the reference is intentional and is registered with the other
- * documented divergences. It is a guard rather than an expected path for the report masks in
+ * it. The divergence from the reference is intentional and is registered as
+ * <b>D-EDIT-MASK-OVERFLOW</b> in {@code docs/architecture/cobol-to-service-traceability.md},
+ * alongside the other documented divergences. It is a guard rather than an expected path for the
+ * report masks in
  * particular, because the three accumulators that feed them are declared {@code PIC S9(09)V99}
  * at lines 134, 135 and 136 of {@code app/cbl/CBTRN03C.cbl}, which is exactly the nine integer
  * positions both report masks provide. The guard is still reachable, because {@link Money}
@@ -654,7 +656,8 @@ public final class CobolEditMask {
      * and therefore carries TEN. Line 484 of {@code app/cbl/CBSTM03A.CBL} moves the wider item
      * into the narrower one, so the reference discards one high-order digit for any balance of a
      * thousand million or more. The Java raises instead of reproducing that, and the divergence
-     * is registered with the other documented divergences. The narrowing decision therefore
+     * is registered as {@code D-EDIT-MASK-OVERFLOW} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. The narrowing decision therefore
      * belongs to the caller assembling the statement band, which is the only place that can
      * decide what a balance too wide for its own field should show; making it here would hide a
      * ten-digit balance behind a nine-digit string that looks correct.</p>

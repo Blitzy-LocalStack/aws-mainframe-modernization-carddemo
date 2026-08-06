@@ -231,33 +231,36 @@ class CursorTokenTest {
         //   envelope settles its row-count invariant -- a page carrying rows must name both of its ends
         //   -- before it inspects either token's shape. Supplying one raw component and one sealed one
         //   is what makes the refusal under test the reachable one rather than the invariant above it.
-        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, null, null, false, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, null, null, false, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        // Assumptions: the two scan-position components are held to the same rule, and they are checked
-        //   separately because a page whose rows were all filtered away after the read carries a scan
-        //   position and no boundary row, so a raw key can reach the envelope through either one.
+        // Assumptions: the filtered-away page reaches the same two components by a different route, so
+        //   it is exercised separately. Its scan positions ARE the boundary components -- the envelope
+        //   carries four members and has none of its own for them -- so a raw key handed to either
+        //   parameter of that factory has to be refused by the same check, naming the component it
+        //   landed in rather than the parameter it arrived through.
         assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(RAW_CURSOR, null))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("nextCursor")
+                .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
         assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(null, RAW_CURSOR))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("prevCursor")
+                .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
     }
 
     /**
-     * Confirms the paging envelope accepts sealed tokens, reports a backward step as expressible, and
-     * still admits the exhausted page that carries no cursor at all.
+     * Confirms the paging envelope accepts sealed tokens in both boundary components, keeps the
+     * filtered-away page expressible from those same two, and still admits the exhausted page that
+     * carries no cursor at all.
      */
     @Test
     @DisplayName("the paging envelope accepts sealed tokens and an absent cursor")
@@ -266,14 +269,24 @@ class CursorTokenTest {
         String first = sealer.seal(BINDING, RAW_CURSOR);
         String last = sealer.seal(BINDING, "411111111111111200000000012");
 
-        PageResponse<String> page =
-                new PageResponse<>(List.of("row"), first, last, last, first, true, true);
+        PageResponse<String> page = new PageResponse<>(List.of("row"), first, last, true);
 
         assertThat(page.firstKey()).isEqualTo(first);
         assertThat(page.lastKey()).isEqualTo(last);
-        assertThat(page.nextCursor()).isEqualTo(last);
-        assertThat(page.prevCursor()).isEqualTo(first);
-        assertThat(page.hasPrev()).isTrue();
+        assertThat(page.hasNext()).isTrue();
+
+        // Assumptions: the filtered-away page is asserted here because it is the state the envelope's
+        //   four components have to carry without components of their own. Its forward scan position
+        //   lands in lastKey and its backward one in firstKey, and a further page is reported from the
+        //   presence of the forward position alone, so a caller honouring the indicator always holds
+        //   the token to send back.
+        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(last, first);
+
+        assertThat(filtered.items()).isEmpty();
+        assertThat(filtered.lastKey()).isEqualTo(last);
+        assertThat(filtered.firstKey()).isEqualTo(first);
+        assertThat(filtered.hasNext()).isTrue();
+
         assertThat(PageResponse.<String>empty().firstKey()).isNull();
     }
 

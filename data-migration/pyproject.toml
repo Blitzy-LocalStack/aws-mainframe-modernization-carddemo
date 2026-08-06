@@ -35,27 +35,34 @@
 #   rationale and for the explicitly local way to iterate without installing.
 #
 # State at this checkpoint:
-#   `src/carddemo_migration/` currently holds seven Python modules: `__init__.py`,
-#   `config.py`, `copybook/layouts.py`, `credentials.py`, `role_credentials.py`,
-#   `loaders/__init__.py` and `loaders/s3_stage.py`. The `copybook` directory has
-#   no `__init__.py` where `loaders` does; the built wheel was inspected and does
-#   include `carddemo_migration/copybook/layouts.py` as an implicit namespace
-#   child, so the asymmetry changes what is packaged not at all and is left as it
-#   is rather than corrected blind. The `readers/` and `verify/` packages and the
-#   `cli.py` module named by `[project.scripts]` remain later-index artifacts.
+#   `src/carddemo_migration/` currently holds ten Python modules: `__init__.py`,
+#   `cli.py`, `config.py`, `copybook/__init__.py`, `copybook/layouts.py`,
+#   `copybook/zoned.py`, `credentials.py`, `role_credentials.py`,
+#   `loaders/__init__.py` and `loaders/s3_stage.py`. The `readers/` and `verify/`
+#   packages remain later-index artifacts, and so do `copybook/packed.py`,
+#   `copybook/ebcdic_codec.py` and `loaders/aurora.py`; `cli.py` registers only the
+#   three subcommands those absent modules are not needed for.
+#   Refactoring Rationale: `copybook` previously had no `__init__.py` where
+#   `loaders` did, and that asymmetry was left in place on the measured evidence
+#   that the built wheel included `carddemo_migration/copybook/layouts.py` as an
+#   implicit namespace child anyway. The evidence was correct and the reasoning
+#   held only while nothing else changed: discovery finds a regular package by its
+#   `__init__.py` and a namespace child only by falling back, so a later
+#   `packages` or `exclude` entry would have dropped the directory from the
+#   distribution with every test still passing. It is now a regular package.
 #   Measured consequences:
-#     - `ruff check .` and `ruff format --check .` both pass over all twelve files
+#     - `ruff check .` and `ruff format --check .` both pass over all sixteen files
 #       this configuration governs, so the docstring gate is live for the code
 #       that exists.
-#     - `python -m pytest data-migration/tests` collects four test modules --
-#       test_config_name_contract, test_database_trust, test_reporting_views and
-#       test_s3_stage -- and all seventy-seven tests pass.
+#     - `python -m pytest data-migration/tests` collects five test modules --
+#       test_cli, test_config_name_contract, test_database_trust,
+#       test_reporting_views and test_s3_stage -- and all ninety-nine tests pass.
 #     - The distribution builds cleanly and its wheel contains every module above,
-#       so `import carddemo_migration` and
-#       `import carddemo_migration.copybook.layouts` both work, while the
-#       generated console-script wrapper still fails when invoked because
-#       `carddemo_migration.cli` is absent; the `[project.scripts]` block below
-#       records that deliberate staged boundary.
+#       so `import carddemo_migration`, `import carddemo_migration.copybook` and
+#       `import carddemo_migration.copybook.layouts` all work, and the generated
+#       console-script wrapper now RUNS: `carddemo-migrate --help` exits 0 from an
+#       installed wheel with no source tree on the path. The `[project.scripts]`
+#       block below records what that entry point does and does not cover.
 #   Refactoring Rationale: an earlier revision of this header appeared twice
 #   verbatim and both copies omitted modules that had landed. One measured block
 #   removes the possibility that duplicate prose drifts internally, and the
@@ -212,17 +219,22 @@ dependencies = [
 #   or not the wheel's generated script wrappers are present on PATH, whereas a
 #   bare `carddemo-migrate` silently depends on them. Keeping both means the
 #   documented path never relies on an installation side effect.
-# WHY : Assumptions: this entry is a target declaration, not a working command
-#   in the current package. `src/carddemo_migration/cli.py` and its `main`
-#   callable are absent. The wheel builds and installs, and the wrapper is
-#   generated, but invoking either entry exits with `ModuleNotFoundError`. The
-#   package README and migration runbook state that limitation explicitly, so
-#   schema/security validation cannot be mistaken for a complete data cutover.
-#   The target name remains declared because it is part of the orchestration
-#   contract that this package's Dockerfile and the batch
-#   staging state are written against, and renaming it after those exist would
-#   change an interface rather than fill one in. Nothing here asserts that the
-#   command runs today.
+# WHY : Refactoring Rationale: this entry was a target declaration only, because
+#   `src/carddemo_migration/cli.py` and its `main` callable were absent and both
+#   entry points exited with `ModuleNotFoundError`. The module now exists, so the
+#   wrapper runs: `carddemo-migrate --help` and `carddemo-migrate list-datasets`
+#   both exit 0 from an installed wheel with no source tree on the path. The note
+#   is rewritten rather than deleted because the boundary it recorded has MOVED
+#   rather than disappeared, and a reader who had learned the old limitation needs
+#   to be told which part of it still holds.
+# WHY : Assumptions: what the entry point covers is narrower than what
+#   `data-migration/README.md` section 5.2 contracts. It registers `list-datasets`,
+#   `stage-dataset` and `apply-credentials` -- the three subcommands whose backing
+#   modules are in this distribution -- and does NOT register `load-dataset` or the
+#   three `verify-*` passes, which need `readers/`, `loaders/aurora.py` and
+#   `verify/`. Naming one of those is refused as a usage error, so a complete data
+#   cutover still cannot be claimed from this distribution, and schema/security
+#   validation must not be mistaken for one.
 carddemo-migrate = "carddemo_migration.cli:main"
 
 [tool.setuptools.packages.find]

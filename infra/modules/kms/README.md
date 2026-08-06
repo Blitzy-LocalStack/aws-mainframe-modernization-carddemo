@@ -29,7 +29,7 @@ documented at this length. See the
 
 ## Why four keys rather than one
 
-**Alternatives Considered.** One shared customer-managed key for the whole stack
+Alternatives Considered: One shared customer-managed key for the whole stack
 is the obvious simplification, and on price it wins outright: KMS bills per key
 per month plus per request, so one key is one monthly key charge instead of four.
 It is rejected on a mechanism, not on a preference. One key has exactly one key
@@ -41,7 +41,7 @@ same mistake is confined to one class: an over-broad grant added to the queue
 key cannot decrypt database ciphertext, and a grant added to the Secrets Manager
 key cannot read a dataset generation.
 
-**Trade-offs.** The cost accepted for that boundary is four monthly key charges
+Trade-offs: The cost accepted for that boundary is four monthly key charges
 instead of one, four key policies to review instead of one, and four ARNs for a
 calling root to wire instead of one. Naming the cost matters: a rationale that
 reports only the benefit is not a rationale. The per-data-domain reasoning and
@@ -63,7 +63,7 @@ sets `JNLREAD(NONE) JNLSYNCREAD(NO) JNLUPDATE(NO) JNLADD(NONE)`, at lines 8, 20,
 deliberately simple demonstration application, recorded here by path and line
 because they are what this module's existence answers.
 
-**Refactoring Rationale.** The eight VSAM file resources express no recovery and
+Refactoring Rationale: The eight VSAM file resources express no recovery and
 no journalling of file activity, and the tier has no encryption-at-rest
 construct at all, so there is no baseline rotation behaviour for this module to
 reproduce. That is precisely why rotation is an invariant of the module rather
@@ -95,7 +95,7 @@ exactly as they are — the migration adds a path, it does not remove one.
 | Secrets Manager | The generated database credential and the seed-user bootstrap values, all created at provisioning time rather than committed. This is the key that answers `app/cpy/CSUSR01Y.cpy:21`, where the baseline declares `SEC-USR-PWD PIC X(08)`, an eight-character password held in plain text: the target carries no password field forward at all. | `secrets`, `cognito` |
 | SQS | Queue message payloads at rest, across all six queues and their six dead-letter queues. | `sqs` |
 
-**Assumptions.** The queue count is six rather than the five the target messaging
+Assumptions: The queue count is six rather than the five the target messaging
 design names, because the implemented queue module splits the inquiry request by
 owning service — account inquiry and date conversion each get their own request
 queue while sharing one reply queue. Six is therefore the number this module's
@@ -103,7 +103,7 @@ queue while sharing one reply queue. Six is therefore the number this module's
 module it actually encrypts rather than the summary design. The split itself is
 owned by the `sqs` module, not by this one.
 
-**Assumptions.** Each consuming module receives the key ARN it needs from an
+Assumptions: Each consuming module receives the key ARN it needs from an
 environment root, never by calling this module itself. That is what allows key
 creation and key-policy application to be separate resources here: a consumer can
 be created with the key ARN first, and its resulting exact resource identity can
@@ -125,7 +125,7 @@ principal, by service path, and by resource-specific encryption context:
 - SQS use is bound to exact same-account role ARNs and the regional queue
   service path.
 
-**Assumptions.** Naming the account root as the administrative principal is a
+Assumptions: Naming the account root as the administrative principal is a
 deliberate dependency on two documented KMS behaviours rather than a default.
 First, a key policy must leave an administrative path in place, or the key
 becomes unmanageable by anyone; the account-root statement is also what permits
@@ -135,7 +135,7 @@ scopes to *that key alone* and is not the account-wide wildcard the same
 expression would mean in an identity policy — which is why the statement is not
 an over-broad grant despite how it reads.
 
-**Assumptions.** The four trusted-principal lists each default to an empty list
+Assumptions: The four trusted-principal lists each default to an empty list
 so the keys can be created before the task roles that use them exist. Those roles
 come from the `ecs-service` module, which itself consumes these key ARNs, so
 requiring a non-empty list would make the grant a precondition of the key the
@@ -143,7 +143,7 @@ grant depends on. An empty default installs no wildcard grant — it installs no
 use grant at all — and no default in this module holds an ARN. The empty defaults
 are load-bearing, not placeholders left unfinished.
 
-**Trade-offs.** The key ARNs and key identifiers are published as ordinary
+Trade-offs: The key ARNs and key identifiers are published as ordinary
 outputs and are not marked `sensitive`. They are resource identifiers, not key
 material, and leaving them legible lets a reviewer read a plan and see which data
 class is wired to which key — the single most useful thing a reviewer can check
@@ -200,7 +200,7 @@ keys with rotation enabled**. The one lever this module exposes to that
 difference is `deletion_window_in_days`, set per environment in
 `infra/envs/dev/terraform.tfvars` and `infra/envs/prod/terraform.tfvars`.
 
-**Trade-offs.** The two ends of that window buy different things. A short window
+Trade-offs: The two ends of that window buy different things. A short window
 lets `terraform destroy` release the keys sooner and stops a torn-down
 environment leaving keys behind in a pending-deletion state that still bills; a
 long window preserves more time in which a key deleted by mistake can be
@@ -228,7 +228,7 @@ is built, not a habit to be maintained:
 - The key ARNs travel **outward as outputs**, never inward as source-committed
   inputs.
 
-**Assumptions.** The reason no default carries a specimen ARN — not even as a
+Assumptions: The reason no default carries a specimen ARN — not even as a
 worked example of the expected shape — is that an ARN embeds an AWS account
 identifier, and committing no secret to the repository is a non-negotiable
 constraint of this project that admits no exception. The expected shape is
@@ -244,7 +244,7 @@ Run from the repository root:
 ```bash
 # WHAT: check this module's HCL against canonical formatting without rewriting
 #       a single byte of it.
-# WHY : `-check` reports drift and exits non-zero, whereas a bare
+# WHY : Trade-offs: `-check` reports drift and exits non-zero, whereas a bare
 #       `terraform fmt` rewrites files in place -- which in CI would let a
 #       formatting regression pass as green, because the command repaired the
 #       tree and then succeeded.
@@ -252,7 +252,7 @@ terraform fmt -check -recursive infra/modules/kms
 
 # WHAT: parse and type-check the module's configuration with no state backend
 #       and no credentials.
-# WHY : `validate` refuses to run in an uninitialised directory, so `init` must
+# WHY : Assumptions: `validate` refuses to run in an uninitialised directory, so `init` must
 #       precede it, and `-backend=false` is what lets it run offline -- this
 #       directory has no backend of its own to configure. The GATING path is
 #       the transitive one: CI validates the three roots, and validating a root
@@ -261,7 +261,7 @@ terraform -chdir=infra/modules/kms init -backend=false -input=false
 terraform -chdir=infra/modules/kms validate
 
 # WHAT: run the HCL lint gate over this directory.
-# WHY : the config is given as an absolute path because tflint resolves a
+# WHY : Assumptions: the config is given as an absolute path because tflint resolves a
 #       relative --config against the directory named by --chdir rather than
 #       against the shell's working directory, so a relative path silently
 #       finds no configuration and lints with default rules.
@@ -269,7 +269,7 @@ tflint --chdir=infra/modules/kms --config="$(pwd)/infra/.tflint.hcl"
 
 # WHAT: compare the generated region of this README against the module's HCL,
 #       writing nothing at all.
-# WHY : this is the drift gate in check-only mode. A stale README exits
+# WHY : Trade-offs: this is the drift gate in check-only mode. A stale README exits
 #       non-zero and stays stale until a human resolves it deliberately; an
 #       auto-fix step that regenerated the file and committed it back would
 #       turn a review gate into a silent mutation, leaving the author unaware
@@ -307,7 +307,7 @@ scope. No key has been created, no key has rotated, and nothing here has been
 penetration-tested, audited, or assessed against any compliance standard; no
 conformance claim of any kind is made.
 
-**Trade-offs.** No `prevent_destroy` lifecycle guard is set on any key. The
+Trade-offs: No `prevent_destroy` lifecycle guard is set on any key. The
 accepted risk is a key destroyed by an unintended `terraform destroy`. It is
 accepted because a guard would make the project's own acceptance criterion —
 that an environment tears down cleanly — unsatisfiable: the run would halt on the
@@ -414,4 +414,4 @@ no second table competes with it.
 | [Security and identity](../../../docs/architecture/security-and-identity.md) | Encryption in transit and at rest across the stack, the identity treatment, the IAM boundaries, and the VSAM-versus-Db2 baseline reconciliation cited above |
 | [Deploy runbook](../../../docs/runbooks/deploy.md) | The authoritative deploy command sequence, which this file does not duplicate |
 | [Teardown runbook](../../../docs/runbooks/teardown.md) | The authoritative teardown sequence and the deletion-window consequences of removing these keys |
-| [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The convention this document is written to, including the HCL split and the `# WHAT:` / `# WHY :` idiom |
+| [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The convention this document is written to, including the HCL split and the paired what-and-why comment idiom |

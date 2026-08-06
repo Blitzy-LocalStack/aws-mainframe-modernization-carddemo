@@ -16,16 +16,6 @@ import jakarta.validation.constraints.Size;
  * is the specification, so this shape encodes the field set and the widths that specification
  * already states rather than redefining them.
  *
- * <p><b>Return values, exceptions or errors.</b> A record declaration returns no value and raises
- * nothing, so this docstring carries no {@code @return} and no {@code @throws} at-clause. The
- * inapplicability is declared rather than left silent, because the Explainability rule's line 39
- * forbids a docstring that omits return values, and a reader has to be able to tell a declared
- * inapplicability from an oversight. The record's components are the parameters of its canonical
- * constructor, so the parameters element of that rule is answered by the two {@code @param}
- * at-clauses below and not by a separate paragraph. Nothing here declares a checked exception: a
- * component is a carrier, and a constraint violation is reported as a response body by the shared
- * handler named further down rather than thrown to a caller of this type.
- *
  * <h2>Two components, and the reason there is no third</h2>
  *
  * <p>The reference screen is the smallest of the four in this bounded context.
@@ -239,17 +229,10 @@ import jakarta.validation.constraints.Size;
  * identities of the reference transaction monitor with no target analogue, the two titles belong to
  * the user interface screen header, and the date and time are clock reads rendered by the client.
  *
- * <p>Alternatives Considered: Lombok was evaluated and rejected because its generated accessors
- * cannot carry the Javadoc the Explainability rule requires at its line 15, and the repository
- * ruleset grants no annotation-based exemption that would excuse a generated member, so a
- * Lombok-built type either fails the documentation gate or has to be suppressed out of it -- and
- * the companion suppression charter reaches only generated sources and test fixture material, so no
- * suppression is available to source under this directory. A Java 21 record gives the same brevity
- * with members that can be documented. MapStruct was rejected on a separate ground: mapping the
- * reference record onto a shape like this one is not mechanical. It drops {@code FILLER}, masks the
- * primary account number to its last four digits, suppresses a card verification value entirely,
- * encrypts protected identifiers and renames misspelled baseline fields, and each of those needs a
- * justification at the mapping site that a generated mapper has nowhere to hold.
+ * <p>Alternatives Considered: Lombok and MapStruct were both evaluated and both rejected for this
+ * package as a whole; {@code com.carddemo.transaction.dto}'s package charter carries the reasoning,
+ * which turns on generated members being undocumentable and on copybook-to-transfer-object mapping
+ * being non-mechanical. A Java 21 record with hand-written mapping is what replaces them.
  *
  * <p>Assumptions: this type imports no persistence entity from
  * {@code com.carddemo.transaction.domain} and no type belonging to another service. The conversion
@@ -257,50 +240,21 @@ import jakarta.validation.constraints.Size;
  * prohibition on reaching across that boundary is asserted by the ArchUnit layering rules this
  * module runs against its own classes rather than by convention.
  *
- * <h2>The documentation contract this type is held to</h2>
- *
- * <p>Assumptions: one user-specified rule governs this migration, Explainability, and there is no
- * conflict to resolve -- not with the repository's own conventions, not with the migration plan,
- * and not within the rule itself. The four categories it names at its lines 31 to 34 are the
- * same four the house convention at {@code tests/README.md} lines 544 to 549 already names, and
- * that convention names the same docstring quartet of purpose, parameters, returns and exceptions
- * at its lines 545 and 546. Its validation gate at line 43 is conjunctive, so a complete docstring
- * and a labelled rationale for each non-obvious choice are each independently fatal when absent;
- * that line rather than line 29 is the one cited, because line 29 states the same obligation only
- * as a recommendation. In this file the non-obvious choices are mostly absences -- no amount, no
- * cursor, no boolean confirmation, no compact constructor -- and every one of them has an obvious
- * alternative, which is what makes documenting each of them mandatory under line 40. The labels
- * above are written in the single accepted form: plural, unparenthesised, colon-terminated and
- * unemphasised.
- *
- * <p>Alternatives Considered: declaring the two accessors explicitly, each with the single-line
- * form the rule permits for a trivial accessor at its line 23, was evaluated and rejected. This
- * record declares no method of its own, so the two at-clauses above are the whole of its parameter
- * obligation and the generated documentation attaches each description to the accessor that returns
- * it. Writing the accessors out would add two bodies that restate the component they return, which
- * is the narration the rule forbids at its line 38, and it would put the same description in two
- * places that could then disagree.
- *
- * <p>Assumptions: the framing used throughout is that the baseline does one thing, the Java
- * implements another, and any divergence is documented in the migration traceability register
- * rather than introduced silently. The repository states the same discipline for its own suite at
- * {@code tests/README.md} lines 555 and 556, which encode the specification rather than redefine
- * it. Nothing under {@code app/} is edited by this record or by any statement in this docstring.
- *
  * @param accountId the account whose outstanding balance this payment settles, from
  *     {@code ACTIDINI PIC X(11)} at line 60 of {@code app/cpy-bms/COBIL00.CPY} and keyed as
  *     {@code CC-ACCT-ID PIC X(11)} at line 34 of {@code app/cpy/CVCRD01Y.cpy}; required, capped at
  *     the copybook's eleven characters and constrained to digits, and borne as digit characters so
  *     that a leading zero survives the round trip
- * @param confirm the one-character authorisation of the payment, from
+ * @param confirmation the one-character authorisation of the payment, from
  *     {@code CONFIRMI PIC X(1)} at line 72 of that same map; capped at the copybook's one
  *     character and nullable, because an absent value is the never-confirmed state that drives the
  *     prompt branch rather than a rejected submission, and the accepted letters are matched case
- *     insensitively by the service
+ *     insensitively by the service. The component is named for the wire: the published contract
+ *     calls this property confirmation, no property-naming strategy or per-property annotation is
+ *     configured anywhere in this package, so a component named anything else would leave a
+ *     conformant client's value unbound and this record holding null on a money-moving request
  */
 public record BillPaymentRequest(
-    // WHAT: the account identifier, required, width-capped and digit-constrained, with the
-    //       reference blank-case message carried onto the not-blank constraint verbatim.
     // WHY : Assumptions: three constraints are declared rather than one because each has a
     //       different authority. Requiredness comes from COBIL00C.cbl line 159, the width from the
     //       PIC X(11) at COBIL00.CPY line 60, and the digit domain from the numeric redefinition
@@ -308,17 +262,41 @@ public record BillPaymentRequest(
     //       enforce the same values while leaving no way to see which copybook line each came
     //       from, and the OpenAPI contract generated from them would publish one opaque
     //       expression in place of three traceable facts.
+    // WHY : Refactoring Rationale: the digit run is EXACT at eleven and an earlier revision of
+    //       this component admitted any number of digits. Eleven is the whole identifier, and the
+    //       published contract openapi/transaction-api.yaml declares exactly eleven for it, so the
+    //       earlier expression accepted values that contract refused - a request one side called
+    //       valid and the other called malformed, with nothing comparing them. The committed extract
+    //       is zero-padded to eleven, so a shorter run is not a partial identifier but one that
+    //       matches no row.
+    // WHY : Assumptions: the class shorthand for a digit is written out as the ten characters
+    //       rather than as \\d, because that shorthand's reach depends on a matcher flag Bean
+    //       Validation does not set, whereas COBIL00C.cbl line 165 accepts the ten ASCII digits and
+    //       nothing else. Writing the range removes the dependency.
     @NotBlank(message = "Acct ID can NOT be empty...")
     @Size(max = 11)
-    @Pattern(regexp = "\\d+")
+    @Pattern(regexp = "[0-9]{11}")
     String accountId,
 
-    // WHAT: the confirmation character, nullable, with no value-domain constraint.
     // WHY : Assumptions: a width constraint treats a null value as valid, so nullability needs no
     //       second component and no sentinel value to represent it. Leaving the domain to the
     //       service is what keeps COBIL00C.cbl's short-circuit order intact, since a constraint
     //       here would be evaluated alongside the account-identifier constraints above and could
     //       report line 187's message for a submission line 159 already rejected.
+    // WHY : Refactoring Rationale: the component is spelled confirmation because a record component
+    //       name IS the wire name here -- this package declares no property-naming strategy and no
+    //       per-property annotation anywhere -- and the published contract's property is
+    //       confirmation. An earlier revision named it confirm, so a client sending exactly what the
+    //       contract describes had its value rejected as an unknown property by the schema's closed
+    //       object and, had it been admitted, bound nothing: the component would have been null on
+    //       every request, which on this endpoint means never confirmed and therefore never paid.
+    //       Renaming the component was chosen over annotating it so that the invariant "component
+    //       name equals wire name" continues to hold for the whole package, leaving one rule to
+    //       check rather than a per-property exception to find.
+    // WHY : Assumptions: a shorter identifier would be an unknown property to that contract,
+    //       and `spring.jackson.deserialization.fail-on-unknown-properties` is true in this
+    //       module's application.yml, so every contract-conformant body would be refused
+    //       before any constraint above was evaluated.
     @Size(max = 1)
-    String confirm) {
+    String confirmation) {
 }

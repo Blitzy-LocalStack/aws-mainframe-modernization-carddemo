@@ -7,15 +7,6 @@
  * repository contracts while keeping storage details out of the service,
  * mapper, DTO and domain packages.
  *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package
- * declaration accepts no parameters, returns no value and raises no exception,
- * so no parameter, return or exception at-clause has a subject here. The
- * inapplicability is stated because user Rule 1 (Explainability) enumerates
- * Purpose, Parameters, Return values, and Exceptions or errors at lines 18 to
- * 21, and its line 39 forbids a docstring that silently omits required
- * elements. This compilation unit has exactly one subject among those four:
- * its purpose.
- *
  * <h2>Target contract and closed inventory</h2>
  *
  * <p>Assumptions: the names below state the package contract assigned by the
@@ -31,21 +22,37 @@
  * interface in this directory would fail the charter-presence check if this
  * file were not part of the same package.
  *
- * <p>Exactly five {@code .java} files constitute this package:
+ * <p>Exactly five {@code .java} files constitute this package, of which TWO are landed:
  *
  * <ul>
- *   <li>{@code package-info.java}, this charter;</li>
+ *   <li>{@code package-info.java}, this charter -- LANDED;</li>
  *   <li>{@code TransactionRepository}, the Spring Data JPA interface for
- *       {@code com.carddemo.transaction.domain.Transaction};</li>
+ *       {@code com.carddemo.transaction.domain.Transaction} -- LANDED;</li>
  *   <li>{@code DailyTransactionRepository}, the Spring Data JPA interface for
- *       {@code com.carddemo.transaction.domain.DailyTransaction};</li>
+ *       {@code com.carddemo.transaction.domain.DailyTransaction} -- PLANNED, not yet
+ *       authored;</li>
  *   <li>{@code TransactionCategoryBalanceRepository}, the Spring Data JPA
  *       interface for
- *       {@code com.carddemo.transaction.domain.TransactionCategoryBalance};
- *       and</li>
+ *       {@code com.carddemo.transaction.domain.TransactionCategoryBalance} --
+ *       PLANNED, not yet authored; and</li>
  *   <li>{@code TransactionRejectRepository}, the Spring Data JPA interface for
- *       {@code com.carddemo.transaction.domain.TransactionReject}.</li>
+ *       {@code com.carddemo.transaction.domain.TransactionReject} -- PLANNED, not yet
+ *       authored, and its entity is not authored either, so this one is two files away
+ *       rather than one.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: three of the five are marked PLANNED, and an earlier revision of
+ * this charter stated all five as constituting the package. Two exist. The inventory is the
+ * mechanism by which a reader finds the repository for an entity without opening five files, and
+ * an entry that cannot be distinguished from a landed one defeats that at the first lookup --
+ * particularly for {@code TransactionRejectRepository}, whose ENTITY is also unauthored, so a
+ * reader following the charter would search for two files rather than one. The inventory stays
+ * closed at five and now says which two are here.
+ *
+ * <p>Assumptions: the three are not authored as empty interfaces to close the gap. A Spring Data
+ * interface with no declared query and no caller contributes no behaviour and cannot be
+ * exercised, so it would be a placeholder occupying the name of a reviewed contract; each
+ * arrives with the job or service whose queries it declares.
  *
  * <p>Trade-offs: the inventory is closed rather than extensible. There is no
  * shared base repository, keyset base interface, custom fragment,
@@ -108,12 +115,14 @@
  *
  * <p>The service assembles the query result into
  * {@code com.carddemo.common.web.PageResponse}. Its record contract exposes
- * {@code items}, {@code firstKey}, {@code lastKey}, {@code nextCursor},
- * {@code prevCursor}, {@code hasNext} and {@code hasPrev}. The first and last
- * row keys are {@code null} exactly when no row is returned; directional
- * cursor presence agrees with the corresponding availability flag. The
- * repository supplies ordered row boundaries, while the shared envelope owns
- * its sealed cursor representation.
+ * exactly four members: {@code items}, {@code firstKey}, {@code lastKey} and
+ * {@code hasNext}. The two boundary keys name the ends of the page returned and
+ * are {@code null} when no row is returned and no scan position remains in that
+ * direction; {@code hasNext} is admitted only alongside a present
+ * {@code lastKey}, so a caller told a further page follows always holds the
+ * token to request it with. A backward step is expressible exactly when
+ * {@code firstKey} is present. The repository supplies ordered row boundaries,
+ * while the shared envelope owns its sealed cursor representation.
  *
  * <p>Assumptions: requesting one extra row is a transcription of the
  * baseline, not an invented heuristic. {@code COTRN00C} line 308 performs an
@@ -358,11 +367,13 @@
  *
  * <h2>The explainability labels have one auditable spelling</h2>
  *
- * <p>User Rule 1 (Explainability) line 15 requires a docstring on every module
- * entry point, which is the reason this package declaration carries this
- * block. Line 28 requires reasons rather than narration, lines 31 to 34 name
- * the four rationale categories, and line 43 makes the docstring and
- * rationale requirements a conjunctive review gate.
+ * <p>The project's Explainability convention requires a docstring on every
+ * module entry point, which is the reason this package declaration carries this
+ * block. It requires reasons rather than narration, it names the four rationale
+ * categories reproduced below, and it makes the docstring and the rationale a
+ * conjunctive review gate -- work fails for a missing docstring and,
+ * independently, for a missing reason. The convention is recorded for readers in
+ * {@code CONTRIBUTING.md} and {@code docs/CODE_DOCUMENTATION_STANDARD.md}.
  *
  * <pre>
  * Alternatives Considered:
@@ -372,8 +383,9 @@
  * </pre>
  *
  * <p>Alternatives Considered: the plural, unparenthesised spelling with an
- * ASCII hyphen-minus and trailing colon is taken from the rule's own wording,
- * not inferred from nearby artifacts. A repository-wide text census excluding
+ * ASCII hyphen-minus and trailing colon is taken from the governing convention's
+ * own wording as reproduced in {@code docs/CODE_DOCUMENTATION_STANDARD.md}, not
+ * inferred from nearby artifacts. A repository-wide text census excluding
  * this charter finds the canonical fourth label 1,501 times in 276 files, the
  * singular spelling 342 times in 84 files, and the parenthesised WHY spelling
  * 94 times in 28 files. The plural form is the measured majority as well as
@@ -390,21 +402,49 @@
  * Retyping those labels with U+002D makes literal searches reliable and keeps
  * this compilation unit pure ASCII.
  *
- * <h2>Inline comments use the aligned WHAT and WHY idiom</h2>
+ * <h2>Inline comments carry a canonical rationale and nothing else</h2>
  *
- * <p>Assumptions: {@code tests/README.md} line 267 establishes
- * {@code # WHAT:} with no space preceding its colon, and line 270 establishes
- * {@code # WHY :} with exactly one space so the explanation columns align.
- * Translated to Java, inline comments in this package use {@code // WHAT:}
- * and {@code // WHY :}; this Java package is where that aligned idiom first
- * appears in executable source.
+ * <p>An inline comment in this package is a single block placed immediately
+ * above the code it explains, opening with one of the four labels above and its
+ * colon, then the reason and what differs under the alternative. Purpose is
+ * stated once, in the Javadoc, where the language puts it. No statement in this
+ * package carries a {@code // WHAT:} line.
  *
- * <p>Trade-offs: Rule 1 line 38 still forbids a WHAT line that merely narrates
- * the statement beneath it. The WHAT line is permitted only to identify a
- * migrated contract that the Java tokens cannot reveal, such as the baseline
- * paragraph or record path being transcribed. The WHY line names one canonical
- * rationale and its concrete consequence. If the statement exposes
- * its complete effect, only the WHY line is written.
+ * <p>Refactoring Rationale: an earlier draft of this charter authorised a twin
+ * comment pairing a statement-level {@code // WHAT:} line with a
+ * {@code // WHY :} line, on the ground that
+ * {@code tests/README.md} lines 267 and 270 establish that aligned pair. That
+ * authorisation is withdrawn, and the reversal is recorded here rather than
+ * silently dropped because two artifacts had already settled the question the
+ * other way. the "The {@code # WHAT:} / {@code # WHY :} idiom -- prose command blocks only"
+ * section of {@code docs/CODE_DOCUMENTATION_STANDARD.md} scopes
+ * the twin idiom to fenced command blocks in prose "and nowhere else", and names
+ * {@code .java} first in the list of files that may not carry a statement-level
+ * {@code WHAT:} comment; the shared-library charter at
+ * {@code services/common-lib/src/main/java/com/carddemo/common/package-info.java}
+ * had already tried the twin form in Java and rejected it, on the ground that its
+ * first line restates the statement it sits above. Reinstating it here would have
+ * left three governing artifacts in contradiction, and that standard's own
+ * Precedence note makes such a disagreement a review failure
+ * until it is reconciled rather than a local choice either side may keep.
+ *
+ * <p>Trade-offs: the withdrawn form's one genuine use was to name a migrated
+ * contract the Java tokens cannot reveal -- a baseline paragraph or a record path
+ * and byte offset -- and that information still has to live somewhere. It moves
+ * into the Javadoc of the declaration it describes, which is where the
+ * convention puts purpose and provenance anyway, so nothing is lost and the reader gains a
+ * form the language's own tooling renders. The cost is that a provenance note is
+ * a few lines further from the annotation it explains than it was; the benefit is
+ * that no line in this package restates the statement beneath it, which is the
+ * first pattern the convention's forbidden-patterns clause rules out.
+ *
+ * <p>Assumptions: {@code tests/README.md} remains the source of the aligned pair
+ * for fenced command blocks in prose, and this migration's new READMEs and
+ * runbooks continue to use it there. That reference suite is reference-only and
+ * is not retyped, so the two trees do read differently: a shell pipeline in a
+ * fenced block has no docstring construct available and its effect genuinely is
+ * not evident from its tokens, which is what earns the twin form there and only
+ * there.
  *
  * <h2>The package charter is itself mechanically gated</h2>
  *

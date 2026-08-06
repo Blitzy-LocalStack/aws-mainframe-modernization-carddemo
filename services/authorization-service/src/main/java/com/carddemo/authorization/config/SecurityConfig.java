@@ -1,12 +1,20 @@
 package com.carddemo.authorization.config;
 
+import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
 
@@ -25,6 +33,17 @@ import org.springframework.security.web.SecurityFilterChain;
  * than restated, so all eight contexts agree about what an administrator is. Restating it per service
  * would let two services disagree about one claim, and the disagreement would surface as an
  * authorization gap rather than as a compile error.</p>
+ *
+ * <p>Assumptions: this class has the same three responsibilities in every context of this repository --
+ * a filter chain, the group-to-authority conversion, and the decoder that installs the token checks the
+ * issuer alone does not make. It reads the same five property keys in every context, so the chains
+ * cannot diverge in what they accept. Only the route table is specific to this context.</p>
+ *
+ * <p>Refactoring Rationale: this class had the chain and the conversion and not the decoder, so a
+ * validly signed IDENTITY token authenticated a request here -- the framework's issuer-and-time
+ * validation accepts one, and the fraud route's authority check would then be applied to whatever groups
+ * that token happened to carry. The decoder bean below is what closes that, and it is the same bean the
+ * sibling contexts declare rather than a variant written for this one.</p>
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
@@ -46,8 +65,27 @@ public class SecurityConfig {
      * <p>Assumptions: fraud marking is restricted to administrators because the baseline reaches its
      * fraud-marking program from the ADMINISTRATIVE menu only. Opening it to an ordinary user would grant
      * a capability the baseline never granted.</p>
+     *
+     * <p>Assumptions: the pattern carries the published {@code /api/v1} prefix because that is the path
+     * this service actually RECEIVES, and this is the single most easily mis-set value in the class. Three
+     * facts fix it and each was checked rather than assumed: no service in this repository sets
+     * {@code server.servlet.context-path}, so Spring Security matches the full request path; the load
+     * balancer rule forwards to the target without rewriting the path; and the environment roots
+     * configure this target's path patterns as {@code /api/v1/authorizations} and
+     * {@code /api/v1/authorizations/*}. An earlier revision of this constant omitted the prefix. That was
+     * not a cosmetic error -- the pattern matched no request the service could ever receive, so fraud
+     * marking fell through to the {@code anyRequest().authenticated()} rule below and any authenticated
+     * caller, including an ordinary {@code carddemo-user}, could mark an authorization fraudulent. It is
+     * corrected rather than deleted here because a path gate that silently matches nothing is
+     * indistinguishable from a correct one in review, and a reader who saw the earlier wording needs to
+     * know which statement to trust.</p>
+     *
+     * <p>Trade-offs: the prefix is written literally rather than injected from configuration. Injecting it
+     * would let the gate and the route drift apart through a property change, and a mismatch there fails
+     * open in exactly the way described above; a literal makes the gate wrong only when someone edits this
+     * line, where the reasoning is written down next to it.</p>
      */
-    public static final String FRAUD_PATH_PATTERN = "/authorizations/*/fraud";
+    public static final String FRAUD_PATH_PATTERN = "/api/v1/authorizations/*/fraud";
 
     /**
      * Builds the filter chain.
@@ -122,4 +160,72 @@ public class SecurityConfig {
                 new JwtRoleConverter(configuredAdminGroupName, configuredUserGroupName));
         return converter;
     }
+
+    /**
+     * Builds the decoder, with the provider-specific token checks delegated in behind the standard ones.
+     *
+     * <p>Assumptions: the decoder is declared here rather than left to the framework's own
+     * auto-configuration, and that is the only way to add a validator. Setting an issuer location makes
+     * the framework compose signature, issuer and time validation and offers no hook to extend the
+     * composition, so a service that needs a fourth check has to build the decoder and compose the
+     * validators itself. The standard set is composed FIRST and this addition second, so nothing is
+     * replaced and no check is weakened -- a token still has to pass everything the framework would have
+     * required.</p>
+     *
+     * <p>Alternatives Considered: the framework's own {@code audiences} property, which is the obvious
+     * declarative route and is wrong for this provider. A Cognito ACCESS token carries no audience claim
+     * at all -- the client identity travels in {@code client_id} instead -- so an audience validator
+     * would reject every access token the sign-on flow issues while accepting exactly the identity
+     * tokens the delegated validator exists to refuse. It would invert the control.</p>
+     *
+     * <p>Assumptions: the configured token-use value is asserted against the shared validator's own
+     * compiled constant rather than passed to it. The validator decides the token KIND from a constant
+     * because accepting a configurable kind would let a deployment configure the check away; the
+     * property therefore exists so the requirement is visible in configuration, and this assertion is
+     * what stops the visible value and the enforced value drifting apart.</p>
+     *
+     * @param issuerUri the user-pool issuer location the framework's standard validators are built
+     *     from; must not be {@code null} or blank
+     * @param expectedTokenUse the token kind this service accepts, which must equal
+     *     {@link CognitoAccessTokenValidator#ACCESS_TOKEN_USE}
+     * @param expectedClientId the app client id a token must name; must not be {@code null} or blank,
+     *     because a blank value would silently skip the check
+     * @param requiredScope the scope a token must carry
+     * @return the decoder, never {@code null}
+     * @throws IllegalStateException if {@code expectedTokenUse} does not name the access token, or if
+     *     {@code expectedClientId} is blank
+     */
+    @Bean
+    public JwtDecoder jwtDecoder(
+            @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}") String issuerUri,
+            @Value("${carddemo.security.jwt.expected-token-use}") String expectedTokenUse,
+            @Value("${carddemo.security.jwt.expected-client-id}") String expectedClientId,
+            @Value("${carddemo.security.jwt.required-scope}") String requiredScope) {
+
+        // WHY : Assumptions: the configured kind is asserted against the shared validator's compiled
+        //       constant instead of being handed to it. The validator decides the token KIND from a
+        //       constant because a configurable kind could be configured away; the property exists so
+        //       the requirement is visible where an operator reads configuration, and this assertion is
+        //       what stops the visible value and the enforced value drifting apart.
+        if (!CognitoAccessTokenValidator.ACCESS_TOKEN_USE.equals(expectedTokenUse)) {
+            throw new IllegalStateException("carddemo.security.jwt.expected-token-use must be \""
+                    + CognitoAccessTokenValidator.ACCESS_TOKEN_USE + "\"");
+        }
+
+        // WHY : Assumptions: a blank client id is refused rather than tolerated. The shared validator
+        //       reads blank as "skip this check", which is correct only for a caller that has decided
+        //       the audience validator pins the client instead. No service here has, so a blank value
+        //       would mean the check was dropped by omission with nothing saying so.
+        if (expectedClientId == null || expectedClientId.isBlank()) {
+            throw new IllegalStateException(
+                    "carddemo.security.jwt.expected-client-id must name the app client");
+        }
+
+        NimbusJwtDecoder decoder = NimbusJwtDecoder.withIssuerLocation(issuerUri).build();
+        decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<Jwt>(
+                JwtValidators.createDefaultWithIssuer(issuerUri),
+                new CognitoAccessTokenValidator(expectedClientId, List.of(requiredScope))));
+        return decoder;
+    }
 }
+

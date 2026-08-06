@@ -46,12 +46,20 @@
  * ruleset audits at-clause bodies for emptiness, so a fabricated tag would be
  * either discarded or reported.
  *
- * <h2>The closed inventory: eight files</h2>
+ * <h2>The closed inventory: eight files, of which SEVEN are landed</h2>
  *
  * <p>Eight {@code .java} files constitute this package and no more. Seven are
  * records; the eighth is this charter. Each record is named with the reference
  * program and symbolic map it derives from, because that provenance is the only
- * authority for its component set:
+ * authority for its component set.
+ *
+ * <p>Refactoring Rationale: the entry below that is not yet authored says so, and an
+ * earlier revision of this charter wrote all eight in the present tense. Seven exist
+ * at this checkpoint -- this charter and six records -- and {@code BillPaymentResponse}
+ * does not. The distinction matters more here than the count does: the sibling mapper
+ * charter quotes this inventory as its authority for how many mappers it needs, so a
+ * roster that cannot be told apart from an inventory propagates one unauthored type
+ * into a second false statement in another file.
  *
  * <ul>
  *   <li>{@code package-info.java} -- this charter.</li>
@@ -81,9 +89,12 @@
  *       {@code app/cbl/COBIL00C.cbl} and {@code app/cpy-bms/COBIL00.CPY} lines
  *       60 to 72, being the account identifier at {@code ACTIDINI PIC X(11)}
  *       and the one-character confirmation at {@code CONFIRMI PIC X(1)}.</li>
- *   <li>{@code BillPaymentResponse} -- the payment result, from the same two
- *       files. The reference program reports the balance through
- *       {@code CURBALI PIC X(14)} at line 66 of that map.</li>
+ *   <li>{@code BillPaymentResponse} -- PLANNED, not yet authored. The payment
+ *       result, from the same two files. The reference program reports the balance
+ *       through {@code CURBALI PIC X(14)} at line 66 of that map. It arrives with the
+ *       service that produces it, because a response record with no producer could not
+ *       have its component set exercised and would stand as a placeholder where a
+ *       reviewed contract belongs.</li>
  * </ul>
  *
  * <p>Assumptions: two different counts of eight meet in this module and must

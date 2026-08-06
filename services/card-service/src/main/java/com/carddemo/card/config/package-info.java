@@ -96,7 +96,8 @@
  *   <li>There is no exception handler class. The handler that turns an exception
  *       into the shared error payload is
  *       {@code com.carddemo.common.error.GlobalExceptionHandler} in the shared
- *       kernel, and it is registered once by {@code CardApplication}.
+ *       kernel, and it is registered once by that kernel's own
+ *       {@code CardDemoCommonAutoConfiguration}.
  *       Alternatives Considered: declaring a second handler here was rejected
  *       because it would give one concern two owners and make which of them
  *       answers a given exception depend on bean ordering rather than on anything
@@ -115,16 +116,29 @@
  * for a missing bean in the wrong tree entirely.</p>
  *
  * <ul>
- *   <li>{@code CardApplication} imports
- *       {@code com.carddemo.common.error.GlobalExceptionHandler} and
- *       {@code com.carddemo.common.observability.MetricsConfig}, because neither
- *       belongs to the security filter chain and both apply to the application as
- *       a whole.</li>
- *   <li>{@code SecurityConfig} in this package registers the remaining two,
- *       {@code com.carddemo.common.web.CorrelationIdFilter} and
- *       {@code com.carddemo.common.security.JwtRoleConverter}, because both take
- *       effect as part of the request pipeline that class defines and their
- *       position within that pipeline is part of their contract.</li>
+ *   <li>{@code com.carddemo.common.CardDemoCommonAutoConfiguration} contributes
+ *       {@code GlobalExceptionHandler}, {@code MetricsConfig}, the money codec
+ *       module and the {@code CorrelationIdFilter} registration. The framework
+ *       loads it from the shared module's own
+ *       {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}
+ *       entry, so this context receives all four without naming any of them.
+ *       Refactoring Rationale: an earlier design had {@code CardApplication}
+ *       import the first two explicitly and this charter described that. It was
+ *       superseded because a registration a service has to remember is a
+ *       registration a service can omit, and the symptom of omitting one is
+ *       silent -- a log line with no correlation identity, a meter with no service
+ *       dimension, or an amount on the wire as a bare JSON number. The shared
+ *       module's registration resource records the same decision from the other
+ *       side.</li>
+ *   <li>{@code SecurityConfig} in this package registers
+ *       {@code com.carddemo.common.security.JwtRoleConverter} and
+ *       {@code com.carddemo.common.security.CognitoAccessTokenValidator}, because
+ *       both take effect as part of the request pipeline that class defines and
+ *       their position within that pipeline is part of their contract. The
+ *       validator in particular CANNOT be contributed by the shared kernel:
+ *       installing it means building the {@code JwtDecoder}, and the framework
+ *       offers no hook to extend the validator chain it composes from an issuer
+ *       location.</li>
  * </ul>
  *
  * <p>Alternatives Considered: the scan root is never widened to

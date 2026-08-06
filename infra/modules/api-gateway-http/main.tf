@@ -21,21 +21,29 @@
 #   listener over TLS; the ALB's per-service rules dispatch to the owning
 #   service, which validates the same token again independently.
 #
-#   Exactly one path is reached WITHOUT a token, and it is the path that issues
-#   tokens: `POST /auth/signon`, the sign-on exchange. It is published by its
-#   own route resource with `authorization_type = "NONE"`, from its own input
-#   (`var.public_route_keys`) that is validated to an exact method and path
-#   under `/auth`, refuses `ANY` and every greedy matcher, and must be disjoint
-#   from `var.route_keys`. It carries a throttle an order of magnitude tighter
-#   than the authorized default. Everything else on this stage requires a valid
+#   Exactly three paths are reached WITHOUT a token, and all three are paths
+#   that issue one: `POST /api/v1/auth/signon`, the sign-on exchange;
+#   `POST /api/v1/auth/challenge`, which completes a forced credential change;
+#   and `POST /api/v1/auth/refresh`, which renews a token set for a caller whose
+#   access token has expired and who therefore holds no usable token to present.
+#   Each is published by its own route resource with
+#   `authorization_type = "NONE"`, from its own input (`var.public_route_keys`)
+#   that is validated to those three exact methods and paths under `/auth`,
+#   refuses `ANY` and every greedy matcher, and must be disjoint from
+#   `var.route_keys`. Each carries a throttle an order of magnitude tighter than
+#   the authorized default. Everything else on this stage requires a valid
 #   access token carrying the required scope.
 #
 #   Seven of the eight migrated services are published here -- auth, accounts,
-#   cards, transactions, reference, authorizations and reports. The eighth,
-#   batch-service, is reached only by the Step Functions synchronous run-task
-#   call and is deliberately absent from the route table: `var.route_keys`
-#   carries a validation that rejects any `/batch` route outright, and
-#   `var.public_route_keys` admits no prefix other than `/auth` at all.
+#   cards, transactions, reference, authorizations and reports. Two of the seven
+#   own a second top-level path segment because their contracts publish one:
+#   auth-service serves user administration at `/api/v1/users`, and
+#   transaction-service serves bill payment at `/api/v1/billpay`. The eighth
+#   service, batch-service, is reached only by the Step Functions synchronous
+#   run-task call and is deliberately absent from the route table:
+#   `var.route_keys` carries a validation that rejects any `/batch` route
+#   outright, and `var.public_route_keys` admits no prefix other than `/auth` at
+#   all.
 #
 # Parameters:
 #   Not applicable -- this file declares no `variable` block. Every value it
@@ -801,9 +809,9 @@ resource "aws_apigatewayv2_stage" "this" {
   #       authorizer change for that change to become live, so `terraform
   #       apply` on its own would leave the deployed API stale and the operator
   #       sequence the infrastructure README documents -- `init`, then `plan
-  #       -out=tfplan`, then `apply tfplan` -- would appear to succeed while
-  #       changing nothing a caller can reach. Auto-deploy keeps the applied
-  #       state and the live state the same thing.
+  #       -out=<env>.tfplan`, then `apply <env>.tfplan` -- would appear to
+  #       succeed while changing nothing a caller can reach. Auto-deploy keeps
+  #       the applied state and the live state the same thing.
   auto_deploy = true
 
   # WHY : Assumptions: enabled unconditionally. The field set and the deliberate

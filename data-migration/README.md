@@ -73,13 +73,24 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 
 > **Note — delivery state.** This checkout delivers the configuration trust
 > boundary, the normative layout catalogue, the zoned-decimal codec, the S3
-> generation writer, the credential-application bootstrap, the schema/role DDL and
-> the masked reporting views. It does **not** yet deliver `cli.py`, the packed and
-> EBCDIC codecs, the readers, the Aurora bulk loader or the three verification
-> passes. [§2](#2-directory-layout) marks each item. Sections 5 through 10 state the
-> contract those modules are written against; running the documented `cli`
-> invocations against this checkout reports `No module named
-> carddemo_migration.cli`, and a source-record cutover must not be claimed from it.
+> generation writer, the credential-application bootstrap, the schema/role DDL, the
+> masked reporting views, and the command-line entry point carrying the three
+> subcommands whose backing modules are present — `list-datasets`, `stage-dataset`
+> and `apply-credentials`. It does **not** yet deliver the packed and EBCDIC codecs,
+> the readers, the Aurora bulk loader or the three verification passes, so
+> `load-dataset` and the `verify-*` subcommands are **not registered** by the parser.
+> [§2](#2-directory-layout) marks each item and [§5.2](#52-subcommands-and-their-arguments)
+> marks each subcommand. `python -m carddemo_migration.cli --help` and every
+> registered subcommand run against this checkout; an unregistered one is refused as
+> a usage error rather than failing part-way through. A source-record cutover must
+> not be claimed from this checkout, because loading and verifying records is
+> precisely what it does not yet do.
+>
+> Assumptions: an unimplemented subcommand is left OUT of the parser rather than
+> registered and made to fail. A registered command that cannot work would be
+> advertised by `--help`, an orchestrator author would wire a batch state to it, and
+> the failure would then arrive in a deployment instead of at the point where the
+> command was chosen.
 
 ---
 
@@ -106,8 +117,9 @@ data-migration/
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
 │   ├── credentials.py            delivered -- applies each generated credential to its role
 │   ├── role_credentials.py       delivered -- SCRAM verifier derivation and role bootstrap
-│   ├── cli.py                    contracted -- the subcommands in section 5
+│   ├── cli.py                    delivered -- the three registered subcommands in section 5
 │   ├── copybook/
+│   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
 │   │   ├── zoned.py              delivered -- sign-overpunch decode and encode
 │   │   ├── packed.py             contracted -- COMP-3 decode and encode
@@ -118,6 +130,7 @@ data-migration/
 │   │   └── aurora.py             contracted -- bulk COPY into one owning schema
 │   └── verify/                   contracted -- row_counts.py, checksum.py, money_parity.py
 └── tests/
+    ├── test_cli.py                     delivered
     ├── test_config_name_contract.py    delivered
     ├── test_database_trust.py          delivered
     ├── test_reporting_views.py         delivered
@@ -198,9 +211,27 @@ unrelated project from PyPI rather than this directory.
 
 ## 5. Command-line interface
 
-**This section is the contract.** `src/carddemo_migration/cli.py` implements it, and
-[`MIGRATION_README.md`](../MIGRATION_README.md) publishes it. Nothing here describes
-a flag that should not be implemented, and no two subcommands do the same work.
+**This section is the contract.** [`src/carddemo_migration/cli.py`](src/carddemo_migration/cli.py)
+implements the three subcommands marked **registered** in
+[§5.2](#52-subcommands-and-their-arguments) below, and
+[`MIGRATION_README.md`](../MIGRATION_README.md) publishes the invocation. Nothing here
+describes a flag that should not be implemented, and no two subcommands do the same
+work.
+
+Assumptions: the five subcommands marked **contracted** are stated here but are
+deliberately **not registered** by the parser, because their backing modules —
+`readers/`, `loaders/aurora.py` and `verify/` — are not in this distribution. So
+`python -m carddemo_migration.cli --help` lists three subcommands, not eight, and
+naming a contracted one is refused as a usage error (exit 2). They remain documented
+because the batch state machine and this package's `Dockerfile` are written against
+the whole set, and filling an interface in later is a smaller change than renaming one.
+
+Trade-offs: the alternative was to register all eight and have the five unbacked ones
+fail when invoked. That was rejected: `--help` would advertise a command that cannot
+run, an orchestrator author would wire a batch state to it on that evidence, and the
+failure would surface in a deployment rather than at the point where the command was
+chosen. The accepted cost is that `--help` and this table do not match one-for-one,
+which is why the table marks each row.
 
 ### 5.1 Invocation
 
@@ -227,21 +258,37 @@ carddemo-migrate <subcommand> [options]
 
 ### 5.2 Subcommands and their arguments
 
-| Subcommand | Purpose | Required arguments | Optional arguments |
-|---|---|---|---|
-| `list-datasets` | Print the dataset contract of [§6.1](#61-the-eleven-datasets) — identifier, copybook, record length, key length, owning schema and available encodings — so a caller can enumerate the set instead of hard-coding it | none | `--format {table,json}` |
-| `stage-dataset` | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation` | `--domain`, `--object-name`, `--retain` (default 5) |
-| `load-dataset` | Decode **one** dataset per field and bulk-load it into the schema that owns it | `--dataset`, `--source` | `--encoding {ascii,ebcdic}`, `--dry-run` |
-| `apply-credentials` | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
-| `verify-row-counts` | Verification pass 1 — loaded row count against source record count, per dataset | none | `--dataset` |
-| `verify-checksums` | Verification pass 2 — per-record checksum of loaded rows against the source image | none | `--dataset` |
-| `verify-money-totals` | Verification pass 3 — money-column totals against the source files | none | `--dataset` |
-| `verify-all` | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure | none | none |
+| Subcommand | State | Purpose | Required arguments | Optional arguments |
+|---|---|---|---|---|
+| `list-datasets` | **registered** | Print the record-layout contract — identifier, copybook, record length, key length and provenance — for every registered layout, so a caller can enumerate the set instead of hard-coding it | none | `--format {table,json}` |
+| `stage-dataset` | **registered** | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation`, `--domain` | `--object-name`, `--retain` (default 5) |
+| `apply-credentials` | **registered** | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
+| `load-dataset` | contracted | Decode **one** dataset per field and bulk-load it into the schema that owns it | `--dataset`, `--source` | `--encoding {ascii,ebcdic}`, `--dry-run` |
+| `verify-row-counts` | contracted | Verification pass 1 — loaded row count against source record count, per dataset | none | `--dataset` |
+| `verify-checksums` | contracted | Verification pass 2 — per-record checksum of loaded rows against the source image | none | `--dataset` |
+| `verify-money-totals` | contracted | Verification pass 3 — money-column totals against the source files | none | `--dataset` |
+| `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure | none | none |
+
+Assumptions: `list-datasets` prints the five properties
+[`layouts.py`](src/carddemo_migration/copybook/layouts.py) holds authoritatively, and
+reports **every** registered layout — the eleven base masters of
+[§6.1](#61-the-eleven-datasets) plus the three derived ones, distinguished by the
+`provenance` column. The owning schema and the seed-extract encodings that §6.1
+tabulates are deliberately **not** printed: they have no representation in this
+distribution's code, and giving them one here would create a second source for a table
+§6.1 already owns, free to disagree with it. §6.1 remains where those two are read.
+
+Assumptions: `--domain` is **required**, not optional. It is the bounded-context
+segment of the object prefix, and this distribution holds no dataset-to-context mapping
+— the owning schema is tabulated in §6.1 and nowhere in code — so a default would have
+to invent that mapping. An invented default that is wrong writes a real extract to a
+prefix nothing reads, which is worse than requiring the caller to be explicit. It
+becomes optional when the mapping has an authoritative home in code.
 
 | Subcommand | What it writes | Non-zero exit when |
 |---|---|---|
 | `list-datasets` | The contract table on standard output. Touches no database, no object store and no credential | the requested format is unknown |
-| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, then permanently scratches generations that roll off | the source is unreadable, the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
+| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write | the source is unreadable, the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
 | `load-dataset` | Rows in the owning schema's table, inside one transaction; a per-dataset summary on standard output | a record fails the width contract, a field fails to decode, or the load transaction cannot commit |
 | `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
 | `verify-row-counts` | A per-dataset expected-versus-actual table | any dataset's counts differ |
@@ -658,10 +705,19 @@ record set into the single schema that owns it, through `psycopg`'s server-side
 [`DUSRSECJ.jcl`](../app/jcl/DUSRSECJ.jcl) and
 [`TRANFILE.jcl`](../app/jcl/TRANFILE.jcl).
 
-All ten follow one shape, verified in `ACCTFILE.jcl`:
+All ten follow one three-step shape, verified in `ACCTFILE.jcl`, and step 1 comes in
+two variants that are counted rather than generalised:
 
-1. `DELETE ... CLUSTER`, guarded by `IF MAXCC LE 08 THEN SET MAXCC = 0` so a first run
-   against an empty catalogue is not a failure;
+1. `DELETE ... CLUSTER`, followed by a condition-code reset so a first run against an
+   empty catalogue is not a failure. **Five jobs guard the reset** —
+   `ACCTFILE`, `CARDFILE`, `CUSTFILE`, `XREFFILE` and `TRANFILE` write
+   `IF MAXCC LE 08 THEN SET MAXCC = 0`, which forgives a not-found delete but lets a
+   severe failure of 12 or higher propagate. **The other five reset unconditionally** —
+   `DISCGRP`, `TCATBALF`, `TRANTYPE`, `TRANCATG` and `DUSRSECJ` write a bare
+   `SET MAXCC = 0`, which clears *any* delete failure including a severe one. The
+   distinction is recorded because it is a real difference in error tolerance, not a
+   formatting variation, and because the ETL reproduces neither form: see the note on
+   step 1 below;
 2. `DEFINE CLUSTER` with `KEYS(11 0) RECORDSIZE(300 300) INDEXED` — the operands that
    are this package's third independent source for the record and key lengths in
    [§6.1](#61-the-eleven-datasets); and
@@ -670,9 +726,11 @@ All ten follow one shape, verified in `ACCTFILE.jcl`:
 
 Step 2 becomes the table and index definitions in each owning service's
 `V1__<schema>.sql`, and step 3 becomes the bulk copy. **Step 1 has no equivalent, and
-the reason is worth stating rather than leaving as a gap:** the guarded delete existed
-because a VSAM load had no transaction to roll back to, so destroying and redefining
-the cluster was the only way to guarantee the target was clean. The loader writes
+the reason is worth stating rather than leaving as a gap:** the delete-and-reset
+existed — in both of its variants — because a VSAM load had no transaction to roll
+back to, so destroying and redefining the cluster was the only way to guarantee the
+target was clean. That is also why the difference in error tolerance between the two
+variants does not have to be resolved here: neither is reproduced. The loader writes
 inside one transaction instead, so a load that fails leaves the previous contents
 exactly as they were — without any destructive step to get wrong.
 
@@ -931,13 +989,18 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-The delivered modules are
+The delivered modules are [`test_cli.py`](tests/test_cli.py),
 [`test_config_name_contract.py`](tests/test_config_name_contract.py),
 [`test_database_trust.py`](tests/test_database_trust.py),
 [`test_reporting_views.py`](tests/test_reporting_views.py) and
-[`test_s3_stage.py`](tests/test_s3_stage.py). The contracted modules are
-`conftest.py`, `test_zoned.py`, `test_readers.py`, `test_loaders.py` and
-`test_verify.py`.
+[`test_s3_stage.py`](tests/test_s3_stage.py) — ninety-nine tests in total. The
+contracted modules are `conftest.py`, `test_zoned.py`, `test_readers.py`,
+`test_loaders.py` and `test_verify.py`.
+
+Assumptions: `test_cli.py` asserts the ABSENCE of each contracted subcommand as well as
+the presence of each registered one. A test that only checked the three that work would
+pass equally well if a fourth were added that could not, which is the regression the
+absence assertions exist to catch.
 
 ### 12.1 Test vectors are reused, not authored
 
@@ -1073,10 +1136,22 @@ the image cannot be exercised end to end in isolation. What it buys is that the 
 carries no data — so it needs no rebuild when an extract changes, it cannot go stale
 against the source, and a published layer can never contain cardholder data.
 
-> **Note.** Because `cli.py` is not authored in this checkout, both `docker run`
-> commands above exit non-zero with `No module named carddemo_migration.cli`. The image
-> itself builds and its package imports; the entry point is the contract in
-> [§5](#5-command-line-interface) waiting for its implementation.
+> **Note.** Both `docker run` commands above work in this checkout. The bare run
+> resolves `ENTRYPOINT` plus `CMD` to `python -m carddemo_migration.cli --help`, which
+> prints usage and exits `0`; the second appends `list-datasets` as a command override
+> and prints the record-layout contract. Refactoring Rationale: this note previously
+> stated that both commands exit non-zero with `No module named
+> carddemo_migration.cli`, which was true while `cli.py` was absent and is now false.
+> It is restated rather than deleted because a reader who had learned the old behaviour
+> needs to be told it changed — and because the help path exiting `0` is a requirement,
+> not an accident: a container whose default command exits non-zero looks like a broken
+> image to every platform that runs it once as a check.
+>
+> Assumptions: a subcommand [§5.2](#52-subcommands-and-their-arguments) marks
+> **contracted** is refused by the parser as a usage error (exit `2`), so
+> `docker run ... load-dataset` reports an unrecognised subcommand rather than starting
+> a load it cannot finish. A source-record cutover therefore still cannot be claimed
+> from this image.
 
 ---
 

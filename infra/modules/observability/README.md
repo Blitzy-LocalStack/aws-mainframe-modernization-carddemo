@@ -34,11 +34,11 @@ operator habit.
 - Refactoring Rationale: a spool destination is read one job at a time. A
   CloudWatch group is queryable across services and batch states, while an alarm
   pushes a condition rather than waiting for an operator to open a job log.
-- Trade-off: Fargate merges the baseline's separate `SYSPRINT` and `SYSOUT`
+- Trade-offs: Fargate merges the baseline's separate `SYSPRINT` and `SYSOUT`
   streams into one stdout/stderr log stream. The content remains attributable
   through service, environment, version and correlation fields, but the original
   stream distinction no longer exists.
-- Assumption: retention is always explicit. Twenty-nine of the 38 jobs use
+- Assumptions: retention is always explicit. Twenty-nine of the 38 jobs use
   `MSGCLASS=0`, so their log survival was a job-card property; the target makes
   that period an environment input instead.
 - Refactoring Rationale: `CCPAUERY.cpy` already defines a structured
@@ -100,17 +100,37 @@ repository defines no service-level objectives and this module invents none.
 
 | Family | Condition | Why the condition is structural | Operator action |
 |---|---|---|---|
+| No healthy target | `HealthyHostCount < 1`, missing data breaching | An empty target group publishes zero and then stops publishing, so absence is the signal rather than the lack of one | Read the task's stopped reason and log stream |
 | Unhealthy target | `UnHealthyHostCount > 0` | The load balancer has already classified the target as unhealthy | Replace the task or roll back the image |
 | Service/API errors | 5xx count reaches the configured input | A 5xx is a server-side failure by definition | Correlate edge, target and service logs |
 | Dead-letter queue | Visible depth reaches 1 | A message is present only after exhausting the source queue's receive attempts | Correct the cause, then redrive |
 | Stale reply | Oldest reply reaches five seconds by default | Five seconds is the baseline request/reply expiry contract | Inspect the waiting requester and correlation id |
-| Batch failure | `ExecutionsFailed` or `ExecutionsTimedOut` | The state machine has entered the fail tier | Inspect the state and redrive |
+| Stale work | Oldest message on a request or error queue reaches the configured wait | A stopped consumer never receives, so nothing redrives and the dead-letter alarm stays silent | Inspect that consumer's task and its healthy-target alarm |
+| Batch failure | `ExecutionsFailed`, `ExecutionsTimedOut` or `ExecutionThrottled` | The state machine has entered the fail tier, or refused to start the chain at all | Inspect the state and redrive |
 | Aurora processor pressure | CPU reaches the configured input | The environment owns the chosen detection value | Compare capacity and connections |
 | Aurora capacity ceiling | Capacity reaches `aurora_max_capacity` | The threshold is the exact configured ceiling | Review workload before raising the maximum |
 
-The batch alarm intentionally does **not** fire on posting return code 4.
-`TRANBKP.jcl` uses `COND=(4,LT)` for the soft-warning path, and the target state
-machine preserves that outcome as a successful execution with a warning record.
+The batch alarm intentionally does **not** fire on posting return code 4. That
+outcome is authored in the program itself -- `app/cbl/CBTRN02C.cbl:229-230` reads
+`IF WS-REJECT-COUNT > 0` then `MOVE 4 TO RETURN-CODE` -- and the tier is modelled
+in `services/batch-service/.../dto/BatchReturnCode.java` (L64-L74), where the run
+gate is expressed once in the run sense. The target state machine preserves the
+outcome as a **successful** execution carrying a warning record, so
+`ExecutionsFailed` never counts it. `app/jcl/TRANBKP.jcl:51` is a different thing
+and is not cited as evidence here: its `COND=(4,LT)` gates an `IDCAMS` step
+against earlier steps of that same job and cannot observe posting, which runs in
+another job entirely with no condition parameter at all.
+
+Since the batch alarm cannot see the warn tier by design, that tier is reported by
+the batch entry point instead: `BatchApplication` emits one outcome line per
+finished execution, at warn level for the soft-warn tier, carrying the same
+`POSTING_REJECTS_PRESENT` token the state machine writes into its execution state.
+A log query and an execution history therefore answer with one string.
+
+The `CardDemo` metric namespace, into which the telemetry sidecar exports each
+service's Actuator meters, is read by the dashboard's application-meter widget.
+Only framework meters exist to read today; no business meter is authored in any
+service yet, and none is claimed here.
 
 ## 5. Encryption and access-log destinations
 
@@ -216,7 +236,9 @@ regenerate it after any variable, output or resource-contract change.
 | [aws_cloudwatch_metric_alarm.reply_queue_age](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.rotation_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.service_5xx](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
+| [aws_cloudwatch_metric_alarm.service_no_healthy_targets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.service_unhealthy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
+| [aws_cloudwatch_metric_alarm.work_queue_age](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_s3_bucket.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_lifecycle_configuration.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
 | [aws_s3_bucket_ownership_controls.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_ownership_controls) | resource |
@@ -246,7 +268,7 @@ regenerate it after any variable, output or resource-contract change.
 | <a name="input_ecs_cluster_name"></a> [ecs\_cluster\_name](#input\_ecs\_cluster\_name) | Exact ECS cluster name used as the ClusterName dimension for Container Insights widgets. Required from the ecs-cluster module output so a cluster rename cannot leave this dashboard querying a derived, obsolete name. | `string` | n/a | yes |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment name interpolated into the log group paths, the dashboard name, every alarm name and the topic name, so an alarm's own name says which environment raised it; must be `dev` or `prod`, the two environments that have a Terraform root under infra/envs/. | `string` | n/a | yes |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of the customer-managed key the log groups and notification topic are encrypted with. Required rather than optional because all eight CICS VSAM FILE resources are configured without recovery or journalling, so customer-controlled encryption is a target property that must not become skippable. Alternatives Considered: allowing null to select the services' managed-encryption fallback was rejected because it would make that target property optional and diverge from both environment roots, which provide a customer-managed key. | `string` | n/a | yes |
-| <a name="input_queue_names"></a> [queue\_names](#input\_queue\_names) | Map of logical queue key to the exact SQS QueueName dimension. Keys ending in \_dlq receive dead-letter alarms, while keys ending in \_reply receive stale-reply alarms; an empty map creates no queue alarm. | `map(string)` | n/a | yes |
+| <a name="input_queue_names"></a> [queue\_names](#input\_queue\_names) | Map of logical queue key to the exact SQS QueueName dimension. Keys ending in \_dlq receive dead-letter alarms, keys ending in \_reply receive stale-reply alarms, and every other key receives a primary work-queue age alarm; an empty map creates no queue alarm. | `map(string)` | n/a | yes |
 | <a name="input_service_target_group_arn_suffixes"></a> [service\_target\_group\_arn\_suffixes](#input\_service\_target\_group\_arn\_suffixes) | Map of service name to provider-returned target-group ARN suffix for the seven online services. The map key labels dashboard and alarm outputs; an empty map deliberately creates no per-service load-balancer alarm. | `map(string)` | n/a | yes |
 | <a name="input_vpc_flow_log_group_name"></a> [vpc\_flow\_log\_group\_name](#input\_vpc\_flow\_log\_group\_name) | Exact CloudWatch log-group name created by the network module for VPC flow logs. It feeds the dashboard Logs Insights query and is never recreated here, preserving the network module's ownership of the flow-log lifecycle. | `string` | n/a | yes |
 | <a name="input_access_log_bucket_force_destroy"></a> [access\_log\_bucket\_force\_destroy](#input\_access\_log\_bucket\_force\_destroy) | Whether Terraform may remove the shared ALB and S3 access-log destination while it still contains current or noncurrent objects. False preserves the audit trail and makes an operator purge it explicitly before teardown. | `bool` | `false` | no |
@@ -263,8 +285,9 @@ regenerate it after any variable, output or resource-contract change.
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix concatenated into the dashboard name, the topic name, every alarm name and every log group path this module creates, giving the observability surface one greppable identity shared with the rest of the stack; lowercase letters, digits and hyphens only, at most 32 characters. | `string` | `"carddemo"` | no |
 | <a name="input_reply_queue_age_threshold_seconds"></a> [reply\_queue\_age\_threshold\_seconds](#input\_reply\_queue\_age\_threshold\_seconds) | Oldest-message age that raises a reply-queue alarm. Five seconds is derived from the baseline request/reply expiry contract rather than an invented service objective; the consumer still enforces expiresAt because SQS has no per-message expiry. | `number` | `5` | no |
 | <a name="input_rotation_lambda_function_names"></a> [rotation\_lambda\_function\_names](#input\_rotation\_lambda\_function\_names) | Set of Secrets Manager rotation Lambda function names that receive a non-zero Errors alarm. Empty creates no rotation alarm and is appropriate only when rotation is not provisioned in the composed root. | `set(string)` | `[]` | no |
-| <a name="input_service_error_rate_threshold"></a> [service\_error\_rate\_threshold](#input\_service\_error\_rate\_threshold) | Server-error responses within one evaluation period that raise the per-service alarm. This watches the load balancer's own count of 5xx responses, so it fires for a service that is failing requests regardless of whether the service itself is still logging. | `number` | `5` | no |
+| <a name="input_service_error_count_threshold"></a> [service\_error\_count\_threshold](#input\_service\_error\_count\_threshold) | Count of server-error responses within one evaluation period that raises the per-service alarm. This is an absolute Sum of the load balancer's own 5xx count and not a proportion of requests, so it fires for a service that is failing requests regardless of whether the service itself is still logging. | `number` | `5` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto the resources this module creates, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module. | `map(string)` | `{}` | no |
+| <a name="input_work_queue_age_threshold_seconds"></a> [work\_queue\_age\_threshold\_seconds](#input\_work\_queue\_age\_threshold\_seconds) | Oldest-message age that raises a primary work-queue alarm, covering the request queues and the error queue. This is a detection default equal to one full evaluation period, not a latency objective; the repository defines none. | `number` | `300` | no |
 
 ### Outputs
 

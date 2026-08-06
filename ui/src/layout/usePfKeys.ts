@@ -208,8 +208,25 @@ export interface PfKeyBinding {
 export interface UsePfKeysOptions {
   /** Disables all dispatch without unregistering the screen's handler map. */
   readonly enabled?: boolean;
-  /** Optional event target ref; a missing target falls back to `document`. */
-  readonly target?: RefObject<EventTarget | null>;
+  /**
+   * Element the keydown listener is installed on; `document` when absent or
+   * `null`.
+   *
+   * Refactoring Rationale: this is the target ITSELF and not a ref to it, because
+   * the effect that installs the listener has to be able to react to a change of
+   * target and a ref object never changes. Passing a ref made the dependency the
+   * container rather than the element, so a screen that re-pointed a stable ref at
+   * a different node - a panel that mounts conditionally, for instance - kept the
+   * listener on the node it had already unmounted, with no cleanup and no
+   * re-registration. Taking the element makes the dependency the thing that
+   * actually varies.
+   *
+   * Assumptions: a caller that needs to scope the listener to a mounted element
+   * holds that element in state and sets it from a callback ref, which is what
+   * makes the element available as a render value at all; reading `ref.current`
+   * during render would reintroduce the same staleness one level up.
+   */
+  readonly target?: EventTarget | null | undefined;
   /**
    * Receives recognized AIDs that are unmapped or currently disabled.
    *
@@ -262,12 +279,34 @@ type PfKeyListenerCleanup = () => void;
 /**
  * Normalizes a browser key name using the port of `YYYY-STORE-PFKEY`.
  *
+ * Assumptions: the lookup is restricted to the table's OWN properties, and the
+ * restriction is load-bearing rather than defensive style. `KEYBOARD_KEY_TO_AID`
+ * is a frozen plain object, so it still inherits from `Object.prototype`, and a
+ * bare index would resolve `"constructor"`, `"toString"` and `"valueOf"` to
+ * functions and `"__proto__"` to an object. This function is exported and accepts
+ * an arbitrary string, so without the guard its declared return type would be a
+ * claim the implementation does not keep — a caller trusting it could hand a
+ * function to `invoke` and reach a state no AID represents. No real
+ * `KeyboardEvent.key` value spells any of those names, so this closes a contract
+ * hole rather than an observed defect, and closing it now costs one call.
+ *
+ * Alternatives Considered: building the table with a null prototype, or as a
+ * `Map`. Both remove the hazard at the source and both were rejected on the
+ * table's other obligations: it is a documented, frozen, exported constant that
+ * `ui/src/layout/PfKeyBar.tsx` inverts with `Object.entries` to derive the
+ * key each control advertises, and a `Map` would change that consumer's shape
+ * while a null-prototype object cannot be written as a typed object literal
+ * without a cast. Guarding the one read keeps the published shape and the
+ * inversion untouched.
+ *
  * @param {string} key - Browser `KeyboardEvent.key` value to normalize.
  * @returns {CicsAid | undefined} Matching CICS AID, or `undefined` when the
  * key is not a terminal attention identifier represented on the web.
  */
 export function resolveAid(key: string): CicsAid | undefined {
-  return KEYBOARD_KEY_TO_AID[key];
+  return Object.hasOwn(KEYBOARD_KEY_TO_AID, key)
+    ? KEYBOARD_KEY_TO_AID[key]
+    : undefined;
 }
 
 /**
@@ -290,6 +329,120 @@ export function resolveAidFromKeyboardEvent(
   }
 
   return resolveAid(event.key);
+}
+
+/*
+ * Refactoring Rationale: this policy exists because the listener is installed on
+ * the document by default, which is what the 3270 contract requires - a terminal
+ * delivered an attention identifier to the transaction regardless of which field
+ * the cursor sat in - but a browser has one behaviour the terminal did not: some
+ * elements act on Enter themselves. Without a policy the shell cancelled that
+ * activation and dispatched the screen's own ENTER verb instead, so pressing
+ * Enter on a focused function-key button ran the screen's submit rather than the
+ * button. The policy is deliberately narrow: it defers ONLY the ENTER
+ * identifier, because ENTER is the only member of `KEYBOARD_KEY_TO_AID` that any
+ * element consumes natively, and a function key must keep working wherever focus
+ * is - `COACTUPC.cbl:L905-L916` validates PF5 and PF12 against screen state, not
+ * against cursor position.
+ */
+
+/**
+ * Selector matching the elements a browser acts on when Enter is pressed with no
+ * modifier.
+ *
+ * Assumptions: the list is the set of NATIVE activations, and it is limited to
+ * those on purpose. A widget that handles Enter in JavaScript - a combobox
+ * committing a highlighted option, for instance - marks the event as handled by
+ * calling `preventDefault` on it, and the keydown listener bails on an
+ * already-handled event before this selector is consulted, so such widgets need
+ * no entry here. What the selector covers is the case that guard cannot see:
+ * activation the browser performs AFTER every keydown listener has run, which is
+ * silently lost if the shell cancels the event first.
+ *
+ * Assumptions: the two ARIA roles are included even though a browser activates
+ * neither of them natively. They name elements that have taken a control's
+ * semantics without its implementation, so a screen reader tells the user Enter
+ * will activate them; honouring that promise costs nothing and breaking it is
+ * indistinguishable from a defect.
+ *
+ * Assumptions: a text input, a checkbox and a radio are deliberately ABSENT.
+ * Enter in a text field is exactly the 3270 submit gesture the shell must claim,
+ * and Enter on a checkbox or radio does not toggle it in any browser - the space
+ * key does - so those three keep the shell's dispatch, which is the behaviour
+ * being migrated rather than an omission.
+ */
+export const ENTER_ACTIVATED_TARGET_SELECTOR = [
+  "button",
+  '[role="button"]',
+  "a[href]",
+  "area[href]",
+  '[role="link"]',
+  "summary",
+  "select",
+  "textarea",
+  'input[type="button"]',
+  'input[type="image"]',
+  'input[type="reset"]',
+  'input[type="submit"]',
+  '[contenteditable=""]',
+  '[contenteditable="true"]',
+].join(", ");
+
+/**
+ * Reports whether the event's own target will act on the key, so the shell must
+ * leave it alone.
+ *
+ * Assumptions: the match is resolved with `closest` rather than by testing the
+ * target itself, because a control's own descendant is frequently what receives
+ * the event - a design-system button wraps its label in an inner element - and
+ * testing only the target would defer for a bare button while claiming the same
+ * key from a labelled one.
+ *
+ * Assumptions: this requires a DOM, and the guard against a non-element target
+ * covers the document itself, which is the default listener target and matches
+ * nothing.
+ *
+ * @param {CicsAid} aid - Canonical AID the browser key normalized to.
+ * @param {EventTarget | null} target - The keydown event's target.
+ * @returns {boolean} `true` when dispatch must be skipped so the target's own
+ * behaviour survives.
+ */
+export function isAidClaimedByEventTarget(
+  aid: CicsAid,
+  target: EventTarget | null,
+): boolean {
+  if (aid !== "ENTER" || !(target instanceof Element)) {
+    return false;
+  }
+
+  return target.closest(ENTER_ACTIVATED_TARGET_SELECTOR) !== null;
+}
+
+/**
+ * Reports whether a keydown carries no dispatchable attention identifier because
+ * of the event's own state.
+ *
+ * Assumptions: auto-repeat is suppressed because a 3270 delivered exactly one
+ * attention identifier per attention key. Holding a key down in a browser
+ * produces a stream of keydown events, so without this an operator resting on F5
+ * would run a save as many times as the platform's repeat rate allows - and PF5
+ * is a write verb on `app/bms/COACTUP.bms` and `app/bms/COTRTUP.bms`.
+ *
+ * Assumptions: an in-composition event is suppressed because a user committing
+ * an input-method composition presses Enter to accept candidate text, not to
+ * submit the screen. The browser reports that state on the event, so honouring it
+ * needs no knowledge of which input method is in use.
+ *
+ * Assumptions: an already-handled event is suppressed because something nearer
+ * the target has claimed the key - a component's own key handler, or another
+ * listener. Dispatching anyway would run two actions for one keystroke, and the
+ * shell is the outer listener, so it is the one that yields.
+ *
+ * @param {KeyboardEvent} event - DOM keyboard event to inspect.
+ * @returns {boolean} `true` when the event must be ignored entirely.
+ */
+export function isKeydownSuppressed(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.repeat || event.isComposing;
 }
 
 /**
@@ -398,6 +551,17 @@ function createBindings(
  * `@testing-library/user-event`, so production and test dispatch must share that
  * same event path.
  *
+ * Assumptions: The keyboard path is deliberately narrower than the imperative
+ * one, and the difference is the browser rather than the screen. `invoke` runs the
+ * validation chain and nothing else, because a click has already been resolved to
+ * one control. A keydown passes two further gates first - the event-state gate of
+ * {@link isKeydownSuppressed} and the target gate of
+ * {@link isAidClaimedByEventTarget} - because a key press arrives with context a
+ * click does not have: it may be an auto-repeat, an input-method composition, an
+ * event another listener has already handled, or a key the focused control acts
+ * on itself. Neither gate exists in the baseline, because a terminal had no
+ * concept of any of the four.
+ *
  * @param {PfKeyHandlerMap} handlers - Sparse handlers owned by the active
  * screen.
  * @param {UsePfKeysOptions} options - Optional listener, reporting, and focus
@@ -415,7 +579,36 @@ export function usePfKeys(
   // but avoids replacing the DOM listener whenever a screen recreates its
   // handler map and guarantees cleanup removes the same registered function.
   const currentState = useRef<CurrentPfKeyState>({ handlers, options });
-  currentState.current = { handlers, options };
+
+  useEffect(
+    /**
+     * Publishes the latest render's handlers and options to the stable readers.
+     *
+     * Refactoring Rationale: this assignment used to run during render, which is
+     * a write to a value outside the render's own output. React may start a
+     * render and discard it, so a ref written that way can be left holding
+     * handlers from a render that never committed - and the listener installed
+     * below would then dispatch into them. Publishing on commit means the ref
+     * only ever holds state that reached the DOM.
+     *
+     * Alternatives Considered: a layout effect, and an insertion effect. Both run
+     * earlier in the commit and would close the one-commit window in which the
+     * ref still holds the previous render's values. A layout effect is rejected
+     * because it warns when a tree is rendered on a server, which the listener
+     * effect below explicitly tolerates by bailing out when there is no document;
+     * an insertion effect is rejected because the library documents it for
+     * style-injection use only, so borrowing it here would rely on behaviour
+     * outside its stated contract. The window a passive effect leaves is between
+     * commit and the effect flush that precedes the next paint, and no keyboard
+     * or click event can be delivered inside it, so the two earlier hooks buy
+     * nothing this one does not already give.
+     * @returns {void} Completion is the updated ref contents.
+     */
+    function publishCurrentPfKeyState(): void {
+      currentState.current = { handlers, options };
+    },
+    [handlers, options],
+  );
 
   const invoke = useCallback(
     /**
@@ -451,11 +644,11 @@ export function usePfKeys(
     [],
   );
 
-  const targetRef = options.target;
+  const target = options.target ?? null;
 
   useEffect(
     /**
-     * Installs one listener for the current target ref and removes it on cleanup.
+     * Installs one listener for the current target and removes it on cleanup.
      *
      * @returns {PfKeyListenerCleanup | undefined} Cleanup callback in a DOM
      * environment, or `undefined` during server rendering.
@@ -465,7 +658,7 @@ export function usePfKeys(
         return undefined;
       }
 
-      const eventTarget = targetRef?.current ?? document;
+      const eventTarget = target ?? document;
 
       /**
        * Normalizes and dispatches one bubbling DOM keydown event.
@@ -476,6 +669,10 @@ export function usePfKeys(
        */
       function handleKeydown(event: Event): void {
         if (!(event instanceof KeyboardEvent)) {
+          return;
+        }
+
+        if (isKeydownSuppressed(event)) {
           return;
         }
 
@@ -492,6 +689,15 @@ export function usePfKeys(
         const aid = resolveAidFromKeyboardEvent(event);
 
         if (aid === undefined) {
+          return;
+        }
+
+        // Refactoring Rationale: the target policy is applied BEFORE the handler
+        // lookup, so a screen that registers ENTER still leaves a focused
+        // control's own activation intact. Applying it after the lookup would
+        // have made the outcome depend on whether the screen happened to bind
+        // ENTER, which is not a distinction the user can see or predict.
+        if (isAidClaimedByEventTarget(aid, event.target)) {
           return;
         }
 
@@ -522,7 +728,7 @@ export function usePfKeys(
 
       return unsubscribeFromPfKeys;
     },
-    [invoke, targetRef],
+    [invoke, target],
   );
 
   return {

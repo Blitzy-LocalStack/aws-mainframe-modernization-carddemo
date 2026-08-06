@@ -15,14 +15,6 @@
  * package as the single permitted home for those concerns rather than leaving
  * the boundary to be inferred.
  *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package
- * declaration takes no parameter, returns no value and raises nothing, so this
- * charter carries no parameter, return or exception at-clause. The
- * inapplicability is declared rather than passed over in silence, because the
- * Explainability rule's line 39 forbids a docstring that omits parameters,
- * return values or purpose, and a reader has to be able to distinguish a
- * declared inapplicability from an oversight.
- *
  * <p>Assumptions: inventing those at-clauses would do more than add noise.
  * Javadoc has no parameter, return or exception concept for a package, and the
  * ruleset audits at-clause bodies for emptiness, so a fabricated at-clause
@@ -31,26 +23,42 @@
  * the four has a subject in this compilation unit; the paragraph above accounts
  * for the other three.
  *
- * <h2>The closed inventory: three files</h2>
+ * <h2>The closed inventory: three files, of which ONE is landed</h2>
  *
  * <p>Three {@code .java} files constitute this package and no more:
  *
  * <ul>
- *   <li>{@code package-info.java} -- this charter.</li>
- *   <li>{@code TransactionMapper} -- conversions for the three transaction
- *       screens, serving {@code TransactionListItemResponse},
+ *   <li>{@code package-info.java} -- this charter. LANDED, and the only file in this
+ *       directory at this checkpoint.</li>
+ *   <li>{@code TransactionMapper} -- PLANNED, not yet authored. Conversions for the
+ *       three transaction screens, serving {@code TransactionListItemResponse},
  *       {@code TransactionDetailResponse}, {@code TransactionAddRequest} and
  *       {@code TransactionAddResponse}.</li>
- *   <li>{@code BillPaymentMapper} -- conversions for bill payment, serving
- *       {@code BillPaymentRequest} and {@code BillPaymentResponse}.</li>
+ *   <li>{@code BillPaymentMapper} -- PLANNED, not yet authored. Conversions for bill
+ *       payment, serving {@code BillPaymentRequest} and {@code BillPaymentResponse},
+ *       the second of which is itself not yet authored.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the two mappers are marked PLANNED, and an earlier revision of
+ * this charter wrote all three in the present tense under the heading "three files". That
+ * made a directory holding one file read as a directory holding three, and it did so in the
+ * one place a reader consults to find out what converts what -- so the reader would look for
+ * a mapper, fail to find it, and have no way to tell an unauthored contract from a missing
+ * one. The inventory is still closed at three; it now distinguishes what exists.
+ *
+ * <p>Assumptions: neither mapper is authored here to make the roster true. A mapper with no
+ * controller to call it and no service to feed it converts nothing that can be exercised, and
+ * this package's whole purpose is to be the one place where copybook representation concerns
+ * are justified at the point of decision -- masking, padding, narrowing, renaming. Those
+ * decisions are written when the conversion they govern is written, not before.
  *
  * <p>Alternatives Considered: the arrangement a reader is most likely to expect
  * is one mapper per persistence entity, which would make six files rather than
  * three, because {@code domain} holds four entities. It is not available, and
  * the reason is a fact about the sibling package rather than a preference here.
  * The {@code dto} package is a closed inventory of eight files, seven of them
- * records, and those seven serve the four migrated online screens only. No
+ * records -- six of the seven authored at this checkpoint -- and those seven serve
+ * the four migrated online screens only. No
  * transfer object exists for {@code DailyTransaction}, for
  * {@code TransactionCategoryBalance} or for {@code TransactionReject}, so a
  * mapper for any of the three would have nothing on the far side to map to and
@@ -440,56 +448,5 @@
  * path. Cross-context data reaches a mapper as an argument its caller obtained
  * over HTTP, which is why the balance in {@code BillPaymentResponse} arrives as
  * a scalar and not as an imported entity.
- *
- * <h2>Authoring notes for this file</h2>
- *
- * <p>Assumptions: rationale on a statement in the two mappers is written as a
- * single comment placed immediately above the code it explains, opening with
- * one of the four canonical labels and its colon, then the reason and what
- * would differ under the alternative, with continuations indented to line up
- * beneath the label. The four labels are written plural, unparenthesised, colon
- * terminated and without emphasis markup, exactly as the Explainability rule
- * writes them at its lines 31 to 34. That spelling is load-bearing rather than
- * cosmetic: these labels are searched for across seven languages, no linter
- * parses prose in a build file or a migration, and a second accepted spelling
- * of a category is a rationale that reads as documented to a person and as
- * absent to the search that has to count it.
- *
- * <p>Alternatives Considered: pairing that comment with a preceding line
- * labelled for what the code does is the twin idiom this repository uses in its
- * prose command blocks, where the two labels are written so their colons align
- * -- the first with no space before its colon, the second with exactly one --
- * and it is deliberately not used on a statement in this package. The polyglot
- * documentation standard confines that idiom to fenced command blocks and
- * forbids a statement-level form in every code and configuration file,
- * including Java, and the parent charter records the same decision. The reason
- * is the rule's own first forbidden pattern: a line above a Java statement
- * saying what the statement does restates it, and purpose already has a home in
- * the Javadoc. A shell pipeline inside a fenced block is the opposite case,
- * having no docstring construct available and often no evident effect, which is
- * what earns the twin form there and only there. This charter uses the
- * in-Javadoc equivalent, a labelled sentence opening a paragraph, because it
- * holds one declaration and no statement to annotate.
- *
- * <p>Trade-offs: this file is pure ASCII with no byte-order mark, so its
- * punctuation is plainer than the migration prose it draws on. The alternative
- * was to reproduce that prose's typographic dashes. ASCII was chosen because
- * the house convention cited above is written elsewhere in the repository with
- * a non-breaking hyphen, which is indistinguishable from an ordinary hyphen on
- * screen while behaving differently in a search: copying a label from there
- * would turn {@code Trade-offs:} into a token that a search for the label fails
- * to find. Restricting the whole file to ASCII makes that failure mode
- * unreachable, and the build declares UTF-8 for both the source encoding and
- * the documentation gate's charset, so ASCII is a strict subset of what is
- * configured.
- *
- * <p>Trade-offs: this file holds one Javadoc block and one package declaration
- * and nothing else -- no type, no annotation, no import and no line comment. It
- * carries no authorship, revision or version at-clause either, because the
- * ruleset omits the whole family of checks that would ask for them and the
- * version control history answers those questions more reliably than a comment
- * maintained by hand. Prose is wrapped at 80 columns to match the sibling
- * charters, even though the ruleset enables no line-length check and so does
- * not require it.
  */
 package com.carddemo.transaction.mapper;

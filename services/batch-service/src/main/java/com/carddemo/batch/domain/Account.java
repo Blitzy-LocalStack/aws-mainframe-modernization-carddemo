@@ -71,6 +71,19 @@ import org.hibernate.annotations.JdbcTypeCode;
  * {@code account-service} or the extract-transform-load path created, adjusts the three members
  * the baseline adjusts, and rewrites it.</p>
  *
+ * <p>Assumptions: the migration that creates {@code account.accounts} is a planned artifact of the
+ * migration plan and is not a file present beside this one. {@code account-service} owns it at
+ * {@code services/account-service/src/main/resources/db/migration/V1__account.sql}, and a reader who
+ * looks for that path and does not find it should read the dependency as declared rather than the
+ * reference as broken: {@code data-migration/sql/V0__schemas_and_roles.sql} creates the
+ * {@code account} schema at line 502, records the ownership map at line 20, and guards its own
+ * {@code UPDATE} grant with a {@code to_regclass} test that raises a notice naming the statement to
+ * re-run while the table is absent. The consequence is stated in this module's
+ * {@code application.yml}, which sets {@code ddl-auto: validate} deliberately: a task started before
+ * the owning context has applied that migration fails its schema check at startup with nothing
+ * half-applied, which for a nightly chain is the better failure and is the accepted ordering
+ * dependency rather than a defect in this mapping.</p>
+ *
  * <p>That grant exists so the posting unit of work stays one commit. The posting paragraph
  * performs {@code 2700-UPDATE-TCATBAL} at {@code app/cbl/CBTRN02C.cbl} line 440, then
  * {@code 2800-UPDATE-ACCOUNT-REC} at line 441, then {@code 2900-WRITE-TRANSACTION-FILE} at line
@@ -181,6 +194,32 @@ import org.hibernate.annotations.JdbcTypeCode;
 //       asking a module holding a scoped write grant to create or alter another service's
 //       schema, which it has no right to do and which surfaces as a permission error naming
 //       nothing about the actual mistake.
+// WHY : Assumptions: this mapping carries a SEQUENCING DEPENDENCY that is not yet satisfied, and
+//       it is recorded here rather than left to be discovered at run time. The migration that
+//       creates {@code account.accounts} is
+//       services/account-service/src/main/resources/db/migration/V1__account.sql, which the
+//       migration plan schedules as an account-service deliverable and which is not yet authored
+//       -- that module currently holds no db/migration directory at all. Three consequences
+//       follow and all three are transient: with DDL generation off, every column mapping on this
+//       type is DESCRIBED but not yet verifiable against a created table, including the BIGINT
+//       NOT NULL claim on the version column below; the conditional grant in
+//       data-migration/sql/V0__schemas_and_roles.sql at lines 778 to 791 takes its ELSE branch
+//       and raises a notice instead of granting UPDATE; and a job reading or rewriting an account
+//       master against a database migrated with V0 alone fails with
+//       {@code relation "account.accounts" does not exist}.
+// WHY : Alternatives Considered: authoring that migration from this module, so the table exists
+//       and every mapping here becomes verifiable at once. Rejected on ownership rather than on
+//       effort. The schema belongs to account-service, whose own entities are the authority for
+//       every column name, type and constraint in it, and those entities are not yet authored
+//       either -- so a migration written here would fix the columns by inference from a
+//       consuming module's read of them, and the owning module would then have to be written to
+//       match a file it did not author. That is the inverted direction of authority this
+//       document set is careful to avoid, and it would leave two files claiming to define one
+//       table. The dependency is therefore TRACKED rather than pre-empted: when V1__account.sql
+//       lands, re-verify every column mapping on this type against it and re-run
+//       V0__schemas_and_roles.sql so the conditional grant takes its IF branch. The same
+//       dependency is recorded once more, from the schema's own side, in
+//       docs/architecture/data-model-and-schema-mapping.md.
 @Table(name = "accounts", schema = "account")
 public class Account {
 

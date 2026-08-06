@@ -8,27 +8,43 @@ import java.util.List;
  *
  * <p><b>Purpose.</b> A stateless request handler cannot remember where a caller had reached in a
  * list, so something in the response has to say it. This type is that something, and it says exactly
- * seven things: the rows of the current page, a token identifying the first of those rows, a token
- * identifying the last of them, the token a forward request is issued from, the token a backward
- * request is issued from, and one availability indicator per direction. A caller holding those values
- * can ask for the page after this one, or the page before it, while the server retains nothing
+ * four things: the rows of the current page, the token naming the leading boundary of those rows, the
+ * token naming their trailing boundary, and whether a further page follows. A caller holding those
+ * values can ask for the page after this one, or the page before it, while the server retains nothing
  * whatsoever between the two requests.
  *
- * <p>Refactoring Rationale: the first three of those tokens are <em>row identities</em> and the next
- * two are <em>request positions</em>, and separating them is the correction this type carries. An
- * earlier shape of this envelope held only the two row identities and one forward indicator, and
- * three states were then representable that no caller could act on. A page could return rows and
- * carry no token, leaving the caller holding rows it could not page away from. A page could return no
- * rows and still claim that a further page followed -- which the card list genuinely produces, because
- * it filters rows <em>after</em> reading them at paragraph {@code 9500-FILTER-RECORDS.} on line 1382
- * of {@code app/cbl/COCRDLIC.cbl} -- and the caller was then told to continue with no position to
- * continue from. And backward availability was inferred from the mere presence of a first row, so the
- * opening page of every set claimed a previous page that did not exist. Each of the three is now
- * unrepresentable: the canonical constructor requires a row identity for every returned page, requires
- * a request position for every direction reported available, and takes backward availability as a
- * stated value rather than deriving one.
+ * <p>Refactoring Rationale: <b>four components, not seven.</b> A revision of this envelope carried
+ * two further cursor components -- a forward and a backward <em>request position</em> held separately
+ * from the two <em>row identities</em> -- together with a backward availability indicator, on the
+ * ground that three states were otherwise representable that no caller could act on. The four
+ * components named above are the shape this migration fixed for the envelope, and the additional three
+ * are withdrawn: two artifacts authored against the fixed shape already describe it as exactly these
+ * four ({@code com.carddemo.transaction.dto} and {@code com.carddemo.reporting.dto} both quote the
+ * four-component signature in their package documentation), and the browser client reads exactly these
+ * four. An envelope every consumer describes with four members may not publish seven.
  *
- * <p><b>Parameters, return values, exceptions or errors at the type level.</b> The seven record
+ * <p>Refactoring Rationale: none of the three defects the withdrawn components were introduced for is
+ * reintroduced, because each is answered by an invariant on the four instead. The two tokens are the
+ * page's <em>boundary positions</em> rather than strictly its row identities: on an ordinary page they
+ * are the first and the last row returned, and on a page whose every row was removed by a post-read
+ * filter -- which the card list genuinely produces, filtering rows <em>after</em> reading them at
+ * paragraph {@code 9500-FILTER-RECORDS.} on line 1382 of {@code app/cbl/COCRDLIC.cbl} -- they are the
+ * keys at which scanning stopped in each direction. So a page that returns rows it cannot be paged away
+ * from is rejected by the constructor; a page that reports a further page without the position to
+ * pursue it from is rejected too, because {@code hasNext} is admitted only alongside a present
+ * {@code lastKey}; and backward availability is no longer a separate claim at all, being the presence
+ * of {@code firstKey}, which is precisely what the browser client binds its backward control to.
+ *
+ * <p>Trade-offs: expressing backward availability as the presence of {@code firstKey} means the
+ * opening page of a set, which names its own first row like every other page, offers a backward step
+ * that returns an empty page rather than refusing outright. That is accepted for two reasons. It is
+ * what the reference does -- its backward path sets the further-page condition unconditionally at line
+ * 1287 of {@code app/cbl/COCRDLIC.cbl}, with no probe -- so no behaviour is lost against the baseline;
+ * and the alternative, a fifth component stating the answer, is the component this envelope is fixed
+ * not to have. A caller that wants to withhold the control on the opening page already knows it issued
+ * no cursor.
+ *
+ * <p><b>Parameters, return values, exceptions or errors at the type level.</b> The four record
  * components are this type's parameters, and each carries its own at-clause below alongside the
  * at-clause for the element type. A type declaration returns no value and raises nothing, so no
  * return or exception at-clause appears here; the members declared in the body carry their own. The
@@ -79,11 +95,11 @@ import java.util.List;
  *
  * <p>Alternatives Considered: a second type parameter for the key, rejected in favour of one type
  * parameter over the element and opaque textual cursor tokens. The two browse screens do not share a
- * key shape -- {@code app/cbl/COCRDLIC.cbl} composes twenty-seven characters at lines 230 to 232, a
- * sixteen-character card number followed by an eleven-digit account identifier, while
- * {@code app/cbl/COTRN00C.cbl} carries a single scalar transaction identifier at line 595. A type
- * parameterised over the key would be instantiated at two unrelated shapes and would push composing
- * and splitting the composite into every caller; an opaque token carries either shape unchanged.
+ * key shape -- {@code app/cbl/COCRDLIC.cbl} pages the card file by its sixteen-character card number,
+ * while {@code app/cbl/COTRN00C.cbl} carries a sixteen-character transaction identifier at line 595 --
+ * and a future browse over a genuinely composite key would be a third shape again. A type parameterised
+ * over the key would be instantiated at those unrelated shapes and would push composing and splitting a
+ * key into every caller; an opaque token carries any shape unchanged.
  *
  * <p>Alternatives Considered: {@code lastKey} identifies the last row actually returned in
  * {@code items}, which had to be chosen rather than inherited because the two browse screens
@@ -94,14 +110,27 @@ import java.util.List;
  * position the caller cannot account for. Symmetrically {@code firstKey} identifies the first row
  * actually returned, so both tokens always name rows the caller holds.
  *
- * <p>Assumptions: the cursor ordering is the card number followed by the account identifier, per
- * lines 230 to 232 of {@code app/cbl/COCRDLIC.cbl}, which is the physical key order of the card
- * file. It is emphatically <b>not</b> the display-row ordering at lines 258 to 260, which is the
- * account number, then the card number, then the card status, in a reading order meant for a person.
- * The two layouts differ in length as well as order, twenty-seven characters against twenty-eight,
- * and the twenty-eighth character is the <b>card status</b> at line 260 rather than a row-selection
- * marker. Conflating the two orders would produce a query that pages in the wrong sequence while
- * still returning plausible-looking rows.
+ * <p>Assumptions: the card list's cursor key is the <b>sixteen-character card number and nothing
+ * else</b>, and that is read off the browse itself rather than off the structure that surrounds it.
+ * {@code app/cbl/COCRDLIC.cbl} declares the record identification field at lines 137 to 139 and then
+ * positions and reads with {@code RIDFLD(WS-CARD-RID-CARDNUM)} and
+ * {@code KEYLENGTH(LENGTH OF WS-CARD-RID-CARDNUM)} at lines 1131 to 1132, 1150 to 1151, 1201 to 1202
+ * and 1276 onward -- one operand, sixteen characters, which is the primary key of the card file.
+ * <b>Refactoring Rationale:</b> an earlier revision of this charter described the cursor key as a
+ * twenty-seven-character composite of the card number followed by the eleven-digit account identifier,
+ * taken from the communication-area group at lines 230 to 232. That reading was wrong and is corrected
+ * here rather than quietly dropped, because a cursor implementation that encoded the second component
+ * would seal a key the store cannot seek on. The account half of that group is <b>dead
+ * scaffolding</b>: every statement that would move an account identifier into the record
+ * identification field is commented out, at lines 449, 476, 491, 507 and 577, so the field's account
+ * portion is never populated and never contributes to a browse position. The group is retained in the
+ * baseline as context the screen redisplays, not as a key.</p>
+ *
+ * <p>Assumptions: the cursor key is emphatically <b>not</b> the display-row layout at lines 258 to 260,
+ * which is the account number, then the card number, then the card status, in a reading order meant for
+ * a person. That layout is twenty-eight characters and its final character is the <b>card status</b> at
+ * line 260 rather than a row-selection marker. Conflating a display layout with a key would produce a
+ * query that pages in the wrong sequence while still returning plausible-looking rows.
  *
  * <p>Assumptions: {@code hasNext} is discovered by requesting one row beyond the page and observing
  * whether that row exists, never from a running tally of how many rows or pages there are. Both
@@ -151,10 +180,10 @@ import java.util.List;
  *
  * <p>Trade-offs: making the tokens opaque text buys one structure for two key shapes and gives up
  * compile-time checking of their contents. Neither this type nor the compiler can tell a well-formed
- * composite from a malformed one, so a caller that composes a token in one order and splits it in
- * another gets no diagnostic from here. That risk is answered by stating the composite ordering above
- * and by testing it, rather than by a type parameter whose only effect would be to move the same
- * composing and splitting into every call site while fragmenting the one envelope the services share.
+ * key from a malformed one, so a caller that seals a token from one column and seeks on another gets no
+ * diagnostic from here. That risk is answered by stating the key of each browse above and by testing it,
+ * rather than by a type parameter whose only effect would be to move the same composing and splitting
+ * into every call site while fragmenting the one envelope the services share.
  *
  * <p>Trade-offs: the baseline's one-digit screen ordinal at line 237 of {@code app/cbl/COCRDLIC.cbl}
  * and its last-page-displayed indicator at line 239 are deliberately not carried across, so a caller
@@ -171,53 +200,42 @@ import java.util.List;
  *
  * <p>Refactoring Rationale: opaque now means SEALED, and the canonical constructor enforces it. When
  * this type was first authored, opacity was a description of intent that nothing held a caller to, so
- * the raw composite key -- which is what a keyset query naturally yields -- satisfied it. That would
+ * the raw key -- which is what a keyset query naturally yields -- satisfied it. That would
  * have serialised a primary account number into every page of the card list and handed it to the
  * client to replay. Every cursor component present here must now match the shape
  * {@link CursorToken} produces, whose payload carries the key inside an authenticated envelope bound
- * to the query and the subject it was issued for. The composite ordering described above still
- * governs the key sealed inside the token; it is simply no longer the token.
+ * to the query and the subject it was issued for. The physical key described above still governs what
+ * is sealed inside the token; it is simply no longer the token.
  *
  * @param <T> the element type of the rows this page carries; the envelope never inspects a row, so
  *     any type a service can serialise is admissible, and no reference-baseline entity is named here
  * @param items the rows of this page, in the query's ordering, never {@code null}; an exhausted page
  *     carries an empty list rather than {@code null}, and the constructor stores an unmodifiable copy
- * @param firstKey the sealed cursor token identifying the first row in {@code items}, produced by
- *     {@link CursorToken#seal(String, String)}, or {@code null} exactly
- *     when this page carries no rows; where the token is composite it is ordered as the underlying
- *     physical key is ordered, the card number preceding the account identifier, and never in the
- *     order a screen happened to display
- * @param lastKey the sealed cursor token identifying the last row in {@code items}, produced by
- *     {@link CursorToken#seal(String, String)}, or {@code null} exactly
- *     when this page carries no rows; it identifies the last row the caller actually received and
- *     never the surplus row read to settle {@code hasNext}
- * @param nextCursor the sealed position a forward request is issued from -- the query seeks keys
- *     strictly greater than it, ascending -- which must be present exactly when {@code hasNext} is
- *     {@code true} and absent otherwise; it is normally {@code lastKey}, and it is deliberately a
- *     separate component because a page whose rows were all filtered away after the read has a
- *     scan position and no last row
- * @param prevCursor the sealed position a backward request is issued from -- the query seeks keys
- *     strictly less than it, descending -- which must be present exactly when {@code hasPrev} is
- *     {@code true} and absent otherwise; it is normally {@code firstKey}, and it is separate for the
- *     same filtered-away reason
+ * @param firstKey the sealed cursor token naming this page's leading boundary, produced by
+ *     {@link CursorToken#seal(String, String)}: the first row in {@code items} on an ordinary page,
+ *     or the key at which a backward scan stopped on a page whose rows were all filtered away after
+ *     being read, and {@code null} when neither exists. Where the token is composite it is ordered as
+ *     the underlying physical key is ordered, the card number preceding the account identifier, and
+ *     never in the order a screen happened to display. Its presence is what tells a caller a backward
+ *     step is expressible
+ * @param lastKey the sealed cursor token naming this page's trailing boundary, produced by
+ *     {@link CursorToken#seal(String, String)}: the last row in {@code items} on an ordinary page --
+ *     the last row the caller actually received, never the surplus row read to settle
+ *     {@code hasNext} -- or the key at which a forward scan stopped on a filtered-away page, and
+ *     {@code null} when neither exists
  * @param hasNext whether a further page follows this one, established by requesting one row beyond
  *     the page and observing whether that row exists, and never from any tally of how many rows or
- *     pages exist altogether
- * @param hasPrev whether a page precedes this one, stated by the caller from its own request context
- *     -- it is {@code false} for the opening query, which supplied no cursor, and {@code true} for any
- *     page reached from a neighbouring one -- and never inferred from this page's own contents
+ *     pages exist altogether; it is admitted as {@code true} only alongside a present
+ *     {@code lastKey}, so a caller told to continue always holds the position to continue from
  */
 public record PageResponse<T>(
         List<T> items,
         String firstKey,
         String lastKey,
-        String nextCursor,
-        String prevCursor,
-        boolean hasNext,
-        boolean hasPrev) {
+        boolean hasNext) {
 
     /**
-     * Validates and normalises the seven components so that every instance in existence already obeys
+     * Validates and normalises the four components so that every instance in existence already obeys
      * this type's cursor contract.
      *
      * <p>Refactoring Rationale: the baseline had nowhere to put a check like this. Its cursor lived
@@ -229,26 +247,20 @@ public record PageResponse<T>(
      *
      * @param items the rows of this page, which must not be {@code null} and must contain no
      *     {@code null} element; an unmodifiable copy is stored
-     * @param firstKey the token identifying the first returned row, or {@code null}, empty or blank to
+     * @param firstKey the token naming this page's leading boundary, or {@code null}, empty or blank to
      *     mean absent, all three of which are stored as {@code null}
-     * @param lastKey the token identifying the last returned row, or {@code null}, empty or blank to
+     * @param lastKey the token naming this page's trailing boundary, or {@code null}, empty or blank to
      *     mean absent, all three of which are stored as {@code null}
-     * @param nextCursor the position a forward request is issued from, or {@code null}, empty or blank
-     *     to mean absent
-     * @param prevCursor the position a backward request is issued from, or {@code null}, empty or
-     *     blank to mean absent
      * @param hasNext whether a further page follows, which is accepted as given because only the
      *     caller that issued the query beyond the page can know it
-     * @param hasPrev whether a page precedes this one, likewise accepted as given because only the
-     *     caller that issued the request knows whether it arrived from a neighbouring page
      * @throws NullPointerException if {@code items} is {@code null}, or if any element of
      *     {@code items} is {@code null}; a {@code null} row would serialise as a hole in the page and
      *     leave a caller unable to tell an absent row from a row of absent values
-     * @throws IllegalArgumentException if {@code items} is empty while {@code firstKey} or
-     *     {@code lastKey} is present, because a page carrying no rows has no first or last returned
-     *     row for a token to identify; if {@code items} is non-empty while either of those two is
-     *     absent, because every returned page must be navigable away from; or if either availability
-     *     indicator disagrees with the presence of its own cursor, in either direction
+     * @throws IllegalArgumentException if {@code items} is non-empty while either boundary token is
+     *     absent, because every returned page must be navigable away from; if {@code hasNext} is
+     *     {@code true} while {@code lastKey} is absent, because that is the one state a caller cannot
+     *     act on -- told to continue with nowhere to continue from; or if either present token is not
+     *     a token sealed by {@link CursorToken}
      */
     public PageResponse {
         // Alternatives Considered: letting a null list through and treating it as an empty page was
@@ -274,19 +286,18 @@ public record PageResponse<T>(
         //   returned state identical, so no caller has to know which of the two it is looking at.
         firstKey = absentWhenBlank(firstKey);
         lastKey = absentWhenBlank(lastKey);
-        nextCursor = absentWhenBlank(nextCursor);
-        prevCursor = absentWhenBlank(prevCursor);
 
-        // Assumptions: a row identity exists exactly when a row exists. With no rows returned there
-        //   is no returned row for a token to identify, and with rows returned the caller must be
-        //   able to name the two ends of what it received -- it is those two values a subsequent
-        //   request is verified against. The two directions of this check are one rule, so they are
-        //   enforced together rather than as two unrelated guards.
-        if (items.isEmpty() && (firstKey != null || lastKey != null)) {
-            throw new IllegalArgumentException(
-                    "a page carrying no rows must carry no first or last row token, because there is "
-                            + "no returned row for either to identify");
-        }
+        // Assumptions: a page that returned rows must name both of its boundaries -- it is those two
+        //   values a subsequent request is verified against, so a page a caller cannot name the ends of
+        //   is a page it cannot page away from.
+        // Refactoring Rationale: the converse is deliberately NOT asserted, and the change is what
+        //   lets four components carry what seven carried. A page with no rows may still name a
+        //   boundary, because the card list applies its filter AFTER reading -- paragraph
+        //   9500-FILTER-RECORDS. at line 1382 of app/cbl/COCRDLIC.cbl -- so a read whose every record
+        //   was filtered away has keys at which scanning stopped and no returned row to take them
+        //   from. Forbidding that combination would either contradict a cited program or force the two
+        //   scan positions back into components of their own; admitting it, and holding hasNext to the
+        //   presence of lastKey below, keeps the state expressible without them.
         if (!items.isEmpty() && (firstKey == null || lastKey == null)) {
             throw new IllegalArgumentException(
                     "a page carrying " + items.size() + " row(s) must carry both a firstKey and a "
@@ -295,34 +306,27 @@ public record PageResponse<T>(
         }
 
         // Alternatives Considered: rejecting an empty page that reports a further page was considered
-        //   and deliberately NOT done, because the baseline itself produces exactly that state. The
-        //   card list applies a post-read filter, at paragraph 9500-FILTER-RECORDS. on line 1382 of
-        //   app/cbl/COCRDLIC.cbl, after the records have been read; every row of a read can therefore
-        //   be filtered away while further rows remain beyond it. Forbidding the combination would
-        //   contradict a cited program. What IS forbidden is reporting a direction as available
-        //   without the position a request in that direction is issued from -- the state that told a
-        //   caller to continue and gave it nowhere to continue from. The biconditional is enforced in
-        //   both senses on purpose: a cursor present while the indicator says unavailable is equally
-        //   a contradiction, and leaving that direction unchecked would let two components disagree
-        //   about the same fact.
-        if (hasNext != (nextCursor != null)) {
+        //   and deliberately NOT done, because the baseline itself produces exactly that state -- see
+        //   the post-read filter cited above. What IS forbidden is reporting a further page without the
+        //   position a forward request is issued from: that is the one state a caller cannot act on,
+        //   having been told to continue and given nowhere to continue from.
+        // Trade-offs: only this direction of the implication is enforced. A present lastKey while
+        //   hasNext is false is a legitimate final page -- it still names its trailing boundary, which
+        //   is what a caller paging backward off it seeks from -- so the biconditional an earlier
+        //   revision asserted between a forward indicator and a forward cursor would refuse the last
+        //   page of every set. The asymmetry is therefore the contract rather than an omission, and it
+        //   is stated here so nobody restores the stricter test.
+        if (hasNext && lastKey == null) {
             throw new IllegalArgumentException(
-                    "hasNext=" + hasNext + " disagrees with nextCursor being "
-                            + (nextCursor == null ? "absent" : "present")
-                            + "; a further page must be reported together with the position a forward "
-                            + "request is issued from, and neither without the other");
-        }
-        if (hasPrev != (prevCursor != null)) {
-            throw new IllegalArgumentException(
-                    "hasPrev=" + hasPrev + " disagrees with prevCursor being "
-                            + (prevCursor == null ? "absent" : "present")
-                            + "; a preceding page must be reported together with the position a "
-                            + "backward request is issued from, and neither without the other");
+                    "hasNext=true requires a lastKey, because a further page must be reported together "
+                            + "with the position a forward request is issued from; reporting one "
+                            + "without the other tells a caller to continue with nowhere to continue "
+                            + "from");
         }
 
-        // Refactoring Rationale: all four cursor components are now required to be SEALED tokens, and
+        // Refactoring Rationale: both cursor components are now required to be SEALED tokens, and
         //   this check is the enforcement this type previously lacked. It described them as opaque from
-        //   the outset and nothing held a caller to it, so the raw composite key a keyset query
+        //   the outset and nothing held a caller to it, so the raw key a keyset query
         //   produces -- a card number followed by an account identifier, per lines 230 to 232 of
         //   app/cbl/COCRDLIC.cbl -- satisfied the type exactly as well as an opaque token did. That is
         //   a primary account number serialised into a response body, held by the client and replayed
@@ -337,8 +341,6 @@ public record PageResponse<T>(
         //   catch requires a caller to mint a token with the deployment's own key.
         requireSealed(firstKey, "firstKey");
         requireSealed(lastKey, "lastKey");
-        requireSealed(nextCursor, "nextCursor");
-        requireSealed(prevCursor, "prevCursor");
     }
 
     /**
@@ -379,16 +381,16 @@ public record PageResponse<T>(
      *
      * @param <T> the element type the caller's page is declared over, inferred from the assignment
      *     context, so that an exhausted page composes with a populated one of the same type
-     * @return an exhausted page whose rows are empty and unmodifiable, whose four tokens are all
-     *     {@code null}, and whose two availability indicators are both {@code false}
+     * @return an exhausted page whose rows are empty and unmodifiable, whose two boundary tokens are
+     *     both {@code null}, and which reports no further page
      */
     public static <T> PageResponse<T> empty() {
-        return new PageResponse<>(List.of(), null, null, null, null, false, false);
+        return new PageResponse<>(List.of(), null, null, false);
     }
 
     /**
-     * Builds the ordinary page: one that returned rows, whose request positions are the identities of
-     * the rows returned.
+     * Builds the ordinary page: one that returned rows, whose boundaries are the first and last of
+     * those rows.
      *
      * <p>Assumptions: on a page that returned rows the position a forward request is issued from is
      * the last row returned, and the position a backward request is issued from is the first row
@@ -396,14 +398,17 @@ public record PageResponse<T>(
      * moves the first key of the current page into the field its backward browse is positioned from --
      * so this factory is what a service calls for every page that is not the filtered-away special
      * case below. It exists so that the ordinary call site cannot get the pairing wrong: supplying the
-     * cursors by hand and crossing them would produce an envelope that pages in the wrong direction
-     * while remaining perfectly valid.</p>
+     * two tokens crossed would produce an envelope that pages in the wrong direction while remaining
+     * perfectly valid.</p>
      *
-     * <p>Trade-offs: the two availability indicators stay parameters rather than being derived from
-     * the tokens, because neither is knowable from the page's own contents. Forward availability comes
-     * from the probe read -- one row beyond the page, per the two cited programs -- and backward
-     * availability comes from the caller's request context, which is the only place that records
-     * whether this page was reached from a neighbouring one.</p>
+     * <p>Trade-offs: forward availability stays a parameter rather than being derived from the tokens,
+     * because it is not knowable from the page's own contents: it comes from the probe read -- one row
+     * beyond the page, per the two cited programs -- which only the caller that issued the query
+     * performed. Backward availability takes no parameter at all, because on a page that returned rows
+     * a backward step is always expressible from {@code firstKey}, which this factory requires;
+     * whether that step yields rows is a question only the store can answer, and the reference answers
+     * it the same way, reporting a further page on its backward path unconditionally at line 1287 of
+     * {@code app/cbl/COCRDLIC.cbl}.</p>
      *
      * @param <T> the element type of the rows this page carries
      * @param items the rows returned, which must not be {@code null} and must not be empty; use
@@ -411,23 +416,16 @@ public record PageResponse<T>(
      * @param firstKey the token identifying the first returned row, which must be present
      * @param lastKey the token identifying the last returned row, which must be present
      * @param hasNext whether the probe read found a row beyond this page
-     * @param hasPrev whether the caller's request arrived from a preceding page
-     * @return a page whose forward position is {@code lastKey} when a further page follows and whose
-     *     backward position is {@code firstKey} when a preceding page exists, each absent otherwise
+     * @return a page carrying the rows supplied, naming both of its boundaries, and reporting a further
+     *     page exactly as {@code hasNext} states
      * @throws NullPointerException if {@code items} is {@code null} or contains a {@code null} element
-     * @throws IllegalArgumentException if {@code items} is empty, or if either row token is absent
-     *     while rows are present, both of which the canonical constructor rejects
+     * @throws IllegalArgumentException if either boundary token is absent while rows are present, or if
+     *     {@code hasNext} is {@code true} while {@code lastKey} is absent, both of which the canonical
+     *     constructor rejects
      */
     public static <T> PageResponse<T> ofRows(
-            List<T> items, String firstKey, String lastKey, boolean hasNext, boolean hasPrev) {
-        return new PageResponse<>(
-                items,
-                firstKey,
-                lastKey,
-                hasNext ? lastKey : null,
-                hasPrev ? firstKey : null,
-                hasNext,
-                hasPrev);
+            List<T> items, String firstKey, String lastKey, boolean hasNext) {
+        return new PageResponse<>(items, firstKey, lastKey, hasNext);
     }
 
     /**
@@ -442,60 +440,33 @@ public record PageResponse<T>(
      * them from, so they are the keys at which scanning stopped in each direction, which only the
      * caller that ran the query holds.</p>
      *
-     * <p>Refactoring Rationale: this is the factory that closes the defect the type-level note
-     * records. The state used to be expressible with a forward indicator and no forward position, and
-     * a caller that honoured the indicator had nothing to send. Requiring the position here, and
-     * rejecting an indicator without one in the canonical constructor, makes the unusable form
-     * unreachable while keeping the usable one available.</p>
+     * <p>Refactoring Rationale: this factory is why the four components suffice. The scan positions it
+     * receives are stored in the two boundary components, which is exactly what they are on this page,
+     * so the state needs no components of its own: a caller that honours the reported further page
+     * sends back {@code lastKey} as it would from any other page, and one stepping backward sends back
+     * {@code firstKey}. Naming the parameters after the direction each continues, rather than after the
+     * component each lands in, keeps the call site readable at the point where the two are easiest to
+     * cross.</p>
      *
      * @param <T> the element type the caller's page is declared over, inferred from the assignment
      *     context
-     * @param nextCursor the key at which the forward scan stopped, or {@code null} when nothing remains
-     *     ahead; forward availability is reported exactly when this is present
-     * @param prevCursor the key at which the backward scan stopped, or {@code null} when nothing
-     *     remains behind; backward availability is reported exactly when this is present
-     * @return a page carrying no rows, no row identities, and whichever continuation positions were
-     *     supplied
+     * @param forwardPosition the key at which the forward scan stopped, stored as {@code lastKey}, or
+     *     {@code null} when nothing remains ahead; a further page is reported exactly when this is
+     *     present
+     * @param backwardPosition the key at which the backward scan stopped, stored as {@code firstKey}, or
+     *     {@code null} when nothing remains behind; a backward step is expressible exactly when this is
+     *     present
+     * @return a page carrying no rows and whichever continuation positions were supplied, in the two
+     *     boundary components
+     * @throws IllegalArgumentException if either supplied position is not a token sealed by
+     *     {@link CursorToken}, which the canonical constructor rejects
      */
-    public static <T> PageResponse<T> ofFilteredEmpty(String nextCursor, String prevCursor) {
+    public static <T> PageResponse<T> ofFilteredEmpty(String forwardPosition, String backwardPosition) {
         return new PageResponse<>(
                 List.of(),
-                null,
-                null,
-                nextCursor,
-                prevCursor,
-                absentWhenBlank(nextCursor) != null,
-                absentWhenBlank(prevCursor) != null);
-    }
-
-    /**
-     * Reports whether a page precedes this one, as stated by the caller that issued the request.
-     *
-     * <p>Refactoring Rationale: this is the record component's own accessor, and it replaces a derived
-     * method that returned whether a first-row token existed. That derivation was wrong in a way that
-     * was invisible from inside this type: the opening page of a set carries a first row like every
-     * other page, so it reported a preceding page that cannot exist, and a screen binding its backward
-     * function key to this value offered a step that could only ever return nothing. The value is now
-     * supplied, because the only place the answer exists is the request that produced this page -- an
-     * opening query supplies no cursor and therefore has nothing behind it, while a page reached from a
-     * neighbouring one does. The baseline reaches the same answer from the same place: on its backward
-     * path it sets the further-page condition unconditionally at line 1287 of
-     * {@code app/cbl/COCRDLIC.cbl}, with no probe at all, because arriving at a page from a
-     * neighbouring one already implies the neighbour was reachable.</p>
-     *
-     * <p>Trade-offs: a stated value is one more component to keep in step with {@code prevCursor},
-     * which a derivation could not contradict. The cost is answered rather than accepted: the canonical
-     * constructor enforces the biconditional between this indicator and that cursor, so the two cannot
-     * disagree in either direction, and the {@link #ofRows(List, String, String, boolean, boolean)}
-     * factory sets them together from one argument. What is bought is an answer that is correct on the
-     * opening page, which no derivation from this page's contents can be.</p>
-     *
-     * @return {@code true} when the caller reported that this page was reached from a preceding one, in
-     *     which case {@code prevCursor} is present; {@code false} otherwise, including for the opening
-     *     page of a set and for an exhausted page
-     */
-    public boolean hasPrev() {
-        return hasPrev;
+                backwardPosition,
+                forwardPosition,
+                absentWhenBlank(forwardPosition) != null);
     }
 
     /**
@@ -506,7 +477,7 @@ public record PageResponse<T>(
      * that pads with blanks, so a wholly blank value means absent rather than a token made of blanks.
      * Only the wholly absent case is rewritten. A token with any non-blank character is returned
      * exactly as received, including its padding, because the token is opaque: this type does not
-     * know where one key ends and the next begins inside a composite, and trimming its interior would
+     * know where one key ends and the next begins inside a multi-column key, and trimming its interior would
      * be an interpretation that could change which row the token names.
      *
      * <p>Alternatives Considered: trimming every token, and rejecting a blank one outright, were both

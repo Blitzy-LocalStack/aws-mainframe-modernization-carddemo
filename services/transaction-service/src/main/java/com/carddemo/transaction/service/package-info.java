@@ -13,15 +13,6 @@
  * packages is filed in the wrong layer, and the layering test named further down fails the build
  * for it rather than leaving the drift to a reviewer's memory.
  *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package declaration accepts no
- * parameter, yields no value and raises nothing, so none of those three elements has a subject in
- * this compilation unit. Exactly one of the four elements has a subject here, and that one is
- * purpose. Alternatives Considered: passing over the other three in silence was the obvious
- * alternative and is rejected, because user Rule 1 (Explainability) enumerates Purpose, Parameters,
- * Return values, and Exceptions or errors at its lines 18 to 21, and its line 39 names a docstring
- * that omits a required element among its forbidden patterns; a silent omission is indistinguishable
- * to a reviewer from an element that was forgotten, whereas a stated inapplicability can be checked.
- *
  * <h2>Four classes, one per migrated program, and no fifth type</h2>
  *
  * <p>Target contract: this package is to hold exactly four annotated service classes. The pairing
@@ -83,9 +74,8 @@
  * the paragraph would send the next reader to a branch rather than to the logic.
  *
  * <p>Assumptions: every citation in a class in this package is verified in the file before it is
- * written down. Rule 1's line 41 rejects a vague rationale, and a rationale resting on a line
- * number that does not hold what it claims is worse than one that cites nothing, because it
- * survives review by looking precise. Counting is part of that discipline: the validation
+ * written down. A rationale resting on a line number that does not hold what it claims is worse
+ * than one that cites nothing, because it survives review by looking precise. Counting is part of that discipline: the validation
  * paragraph of {@code app/cbl/COTRN02C.cbl} runs from line 235 to line 437, and the span is cited
  * rather than a count of the blocks inside it, because the span was verified and a tally of blocks
  * depends on whether a conditional statement counts as one.
@@ -428,8 +418,8 @@
  * <p>Assumptions: the following are out of scope for the migration as a whole and none is introduced
  * here -- an annotation processor that generates members, a generated mapper, a resilience library,
  * a circuit breaker, an application cache tier, a streaming platform and a read replica. A generated
- * member cannot carry the rationale Rule 1 requires of it, and each of the others adds an
- * operational component the reference system has no counterpart for.
+ * member cannot carry a rationale at all, and each of the others adds an operational component the
+ * reference system has no counterpart for.
  *
  * <p>There is no saga and no two-phase commit. Assumptions: nothing in this context spans two
  * datastores, so either would introduce intermediate states the reference never produces and the
@@ -440,39 +430,41 @@
  *
  * <p>There is no {@code module-info.java} in this directory or anywhere beneath this module.
  *
- * <h2>What Rule 1 requires of every class authored here</h2>
+ * <h2>What the Explainability convention requires of every class authored here</h2>
  *
- * <p>This charter exists because of user Rule 1 (Explainability). Its line 15 attaches a docstring
+ * <p>This charter exists because of the project's Explainability convention, recorded for readers in
+ * {@code CONTRIBUTING.md} and {@code docs/CODE_DOCUMENTATION_STANDARD.md}. It attaches a docstring
  * requirement to every function, every class and every module entry point; in Java the module entry
  * point is the package declaration, and this file is the only place documentation for it can be
- * written. There is no alternative location. The rule's line 22 fixes the form as the language's
+ * written. There is no alternative location. The convention fixes the form as the language's
  * standard documentation format, which is the block immediately above that declaration.
  *
  * <p>Every type, constructor and method authored in this package carries a Javadoc block stating its
  * purpose, a parameter clause for each parameter it accepts, a return clause when it yields a value,
  * and an exception clause for what it can raise. Assumptions: the exception element is attributed
- * honestly rather than to the loudest authority. Rule 1's validation gate at line 43 names purpose,
+ * honestly rather than to the loudest authority. The convention's validation gate names purpose,
  * parameters and return values, and it does not name exceptions. The exception duty rests instead on
- * the rule's own line 21, on the house convention at lines 544 to 549 of {@code tests/README.md} --
- * which names Purpose, Parameters, Returns and Exceptions together and is therefore stricter than
- * line 43 read alone -- and on the documentation gate, which is configured to validate declared
- * exceptions. Claiming line 43 as the authority for that clause would itself be the unfounded
- * rationale the rule's line 41 rejects, in the very file that instructs four authors to avoid one.
+ * the convention's own docstring-content clause, on the house convention at lines 544 to 549 of
+ * {@code tests/README.md} -- which names Purpose, Parameters, Returns and Exceptions together and is
+ * therefore stricter than the validation gate read alone -- and on the documentation gate, which is
+ * configured to validate declared exceptions. Claiming the validation gate as the authority for that
+ * clause would itself be the unfounded rationale the convention rejects, in the very file that
+ * instructs four authors to avoid one.
  *
  * <p>Assumptions: once a block exists the gate requires it to be complete. A parameter clause is
  * required for every parameter, a return clause for every returning method, and no clause may be
  * left with an empty description. Clause order is purpose, then parameters, then return value, then
- * exceptions, which is the order Rule 1 enumerates at its lines 18 to 21.
+ * exceptions, which is the order the convention enumerates.
  *
- * <p>Assumptions: the rule's line 23 lets a trivial accessor use a single-line docstring. That
+ * <p>Assumptions: the convention lets a trivial accessor use a single-line docstring. That
  * grants a form and not an absence -- the docstring is still required, and it must still carry the
  * return clause the gate demands of a returning method. The concession is restated here because
  * this charter is the file an author of these four classes reads first.
  *
  * <h2>A green build is necessary and not sufficient in this package</h2>
  *
- * <p>Assumptions: this is the most consequential paragraph in this charter. Rule 1's validation gate
- * at line 43 is conjunctive -- work fails it for missing the docstring, and independently for
+ * <p>Assumptions: this is the most consequential paragraph in this charter. The convention's
+ * validation gate is conjunctive -- work fails it for missing the docstring, and independently for
  * missing the recorded rationale. The documentation gate mechanises the docstring half and states of
  * itself that it cannot mechanise the other half: it cannot judge whether a comment explains why
  * rather than what, cannot detect a comment that merely restates the code beside it, cannot verify
@@ -490,8 +482,8 @@
  * transcribed: the page-boundary handlers of the list program, the validation blocks spanning
  * lines 235 to 437 of {@code app/cbl/COTRN02C.cbl}, the timestamp derivation at line 249 of
  * {@code app/cbl/COBIL00C.cbl} and the clearing routines of the view program all arrive as private
- * methods. Each is obliged twice over, by the rule's line 15, which carries no qualification by
- * visibility, and by the gate. Neither obligation reaches the rationale, and the rationale is the
+ * methods. Each is obliged twice over, by the convention's docstring requirement, which carries no
+ * qualification by visibility, and by the gate. Neither obligation reaches the rationale, and the rationale is the
  * half a later reader of the code actually needs.
  *
  * <h2>The four labels, in one written form</h2>
@@ -499,13 +491,13 @@
  * <p>Every rationale in this package is tagged with one of exactly four labels, written character
  * for character as {@code Alternatives Considered:}, {@code Refactoring Rationale:},
  * {@code Assumptions:} and {@code Trade-offs:}. Four properties of that form are load-bearing: each
- * label is plural where the rule writes it plural, none is parenthesised, each keeps its trailing
+ * label is plural where the convention writes it plural, none is parenthesised, each keeps its trailing
  * colon, and none carries emphasis markup. The hyphen in the fourth is the plain hyphen-minus and no
  * other character resembling it. {@code docs/CODE_DOCUMENTATION_STANDARD.md} is the authority for
  * this form and states it once for every language in the new trees.
  *
  * <p>Assumptions: the label is searched for before it is read. A reviewer auditing this tree against
- * the rule's validation gate has to locate every rationale across several languages, and a literal
+ * the convention's validation gate has to locate every rationale across several languages, and a literal
  * string search is the only mechanism available in all of them. One spelling makes that search
  * complete; four spellings of one category make it quietly partial, and a rationale a search cannot
  * find is a rationale a review cannot count. The gate offers no help here, because a singular,
@@ -513,31 +505,48 @@
  *
  * <p>Trade-offs: this diverges on purpose from the singular idiom that predominates in the
  * repository's reference test suite, so the two trees genuinely do read differently. The plural is
- * the form Rule 1 uses at its lines 31 to 34, and its line 43 makes that wording the sentence this
- * tree is audited against; matching the older idiom would read more consistently while failing to
- * match the rule actually enforced. The divergence is recorded so that a reader who searches the
+ * the form the governing convention uses, and its validation gate makes that wording the sentence
+ * this tree is audited against; matching the older idiom would read more consistently while failing
+ * to match the convention actually enforced. The divergence is recorded so that a reader who searches the
  * repository and finds both forms knows which one governs here. The two forms are never mixed inside
  * one file.
  *
- * <p>Assumptions: label text is taken from Rule 1's lines 31 to 34 and never copied out of
+ * <p>Assumptions: label text is taken from the governing convention and never copied out of
  * {@code tests/README.md}. Lines 542 and 548 of that file each carry one non-breaking hyphen and no
  * plain hyphen at all, so a label copied from there is invisible to the literal search this
  * convention depends on. This compilation unit is pure ASCII for the same reason.
  *
  * <h2>The comment idiom</h2>
  *
- * <p>Inline comments in this package use the aligned pair {@code // WHAT:}, with no space before its
- * colon, and {@code // WHY :}, with exactly one space before its colon. Assumptions: that single
- * space makes both labels the same width, so their text and their continuation lines begin in one
- * column and a reader tracks one left margin instead of two. The form originates in the reference
- * test guide, which establishes it at lines 267 and 270.
+ * <p>An inline comment in this package is a single block sitting immediately above the code it
+ * explains. It opens with one of the four labels above and its colon, then gives the reason and what
+ * differs under the alternative, and it contains nothing else. Purpose is stated once, in the
+ * Javadoc, where the language puts it; inside a Javadoc block the equivalent of the inline form is a
+ * labelled sentence, which is how this charter is written throughout. No statement in this package
+ * carries a {@code // WHAT:} line.
  *
- * <p>Trade-offs: the rule's line 38 still forbids a line that narrates the statement beneath it, so
- * the what line is permitted only to identify a migrated contract the Java tokens cannot reveal --
- * the baseline paragraph being transcribed, or the record path a value arrived from. The why line
- * names one of the four canonical labels, the reason, and the consequence under the alternative.
- * Where a statement already exposes its whole effect, only the why line is written. Inside a Javadoc
- * block the equivalent is a labelled sentence, which is how this charter is written throughout.
+ * <p>Refactoring Rationale: an earlier draft of this charter authorised the aligned pair
+ * {@code // WHAT:} and {@code // WHY :} on statements, citing lines 267 and 270 of the reference test
+ * guide as its origin. That authorisation is withdrawn, and the reversal is recorded rather than
+ * quietly dropped because the question had already been settled twice the other way.
+ * The "The {@code # WHAT:} / {@code # WHY :} idiom -- prose command blocks only" section of
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md} confines the twin idiom to fenced
+ * command blocks in prose and names {@code .java} first among the files that may not carry a
+ * statement-level {@code WHAT:} comment, and the shared-library charter at
+ * {@code services/common-lib/src/main/java/com/carddemo/common/package-info.java} had already
+ * adopted that pair in Java and then rejected it, because its first line restates the statement it
+ * sits above. Keeping the authorisation would have left three governing artifacts in contradiction,
+ * which that standard's Precedence note treats as a review failure until reconciled
+ * rather than as a choice a package may make locally.
+ *
+ * <p>Trade-offs: the withdrawn form's one defensible use was naming a migrated contract the Java
+ * tokens cannot reveal -- the baseline paragraph being transcribed, or the record path and byte
+ * offset a value arrived from -- and that information still has to be recorded. It moves into the
+ * Javadoc of the declaration it describes, which is where the convention places purpose in any
+ * case, so no provenance is lost and the note is rendered by the language's own tooling. The cost is
+ * a few lines of distance between a provenance note and the annotation it explains; the benefit is
+ * that nothing in this package restates the statement beneath it, which is the first pattern the
+ * convention's forbidden-patterns clause rules out.
  *
  * <p>Assumptions: there is no escape from any of this inside a source file. The configuration
  * deliberately omits every filter that would let a suppression be written into Java, so a marker
@@ -558,13 +567,13 @@
  *
  * <p>Assumptions: the summary sentence of this block ends with a period and carries no placeholder
  * marker and no unfounded-rationale fragment, because the summary check enforces exactly that and is
- * the one check that reaches Rule 1's purpose element.
+ * the one check that reaches the convention's purpose element.
  *
  * <p>Trade-offs: this compilation unit holds one Javadoc block and one package declaration and
  * nothing else -- no annotation, no import, no type, no field, no method and no line comment. It
  * carries no parameter, return, exception, authorship, release or version clause, because none of
  * those has a valid subject on a package declaration, and inventing one would be the omission
- * defect of the rule's line 39 read from the other direction. Version control answers provenance;
+ * defect of the convention's incomplete-docstring clause read from the other direction. Version control answers provenance;
  * this block answers responsibility and rationale.
  *
  * <p>Trade-offs: the source is UTF-8 with no byte-order mark and restricts its content to ASCII.

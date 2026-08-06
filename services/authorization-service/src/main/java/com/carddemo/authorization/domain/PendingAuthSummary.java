@@ -5,6 +5,8 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * The per-account pending-authorization summary, one row per account.
@@ -60,6 +62,24 @@ public class PendingAuthSummary {
      * thirty-two-bit integer holds; the value is assigned by the caller rather than generated, because
      * an account identifier originates in the account context and is never minted here.</p>
      */
+    /**
+     * The greatest value the reference counter fields can hold, from {@code PIC S9(04) COMP}.
+     *
+     * <p>Assumptions: four decimal digits, so 9999 rather than the halfword's own 32767. The schema's
+     * check constraint on the two counter columns states the identical bound, and the two are meant to
+     * be read together.</p>
+     */
+    private static final int COUNTER_MAX = 9999;
+
+    /**
+     * The least value the reference counter fields can hold, from {@code PIC S9(04) COMP}.
+     *
+     * <p>Assumptions: the sign is load-bearing rather than decorative, because the purge program
+     * DECREMENTS these counters at {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 287
+     * to 293, so a negative bound is the correct floor for a signed running total.</p>
+     */
+    private static final int COUNTER_MIN = -9999;
+
     @Id
     @Column(name = "account_id", nullable = false, updatable = false)
     private Long accountId;
@@ -74,36 +94,50 @@ public class PendingAuthSummary {
      * The one-character authorization status of the account, {@code PA-AUTH-STATUS PIC X(01)} at
      * line 21.
      */
+    // WHY : Alternatives Considered: relying on the declared length alone was evaluated and rejected,
+    //       because a Java String otherwise selects the JDBC VARCHAR binding and schema validation then
+    //       rejects this schema's CHAR columns even though every width agrees. Spelling the physical
+    //       type into columnDefinition was rejected too: that would duplicate vendor DDL inside a
+    //       mapping which has no authority to create the table. The type code below selects the standard
+    //       CHAR binding for reads, writes and validation while leaving the physical definition wholly
+    //       with V1__authorization.sql, and it is the same mechanism the batch context's own entities
+    //       use for the identical reason.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_status", length = 1)
     private String authStatus;
 
     /**
      * The first of the five two-character account-status slots at line 22.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_1", length = 2)
     private String accountStatus1;
 
     /**
      * The second of the five two-character account-status slots at line 22.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_2", length = 2)
     private String accountStatus2;
 
     /**
      * The third of the five two-character account-status slots at line 22.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_3", length = 2)
     private String accountStatus3;
 
     /**
      * The fourth of the five two-character account-status slots at line 22.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_4", length = 2)
     private String accountStatus4;
 
     /**
      * The fifth of the five two-character account-status slots at line 22.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "account_status_5", length = 2)
     private String accountStatus5;
 
@@ -136,28 +170,28 @@ public class PendingAuthSummary {
      * How many authorizations have been approved against the account,
      * {@code PA-APPROVED-AUTH-CNT PIC S9(04) COMP} at line 27.
      */
-    @Column(name = "approved_auth_count", nullable = false)
+    @Column(name = "approved_auth_cnt", nullable = false)
     private Short approvedAuthCount;
 
     /**
      * How many authorizations have been declined against the account,
      * {@code PA-DECLINED-AUTH-CNT PIC S9(04) COMP} at line 28.
      */
-    @Column(name = "declined_auth_count", nullable = false)
+    @Column(name = "declined_auth_cnt", nullable = false)
     private Short declinedAuthCount;
 
     /**
      * The total approved authorization amount, {@code PA-APPROVED-AUTH-AMT S9(09)V99 COMP-3} at
      * line 29.
      */
-    @Column(name = "approved_auth_amount", nullable = false, precision = 11, scale = 2)
+    @Column(name = "approved_auth_amt", nullable = false, precision = 11, scale = 2)
     private BigDecimal approvedAuthAmount;
 
     /**
      * The total declined authorization amount, {@code PA-DECLINED-AUTH-AMT S9(09)V99 COMP-3} at
      * line 30.
      */
-    @Column(name = "declined_auth_amount", nullable = false, precision = 11, scale = 2)
+    @Column(name = "declined_auth_amt", nullable = false, precision = 11, scale = 2)
     private BigDecimal declinedAuthAmount;
 
     /**
@@ -173,33 +207,65 @@ public class PendingAuthSummary {
     }
 
     /**
-     * Creates a summary for an account that has none yet, with zeroed counters and amounts.
+     * Creates a summary for an account that has none yet, identified only and otherwise zeroed.
      *
      * <p>Assumptions: a summary is created lazily, on the first authorization for an account, which is
      * the hierarchical database's own behaviour -- a root segment is inserted when a child first needs
-     * one. The four limits and balances are supplied rather than zeroed because they are properties of
-     * the ACCOUNT and are carried in from the account context, whereas the counters and totals are
-     * properties of this context's own history and therefore start at zero.</p>
+     * one. This constructor reproduces {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines
+     * 801 to 806 exactly: the reference program initialises every numeric field of the segment to zero
+     * and then moves in the account and customer identifiers from the cross-reference row, and nothing
+     * else.</p>
      *
-     * @param accountId the account this summary belongs to; must not be {@code null}
-     * @param customerId the customer the account belongs to; must not be {@code null}
-     * @param creditLimit the account's credit limit at scale two; must not be {@code null}
-     * @param cashLimit the account's cash limit at scale two; must not be {@code null}
-     * @param creditBalance the account's credit balance at scale two; must not be {@code null}
-     * @param cashBalance the account's cash balance at scale two; must not be {@code null}
+     * <p>Refactoring Rationale: this replaces a six-argument form that also took the four limits and
+     * balances, and whose documentation asserted they were "properties of the ACCOUNT carried in from the
+     * account context". For the two BALANCES that assertion was wrong, and wrong in a way that would have
+     * over-reserved credit: the credit balance on this segment counts authorizations taken and not yet
+     * posted, which is zero for an account whose first authorization is being decided, whereas the
+     * account master's balance counts POSTED transactions. Seeding this field from that one would have
+     * started the pending balance at the posted balance and then compared the sum against the same limit,
+     * declining requests the reference program approves. The two LIMITS are genuinely the account's, and
+     * they arrive through {@link #refreshLimits(BigDecimal, BigDecimal)} on every authorization rather
+     * than only at creation, which is where the reference program sets them.</p>
+     *
+     * @param accountId the account this summary belongs to, {@code XREF-ACCT-ID} at line 805; must not be
+     *     {@code null}
+     * @param customerId the customer the account belongs to, {@code XREF-CUST-ID} at line 806; must not
+     *     be {@code null}
      */
-    public PendingAuthSummary(Long accountId, Long customerId, BigDecimal creditLimit,
-            BigDecimal cashLimit, BigDecimal creditBalance, BigDecimal cashBalance) {
+    public PendingAuthSummary(Long accountId, Long customerId) {
         this.accountId = accountId;
         this.customerId = customerId;
-        this.creditLimit = creditLimit;
-        this.cashLimit = cashLimit;
-        this.creditBalance = creditBalance;
-        this.cashBalance = cashBalance;
+        this.creditLimit = BigDecimal.ZERO.setScale(2);
+        this.cashLimit = BigDecimal.ZERO.setScale(2);
+        this.creditBalance = BigDecimal.ZERO.setScale(2);
+        this.cashBalance = BigDecimal.ZERO.setScale(2);
         this.approvedAuthCount = 0;
         this.declinedAuthCount = 0;
         this.approvedAuthAmount = BigDecimal.ZERO.setScale(2);
         this.declinedAuthAmount = BigDecimal.ZERO.setScale(2);
+    }
+
+    /**
+     * Copies the account's two limits onto this summary.
+     *
+     * <p>Assumptions: this is {@code MOVE ACCT-CREDIT-LIMIT TO PA-CREDIT-LIMIT} and
+     * {@code MOVE ACCT-CASH-CREDIT-LIMIT TO PA-CASH-LIMIT} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 810 and 811, which the reference
+     * program performs on every authorization rather than only when it creates the segment. Refreshing
+     * each time is what keeps a limit raised on the account master effective for the very next
+     * authorization instead of only after the segment is next recreated.</p>
+     *
+     * <p>Assumptions: the two limits are the only account fields this method takes, and it does not touch
+     * either balance. A limit is owned by the account context and mirrored here; the balances are this
+     * context's own running totals, and overwriting them from the account master would discard the
+     * authorizations they represent.</p>
+     *
+     * @param refreshedCreditLimit the account's credit limit at scale two; must not be {@code null}
+     * @param refreshedCashLimit the account's cash credit limit at scale two; must not be {@code null}
+     */
+    public void refreshLimits(BigDecimal refreshedCreditLimit, BigDecimal refreshedCashLimit) {
+        this.creditLimit = refreshedCreditLimit;
+        this.cashLimit = refreshedCashLimit;
     }
 
     /**
@@ -314,7 +380,7 @@ public class PendingAuthSummary {
      *     balance; must not be {@code null}
      */
     public void recordApproved(BigDecimal amount) {
-        this.approvedAuthCount = (short) (this.approvedAuthCount + 1);
+        this.approvedAuthCount = incremented(this.approvedAuthCount, "approvedAuthCount");
         this.approvedAuthAmount = this.approvedAuthAmount.add(amount);
         this.creditBalance = this.creditBalance.add(amount);
     }
@@ -331,7 +397,50 @@ public class PendingAuthSummary {
      *     {@code null}
      */
     public void recordDeclined(BigDecimal amount) {
-        this.declinedAuthCount = (short) (this.declinedAuthCount + 1);
+        this.declinedAuthCount = incremented(this.declinedAuthCount, "declinedAuthCount");
         this.declinedAuthAmount = this.declinedAuthAmount.add(amount);
+    }
+
+    /**
+     * Adds one to a counter in a wider type and refuses a result the reference field cannot hold.
+     *
+     * <p>Refactoring Rationale: the increment was written as {@code (short) (counter + 1)}, and the cast
+     * is what made it wrong. The addition itself is performed in {@code int}, so the cast is a NARROWING
+     * conversion that discards the high bits without any diagnostic: a counter at the storage type's
+     * maximum wraps to its most negative value, and a running total of approvals silently becomes a
+     * large negative number that every downstream reader believes. The addition now happens in
+     * {@code int}, the result is compared against the bound the copybook sets, and a result outside it is
+     * refused rather than stored.</p>
+     *
+     * <p>Assumptions: the bound is the PICTURE's and not the storage type's. The two counters are
+     * {@code PIC S9(04) COMP} at lines 27 and 28 of
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy}, four decimal digits, so the values the
+     * reference field can hold are -9999 through 9999 -- narrower than the halfword that stores them,
+     * which reaches 32767. Checking at the halfword's limit would let this class store 10000 in a column
+     * whose own check constraint refuses it, turning a representable-value question into a database error
+     * raised at flush time with no field named.</p>
+     *
+     * <p>Trade-offs: an approval on an account that has already reached 9999 is refused, and the
+     * authorization it belongs to fails rather than being recorded against a wrapped counter. That is the
+     * conservative outcome of the two available: the alternatives are to store a value the reference
+     * field cannot represent, or to stop counting at the bound and let the total silently understate the
+     * approvals -- and a total that lies is worse than a request that fails loudly, because only the
+     * second one gets noticed. The same bound is asserted by the schema's own check constraint, so the
+     * two writers of these columns -- this listener and the extract load -- are held to one rule.</p>
+     *
+     * @param counter the current counter value; must not be {@code null}
+     * @param fieldName the counter's name, used to identify it in the refusal
+     * @return the incremented value, always within the four-digit domain
+     * @throws IllegalStateException if the increment would leave the four-digit domain the reference
+     *     field declares
+     */
+    private static Short incremented(Short counter, String fieldName) {
+        int next = counter + 1;
+        if (next > COUNTER_MAX || next < COUNTER_MIN) {
+            throw new IllegalStateException(fieldName + " would reach " + next
+                    + ", which is outside the range " + COUNTER_MIN + " to " + COUNTER_MAX
+                    + " that PIC S9(04) COMP can hold");
+        }
+        return Short.valueOf((short) next);
     }
 }

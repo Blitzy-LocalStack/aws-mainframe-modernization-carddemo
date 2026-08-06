@@ -8,7 +8,10 @@
 #   it already declares, and it introduces no key that is absent there. Six
 #   keys are set, across the only axes a profile in this project may vary:
 #   log verbosity, connection-pool sizing, streaming fetch size and actuator
-#   health detail.
+#   health detail. Every base setting this file does not name -- the
+#   view-binding flag, the schema-management mode, the acquisition timeout, the
+#   actuator exposure list and every level pin on a category not listed below --
+#   stays in force BY OMISSION, and not restating it is what preserves it.
 #
 #   Nothing here changes topology and nothing here changes security posture.
 #   The datasource is still Aurora PostgreSQL resolved from the platform, the
@@ -51,12 +54,6 @@
 #     expressed as properties, and such a file in this folder would take over
 #     the appender chain wholesale, so the console pattern carrying the
 #     correlation identifier would silently stop applying.
-#   - Assumptions: this file has no mechanical documentation gate.
-#     config/checkstyle/checkstyle.xml sets fileExtensions to java, so no
-#     linter in this project inspects a .yml file for documentation, and
-#     docs/CODE_DOCUMENTATION_STANDARD.md records the same limit for YAML.
-#     The obligation rests on that written standard and on review, and no
-#     comment here claims a gate enforces something it does not.
 # =============================================================================
 
 # WHY : Trade-offs:
@@ -67,13 +64,10 @@
 #       REFERENCE-ONLY), rather than being inferred from a stack trace after
 #       the fact. The cost is per request and unbounded in aggregate, and log
 #       ingestion is billed by the gigabyte, which is why this sits in the dev
-#       overlay and not in application.yml.
+#       overlay and not in application.yml. Nothing raised here lowers a
+#       category that would print identity material or a bound statement
+#       parameter.
 logging:
-  # WHY : Assumptions:
-  #       The level pins application.yml sets on categories this file
-  #       does not name stay in force BY OMISSION -- not restating them is what
-  #       preserves them -- so nothing below lowers a category that would print
-  #       identity material or a bound statement parameter.
   level:
     # WHY : Alternatives Considered:
     #       Leaving this at the base WARN and raising only the project package.
@@ -100,17 +94,14 @@ logging:
     #       reason above.
     com.carddemo: DEBUG
 
-# WHY : Assumptions:
-#       Every key below re-opens a path application.yml already
-#       declares under the same name, so this block replaces values and adds
-#       nothing. The datasource URL, its credentials and its TLS terms are not
-#       among them and stay exactly where the base leaves them.
 spring:
   # WHY : Assumptions:
   #       This pool is the read side of a SELECT-only role, and every
   #       borrow it serves is a cursor walk rather than a keyed read, so one
   #       connection is held for the length of a whole report or statement
-  #       rather than for a single statement.
+  #       rather than for a single statement. The datasource URL, its
+  #       credentials and its TLS terms are not touched here and stay exactly
+  #       where the base leaves them.
   datasource:
     # WHY : Trade-offs:
     #       This pool is sized DOWN from the base rather than up, which
@@ -145,12 +136,6 @@ spring:
       #       accepted, and it is the reason the acquisition timeout in
       #       application.yml is left at its base value rather than tightened.
       minimum-idle: 0
-  # WHY : Assumptions:
-  #       Only one entry in the persistence property map is touched.
-  #       The base settings this file does not name -- the view-binding flag
-  #       and the schema-management mode among them -- stay in force by
-  #       omission, so this module still cannot emit schema statements even
-  #       accidentally.
   jpa:
     # WHY : Assumptions:
     #       This map is an untyped passthrough handed to the
@@ -184,33 +169,88 @@ spring:
           #       docs/architecture/cobol-to-service-traceability.md.
           fetch_size: 100
 
-# WHY : Assumptions:
-#       The dev load balancer is internal and the actuator path is not
-#       routed through the public front door, so the payload widened below is
-#       reachable only from inside the private network. This is the one setting
-#       application.yml explicitly leaves to this file, noting that the
-#       development overlay may widen it and the production overlay does not.
+# WHY : Refactoring Rationale:
+#       An earlier revision of this profile set `always` on the health
+#       endpoint, reasoning that the dev load balancer is internal and the
+#       actuator path is not routed through the public front door. That is
+#       withdrawn, because it is not a control this file can enforce: which
+#       profile a task activates is a property of its task definition, so
+#       `always` in a file that ships beside `prod` is one deployment variable
+#       away from publishing the datasource and schema layout of the system that
+#       serves statements and reports. Both pollers of the aggregate path are
+#       unauthenticated -- the load balancer target group and the container
+#       health check -- so whatever that body carries is readable by anything
+#       able to reach the task inside the private application subnets. The
+#       detail is not deleted; it moves to its own authorized path below.
 management:
-  # WHY : Assumptions:
-  #       Only the health endpoint's detail breadth is touched. The
-  #       exposure list, which decides WHICH endpoints answer at all, is not
-  #       restated and so stays exactly as the base closes it.
   endpoint:
     # WHY : Trade-offs:
     #       A detail payload names the datasource and the schemas the
     #       connection reaches, which turns a "why is the pool empty"
-    #       investigation from a guess into a reading. That disclosure is
-    #       acceptable inside a private network and is NOT acceptable in prod,
-    #       where anything able to reach the probe path could read the data-tier
-    #       layout from it. PROD KEEPS never.
+    #       investigation from a guess into a reading. That reading is kept, and
+    #       what changes is who may take it: an authorized caller on a named
+    #       path rather than anything that can reach the probe port. Every
+    #       non-development activation keeps the closed answer because
+    #       application.yml sets `never` and this overlay is the only file in the
+    #       module that touches the setting at all.
     health:
-      # WHY : Alternatives Considered:
-      #       When-authorized, the middle setting, which
-      #       looks like the cautious choice. Rejected because both pollers of
-      #       this endpoint are unauthenticated -- the load balancer target
-      #       group and the container health check, neither of which can present
-      #       a token -- so when-authorized would return the same bare status as
-      #       never while appearing to be configured. That is the worse outcome
-      #       because it misleads the next reader instead of merely restricting
-      #       them.
-      show-details: always
+      # WHY : (1) Refactoring Rationale: `never` on the aggregate path, replacing
+      #       the `always` recorded above. The earlier revision rejected
+      #       `when-authorized` here on the correct observation that both pollers
+      #       are unauthenticated and would therefore receive the same bare status
+      #       as `never` while the setting appeared to be configured. That
+      #       objection stands, and it is answered by the GROUP below rather than
+      #       by widening this path: the aggregate path answers the pollers with
+      #       the status word, and the detail lives on its own path where an
+      #       authorized caller asks for it and is distinguishable in an access
+      #       log. This is the arrangement the transaction-service dev overlay
+      #       already uses, so the two profiles now fail in the same direction.
+      #       (2) Assumptions: show-components is closed alongside show-details.
+      #       Left open it would enumerate the contributor NAMES to an
+      #       unauthenticated poller -- which discloses that a datasource
+      #       contributor exists and is therefore the same class of leak in a
+      #       smaller quantity.
+      show-details: never
+      show-components: never
+
+      # WHY : Assumptions: the role is named explicitly rather than left unset.
+      #       Unset, the framework treats ANY authenticated caller as authorized,
+      #       and an authenticated caller here is any holder of a valid user-pool
+      #       token -- an ordinary cardholder included, and a cardholder is not an
+      #       operator. The value is the authority JwtRoleConverter publishes for
+      #       the administrative Cognito group, named there as the constant
+      #       ADMIN_AUTHORITY so the two cannot drift apart.
+      #       Assumptions: the actuator's authorization test delegates to the
+      #       servlet role check, which prepends the framework's role prefix to a
+      #       value that does not already carry one, while this system's
+      #       authorities are the provider's group names with NO prefix. The
+      #       consequence is stated rather than glossed: this arrangement fails
+      #       CLOSED. Until the resource-server configuration grants a caller the
+      #       named role, the group below discloses the status word and nothing
+      #       else -- the same answer the aggregate path gives, and the safe
+      #       direction to fail in.
+      roles: carddemo-admin
+
+      group:
+        # WHY : (1) Assumptions: the contributors are the ones THIS module
+        #       actually registers, so the group resolves rather than silently
+        #       matching nothing -- `db` from the datasource that reads the
+        #       read-only cross-schema views, and `diskSpace` and `ping` from the
+        #       framework defaults.
+        #       (2) Alternatives Considered: including `flyway` as the
+        #       transaction-service overlay does. Rejected on evidence rather than
+        #       symmetry: services/reporting-service/pom.xml declares no Flyway
+        #       dependency, because this context owns no schema and runs no
+        #       migration -- it reads views another service migrates. Naming a
+        #       contributor this module cannot register would make the group
+        #       resolve to a smaller set than it appears to name, which is the
+        #       silent-mismatch failure this note exists to prevent.
+        #       (3) Trade-offs: the question a failed deployment raises here --
+        #       did the pool connect to the reporting role -- is answered on this
+        #       path for a caller entitled to ask. What is given up is reading
+        #       that answer out of an unauthenticated probe reply, which is
+        #       exactly the disclosure being closed.
+        diagnostics:
+          include: db,diskSpace,ping
+          show-details: when-authorized
+          show-components: when-authorized

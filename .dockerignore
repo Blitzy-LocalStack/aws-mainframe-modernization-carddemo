@@ -1,0 +1,168 @@
+# =============================================================================
+# .dockerignore
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Excludes paths from the REPOSITORY-ROOT build context. Exactly one image is
+#   built from that context: services/batch-service/Dockerfile, whose own header
+#   records why -- it compiles the unpublished common-lib sibling from source and
+#   the inherited Checkstyle gate reads config/checkstyle, both of which sit
+#   outside its own tree, so no narrower context can build it. Without this file
+#   the daemon receives the whole working tree, which is neither small nor safe.
+#
+#   The repository's other image, data-migration/Dockerfile, is built from
+#   data-migration/ as its context and is therefore governed by
+#   data-migration/.dockerignore instead. The daemon resolves this file from the
+#   context root, so this one has no effect on that build and that one has no
+#   effect on this build. Each context needs its own file; neither is redundant.
+#
+# Parameters (the inputs this file governs):
+#   One input: the set of paths the daemon receives when a build is started from
+#   the repository root. Every pattern below is matched against paths relative
+#   to that root. A pattern removes a path from the context entirely, so a
+#   removed path cannot be reached by any COPY instruction and cannot appear in
+#   any layer.
+#
+# Return values:
+#   None directly. Its effect is observable as the "transferring context" size a
+#   build reports and as the absence of the excluded paths from every layer.
+#
+# Exceptions or errors:
+#   A pattern that excludes something a Dockerfile copies makes the build fail
+#   on a missing path, which is loud and immediate. The reverse mistake -- a
+#   pattern too narrow -- fails silently and is what the rationale below is
+#   written to prevent, so a new exclusion is safer to add than an existing one
+#   is to remove.
+#
+# Governing convention:
+#   docs/CODE_DOCUMENTATION_STANDARD.md
+#
+# WHY (non-obvious design decisions):
+#   1. Refactoring Rationale: this file exists at the ROOT rather than beside the
+#      Dockerfile it governs, because the daemon resolves .dockerignore from the
+#      build CONTEXT and not from the location of the Dockerfile. The batch image
+#      is built from the root with an explicit --file, so a copy of these rules
+#      placed in services/batch-service/ would be ignored completely -- present,
+#      plausible, and doing nothing. This placement is the only one that takes
+#      effect for that build, and it is the reason the second image needs its own
+#      file at its own context root rather than inheriting these rules.
+#   2. Assumptions: the three reasons for each exclusion below are secret
+#      exposure, layer contamination and context size, in that order of
+#      importance. Secret exposure is the reason .git and .env* are named first:
+#      a build that receives .git receives every value ever committed and later
+#      removed, and a COPY of a directory silently includes any local
+#      environment file inside it. Layer contamination is the reason build
+#      output is excluded: a host-built target/ or node_modules/ copied into a
+#      builder can shadow what the container itself compiles, producing an image
+#      whose contents depend on the developer's machine. Context size is real
+#      but last: it makes builds slow, not wrong.
+#   3. Alternatives Considered: naming only the paths the two Dockerfiles copy
+#      and excluding everything else with a leading `*` plus re-inclusions. That
+#      is the stricter shape and it was rejected on maintenance grounds -- every
+#      new COPY would need a matching re-inclusion, and the failure mode of
+#      forgetting one is a build error whose cause is in this file rather than in
+#      the Dockerfile being edited. The enumerated form fails in the safer
+#      direction for this repository, where the reference-only baseline trees are
+#      never copied by any image and cannot appear by accident.
+#   4. Trade-offs: the reference-only baseline trees (app/, tests/, scripts/,
+#      samples/) are deliberately NOT excluded, even though no image copies
+#      them. Excluding them would shrink the context, and the reason not to is
+#      that the Dockerfile cites baseline paths in its own comments as the
+#      specification for what it builds; a reader who runs a build from a context
+#      missing those trees cannot check a citation from inside it. The cost is a
+#      larger context transfer and nothing else, because a path no COPY names
+#      never enters a layer.
+# =============================================================================
+
+# WHY : Assumptions: version-control metadata is the highest-value exclusion in
+#       this file. It carries the full history of every tracked file, so any
+#       value that was ever committed and later removed is still retrievable from
+#       it -- which makes a context containing .git a durable copy of every past
+#       secret, regardless of what the current tree looks like. Nothing in either
+#       image needs it: neither Dockerfile stamps a commit identity, and if one
+#       ever should, the identity belongs in a build argument rather than in a
+#       copy of the repository's history.
+.git
+.gitignore
+.gitattributes
+
+# WHY : Assumptions: local environment files are excluded by pattern rather than
+#       by name, because the risk is the file nobody remembered. .env.example is
+#       committed and carries variable NAMES with no values by design, while a
+#       .env, .env.local or .env.prod is a developer's own file with real values
+#       in it, is untracked, and is exactly what a broad COPY would pick up. The
+#       pattern covers the whole family so a new suffix does not need a new rule.
+.env
+.env.*
+
+# WHY : Refactoring Rationale: build output is excluded so that what an image
+#       contains is what the image built. The batch image compiles the
+#       unpublished common-lib sibling from source inside the builder; if a
+#       host-built services/*/target/ were transferred, a stale jar could be
+#       present at a path the build expects to create, and the resulting image
+#       would depend on the state of the machine that ran the build rather than
+#       on the commit. That failure is invisible on the machine that produced it
+#       and reproducible nowhere else.
+target
+**/target
+build
+**/build
+
+# WHY : Assumptions: the same reasoning covers the front-end trees, plus one
+#       specific hazard of their own. A node_modules/ built on the host may hold
+#       native modules compiled for the host's own libc and architecture, so
+#       copying it into a Linux image can install binaries that cannot run there
+#       -- a failure that appears at runtime rather than at build time. The
+#       front-end image installs its dependencies inside the builder from the
+#       committed lock file, which is what makes them reproducible.
+node_modules
+**/node_modules
+dist
+**/dist
+
+# WHY : Assumptions: infrastructure working directories and STATE are excluded,
+#       and state is the reason this rule is not merely tidiness. A Terraform
+#       state file records resource attributes as applied, which for this
+#       architecture includes generated database credentials and secret ARNs, so
+#       a state file inside a build context is a secret inside a build context.
+#       The .terraform/ directory additionally holds provider binaries that are
+#       hundreds of megabytes and of no use to any image here.
+.terraform
+**/.terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# WHY : Assumptions: interpreter and tool caches are excluded because they are
+#       machine-local and can shadow what the image installs. A .venv/ built on
+#       the host pins absolute paths from that host into its scripts, so a copy
+#       of it inside an image is broken in a way that is confusing to diagnose;
+#       __pycache__ directories hold bytecode compiled by whichever interpreter
+#       version the host happened to run.
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+**/.pytest_cache
+.ruff_cache
+**/.ruff_cache
+.mypy_cache
+**/.mypy_cache
+
+# WHY : Trade-offs: the temporary validation artifacts an agent or a developer
+#       may leave in the working tree are excluded by their agreed prefix. They
+#       are never committed, so this rule only matters for a build run from a
+#       dirty tree -- which is precisely the situation in which an unexpected
+#       file reaching a layer would be hardest to notice.
+blitzy_adhoc_test_*
+**/blitzy_adhoc_test_*
+
+# WHY : Assumptions: editor and operating-system metadata is excluded last
+#       because it is the least consequential of these categories, not because
+#       it is harmless: an editor directory can carry local tool settings and
+#       occasionally credentials for a language server or a database client.
+.idea
+.vscode
+*.swp
+.DS_Store

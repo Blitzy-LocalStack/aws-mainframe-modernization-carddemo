@@ -152,6 +152,33 @@ public record BusinessDate(String token) {
         //       trailing whitespace removed first. An eleven-character value that would measure
         //       ten after whitespace removal is rejected rather than quietly accepted, because
         //       accepting it would concatenate a space into a primary key.
+        // WHY : Trade-offs: because this check is on length alone, this type admits a token whose
+        //       characters name no day that exists -- '2022999900' is ten characters and is accepted
+        //       here. That is the price of holding the token opaquely, and it is paid rather than
+        //       avoided because the alternative rejects the baseline's own production parameter. The
+        //       cost is met where a DERIVED calendar value is rendered instead: DatasetGeneration
+        //       .partitionDate() resolves the token's two layouts to a separated date and refuses one
+        //       that resolves to no real day, so an impossible date cannot reach an object-storage
+        //       prefix even though it can reach this constructor. A reader who needs the calendar
+        //       reading of a token asks that method or parseIsoDateForRangeComparison() below; neither
+        //       this constructor nor token() will ever answer that question.
+        // WHY : Assumptions: the CHARACTER CLASS is gated upstream, not here, and the division is
+        //       deliberate rather than an omission -- so a caller that constructs this record
+        //       directly needs to know where the other half lives. BatchApplication refuses any
+        //       --business-date= value that is not exactly ten characters of ASCII digits and
+        //       ASCII hyphen-minus, before an application context exists, and it tests the ASCII
+        //       range explicitly rather than delegating to the platform's is-a-digit predicate so
+        //       that a fullwidth or Arabic-Indic digit cannot pass and then occupy more than one
+        //       byte in a fixed-width record. Every production path into this type runs through
+        //       that check; there is no other construction site in this module.
+        //       Alternatives Considered: repeating the character check here as defence in depth.
+        //       Rejected on the specific ground that it would make this type's contract two rules
+        //       maintained in two files, which is how the two come to disagree, and the existing
+        //       assertion at BusinessDateTest.tenCharacterTokenCarryingASpaceIsCarriedUnchanged
+        //       pins the layered contract as documented. If a second construction site is ever
+        //       added outside the module entry point, the correct change is to promote the entry
+        //       point's predicate to this type and have the entry point delegate -- one rule moved,
+        //       not one rule copied.
         if (token.length() != TOKEN_LENGTH) {
             throw new IllegalArgumentException("business-date token '" + token + "' is "
                     + token.length() + " characters, not exactly " + TOKEN_LENGTH);

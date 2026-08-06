@@ -453,6 +453,57 @@ class DatasetGenerationTest {
     }
 
     /**
+     * Verifies that a token whose characters name no day that exists is refused before it can become
+     * a partition prefix, in both accepted layouts.
+     *
+     * <p>Assumptions: each token below is ten characters and passes the width check the token type
+     * applies, and each also passes the digit-and-position shape test, so nothing before this
+     * refusal can catch it. The refusal matters because the rendering it would otherwise produce is
+     * accepted by the loader's own key pattern, so the objects would be written and then filed for
+     * ever under a day that never occurred, with nothing reporting an error.</p>
+     *
+     * @param token a ten-character business-date token naming an impossible day, in either layout
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"2022-99-99", "2022999900", "2022-13-01", "2022130100", "2022-02-30",
+        "2022023000"})
+    void anImpossibleDateIsRefusedBeforeItReachesAPartitionPrefix(String token) {
+        DatasetGeneration coordinate =
+                new DatasetGeneration(DatasetFamily.TRANSACT_BKUP, new BusinessDate(token), 1);
+
+        assertThatThrownBy(coordinate::partitionDate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not a day that exists");
+        assertThatThrownBy(coordinate::keyPrefix)
+                .as("the whole prefix must fail too, or a caller could route round the refusal")
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    /**
+     * Verifies that the twenty-ninth of February is refused in a common year and accepted in a leap
+     * year, which no digit-and-position test can distinguish.
+     *
+     * <p>Assumptions: this is the boundary that separates a shape test from a calendar one. Both
+     * tokens are ten characters with digits in the same positions, so only a strict calendar
+     * resolution tells them apart, and a lenient one would accept the first by rolling it into
+     * March -- filing a generation under a date the caller never named.</p>
+     */
+    @Test
+    void theLeapDayBoundaryIsResolvedStrictly() {
+        DatasetGeneration commonYear =
+                new DatasetGeneration(DatasetFamily.SYSTRAN, new BusinessDate("2022-02-29"), 1);
+        assertThatThrownBy(commonYear::partitionDate).isInstanceOf(IllegalStateException.class);
+
+        DatasetGeneration leapYear =
+                new DatasetGeneration(DatasetFamily.SYSTRAN, new BusinessDate("2024-02-29"), 1);
+        assertThat(leapYear.partitionDate()).isEqualTo("2024-02-29");
+        assertThat(new DatasetGeneration(DatasetFamily.SYSTRAN, new BusinessDate("2024022900"), 1)
+                .partitionDate())
+                .as("the compact layout of the same real day must render identically")
+                .isEqualTo("2024-02-29");
+    }
+
+    /**
      * Verifies that the retained-generation constant is the baseline's own retention limit.
      *
      * <p>Assumptions: five, from {@code LIMIT(5)} at {@code app/jcl/DEFGDGB.jcl:26} and on the other

@@ -154,10 +154,16 @@ CREATE TABLE pending_auth_summary (
 
     -- WHY : Assumptions: PA-CUST-ID at L20 is PIC 9(09), unsigned DISPLAY, and
     --       becomes BIGINT because it is an identifier rather than a quantity.
-    --       It is nullable here: the segment can carry it unset, and ledger
-    --       ownership of the customer record belongs to another context, so
-    --       there is no local row to make it mandatory against.
-    customer_id           BIGINT,
+    -- WHY : Assumptions: it is NOT NULL. Every path that creates this row supplies
+    --       it: cbl/COPAUA0C.cbl L806 moves XREF-CUST-ID into PA-CUST-ID inside the
+    --       same block that moves the account identifier, on the create branch its
+    --       L801 selects, so a summary row without a customer is a row the baseline
+    --       cannot produce. Ledger ownership of the customer RECORD still belongs to
+    --       another context, which is why there is no foreign key here -- but the
+    --       absence of a foreign key is not a reason to admit an absent value. The
+    --       entity mapping in PendingAuthSummary declares the same column
+    --       non-nullable, so the two statements of this invariant now agree.
+    customer_id           BIGINT         NOT NULL,
 
     -- WHY : Assumptions: PA-AUTH-STATUS at L21 carries NO CHECK constraint,
     --       deliberately. It is declared PIC X(01) and no 88-level follows it
@@ -183,10 +189,22 @@ CREATE TABLE pending_auth_summary (
     account_status_4      CHAR(2),
     account_status_5      CHAR(2),
 
-    credit_limit          NUMERIC(11,2),
-    cash_limit            NUMERIC(11,2),
-    credit_balance        NUMERIC(11,2),
-    cash_balance          NUMERIC(11,2),
+    -- WHY : Assumptions: the four money columns are NOT NULL with a zero default,
+    --       because the baseline gives them a value before it writes the row and has
+    --       no representation for an absent one. Its create branch runs INITIALIZE
+    --       PENDING-AUTH-SUMMARY REPLACING NUMERIC DATA BY ZERO at
+    --       cbl/COPAUA0C.cbl L802-L803, and both branches then move the account
+    --       master's limits in at L810-L811; the two balances are running totals the
+    --       decision path adds to at L817-L818. A packed COMP-3 field has no null
+    --       state at all, so a nullable column here would admit a row no extract and
+    --       no decision can produce, and would oblige every reader of a running
+    --       total to treat absence and zero as different when the baseline cannot
+    --       tell them apart. The default is what lets the purge and decision paths
+    --       add to a column without first testing it.
+    credit_limit          NUMERIC(11,2)  NOT NULL DEFAULT 0,
+    cash_limit            NUMERIC(11,2)  NOT NULL DEFAULT 0,
+    credit_balance        NUMERIC(11,2)  NOT NULL DEFAULT 0,
+    cash_balance          NUMERIC(11,2)  NOT NULL DEFAULT 0,
 
     -- WHY : Assumptions: the two counters are SMALLINT because L27-L28 declare
     --       them PIC S9(04) COMP, a signed two-byte binary halfword, and
@@ -198,11 +216,11 @@ CREATE TABLE pending_auth_summary (
     --       removed. All four counter and amount columns are therefore mutable
     --       running aggregates rather than immutable snapshots, and an
     --       unsigned target would be wrong the first time a total was reduced.
-    approved_auth_cnt     SMALLINT,
-    declined_auth_cnt     SMALLINT,
+    approved_auth_cnt     SMALLINT       NOT NULL DEFAULT 0,
+    declined_auth_cnt     SMALLINT       NOT NULL DEFAULT 0,
 
-    approved_auth_amt     NUMERIC(11,2),
-    declined_auth_amt     NUMERIC(11,2),
+    approved_auth_amt     NUMERIC(11,2)  NOT NULL DEFAULT 0,
+    declined_auth_amt     NUMERIC(11,2)  NOT NULL DEFAULT 0,
 
     -- WHY : Assumptions: FILLER PIC X(34) at cpy/CIPAUSMY.cpy L31 is DROPPED
     --       rather than stored. It pads the record to the fixed 100 bytes the
@@ -224,7 +242,30 @@ CREATE TABLE pending_auth_summary (
     --       than a second access path. One summary row per account is what
     --       makes the child rows below addressable by account plus key, so
     --       pending_auth_detail is the only composite key in this schema.
-    CONSTRAINT pk_pending_auth_summary PRIMARY KEY (account_id)
+    CONSTRAINT pk_pending_auth_summary PRIMARY KEY (account_id),
+
+    -- WHY : Assumptions: the two counters are range-checked to the four decimal
+    --       digits their picture declares. PA-APPROVED-AUTH-CNT and
+    --       PA-DECLINED-AUTH-CNT are PIC S9(04) COMP at cpy/CIPAUSMY.cpy L27-L28,
+    --       so the values the baseline can hold are -9999 through 9999 -- narrower
+    --       than the halfword SMALLINT that stores them, which reaches 32767. The
+    --       gap is not academic: these are running totals that the decision path
+    --       increments at cbl/COPAUA0C.cbl L814 and L821 and the purge path
+    --       decrements at cbl/CBPAUP0C.cbl L287-L293, so without a bound a busy
+    --       account would pass 9999 and store a count the baseline's own field
+    --       could not represent, and a reader narrowing it back to that field would
+    --       see the value wrap negative. Refusing the write is the only outcome that
+    --       neither loses the count nor stores an unrepresentable one, and it
+    --       refuses at the boundary the picture actually sets rather than at the
+    --       storage type's own limit.
+    -- WHY : Trade-offs: the check is stated here rather than left to the entity,
+    --       and the entity's increment is checked as well. Two paths write these
+    --       columns -- the decision listener and the ETL load -- so an invariant
+    --       asserted in one of them cannot bind the other, which is the same reason
+    --       the value-domain checks on the detail table below live in the schema.
+    CONSTRAINT ck_pending_auth_summary_counts
+        CHECK (approved_auth_cnt BETWEEN -9999 AND 9999
+               AND declined_auth_cnt BETWEEN -9999 AND 9999)
 );
 
 
@@ -301,16 +342,36 @@ CREATE TABLE pending_auth_detail (
     --       which is why they are X(06) wire fields. Only the complemented key
     --       above comes from the CICS clock at L857-L875. Externally supplied
     --       values are therefore what these two columns must tolerate.
-    auth_orig_date        DATE,
+    -- WHY : Refactoring Rationale: this column is CHAR(6) and NOT a DATE, and
+    --       the correction is recorded rather than made silently because an
+    --       earlier revision of this file declared it DATE. Three reasons settle
+    --       it. The migration's own type rule maps PIC X(n) to CHAR(n) and
+    --       admits a DATE only for a character date that is already
+    --       ISO-ORDERED, which YYMMDD is not; the plan states that rule for
+    --       PIC X(10) holding YYYY-MM-DD specifically. A two-digit year cannot
+    --       be widened without inventing a century pivot, and the baseline never
+    --       chose one -- it compares and displays the characters and never
+    --       converts them -- so a pivot here would be a target-only decision
+    --       silently changing what a stored value means. And an acquirer-supplied
+    --       field must tolerate a value that is blank or will not parse: the
+    --       baseline stores those characters unchanged, whereas a DATE column
+    --       forces every such row either to NULL, which loses data the baseline
+    --       keeps, or to a rejection the baseline never makes. Storing the six
+    --       characters preserves all three properties, and the entity mapping in
+    --       PendingAuthDetail carries the same six characters.
+    -- WHY : Assumptions: the six characters are stored YEAR-FIRST and merely
+    --       DISPLAYED month-first, per the slicing at cbl/COPAUS0C.cbl L531-L534
+    --       and cbl/COPAUS2C.cbl L103-L105. A reader who takes the stored order
+    --       for the displayed one produces dates that are wrong without looking
+    --       wrong, which is why the order is stated here beside the type.
+    auth_orig_date        CHAR(6),
 
-    -- WHY : Trade-offs: auth_orig_time stays CHAR(6) while auth_orig_date
-    --       becomes DATE, and the asymmetry is deliberate. Both are acquirer
-    --       supplied, but the date participates in the composed auth_ts of
-    --       auth_fraud below and in date-range reasoning, which a DATE
-    --       expresses and six characters do not; the time has no such role. A
-    --       TIME column was rejected because an acquirer value that will not
-    --       parse must still round-trip rather than fail the row, and the
-    --       baseline itself only ever slices these characters for display
+    -- WHY : Assumptions: auth_orig_time is CHAR(6) for the same reasons as
+    --       auth_orig_date immediately above, and the two are now symmetric
+    --       rather than one being a parsed type and the other characters. A TIME
+    --       column was rejected because an acquirer value that will not parse
+    --       must still round-trip rather than fail the row, and the baseline
+    --       itself only ever slices these characters for display
     --       (cbl/COPAUS0C.cbl L527-L529) rather than computing with them.
     auth_orig_time        CHAR(6),
 
@@ -331,8 +392,19 @@ CREATE TABLE pending_auth_detail (
     --       CHAR(6) even though the same field is numeric in the copybook.
     processing_code       CHAR(6),
 
-    transaction_amt       NUMERIC(12,2),
-    approved_amt          NUMERIC(12,2),
+    -- WHY : Assumptions: both amounts are NOT NULL because the baseline always
+    --       writes both when it inserts the segment: cbl/COPAUA0C.cbl L884 moves
+    --       the request amount into PA-TRANSACTION-AMT and its L900 moves the
+    --       reply's approved amount into PA-APPROVED-AMT, on the approve path and
+    --       the decline path alike -- a decline writes literal zero at L689
+    --       rather than leaving the field unset. A packed field has no null state
+    --       to carry, so a nullable column here would admit a row the baseline
+    --       cannot produce and would oblige every reader of the two running
+    --       totals to handle an absence that never occurs. The entity mappings in
+    --       PendingAuthDetail declare the same two columns non-nullable, so the
+    --       two statements of this invariant now agree.
+    transaction_amt       NUMERIC(12,2)  NOT NULL,
+    approved_amt          NUMERIC(12,2)  NOT NULL,
 
     -- WHY : Refactoring Rationale: the baseline names this field
     --       PA-MERCHANT-CATAGORY-CODE, at cpy/CIPAUDTY.cpy L36, transposing
@@ -385,9 +457,39 @@ CREATE TABLE pending_auth_detail (
     merchant_city         CHAR(13),
     merchant_state        CHAR(2),
     merchant_zip          CHAR(9),
-    transaction_id        CHAR(15),
 
-    match_status          CHAR(1),
+    -- WHY : Assumptions: transaction_id is NOT NULL, and the constraint below
+    --       makes (card_num, transaction_id) UNIQUE, because this pair is the
+    --       DURABLE IDEMPOTENCY KEY of the request path and a key that is not
+    --       enforced is not a key. The migration plan sets the queue's
+    --       deduplication identifier to the transaction identifier, which
+    --       suppresses a redelivery only inside the queue's own five-minute
+    --       window; a redelivery after that window arrives as a new message and
+    --       the consumer has to recognise it from stored state instead. It can
+    --       only do so if the state is unique, and it must be unique WITHIN A
+    --       CARD rather than globally: the identifier is a 15-character acquirer
+    --       value at cpy/CCPAURQY.cpy L36, so two acquirers may legitimately
+    --       issue the same one, and a globally unique constraint would reject the
+    --       second card's authorization outright while a lookup by identifier
+    --       alone could return the FIRST card's decision to the second card's
+    --       requester. Enforcing the pair rejects a true duplicate and admits a
+    --       coincidence, which is the distinction the wire contract requires.
+    -- WHY : Alternatives Considered: leaving the column nullable and relying on
+    --       the queue's deduplication alone. Rejected because the baseline's own
+    --       insert always writes the identifier -- cbl/COPAUA0C.cbl L887 moves
+    --       PA-RQ-TRANSACTION-ID into the segment -- so a null is a row the
+    --       baseline cannot produce, and because deduplication outside the
+    --       database cannot survive the redelivery window it is bounded by.
+    transaction_id        CHAR(15)       NOT NULL,
+
+    -- WHY : Assumptions: match_status is NOT NULL because the insert path always
+    --       sets it: cbl/COPAUA0C.cbl L902-L905 selects PA-MATCH-PENDING on an
+    --       approval and PA-MATCH-AUTH-DECLINED on a decline, with no third
+    --       branch that leaves it unset. The two remaining values of the domain,
+    --       'E' and 'M', are reached later by the purge and matching paths rather
+    --       than at insert. The entity mapping declares the same column
+    --       non-nullable, so the two statements agree.
+    match_status          CHAR(1)        NOT NULL,
     auth_fraud            CHAR(1),
 
     -- WHY : Assumptions: fraud_rpt_date is a real DATE parsed from the
@@ -403,16 +505,35 @@ CREATE TABLE pending_auth_detail (
     --       two representations of one date from diverging in the target the
     --       way they do in the baseline, where dcl/AUTHFRDS.dcl L84 declares
     --       the host variable X(10) against the copybook's X(08).
-    -- WHY : Assumptions: it is NULLABLE, and blank maps to NULL rather than to
-    --       a sentinel such as 0001-01-01. On the ordinary path the baseline
-    --       writes neither fraud field: the ELSE at cbl/COPAUS1C.cbl L349 fills
-    --       the whole screen field with a single separator, which is reachable
-    --       only when the flag is neither confirmed nor removed, so the stored
-    --       state is blank and there is no date at all. A blank X(08) cannot be
-    --       held in a DATE, and a sentinel would be indistinguishable from a
-    --       real report date in every predicate. Db2 agrees: L25 carries no NOT
-    --       NULL, and only CARD_NUM at L2 and AUTH_TS at L3 do.
-    fraud_rpt_date        DATE,
+    -- WHY : Refactoring Rationale: THIS column is CHAR(8) and holds the eight
+    --       characters themselves, and the correction is recorded rather than
+    --       made silently because an earlier revision declared it DATE. The
+    --       characters are MM/DD/YY, which is not ISO-ordered, so the migration's
+    --       type rule maps them to CHAR(8) rather than to a DATE; widening the
+    --       two-digit year would require a century pivot the baseline never chose;
+    --       and the baseline writes SPACES into this field outright, at
+    --       cbl/COPAUA0C.cbl L908-L909, which a DATE cannot hold at all. Storing
+    --       the characters keeps every state the segment can be in, including that
+    --       blank one, and the entity mapping in PendingAuthDetail carries the
+    --       same eight characters.
+    -- WHY : Assumptions: it is NULLABLE as well as blank-tolerant. On the ordinary
+    --       path the baseline writes neither fraud field with a value: the ELSE at
+    --       cbl/COPAUS1C.cbl L349 fills the whole screen field with a single
+    --       separator, reachable exactly when the flag is neither confirmed nor
+    --       removed, so the stored state is blank and there is no report date. A
+    --       row loaded from an extract that carried no value at all is NULL here,
+    --       and a row the baseline blanked is eight spaces; both are ordinary and
+    --       neither is invented. Db2 agrees that the value is optional: L25 of
+    --       ddl/AUTHFRDS.ddl carries no NOT NULL, and only CARD_NUM at L2 and
+    --       AUTH_TS at L3 do.
+    -- WHY : Trade-offs: the fraud table below keeps a real DATE for its own
+    --       fraud_rpt_date, because that table is migrated from ddl/AUTHFRDS.ddl
+    --       L25, where the baseline itself declares the column DATE. The two
+    --       representations of one value therefore still differ in the target
+    --       exactly as they differ in the baseline, and the conversion happens at
+    --       the one boundary that writes the relational row rather than being
+    --       forced onto every segment row that has no report date at all.
+    fraud_rpt_date        CHAR(8),
 
     -- WHY : Assumptions: FILLER PIC X(17) at cpy/CIPAUDTY.cpy L54 is DROPPED,
     --       for the same reason as the summary's FILLER above: it pads the
@@ -430,15 +551,24 @@ CREATE TABLE pending_auth_detail (
     --       cbl/COPAUS0C.cbl L544-L545, which carries PA-AUTHORIZATION-KEY out
     --       to the list screen as the token identifying a selected row.
     -- WHY : Trade-offs: no separate descending index is declared for the
-    --       most-recent-first read of one account's authorizations, even though
-    --       that is the order the list screen presents. This key's own btree
-    --       already answers it: with account_id fixed by equality, PostgreSQL
-    --       scans the remaining two columns backward to yield auth_date and
-    --       auth_time descending without a sort. Declaring a second index would
-    --       add an object with no access path of its own to serve. The fraud
-    --       table below is the opposite case and does declare one, for the
-    --       reason given there.
+    --       most-recent-first read of one account's authorizations BY ACCOUNT,
+    --       even though that is the order the list screen presents. This key's own
+    --       btree already answers that one: with account_id fixed by equality,
+    --       PostgreSQL scans the remaining two columns backward to yield auth_date
+    --       and auth_time descending without a sort. The two lookups that do NOT
+    --       lead with account_id are served by the two indexes declared after this
+    --       table instead, and the reason each exists is given there.
     CONSTRAINT pk_pending_auth_detail PRIMARY KEY (account_id, auth_date, auth_time),
+
+    -- WHY : Assumptions: this is the durable idempotency key of the request path,
+    --       enforced rather than assumed, for the reasons recorded on
+    --       transaction_id above. It is (card_num, transaction_id) and not
+    --       transaction_id alone because the identifier is an acquirer value that
+    --       two acquirers may coincide on, and not a wider tuple because the
+    --       consumer must be able to recognise a redelivery from the two values a
+    --       request carries and nothing else.
+    CONSTRAINT uq_pending_auth_detail_card_transaction
+        UNIQUE (card_num, transaction_id),
 
     -- WHY : Assumptions: the four accepted values are exactly the 88-level
     --       condition names at cpy/CIPAUDTY.cpy L46-L49 -- PA-MATCH-PENDING
@@ -577,8 +707,19 @@ CREATE TABLE auth_fraud (
     auth_resp_code        CHAR(2),
     auth_resp_reason      CHAR(4),
     processing_code       CHAR(6),
-    transaction_amt       NUMERIC(12,2),
-    approved_amt          NUMERIC(12,2),
+    -- WHY : Assumptions: both amounts are NOT NULL because the baseline always
+    --       writes both when it inserts the segment: cbl/COPAUA0C.cbl L884 moves
+    --       the request amount into PA-TRANSACTION-AMT and its L900 moves the
+    --       reply's approved amount into PA-APPROVED-AMT, on the approve path and
+    --       the decline path alike -- a decline writes literal zero at L689
+    --       rather than leaving the field unset. A packed field has no null state
+    --       to carry, so a nullable column here would admit a row the baseline
+    --       cannot produce and would oblige every reader of the two running
+    --       totals to handle an absence that never occurs. The entity mappings in
+    --       PendingAuthDetail declare the same two columns non-nullable, so the
+    --       two statements of this invariant now agree.
+    transaction_amt       NUMERIC(12,2)  NOT NULL,
+    approved_amt          NUMERIC(12,2)  NOT NULL,
     merchant_category_code CHAR(4),
     acqr_country_code     CHAR(3),
     pos_entry_mode        SMALLINT,
@@ -726,6 +867,26 @@ CREATE TABLE auth_reply_outbox (
     --       destination. Holding it here keeps the publisher indifferent to who
     --       asked, and keeps a reply routable even if configuration changes
     --       between the decision and the drain.
+    -- WHY : Assumptions: the value stored here is an ALLOWLISTED destination and
+    --       never an arbitrary address a requester supplied. The nomination arrives
+    --       on a message attribute, so it is attacker-influenced in a way the
+    --       baseline's own queue name was not, and an unchecked address would let a
+    --       requester aim a reply at any queue the task role can write to, or at a
+    --       nonexistent one whose repeated publication failures consume the
+    --       publisher's whole batch capacity. AuthorizationRequestListener therefore
+    --       admits only a destination that matches the configured allowlist exactly,
+    --       before the decision and this row are committed, and a request naming
+    --       anything else is answered by no reply at all rather than by a reply sent
+    --       somewhere unintended.
+    -- WHY : Alternatives Considered: enforcing the allowlist as a CHECK constraint
+    --       here. Rejected because the admissible set is per-environment
+    --       configuration -- the queue URLs differ between the development and
+    --       production accounts, and the local emulator's URLs are neither -- so a
+    --       constraint would either be wrong in one environment or would have to be
+    --       rewritten per environment by a migration, which is exactly the kind of
+    --       environment-dependent DDL that makes one schema history unusable across
+    --       accounts. The width is bounded here instead, and membership is enforced
+    --       where the configuration lives.
     reply_to_queue_url    VARCHAR(1024)  NOT NULL,
 
     -- WHY : Assumptions: the correlation identity is echoed from the request
@@ -751,11 +912,24 @@ CREATE TABLE auth_reply_outbox (
     --       publication time would create a second place for that contract to be
     --       got wrong. The reply is the six fields of cpy/CCPAURLY.cpy L19-L24,
     --       whose declared widths sum to 57 characters -- 16, 15, 6, 2, 4 and a
-    --       14-character signed edited amount -- reaching 62 on the wire once the
-    --       five separators are counted. TEXT rather than a bounded CHAR because
-    --       the two figures are different things and a column sized to the width
-    --       sum would truncate the separated form; the request payload, 18 fields
-    --       summing to 153 and 170 on the wire, is not stored here at all.
+    --       14-character signed edited amount -- reaching 63 on the wire.
+    -- WHY : Refactoring Rationale: 63 and not 62, and the request is 169 and not
+    --       170; both figures are corrected here rather than left as an earlier
+    --       revision wrote them, because the executable contract disagreed with the
+    --       prose and the executable contract is what ships. The reply carries SIX
+    --       separators for six fields, not five: the reference program's STRING at
+    --       cbl/COPAUA0C.cbl L722-L730 emits a comma after the sixth field as well
+    --       as between the pairs, so 57 + 6 = 63, which is
+    --       CsvAuthCodec.REPLY_WIRE_LENGTH. The request has no trailing separator
+    --       and its ninth field is emitted at 13 characters rather than the
+    --       copybook's 14 -- because the reference UNSTRING receives that token
+    --       into WS-TRANSACTION-AMT-AN PIC X(13) at cbl/COPAUA0C.cbl L63 and L364,
+    --       so a fourteenth character would be discarded -- giving 18 fields
+    --       summing to 152 and 17 separators, 169 in total, which is
+    --       CsvAuthCodec.REQUEST_WIRE_LENGTH. TEXT rather than a bounded CHAR
+    --       because the width sum and the wire length are different things and a
+    --       column sized to the sum would truncate the separated form; the request
+    --       payload is not stored here at all.
     payload               TEXT           NOT NULL,
     content_type          VARCHAR(64)    NOT NULL DEFAULT 'text/csv',
 
@@ -789,6 +963,32 @@ CREATE TABLE auth_reply_outbox (
     --       into a lost reply, which is the failure this table was added to
     --       remove, so the duplicate is the safer of the two.
     attempts              SMALLINT       NOT NULL DEFAULT 0,
+
+    -- WHY : Assumptions: this column holds REDACTED, metadata-only diagnostic
+    --       text, and the constraint is on what the writer puts in rather than on
+    --       anything the column can enforce. The row it belongs to answers an
+    --       authorization decision, so the payload in scope when a publication
+    --       fails carries a full sixteen-digit card number; a naive handler that
+    --       stored the exception's message, or the message of a codec failure,
+    --       would copy that number into a durable table that outlives the reply
+    --       and is read by anyone diagnosing the queue. What belongs here is the
+    --       SHAPE of the failure -- which operation, which field, which transport
+    --       error, how the attempt ended -- and never the value that failed.
+    --       Assumptions: this is the same boundary the shared codecs already
+    --       enforce on the way in, so the two agree rather than each deciding.
+    --       common-lib's FixedWidthCodec and CsvAuthCodec both build their field
+    --       failures from geometry alone -- the field name, its offset and length,
+    --       a scale, a digit count, at most the single offending character -- and
+    --       the ETL's zoned decoder applies the same rule when it renders a byte
+    --       it cannot decode. A diagnostic assembled from those carries nothing
+    --       that needs redacting, which is why the discipline is stated here as
+    --       the column's contract rather than left to each writer to rediscover.
+    --       Trade-offs: 256 characters is deliberately narrow. It is ample for a
+    --       redacted shape and too small for a stack trace or a serialised
+    --       payload, so the width itself discourages the failure mode above
+    --       instead of merely documenting it; the accepted cost is that a genuinely
+    --       long transport error is truncated, and the correlation identifier on
+    --       the same row is the key to the full operational record.
     last_error            VARCHAR(256),
 
     CONSTRAINT pk_auth_reply_outbox PRIMARY KEY (outbox_id)
@@ -798,11 +998,21 @@ CREATE TABLE auth_reply_outbox (
 --       issues one query -- the oldest rows not yet published -- and because
 --       publication sets a column instead of deleting the row, the published set
 --       grows without bound while the unpublished set stays small and bounded by
---       the drain interval. A full index on created_at would answer the same
---       query while growing with the table and consisting almost entirely of
---       rows the query can never want. The cost is that this index serves only
---       predicates carrying the same IS NULL test, which is the sole access path
---       this table has.
+--       the drain interval. A full index would answer the same query while growing
+--       with the table and consisting almost entirely of rows the query can never
+--       want. The cost is that this index serves only predicates carrying the same
+--       IS NULL test, which is the sole access path this table has.
+-- WHY : Refactoring Rationale: the indexed column is OUTBOX_ID, not created_at,
+--       and the correction is recorded rather than made silently because an
+--       earlier revision indexed created_at. The publisher's claim statement in
+--       OutboxRepository orders by outbox_id and nothing else, so an index on
+--       created_at did not support the ordered scan its own comment claimed to
+--       support and the claim would have been paid for with a sort. Ordering by
+--       the identity column is also the stronger contract of the two: it is
+--       generated strictly increasing and is unique, so it totally orders the
+--       rows, whereas created_at defaults to the statement timestamp and two rows
+--       committed in one transaction share it -- leaving their relative order
+--       undefined and a paged drain able to repeat or skip one at a page boundary.
 CREATE INDEX idx_auth_reply_outbox_unpublished
-    ON auth_reply_outbox (created_at)
+    ON auth_reply_outbox (outbox_id)
     WHERE published_at IS NULL;

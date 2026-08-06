@@ -1,0 +1,108 @@
+# =============================================================================
+# data-migration/.dockerignore
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Excludes paths from the build context of data-migration/Dockerfile. That
+#   image declares THIS directory as its context -- its own header states the
+#   build command is run from here -- so the daemon resolves this file from here
+#   and the repository-root .dockerignore has no effect on it. The two files are
+#   siblings in purpose and neither substitutes for the other.
+#
+# Parameters (the inputs this file governs):
+#   One input: the set of paths the daemon receives when a build is started from
+#   data-migration/. Patterns are matched relative to this directory. A pattern
+#   removes a path from the context entirely, so a removed path cannot be reached
+#   by any COPY instruction and cannot appear in any layer.
+#
+# Return values:
+#   None directly. Its effect is observable as the "transferring context" size a
+#   build reports and as the absence of the excluded paths from every layer.
+#
+# Exceptions or errors:
+#   Excluding something the Dockerfile copies fails the build immediately on a
+#   missing path. The four things it copies are requirements.txt,
+#   requirements-build.txt, pyproject.toml, src/ and sql/, and none of them is
+#   matched by any pattern below.
+#
+# Governing convention:
+#   docs/CODE_DOCUMENTATION_STANDARD.md
+#
+# WHY (non-obvious design decisions):
+#   1. Assumptions: this context is already narrow, so the exclusions here are
+#      about correctness rather than size. The directory holds no build output of
+#      its own to shadow, but it DOES accumulate interpreter caches next to the
+#      source the image installs, and a __pycache__ copied into the builder holds
+#      bytecode compiled by whichever interpreter the host ran. The image pins its
+#      own interpreter precisely so that the codecs behave identically to the
+#      reference test harness; admitting host-compiled bytecode would undermine
+#      the one property the pin exists for.
+#   2. Refactoring Rationale: the test tree is excluded even though it is
+#      committed and useful, because the image is a runtime artifact and the
+#      Dockerfile copies only the package and the schema. Leaving tests/ in the
+#      context would transfer fixtures the image never installs, and a fixture is
+#      a record layout that resembles production data closely enough that its
+#      presence in an image layer would have to be reasoned about. Excluding it
+#      removes the question.
+#   3. Trade-offs: requirements-dev.txt is excluded while requirements.txt and
+#      requirements-build.txt are not. The Dockerfile installs the latter two by
+#      name and never the first, so excluding it costs nothing and states that the
+#      development closure is not an image input -- which the Dockerfile's own
+#      comment about a separate never-copied closure already asserts and this
+#      makes true by construction rather than by discipline.
+# =============================================================================
+
+# WHY : Assumptions: local environment files are excluded by pattern rather than
+#       by name, because the risk is the file nobody remembered -- an untracked
+#       .env holding a real database password sitting beside the package that
+#       connects with one. No .env is committed here and none is copied; the
+#       pattern exists so that a developer's own file cannot become an image
+#       input.
+.env
+.env.*
+
+# WHY : Assumptions: interpreter and tool caches are machine-local and can shadow
+#       what the image installs, for the reason recorded in item 1 above. An
+#       editable install performed on the host also leaves path-bearing metadata
+#       behind, which is broken inside a container in a way that is confusing to
+#       diagnose.
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+**/.venv
+*.egg-info
+**/*.egg-info
+.pytest_cache
+**/.pytest_cache
+.ruff_cache
+**/.ruff_cache
+.mypy_cache
+**/.mypy_cache
+.coverage
+htmlcov
+
+# WHY : Refactoring Rationale: the test tree and the development closure are
+#       excluded because the image installs neither, for the reasons recorded in
+#       items 2 and 3 above. Nothing in the Dockerfile reaches for either, so a
+#       build cannot break on their absence -- and if a future edit needs one, the
+#       correct response is to remove the pattern deliberately rather than to
+#       discover it had been available all along.
+tests
+requirements-dev.txt
+
+# WHY : Trade-offs: temporary validation artifacts are excluded by their agreed
+#       prefix. They are never committed, so this rule only matters for a build
+#       run from a dirty tree -- which is precisely the situation in which an
+#       unexpected file reaching a layer would be hardest to notice.
+blitzy_adhoc_test_*
+**/blitzy_adhoc_test_*
+
+# WHY : Assumptions: editor and operating-system metadata is excluded last
+#       because it is the least consequential of these categories, not because it
+#       is harmless: an editor directory can carry local tool settings and
+#       occasionally credentials for a language server or a database client.
+.idea
+.vscode
+*.swp
+.DS_Store

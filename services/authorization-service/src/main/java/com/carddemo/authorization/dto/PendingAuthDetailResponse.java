@@ -257,9 +257,10 @@ import jakarta.validation.constraints.Size;
  *     {@code '00'} at {@code cbl/COPAUS1C.cbl} L311 and moving {@code A} at L312 or {@code D} at
  *     L315
  * @param authResponseReason the response reason composed as a four-character code, a separator and
- *     a description, from {@code AUTHRSNI} at {@code cpy-bms/COPAU01.cpy} L84; 21 positions, being
- *     {@code PA-AUTH-RESP-REASON PIC X(04)} at {@code cpy/CIPAUDTY.cpy} L32 plus one separator
- *     plus the whole of {@code DECL-DESC PIC X(16)} at {@code cbl/COPAUS1C.cbl} L73
+ *     a description, from {@code AUTHRSNI PIC X(20)} at {@code cpy-bms/COPAU01.cpy} L84; 20 positions,
+ *     being {@code PA-AUTH-RESP-REASON PIC X(04)} at {@code cpy/CIPAUDTY.cpy} L32, one separator, and
+ *     the first 15 characters of {@code DECL-DESC PIC X(16)} at {@code cbl/COPAUS1C.cbl} L73 -- the
+ *     sixteenth is truncated by the receiving field, as it is on the screen
  * @param processingCode the processing code, from {@code AUTHCDI} at
  *     {@code cpy-bms/COPAU01.cpy} L90; 6 digits, from {@code PA-PROCESSING-CODE PIC 9(06)} at
  *     {@code cpy/CIPAUDTY.cpy} L33, which {@code cbl/COPAUS1C.cbl} L331 moves to the screen; the
@@ -355,9 +356,19 @@ public record PendingAuthDetailResponse(
         //       moves the description from position 6 onward, with L321 to L323 writing the
         //       '9999' and 'ERROR' pair when the table lookup finds no entry. Splitting it would
         //       invent two fields where the screen carried one, and the '9999' fallback has no
-        //       separate code field to live in. The X(20) map leaves only 15 positions for the
-        //       X(16) description; retaining the whole source description makes the target width
-        //       21 and records that one-character divergence instead of repeating the truncation.
+        //       separate code field to live in.
+        // WHY : Refactoring Rationale: the width is 20 and an earlier revision made it 21, on the
+        //       stated ground that retaining the whole 16-character description was worth one
+        //       character of divergence. That reasoning inverted the contract. AUTHRSNO is X(20) at
+        //       cpy-bms/COPAU01.cpy L248 -- corroborated by AUTHRSNI X(20) at L84 -- and the MOVE at
+        //       cbl/COPAUS1C.cbl L327 targets AUTHRSNO(6:), a reference-modified receiver of exactly
+        //       15 positions, so COBOL truncates the sixteenth character on the way in. The
+        //       twenty-first character therefore does not exist anywhere in the baseline: not on the
+        //       screen, not in the receiving field and not in any stored value. Carrying it made the
+        //       payload wider than the only observable form of this value, and it would have let a
+        //       projection publish a character the screen it mirrors cannot show. The width and the
+        //       truncation it reproduces are registered as D-AUTH-REASON-WIDTH in
+        //       docs/architecture/cobol-to-service-traceability.md.
         @Size(max = AUTH_RESPONSE_REASON_WIDTH) String authResponseReason,
         @Size(max = PROCESSING_CODE_WIDTH) @Pattern(regexp = DIGITS_ONLY) String processingCode,
         Money approvedAmount,
@@ -460,11 +471,99 @@ public record PendingAuthDetailResponse(
     /**
      * Maximum width of the composed authorization-response reason.
      *
-     * <p>Assumptions: {@code PA-AUTH-RESP-REASON PIC X(04)} at {@code cpy/CIPAUDTY.cpy} L32,
-     * the separator written at {@code cbl/COPAUS1C.cbl} L326, and
-     * {@code DECL-DESC PIC X(16)} at L73 account for 4 + 1 + 16 positions.
+     * <p>Assumptions: 20 is the observable width, and it is read from the map rather than summed from
+     * the sources. {@code AUTHRSNI PIC X(20)} at {@code cpy-bms/COPAU01.cpy} L84 and
+     * {@code AUTHRSNO PIC X(20)} at L248 declare it twice over, and the composition fills exactly
+     * those positions: {@code PA-AUTH-RESP-REASON PIC X(04)} at {@code cpy/CIPAUDTY.cpy} L32 into
+     * positions 1 to 4, the separator written at {@code cbl/COPAUS1C.cbl} L326 into position 5, and
+     * {@code DECL-DESC PIC X(16)} at L73 into {@code AUTHRSNO(6:)} at L327, which is 15 positions --
+     * so 4 + 1 + 15, with the description's sixteenth character truncated by the receiver.
+     *
+     * <p>Assumptions: the no-entry path fills the same 20 positions and confirms the reading. When the
+     * table search finds no matching code, L321 to L323 write {@code '9999'}, the separator and
+     * {@code 'ERROR'}, which is 4 + 1 + 5 characters into the same field.
      */
-    private static final int AUTH_RESPONSE_REASON_WIDTH = 21;
+    private static final int AUTH_RESPONSE_REASON_WIDTH = 20;
+
+    /**
+     * The positions the reason code occupies at the start of the composed reason.
+     */
+    private static final int REASON_CODE_WIDTH = 4;
+
+    /**
+     * The separator the reference program writes into position five of the composed reason.
+     */
+    private static final char REASON_SEPARATOR = '-';
+
+    /**
+     * The positions the description occupies, which is what remains after the code and the separator.
+     */
+    private static final int REASON_DESCRIPTION_WIDTH =
+            AUTH_RESPONSE_REASON_WIDTH - REASON_CODE_WIDTH - 1;
+
+    /**
+     * Composes the authorization-response reason exactly as the reference program's three moves do.
+     *
+     * <p><b>Purpose.</b> This is the executable form of the composition at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl} lines 324 to 327 and of its no-entry
+     * counterpart at lines 320 to 322. It exists so that the truncation those moves perform is
+     * reproduced by one function rather than restated by each caller that assembles this component.</p>
+     *
+     * <p>Assumptions: the truncation is the point, not a side effect. The receiving field is 20
+     * positions and the description arrives from a 16-character table entry into
+     * {@code AUTHRSNO(6:)}, a reference-modified receiver of 15 -- so COBOL discards the sixteenth
+     * character. A composer that kept it would produce a value one character wider than the screen and
+     * one character wider than the field this response mirrors.</p>
+     *
+     * <p>Assumptions: both arguments are padded as well as truncated, so the result is ALWAYS exactly
+     * 20 characters. A COBOL {@code MOVE} into an alphanumeric field space-fills what the source does
+     * not reach, so a three-character code lands in positions 1 to 3 with position 4 blank and the
+     * separator still in position 5. Trimming instead would shift the separator, which is the one
+     * position a reader uses to tell the code from the description.</p>
+     *
+     * <p>Alternatives Considered: returning the code and the description as two values and letting the
+     * caller join them. Rejected because the baseline composes them in place and the no-entry path has
+     * no separate code field at all -- it writes the literal {@code '9999'} into the same positions --
+     * so two values would invent a structure the screen does not have and would leave the truncation
+     * rule with no home.</p>
+     *
+     * @param reasonCode the four-character reason, {@code PA-AUTH-RESP-REASON} at
+     *     {@code cpy/CIPAUDTY.cpy} line 32, or the literal {@code '9999'} on the no-entry path; must
+     *     not be {@code null}
+     * @param description the reason description, {@code DECL-DESC PIC X(16)} at
+     *     {@code cbl/COPAUS1C.cbl} line 73, or the literal {@code 'ERROR'} on the no-entry path; must
+     *     not be {@code null}
+     * @return the composed reason, always exactly {@code AUTH_RESPONSE_REASON_WIDTH} characters
+     * @throws NullPointerException if {@code reasonCode} or {@code description} is {@code null}
+     */
+    public static String composeAuthResponseReason(String reasonCode, String description) {
+        if (reasonCode == null) {
+            throw new NullPointerException("reasonCode must not be null");
+        }
+        if (description == null) {
+            throw new NullPointerException("description must not be null");
+        }
+        return fitToWidth(reasonCode, REASON_CODE_WIDTH) + REASON_SEPARATOR
+                + fitToWidth(description, REASON_DESCRIPTION_WIDTH);
+    }
+
+    /**
+     * Truncates or space-pads one value to a fixed number of positions.
+     *
+     * <p>Assumptions: this is the alphanumeric {@code MOVE} rule and nothing more -- keep the leftmost
+     * positions, pad on the right with spaces. It is written once here rather than twice in the
+     * composer above so that the code and the description cannot come to be fitted by two rules.</p>
+     *
+     * @param value the value to fit; must not be {@code null}
+     * @param width the number of positions the receiving field declares
+     * @return the value in exactly {@code width} characters
+     */
+    private static String fitToWidth(String value, int width) {
+        if (value.length() >= width) {
+            return value.substring(0, width);
+        }
+        return value + " ".repeat(width - value.length());
+    }
 
     /**
      * Maximum width of the processing code.

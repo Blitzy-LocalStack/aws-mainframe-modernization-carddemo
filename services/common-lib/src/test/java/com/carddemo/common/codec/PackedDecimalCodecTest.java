@@ -506,10 +506,12 @@ class PackedDecimalCodecTest {
     /**
      * Packed negative zero decodes as zero and re-encodes with the canonical positive sign nibble.
      *
-     * <p>Assumptions: the exact decimal type carries no negative-zero state, so preserving the
-     * terminal {@code D} is impossible after decode. This is the one documented exception to
-     * byte-identical packed round trips; every magnitude nibble remains unchanged and only
-     * {@code D} becomes {@code C}.</p>
+     * <p>Assumptions: the exact decimal type carries no negative-zero state, so a value ALONE cannot
+     * preserve the terminal {@code D}. This is the one documented exception to byte-identical round
+     * trips on the plain pair of operations; every magnitude nibble remains unchanged and only
+     * {@code D} becomes {@code C}. It is registered under identifier D-SIGNED-ZERO-PACKED in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, and the sign-preserving pair
+     * exercised below has no exception at all.</p>
      */
     @Test
     void packedNegativeZeroCanonicalizesToPositiveZero() {
@@ -521,6 +523,84 @@ class PackedDecimalCodecTest {
         assertEquals(new BigDecimal("0.00"), decoded);
         assertEquals("0000000000000C", reencoded);
         assertThat(reencoded).isNotEqualTo(negativeZero);
+    }
+
+    /**
+     * The sign-preserving pair reproduces a packed negative zero byte for byte.
+     *
+     * <p>Assumptions: the sign nibble is returned beside the value, so the {@code D} survives a decode
+     * that the value alone cannot carry it through, and the encoder writes back the nibble it was given.
+     * Both zero nibbles are asserted, because an implementation that always wrote {@code D} for a zero
+     * would satisfy the negative case on its own.</p>
+     */
+    @Test
+    void signPreservingPackedPairReproducesBothZeroSignNibbles() {
+        String negativeZero = "0000000000000D";
+        String positiveZero = "0000000000000C";
+
+        PackedDecimalCodec.SignedPacked negative = PackedDecimalCodec.decodePackedPreservingSign(
+                fromHex(negativeZero), 0, 10, 2, true);
+        PackedDecimalCodec.SignedPacked positive = PackedDecimalCodec.decodePackedPreservingSign(
+                fromHex(positiveZero), 0, 10, 2, true);
+
+        assertEquals(new BigDecimal("0.00"), negative.value());
+        assertEquals(0x0D, negative.signNibble());
+        assertEquals(new BigDecimal("0.00"), positive.value());
+        assertEquals(0x0C, positive.signNibble());
+
+        assertEquals(negativeZero,
+                hex(PackedDecimalCodec.encodePackedPreservingSign(negative, 10, 2, true)));
+        assertEquals(positiveZero,
+                hex(PackedDecimalCodec.encodePackedPreservingSign(positive, 10, 2, true)));
+    }
+
+    /**
+     * The sign-preserving pair reproduces a non-zero packed value and its unsigned counterpart.
+     *
+     * <p>Assumptions: two vectors are used rather than one because the three nibbles this codec emits
+     * split into two cases that a single vector cannot cover: a signed field, whose nibble agrees with
+     * the value's own sign, and a field declared without the leading {@code S}, whose {@code F} agrees
+     * with no sign at all and would be lost by a boolean sign flag.</p>
+     */
+    @Test
+    void signPreservingPackedPairReproducesSignedAndUnsignedFields() {
+        String signedNegative = "0000000158000D";
+        String unsigned = "000F";
+
+        PackedDecimalCodec.SignedPacked negative = PackedDecimalCodec.decodePackedPreservingSign(
+                fromHex(signedNegative), 0, 10, 2, true);
+        PackedDecimalCodec.SignedPacked plain = PackedDecimalCodec.decodePackedPreservingSign(
+                fromHex(unsigned), 0, 3, 0, false);
+
+        assertEquals(new BigDecimal("-1580.00"), negative.value());
+        assertEquals(0x0D, negative.signNibble());
+        assertEquals(new BigDecimal("0"), plain.value());
+        assertEquals(0x0F, plain.signNibble());
+
+        assertEquals(signedNegative,
+                hex(PackedDecimalCodec.encodePackedPreservingSign(negative, 10, 2, true)));
+        assertEquals(unsigned,
+                hex(PackedDecimalCodec.encodePackedPreservingSign(plain, 3, 0, false)));
+    }
+
+    /**
+     * A pair whose nibble contradicts a non-zero value, or is not one this codec emits, is refused.
+     *
+     * <p>Assumptions: both refusals are asserted together because they defend the same property from
+     * two directions -- that every pair this record admits is one the encoder can lay down and the
+     * decoder can read back to the same value. The alternate nibble {@code 0x0B} is used for the second
+     * case because it is a real sign nibble that this codec deliberately does not accept, so it proves
+     * the check tests membership rather than merely a numeric range.</p>
+     */
+    @Test
+    void signPreservingPackedPairRefusesAnInadmissibleNibble() {
+        PackedDecimalException contradiction = assertThrows(PackedDecimalException.class,
+                () -> new PackedDecimalCodec.SignedPacked(new BigDecimal("1.00"), 0x0D));
+        PackedDecimalException notEmitted = assertThrows(PackedDecimalException.class,
+                () -> new PackedDecimalCodec.SignedPacked(BigDecimal.ZERO, 0x0B));
+
+        assertThat(contradiction).hasMessageContaining("contradicts the value's own sign");
+        assertThat(notEmitted).hasMessageContaining("0xC, 0xD or 0xF");
     }
 
     /**
@@ -913,21 +993,62 @@ class PackedDecimalCodecTest {
      * <p>Assumptions: the five branches beginning at lines 24, 47, 65, 84 and 93 alias one
      * {@code PIC X(460)} payload; they are alternatives and never sequential fields. The 40-byte
      * header is added to exactly one payload to obtain the documented 500-byte record.</p>
+     *
+     * <p>Refactoring Rationale: every computational term below is now a call into the unit under test
+     * rather than the byte count it yields. In its earlier form this test summed literals only, so no
+     * production symbol took part in it and it could not fail for any reason connected to the codec --
+     * a width helper that began returning six bytes for {@code S9(10)V99 COMP-3} would leave these sums
+     * untouched and this test green. Substituting the calls makes each sum a derivation FROM the code
+     * under test, so the copybook total is what verifies the helper rather than merely accompanying
+     * it. The character and display terms stay literal deliberately: their width is their declared
+     * character count, and this class asserts elsewhere that the width helper refuses to derive
+     * one.</p>
      */
     @Test
     void exportRedefinitionsCloseIndividuallyWithoutAccumulating() {
-        int customer = 4 + 25 + 25 + 25 + 150 + 2 + 3 + 10 + 30 + 9 + 20 + 10 + 10 + 1 + 2 + 134;
-        int account = 11 + 1 + 7 + 12 + 7 + 10 + 10 + 10 + 12 + 8 + 10 + 10 + 352;
-        int transaction = 16 + 2 + 4 + 10 + 100 + 6 + 4 + 50 + 50 + 10 + 16 + 26 + 26 + 140;
-        int cardCrossReference = 16 + 9 + 8 + 427;
-        int card = 16 + 8 + 2 + 50 + 10 + 1 + 373;
-        int header = 1 + 26 + 4 + 4 + 5;
+        // WHY : Assumptions: each named width states the picture it comes from, so a reader can check a
+        //       term against CVEXPORT.cpy without counting bytes. EXP-CUST-FICO-CREDIT-SCORE at line 41
+        //       is PIC 9(03) COMP-3; EXP-ACCT-CURR-BAL at line 50 and EXP-ACCT-CASH-CREDIT-LIMIT at
+        //       line 52 are PIC S9(10)V99 COMP-3; EXP-TRAN-AMT at line 71 is PIC S9(09)V99 COMP-3.
+        int ficoPacked = PackedDecimalCodec.packedWidth(3, 0);
+        int accountMoneyPacked = PackedDecimalCodec.packedWidth(10, 2);
+        int transactionMoneyPacked = PackedDecimalCodec.packedWidth(9, 2);
+
+        // WHY : Assumptions: the binary terms are EXPORT-SEQUENCE-NUM at line 16 and
+        //       EXP-CUST-ID at line 25 and EXP-TRAN-MERCHANT-ID at line 72, all PIC 9(09) COMP;
+        //       EXP-XREF-ACCT-ID at line 87 and EXP-CARD-ACCT-ID at line 95, both PIC 9(11) COMP;
+        //       EXP-CARD-CVV-CD at line 96, PIC 9(03) COMP; and EXP-ACCT-CURR-CYC-DEBIT at line 57,
+        //       PIC S9(10)V99 COMP. Their widths come from the halfword, fullword and doubleword tiers
+        //       rather than from a digit count, which is why they are separate calls and not one.
+        int nineDigitBinary = PackedDecimalCodec.binaryWidth(9, 0);
+        int elevenDigitBinary = PackedDecimalCodec.binaryWidth(11, 0);
+        int cvvBinary = PackedDecimalCodec.binaryWidth(3, 0);
+        int accountMoneyBinary = PackedDecimalCodec.binaryWidth(10, 2);
+
+        // WHY : Assumptions: the zoned terms are EXP-ACCT-CREDIT-LIMIT at line 51 and
+        //       EXP-ACCT-CURR-CYC-CREDIT at line 56, both PIC S9(10)V99 with no COMP clause, so they
+        //       occupy display bytes. Taking them from the zoned helper rather than writing twelve is
+        //       what makes the account branch a comparison of THREE regimes -- packed, binary and
+        //       zoned -- against one copybook total, which is the property that catches a width helper
+        //       returning another regime's answer.
+        int accountMoneyZoned = ZonedDecimalCodec.widthOf(10, 2);
+
+        int customer = nineDigitBinary + 25 + 25 + 25 + 150 + 2 + 3 + 10 + 30 + 9 + 20 + 10 + 10 + 1
+                + ficoPacked + 134;
+        int account = 11 + 1 + accountMoneyPacked + accountMoneyZoned + accountMoneyPacked + 10 + 10
+                + 10 + accountMoneyZoned + accountMoneyBinary + 10 + 10 + 352;
+        int transaction = 16 + 2 + 4 + 10 + 100 + transactionMoneyPacked + nineDigitBinary + 50 + 50
+                + 10 + 16 + 26 + 26 + 140;
+        int cardCrossReference = 16 + 9 + elevenDigitBinary + 427;
+        int card = 16 + elevenDigitBinary + cvvBinary + 50 + 10 + 1 + 373;
+        int header = 1 + 26 + nineDigitBinary + 4 + 5;
 
         assertEquals(460, customer);
         assertEquals(460, account);
         assertEquals(460, transaction);
         assertEquals(460, cardCrossReference);
         assertEquals(460, card);
+        assertEquals(40, header);
         assertEquals(500, header + account);
         assertThat(header + customer + account + transaction + cardCrossReference + card)
                 .isNotEqualTo(500);
@@ -940,11 +1061,35 @@ class PackedDecimalCodecTest {
      * proof-by-contradiction is retained because it identifies the exact consequence of the historical
      * six-byte claim: two packed declarations each lose one byte, yielding 458 rather than a merely
      * unspecified mismatch.</p>
+     *
+     * <p>Refactoring Rationale: the wrong width is now DERIVED from the unit under test rather than
+     * written as the literal six, and the derivation is what makes the contradiction attributable. Six
+     * bytes is exactly what {@code packedWidth} returns for an ELEVEN-digit picture, so the historical
+     * error was reading {@code S9(10)V99} as though it declared one integer digit fewer -- a misreading
+     * of the picture, not of the packing rule. Expressing it as the neighbouring digit count says which
+     * mistake produces 458; the literal six said only that some other number had been used. In its
+     * earlier form this test summed literals alone and no production symbol took part, so it could not
+     * fail for any reason connected to the codec.</p>
      */
     @Test
     void sixBytePackedClaimMakesAccountBranchOnly458Bytes() {
-        int branchWithWrongPackedWidths =
-                11 + 1 + 6 + 12 + 6 + 10 + 10 + 10 + 12 + 8 + 10 + 10 + 352;
+        int correctPackedWidth = PackedDecimalCodec.packedWidth(10, 2);
+        int widthOfTheNeighbouringPicture = PackedDecimalCodec.packedWidth(9, 2);
+        int accountMoneyZoned = ZonedDecimalCodec.widthOf(10, 2);
+        int accountMoneyBinary = PackedDecimalCodec.binaryWidth(10, 2);
+
+        // WHY : Assumptions: the two widths must differ by exactly one byte, which is the whole content
+        //       of the historical error. Packed width is the digit count halved and incremented, so
+        //       eleven digits and twelve digits land in adjacent bytes and one dropped integer position
+        //       costs exactly one byte. Asserting the difference rather than the two values keeps the
+        //       claim about the relationship the contradiction below depends on.
+        assertEquals(7, correctPackedWidth);
+        assertEquals(6, widthOfTheNeighbouringPicture);
+        assertEquals(1, correctPackedWidth - widthOfTheNeighbouringPicture);
+
+        int branchWithWrongPackedWidths = 11 + 1 + widthOfTheNeighbouringPicture + accountMoneyZoned
+                + widthOfTheNeighbouringPicture + 10 + 10 + 10 + accountMoneyZoned
+                + accountMoneyBinary + 10 + 10 + 352;
 
         assertEquals(458, branchWithWrongPackedWidths);
         assertThat(branchWithWrongPackedWidths).isNotEqualTo(460);
@@ -999,11 +1144,31 @@ class PackedDecimalCodecTest {
      * eight-byte composite key and the 17-byte trailing filler. The merchant category at line 36 is a
      * four-character field and is counted as such; this test does not attempt to decode it as a
      * computational value.</p>
+     *
+     * <p>Refactoring Rationale: the three computational terms are now calls into the unit under test,
+     * matching the pattern the summary-segment test beside this one already used. In its earlier form
+     * every term was a literal, so the 200-byte total could not disagree with the codec about anything
+     * -- it agreed with itself. The composite key is expressed as its two declared components rather
+     * than as the eight bytes they occupy, because the segment declares them separately at lines 20 and
+     * 21 and their individual widths are what a caller slicing the key depends on.</p>
      */
     @Test
     void pendingAuthorizationDetailClosesAt200Bytes() {
-        int detailLength = 8 + 6 + 6 + 16 + 4 + 4 + 6 + 6 + 6 + 2 + 4 + 6
-                + 7 + 7 + 4 + 3 + 2 + 15 + 22 + 13 + 2 + 9 + 15 + 1 + 1 + 8 + 17;
+        // WHY : Assumptions: PA-AUTH-DATE-9C at line 20 is PIC S9(05) COMP-3 and PA-AUTH-TIME-9C at
+        //       line 21 is PIC S9(09) COMP-3, so the group item at line 19 is the sum of the two and
+        //       never a declared width of its own. PA-TRANSACTION-AMT at line 34 and PA-APPROVED-AMT at
+        //       line 35 are both PIC S9(10)V99 COMP-3.
+        int authDateKeyComponent = PackedDecimalCodec.packedWidth(5, 0);
+        int authTimeKeyComponent = PackedDecimalCodec.packedWidth(9, 0);
+        int detailMoney = PackedDecimalCodec.packedWidth(10, 2);
+        int compositeKey = authDateKeyComponent + authTimeKeyComponent;
+
+        assertEquals(3, authDateKeyComponent);
+        assertEquals(5, authTimeKeyComponent);
+        assertEquals(8, compositeKey);
+
+        int detailLength = compositeKey + 6 + 6 + 16 + 4 + 4 + 6 + 6 + 6 + 2 + 4 + 6
+                + detailMoney + detailMoney + 4 + 3 + 2 + 15 + 22 + 13 + 2 + 9 + 15 + 1 + 1 + 8 + 17;
 
         assertEquals(200, detailLength);
     }
@@ -1014,11 +1179,26 @@ class PackedDecimalCodecTest {
      * <p>Alternatives Considered: inferring the seven-byte correction only from the successful
      * 200-byte sum. This separate contradiction makes the two missing bytes attributable: one from
      * each {@code S9(10)V99 COMP-3} declaration at lines 34 and 35.</p>
+     *
+     * <p>Refactoring Rationale: as in the account-branch contradiction, the wrong width is derived
+     * from the unit under test as the width of the neighbouring nine-integer-digit picture rather than
+     * written as the literal six. That is what identifies the error as a misread picture rather than a
+     * misapplied packing rule, and it is what gives this test a dependency on the code it is about; the
+     * earlier all-literal form had none.</p>
      */
     @Test
     void sixByteDetailMoneyClaimProduces198Bytes() {
-        int detailLengthWithWrongMoneyWidths = 8 + 6 + 6 + 16 + 4 + 4 + 6 + 6 + 6 + 2 + 4 + 6
-                + 6 + 6 + 4 + 3 + 2 + 15 + 22 + 13 + 2 + 9 + 15 + 1 + 1 + 8 + 17;
+        int compositeKey =
+                PackedDecimalCodec.packedWidth(5, 0) + PackedDecimalCodec.packedWidth(9, 0);
+        int widthOfTheNeighbouringPicture = PackedDecimalCodec.packedWidth(9, 2);
+
+        assertEquals(1,
+                PackedDecimalCodec.packedWidth(10, 2) - widthOfTheNeighbouringPicture,
+                "the misread picture must cost exactly one byte per declaration");
+
+        int detailLengthWithWrongMoneyWidths = compositeKey + 6 + 6 + 16 + 4 + 4 + 6 + 6 + 6 + 2 + 4
+                + 6 + widthOfTheNeighbouringPicture + widthOfTheNeighbouringPicture + 4 + 3 + 2 + 15
+                + 22 + 13 + 2 + 9 + 15 + 1 + 1 + 8 + 17;
 
         assertEquals(198, detailLengthWithWrongMoneyWidths);
         assertThat(detailLengthWithWrongMoneyWidths).isNotEqualTo(200);

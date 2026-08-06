@@ -1,0 +1,257 @@
+# =============================================================================
+# services/reporting-service/src/main/resources/application-prod.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The production profile overlay for the CardDemo reporting bounded context, the
+#   migration target of COBOL programs CORPT00C, CBTRN03C, CBSTM03A and CBSTM03B.
+#   It overrides VALUES ONLY, on keys that application.yml beside it already
+#   declares, and it introduces no key that is absent there. Seven leaf values are
+#   set, across the only axes a profile in this project may vary: connection-pool
+#   sizing including the acquisition timeout, the streaming fetch size, log
+#   verbosity and actuator health detail.
+#
+#   Nothing here changes topology and nothing here changes security posture. The
+#   datasource is still the Aurora writer endpoint resolved from the platform, the
+#   read-only cross-schema views are still reached through the same SELECT-only
+#   role and the same pinned connection search path, the pool is still read-only
+#   and outside automatic commit so server-side cursors still materialise lazily,
+#   the single TLS listener and its port are untouched, and identity still arrives
+#   as a signed token whose token_use, client and scope claims
+#   config/JwtDecoderConfig.java checks before common-lib's JwtRoleConverter maps
+#   its groups to authorities.
+#
+#   FOUR of the seven values below RESTATE a base value rather than changing it,
+#   and that is deliberate in each case: application-dev.yml lowers each of the
+#   four, and restating them here is what stops a dev value being read as if it
+#   applied everywhere. The three that genuinely change are the pool ceiling, the
+#   idle floor and the acquisition timeout, and all three follow from one platform
+#   fact recorded below - a production cluster has a non-zero minimum capacity and
+#   therefore never pauses.
+#
+#   No endpoint, credential, identifier, bucket name, ARN or region appears below,
+#   and no stand-in for one. Every such value stays an unresolved placeholder in
+#   application.yml and is injected by the platform at deployment.
+#
+# Parameters:
+#   Each property key is the YAML analogue of a parameter. This overlay consumes NO
+#   environment variable of its own, and the omission is recorded in the closing
+#   block: the base document already builds its Parameter Store and Secrets Manager
+#   prefixes from CARDDEMO_CONFIG_PREFIX, so re-declaring the import list here
+#   would create a second place for those two locations to be named.
+#
+# Return values:
+#   The effective configuration handed to the Spring application context after this
+#   overlay is merged over src/main/resources/application.yml.
+#
+# Exceptions or errors:
+#   A misspelled Spring property is silently ignored rather than reported, so a typo
+#   here does not fail startup - it leaves the base value in force and the intended
+#   change simply never happens. Two failures in this file would be loud rather than
+#   silent, and both come from the pool: a ceiling set below the concurrency a
+#   statement run needs makes requests time out on connection acquisition rather
+#   than on any query, and an acquisition timeout shorter than a cursor walk's own
+#   first fetch fails the request that was about to succeed.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return values
+#     and Exceptions on a module entry point. YAML has no docstring construct, so the
+#     mapping is: this header states Purpose; property keys are Parameters; the
+#     merged Spring Environment is the Return value; and each adjacent rationale
+#     states what a wrong value silently admits. The trivial-accessor relief has no
+#     YAML analogue.
+#   - Assumptions: config/checkstyle/checkstyle.xml sets fileExtensions to java, so
+#     no linter in this project inspects a .yml file for documentation, and
+#     docs/CODE_DOCUMENTATION_STANDARD.md records the same limit for YAML. The
+#     obligation rests on that written standard and on review, and no comment here
+#     claims a gate enforces something it does not.
+#   - Assumptions: production capacity has a NON-ZERO minimum, so the cluster never
+#     pauses. That single fact is what makes three of the seven values differ from
+#     dev at all. The dev overlay sizes its pool DOWN to zero idle connections
+#     because any connection initiated by user activity keeps a zero-minimum cluster
+#     awake and cancels the reason for provisioning one; no such constraint exists
+#     here, so the pool is sized for the workload instead.
+#   - Trade-offs: this context's borrows are unlike any sibling's, and the pool
+#     numbers follow from that rather than from a house figure. Every borrow here is
+#     a cursor walk over a report or a statement run rather than a keyed read, so one
+#     connection is held for the length of a whole document. Sizing this pool like a
+#     request-response context's would let a handful of concurrent statement runs
+#     occupy every connection while each waits on the same cursor.
+#   - Trade-offs: nothing here re-enables a diagnostic the base document suppresses,
+#     and nothing widens what the process publishes. The two settings an incident
+#     tempts an operator to change - the health detail payload and the project log
+#     level - are both restated at their base values below, and each records what
+#     the widening would disclose or cost.
+# =============================================================================
+
+spring:
+  datasource:
+    hikari:
+      # WHY : (1) Trade-offs: eight connections rather than the base document's four,
+      #       and deliberately not the twenty a request-response sibling uses. Each
+      #       borrow here is held for a whole report or statement run rather than for
+      #       a statement, so eight concurrent document generations is a realistic
+      #       production ceiling while twenty would let this one context claim a
+      #       disproportionate share of a budget shared with seven peers - the
+      #       quantity that must fit the cluster's allowance is this number
+      #       multiplied by the task count and summed across every service.
+      #       (2) Assumptions: this pool is the read side of a SELECT-only database
+      #       role, so widening it cannot increase write contention; what it spends
+      #       is connection slots and the per-cursor heap recorded on the fetch size
+      #       below.
+      #       (3) Alternatives Considered: leaving the base four in place and scaling
+      #       the task count instead. Rejected because a report request is answered
+      #       by whichever task the load balancer chose, so a task whose pool is full
+      #       queues the request rather than shedding it to a task with capacity; the
+      #       queue forms per task, and widening the pool is what shortens it.
+      maximum-pool-size: 8
+
+      # WHY : (1) Trade-offs: a floor of two rather than the base document's one and
+      #       against the dev overlay's zero. Production capacity has a non-zero
+      #       minimum so the cluster never pauses, which removes the reason dev
+      #       drains to empty; what remains is the cost of a fresh handshake inside
+      #       the first fetch of a report an operator is waiting on, and two covers
+      #       the steady-state concurrency of the report and statement paths so only
+      #       a genuine burst pays it.
+      #       (2) Assumptions: this value is what the dev overlay's zero is measured
+      #       against, and the two are not interchangeable. Dev sets zero because any
+      #       held connection keeps a zero-minimum cluster awake for the life of the
+      #       task; that argument has no force here, and applying it would trade a
+      #       real latency cost for a saving that does not exist.
+      minimum-idle: 2
+
+      # WHY : (1) Trade-offs: ten seconds rather than the base document's thirty. The
+      #       base is sized generously because the same value has to contain a
+      #       zero-minimum cluster's roughly fifteen-second resume, which is a dev
+      #       concern only. In production the longer wait is actively harmful, and
+      #       the harm is a cascade rather than a slow request: during pool
+      #       exhaustion each waiting request occupies its servlet thread for the
+      #       whole timeout, the thread pool saturates, the health endpoint is served
+      #       by that same pool and stops answering, the load balancer deregisters
+      #       the task, and a database slowdown has become a task replacement loop.
+      #       (2) Trade-offs: the accepted cost is that a genuinely slow but
+      #       recovering database sheds report requests it would eventually have
+      #       served. A shed request returns an error an operator can retry; a
+      #       replaced task loses every in-flight document at once.
+      connection-timeout: 10000
+
+  jpa:
+    properties:
+      hibernate:
+        jdbc:
+          # WHY : (1) Assumptions: two hundred, restating the base document's value
+          #       against the dev overlay's hundred. Dev halves it because a dev task
+          #       runs with a smaller memory reservation and the per-cursor
+          #       high-water mark matters more there than the round-trip count; a
+          #       production task has the reservation the base was sized for, so the
+          #       base value is the right one here and is restated rather than
+          #       inherited so the halving cannot be read as a system-wide setting.
+          #       (2) Assumptions: THIS VALUE IS NOT A CAP AND MUST NEVER BE READ AS
+          #       ONE. It bounds rows in flight per round trip; it does not bound how
+          #       many transactions a statement may contain nor how many cards a run
+          #       may cover. The target carries no fixed arity at all, which is
+          #       divergence D-2 in
+          #       docs/architecture/cobol-to-service-traceability.md, and the base
+          #       document records in full why two hundred was chosen to be none of
+          #       the baseline's three table numbers.
+          #       (3) Assumptions: both preconditions for a server-side cursor still
+          #       hold unchanged - the value stays positive and the base keeps
+          #       automatic commit disabled - so nothing here reintroduces the
+          #       client-side materialisation the setting exists to avoid.
+          fetch_size: 200
+
+logging:
+  level:
+    # WHY : Assumptions: WARN, restating the base document's value. Dev raises the
+    #       root logger to INFO for one specific reason recorded there - the base
+    #       imports its configuration with the optional prefix, so a wrong prefix
+    #       resolves nothing silently and only the framework's own configuration
+    #       line reports it. That diagnostic is worth an environment's log volume in
+    #       dev and is not worth it at production request rates, where root INFO is
+    #       framework narration on every call and log ingestion is billed by the
+    #       gigabyte.
+    root: WARN
+
+    # WHY : (1) Trade-offs: INFO, restating the base document's value against the
+    #       dev overlay's DEBUG. At INFO this context records the outcome of a report
+    #       or statement request; at DEBUG it records which validation branch the
+    #       request took and which preset it resolved, which is what makes the
+    #       transcribed COBOL paragraph logic inspectable during development. The
+    #       cost in production is unbounded in aggregate and the benefit is
+    #       retrospective.
+    #       (2) Assumptions: this is restated rather than inherited because it is the
+    #       value an incident most tempts an operator to raise permanently. A
+    #       deliberate temporary raise belongs in a task-definition override, where
+    #       it expires with the deployment, rather than in this file where it would
+    #       become the new floor.
+    com.carddemo: INFO
+
+management:
+  # WHY : Assumptions: only the health endpoint's detail breadth is touched. The
+  #       exposure list, which decides WHICH endpoints answer at all, is not restated
+  #       and so stays exactly as the base closes it at health, info and prometheus.
+  endpoint:
+    health:
+      # WHY : (1) Assumptions: never, restating the base value against the dev
+      #       overlay's `always`. The base document names this as the one setting it
+      #       leaves to a profile, noting that the development overlay may widen it
+      #       and the production overlay does not - so this line is what keeps that
+      #       statement true rather than an independent choice.
+      #       (2) Trade-offs: both pollers of this endpoint are unauthenticated by
+      #       necessity - the load balancer target group and the container health
+      #       check, neither of which can present a token - so anything able to reach
+      #       the port reads whatever it returns. For this module a detail payload is
+      #       unusually revealing: it names the datasource and the SCHEMAS the
+      #       connection reaches, and this context reaches read-only views across
+      #       every other bounded context's schema, so the payload would sketch the
+      #       whole data-tier layout rather than one service's.
+      #       (3) Alternatives Considered: when-authorized, the middle setting, which
+      #       looks like the cautious choice. Rejected because both pollers are
+      #       unauthenticated, so when-authorized returns the same bare status as
+      #       never while appearing to be configured - which misleads the next reader
+      #       instead of merely restricting them. The same information is available
+      #       from the metrics scrape path and from the task's own logs, neither of
+      #       which is reachable without a credential.
+      show-details: never
+
+# =============================================================================
+# Closing notes: four deliberate absences
+# -----------------------------------------------------------------------------
+#   Each entry is a key a reader would reasonably expect in a production overlay.
+#   They are recorded together because an absent key has no line of its own to sit
+#   beside, and each is a choice a reader would otherwise re-litigate.
+#
+# Assumptions: no spring.config.import. The base document declares a two-entry list
+#   - an optional Parameter Store location and an optional Secrets Manager location,
+#   both built from CARDDEMO_CONFIG_PREFIX with a default that already names this
+#   module's own subtree. A profile's import list REPLACES the base document's rather
+#   than adding to it, so declaring the key here to change nothing would restate both
+#   locations and create a second place for either to be edited; the failure mode of
+#   two places is that one of them is edited. Sibling contexts declare the key in
+#   their overlays because their base imports a single string and their overlays add
+#   a location; this one has nothing to add.
+#
+# Assumptions: no spring.datasource.hikari.idle-timeout or max-lifetime override.
+#   The base sets both, and neither is an environment question: the idle ceiling is
+#   what releases connections the pool grew during a burst, and the lifetime ceiling
+#   is deliberately shorter than the cluster's own idle timeout so the pool retires a
+#   connection on its own terms rather than discovering it closed midway through a
+#   cursor walk. Raising either with the larger pool above would keep more sockets
+#   alive for longer without shortening any queue.
+#
+# Assumptions: no spring.datasource.hikari.read-only or auto-commit override. Both
+#   are declared in the base and both are behavioural rather than environmental: the
+#   first is the client half of a SELECT-only posture whose server half is the
+#   database role's grants, and the second is a precondition for the server-side
+#   cursor the fetch size above depends on. A profile that changed either would stop
+#   being the same service configured differently, which is one of the six forbidden
+#   axes.
+#
+# Assumptions: no management.endpoints.web.exposure.include override, and no
+#   spring.sql.init.mode override. The base already narrows the actuator surface to
+#   three endpoints and pins initialisation to never - the latter because this module
+#   owns no relational object, so a schema.sql or data.sql arriving here by copy from
+#   a peer would be executed against a role holding SELECT-only privileges.
+#   Restating either would assert a decision this file has not made, and widening the
+#   first is not a change in sizing, retention or verbosity and so is outside what
+#   this overlay may vary.
+# =============================================================================

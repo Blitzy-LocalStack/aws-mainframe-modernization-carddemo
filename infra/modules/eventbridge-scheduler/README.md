@@ -109,7 +109,7 @@ fifteen job nodes between them:
 | `SMART_FOLDER "WEEKLY-TransactionTypesDBRefresh"` | 57–63 | `TRANEXTR` (58) |
 | `FOLDER "MONTHLY-InterestCalculation"` | 64–92 | `CLOSEFIL` (65) → `INTCALC` (69) → `COMBTRAN` (75) → `WAITSTEP` (81) → `OPENFIL` (87) |
 
-**Assumptions:** the count is five and not four, which matters because the two
+Assumptions: the count is five and not four, which matters because the two
 `SMART_FOLDER` nodes are the only carriers of the weekly cadence attributes in
 [§3.2](#32-verified-attribute-census) and are therefore easy to overlook when
 reading the file as a list of jobs. `variables.tf` cites the same two nodes at
@@ -135,7 +135,7 @@ ordering or to condition codes.**
 | `PRIORITY="AA"` | 2 | the two `SMART_FOLDER` container nodes | no analogue — one schedule has no queue to be prioritised within |
 | `MAXRERUN="0"` | 2 | the two `SMART_FOLDER` container nodes | nothing; a container is a grouping, not a unit of work |
 
-**Assumptions:** a bare `DAYS` attribute occurs on **exactly six** nodes in the
+Assumptions: a bare `DAYS` attribute occurs on **exactly six** nodes in the
 whole file — lines 4, 8, 14 and 20 (`ALL`) and lines 32 and 57 (`SA`). A naive
 count of `DAYS="0"` returns seventeen, and every one of those seventeen is the
 tail of a `MAXDAYS="0"` attribute rather than a `DAYS` attribute at all. The
@@ -155,7 +155,7 @@ scheduling intent this module is concerned with:
 | 39 | `. DONT SCHEDULE BEFORE 03237 AT 0000` | **The `start_date` analogue.** A floor on the earliest instant the job may be picked up at all, separate from the recurring expression that governs it afterwards |
 | 42–43 | `TRIGGERED JOBS` / `   JOB=CBPAUP0J SCHID=030      QTM=0100 LEADTM=0000 SUBMTM=` | Completion-triggered downstream work, which is a workflow edge and not a schedule |
 
-> **Trade-offs:** the `CPUTM` and `ELAPTM` values on line 37 are cited here **only
+> Trade-offs: the `CPUTM` and `ELAPTM` values on line 37 are cited here **only
 > as recorded baseline attributes**, and deliberately not used for anything. They
 > are not a runtime expectation, a service-level objective, a timeout or a
 > capacity claim, and no argument in this module is derived from them. Reading a
@@ -163,7 +163,7 @@ scheduling intent this module is concerned with:
 > different one is exactly the inference this note exists to block.
 
 The line 39 mapping is why `start_date` exists as an input and why it defaults to
-`null`. **Assumptions:** the *concept* is migrated but the *value* is not, because
+`null`. Assumptions: the *concept* is migrated but the *value* is not, because
 that Julian instant belongs to one historical cutover; hard-coding any instant
 into a reusable module would impose one environment's cutover on every caller, so
 an environment performing a cutover supplies its own.
@@ -210,7 +210,7 @@ state machine in
 [`infra/modules/step-functions-batch`](../step-functions-batch/README.md), where a
 Lambda sets and clears a read-only flag rather than driving a terminal.
 
-**Alternatives Considered.** Putting the quiesce here is the plausible-looking
+Alternatives Considered: Putting the quiesce here is the plausible-looking
 alternative, and naming it is the point of this section: a scheduler that "closes
 the files, runs the chain, reopens the files" reads like a complete description of
 the nightly window, so the division of labour has to be justified rather than
@@ -223,7 +223,7 @@ mode is concrete: the schedule fires, the chain aborts, and the files stay close
 with no online write path until an operator intervenes. This module's only job is
 to **start** the machine; the bracket lives inside it.
 
-**Refactoring Rationale.** `WAITSTEP` / `PGM=COBSWAIT`
+Refactoring Rationale: `WAITSTEP` / `PGM=COBSWAIT`
 (`app/jcl/WAITSTEP.jcl:22`) is retired rather than migrated, and it appears three
 times in the baseline containers (lines 14, 44, 81). What it did — pause between
 two steps so the preceding one could settle — is expressed by the transition
@@ -234,11 +234,11 @@ graph, not a calendar, and it is therefore not a scheduler concern either.
 
 ## 5. Design decisions
 
-Each decision below mirrors a `# WHY :` comment in the HCL, so that the code and
+Each decision below mirrors a labelled why-comment in the HCL, so that the code and
 this document cannot drift into disagreeing. Where a bound or a domain is quoted,
 it was measured against the pinned provider rather than read from a guide.
 
-**`flexible_time_window_mode` defaults to `OFF`.** *Trade-offs:* a flexible window
+**`flexible_time_window_mode` defaults to `OFF`.** Trade-offs: a flexible window
 shifts the invocation **later** inside the window, which spends part of the margin
 ahead of the one budget the baseline actually states — `TIMETO="23:00"`, on all
 fifteen real job nodes. What the feature buys is load-spreading and
@@ -249,7 +249,7 @@ jitter is what is given up, knowingly; `FLEXIBLE` remains an opt-in, and
 `OFF`-with-a-window and `FLEXIBLE`-without-one are both rejected at plan time
 rather than at apply.
 
-**`maximum_retry_attempts` defaults to 5.** *Assumptions:* this is the baseline's
+**`maximum_retry_attempts` defaults to 5.** Assumptions: this is the baseline's
 own number, cited to `MAXRERUN="5"` — see
 [§3.4](#34-what-the-baseline-fixes-and-what-it-leaves-open). It is deliberately a
 **narrowing**: the platform's own default for the field is 185, so accepting that
@@ -259,7 +259,7 @@ re-delivered long past the point at which the baseline would have stopped and
 reported.
 
 **The target payload always carries the scheduled-time context attribute.**
-*Assumptions:* the module merges its own `scheduledTime` key **last**, so a caller
+Assumptions: the module merges its own `scheduledTime` key **last**, so a caller
 supplying the same key is overridden rather than honoured. This is how the state
 machine receives the business date it is running for, and it matters because the
 migrated batch takes its business date as a parameter and never reads it from a
@@ -271,14 +271,14 @@ redriven execution replays the same business date**, because the date travels wi
 the invocation rather than being re-read at retry time. The payload is therefore
 additive by contract, not by convention.
 
-> **Assumptions:** the attribute is substituted by the service finding the keyword
+> Assumptions: the attribute is substituted by the service finding the keyword
 > **literally** in the payload, so the angle brackets are part of the token. That
 > is why `main.tf` un-escapes them after `jsonencode`, which HTML-escapes `<` and
 > `>`. Left escaped, no substitution happens and the state machine is handed the
 > placeholder text instead of an instant — and the failure is silent, because the
 > schedule fires and the target starts. Only the dated output is wrong.
 
-**The timezone is explicit.** *Assumptions:* `schedule_expression_timezone`
+**The timezone is explicit.** Assumptions: `schedule_expression_timezone`
 defaults to `UTC` rather than being left to the service, because a wall-clock
 deadline is exactly what a zone decides. In a zone that observes a summer shift
 the same cron expression fires an hour earlier or later twice a year, moving the
@@ -306,7 +306,7 @@ has two unconditional statements and two that appear only when a key is named:
 | `AllowSchedulePayloadDecryption` | `kms:Decrypt` | the supplied `kms_key_arn` | only when the schedule payload is CMK-encrypted |
 | `AllowDeadLetterQueueEncryption` | `kms:GenerateDataKey`, `kms:Decrypt` | the supplied `dead_letter_kms_key_arn` | only when the dead-letter queue is CMK-encrypted |
 
-*Assumptions:* **configuring a dead-letter target does not by itself make one
+Assumptions: **configuring a dead-letter target does not by itself make one
 work.** The scheduler writes the undeliverable invocation using this role, so
 without `sqs:SendMessage` on that exact queue the write is refused — and because
 the write **is** the failure path, the refusal has nowhere to be reported and the
@@ -316,7 +316,7 @@ statement: when the queue is encrypted with a customer-managed key, a role lacki
 the two data-key actions loses the invocation just as completely and just as
 quietly.
 
-*Alternatives Considered:* granting `kms:GenerateDataKey` on the schedule-payload
+Alternatives Considered: granting `kms:GenerateDataKey` on the schedule-payload
 key too, matching the dead-letter statement, was rejected — the execution role only
 **decrypts** an already-stored payload, and the principal that creates or updates
 the schedule owns the write-time key permission. Both key statements are emitted
@@ -332,7 +332,7 @@ that block with a separately attached policy lets one representation remove what
 the other created. A standalone `aws_iam_role_policy` keeps this one policy
 independently addressable in state.
 
-**The schedule explicitly waits for that policy.** *Assumptions:* referencing the
+**The schedule explicitly waits for that policy.** Assumptions: referencing the
 role ARN orders creation of the role, but does not create an edge to its separate
 policy resource. Without `depends_on`, Terraform may activate the schedule while
 the policy is still in flight; an expression becoming due in that window produces
@@ -340,7 +340,7 @@ a failed invocation caused only by deployment ordering. The explicit edge remove
 that race rather than relying on the schedule not firing during an apply.
 
 **`aws:SourceArn` is scoped to the schedule *group*, not the schedule.**
-*Alternatives Considered:* scoping to the individual schedule is the
+Alternatives Considered: scoping to the individual schedule is the
 tighter-looking option and is wrong twice over. It is **unsatisfiable in this
 dependency graph** — the schedule consumes the role's ARN, so a trust policy naming
 the schedule would close a cycle Terraform cannot resolve — and the service
@@ -350,7 +350,7 @@ including one in another account, could induce the service to assume it and star
 the batch chain. `StringEquals` rather than a pattern test, since the composed
 value is a complete ARN carrying no wildcard.
 
-**Tags apply to the group and the role, not to the schedule.** *Assumptions:* the
+**Tags apply to the group and the role, not to the schedule.** Assumptions: the
 gap is the service's, not this module's, and it is stated so it is not filed as an
 oversight — `aws_scheduler_schedule` exposes no `tags` argument in the pinned
 provider's schema, tagging being a group-level concept here. Attributability is
@@ -358,7 +358,7 @@ preserved by tagging the group, to which every schedule belongs exactly once.
 
 **Deliberately not provisioned.** Each omission is a decision:
 
-- **No `aws_cloudwatch_event_rule`.** *Alternatives Considered:* a scheduled
+- **No `aws_cloudwatch_event_rule`.** Alternatives Considered: a scheduled
   EventBridge Rule would also start a state machine on a cron expression, and it
   does not carry the fields this module depends on — a schedule group to scope
   permissions against, a per-schedule execution role, an explicit evaluation
@@ -367,21 +367,21 @@ preserved by tagging the group, to which every schedule belongs exactly once.
   posture with a Rule means bolting several of them on elsewhere, and the
   dead-letter target is required rather than optional.
 - **No self-managed scheduler** — no cron container, no host `crond`, no hosted
-  equivalent of the retired definitions. *Trade-offs:* a self-managed scheduler is
+  equivalent of the retired definitions. Trade-offs: a self-managed scheduler is
   the only option that could reproduce their syntax, and it costs a component to
   patch, monitor and make highly available in order to fire one nightly trigger.
 - **No Lambda shim between the schedule and the state machine.** *Alternatives
   Considered:* the shim is the habitual shape and buys nothing, because the
   scheduler calls `StartExecution` itself. It would add a second execution role, a
   second failure mode and a second place for the payload to be rewritten.
-- **No second schedule for the weekly or monthly cadences.** *Assumptions:* the
+- **No second schedule for the weekly or monthly cadences.** Assumptions: the
   specified resource scope is the nightly chain, while the monthly source names
   no day to schedule; see [§6](#6-honest-divergences).
-- **No `provider` or `backend` block and no nested `module` call.** *Assumptions:*
+- **No `provider` or `backend` block and no nested `module` call.** Assumptions:
   this is a reusable module and not a root. The required `terraform` block in
   `versions.tf` carries only the CLI and provider constraints; provider
   configuration and state ownership remain with the calling root.
-- **No log group, metric alarm or dashboard.** *Refactoring Rationale:*
+- **No log group, metric alarm or dashboard.** Refactoring Rationale:
   observability is owned by
   [`infra/modules/observability`](../observability/README.md), so retention and
   alarm thresholds are set once per environment rather than differently inside
@@ -400,7 +400,7 @@ seconds**, an upper bound of one day. That bound was measured against the pinned
 provider (`hashicorp/aws ~> 6.56`, exercised at 6.57.1) by driving it with
 out-of-range values, and independently confirmed against the service's API
 reference; it is not inferred. Seven days is therefore not expressible at all.
-*Trade-offs:* what replaces it is the dead-letter target — instead of waiting for
+Trade-offs: what replaces it is the dead-letter target — instead of waiting for
 days, an undeliverable trigger is captured and surfaced. Writing 86400 as though
 it were the baseline figure would misrepresent a divergence as a transcription,
 which is why the default sits at the top of the range for a different and stated
@@ -410,7 +410,7 @@ been made, silently overriding the one figure the baseline does state with one i
 does not.
 
 **The baseline states no day-of-month for the monthly cadence, so none is
-invented.** *Assumptions:* the `MONTHLY-InterestCalculation` container's five job
+invented.** Assumptions: the `MONTHLY-InterestCalculation` container's five job
 nodes carry all twelve month flags set, and **no `DAYS` attribute at all** — nor
 any `DCAL`, `WDAYS` or `CONFCAL` calendar attribute, none of which occurs anywhere
 in the file. The monthly cadence is expressed by the container's *name* and by
@@ -427,7 +427,7 @@ reference-only:
 | `app/scheduler/CardDemo.controlm:58` | `TRANEXTR` declares `PARENT_FOLDER="WEEKLY-DisclosureGroupsRefresh"` while it is nested inside the `SMART_FOLDER` opened at line 57, whose `FOLDER_NAME` is `WEEKLY-TransactionTypesDBRefresh` |
 | `app/scheduler/CardDemo.controlm:81` and `:87` | `WAITSTEP` and `OPENFIL` both declare `JOBISN="4"`. Every other container numbers its jobs 1, 2, 3, 4 with no repeat |
 
-*Assumptions:* neither affects this module, because neither the parent-folder
+Assumptions: neither affects this module, because neither the parent-folder
 attribution nor the job ordinal has a target analogue — sequencing is the state
 machine's concern. They are logged so that a reader comparing the two files does
 not spend time reconciling a discrepancy that is present in the source.
@@ -457,7 +457,7 @@ convention. Its four members have distinct consumers:
 | `schedule_group_name` | Operators use the group to find the schedule and its tags together; reviewers use it to reconcile the group-scoped `aws:SourceArn` trust boundary |
 | `scheduler_role_arn` | IAM inventory and access reviews use the assumed identity to inspect the trigger's effective permissions without opening this module |
 
-**Trade-offs:** none of the four outputs is marked `sensitive`. Names and ARNs
+Trade-offs: none of the four outputs is marked `sensitive`. Names and ARNs
 identify resources but confer no permission to use them; hiding them would remove
 useful plan and root-output evidence without protecting credential material.
 Conversely, the module does not output the target payload or any queue URL,
@@ -569,7 +569,7 @@ verify that the role named by `scheduler_role_arn` can call
 matches this schedule group, and, when `kms_key_arn` is set, that the role retains
 `kms:Decrypt` on that exact key.
 
-**Assumptions:** do not add a Lambda shim as a diagnostic bypass. A shim can make
+Assumptions: do not add a Lambda shim as a diagnostic bypass. A shim can make
 the symptom disappear by introducing a different role while leaving the
 scheduler's actual trust or target permission broken; inspect the direct
 integration instead.
@@ -583,7 +583,7 @@ still has `sqs:SendMessage` on it. For a customer-managed queue key,
 configured as the dead-letter target while its write is denied, which is why
 target configuration and role permission must be diagnosed as one path.
 
-**Trade-offs:** do not broaden either statement to `"*"`. That can mask a wiring
+Trade-offs: do not broaden either statement to `"*"`. That can mask a wiring
 error by allowing the failed invocation to be written to an unintended queue,
 turning a visible delivery failure into a cross-environment data-routing defect.
 
@@ -615,7 +615,7 @@ Set `schedule_state = "DISABLED"` in the calling environment root, review the
 plan, and apply it through the normal deployment path. The schedule, group, role,
 outputs and audit trail remain present, but the service does not trigger a run.
 
-**Alternatives Considered:** removing the module also stops the trigger, but it
+Alternatives Considered: removing the module also stops the trigger, but it
 simultaneously deletes the identity an operator needs to inspect and creates a
 larger restoration plan. `DISABLED` expresses an operational pause without
 changing the stack's shape.

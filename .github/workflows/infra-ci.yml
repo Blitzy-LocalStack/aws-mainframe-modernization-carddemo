@@ -452,9 +452,21 @@ jobs:
             -backend-config="region=$TF_STATE_REGION" \
             -backend-config="dynamodb_table=$TF_STATE_LOCK_TABLE" \
             -backend-config="kms_key_id=$TF_STATE_KMS_KEY_ID"
+          # WHY : Assumptions: the saved plan is named "<env>.tfplan" rather than a
+          #   bare "tfplan" because a saved plan embeds every resolved attribute the
+          #   apply would set, including the generated Aurora master password and the
+          #   Cognito seed-user passwords, and the repository ignore rules match on the
+          #   ".tfplan" SUFFIX. A bare "tfplan" has no suffix to match, so it stays
+          #   trackable, and this runner shares the naming convention with
+          #   infra/README.md and infra/bootstrap/README.md so an operator reproducing
+          #   this step locally writes a name that "git check-ignore" already covers.
+          #   Trade-offs: the runner is ephemeral and never commits, so the risk here is
+          #   lower than on a workstation; the convention is kept identical anyway,
+          #   because a divergent example in CI is what a reader copies.
+          plan_file="${{ inputs.environment }}.tfplan"
           terraform -chdir="$root" plan -input=false \
-            -var-file=terraform.tfvars -out=tfplan
-          terraform -chdir="$root" show -no-color tfplan > "$GITHUB_WORKSPACE/infra-reports/${{ inputs.environment }}-plan.txt"
+            -var-file=terraform.tfvars -out="$plan_file"
+          terraform -chdir="$root" show -no-color "$plan_file" > "$GITHUB_WORKSPACE/infra-reports/${{ inputs.environment }}-plan.txt"
 
       - name: Upload the environment plan
         if: always()

@@ -1,5 +1,6 @@
 package com.carddemo.batch.domain;
 
+import com.carddemo.common.security.CardNumberMasker;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -26,6 +27,17 @@ import org.hibernate.type.SqlTypes;
 //       an object in it, and would create a second definition of one index that nothing can detect
 //       drifting from the first. Hibernate's schema handling in this module is never stronger than
 //       an assertion against the shape already present.
+// WHY : Assumptions: that migration is a planned artifact of the migration plan rather than a file
+//       present beside this one, so a reader who looks for the path named above and does not find it
+//       should read the dependency as declared and not the reference as broken. What does exist is
+//       the provisioning script: data-migration/sql/V0__schemas_and_roles.sql creates the account
+//       schema at line 502 and records the ownership map at line 20, and it guards its own grant on
+//       account.accounts with a to_regclass test that raises a notice naming the statement to re-run
+//       while the table is absent. The consequence for this module is stated where the setting that
+//       causes it lives: application.yml sets ddl-auto: validate deliberately, so a task started
+//       before the owning context has applied that migration fails its schema check at startup with
+//       nothing half-applied. For a nightly chain that is the better failure and is the accepted
+//       ordering dependency, not a defect in this mapping.
 // WHY : Alternatives Considered: the schema is named explicitly on the annotation rather than left
 //       to the connection's search path. Relying on the search path was the alternative and is
 //       rejected because this module spans four schemas with four different authorities -- batch
@@ -264,7 +276,7 @@ import org.hibernate.type.SqlTypes;
  * {@code com.carddemo.batch.service}, and data access in
  * {@code com.carddemo.batch.repository}.</p>
  *
- * <h2>Why the card number is carried unmasked</h2>
+ * <h2>Why the card number is STORED unmasked and RENDERED not at all</h2>
  *
  * <p>Trade-offs: the migration plan requires at its section 0.4.1.9 that a primary account number
  * be masked to its last four digits at API boundaries and never returned by a non-administrative
@@ -272,21 +284,65 @@ import org.hibernate.type.SqlTypes;
  * cross-reference lookup by <b>complete</b> card number is precisely the read the posting job
  * performs, at {@code app/cbl/CBTRN02C.cbl:382-383}, so a masked or truncated value stored here
  * would not match the key it is looked up by and the lookup would report reject reason 100 for
- * every transaction. Masking belongs to the transfer-object and mapper layers of the services that
- * expose an interface, and <b>this module exposes no such interface at all</b>: it declares no web
- * starter, opens no listener and returns nothing over a network, so no value on this type leaves
- * the process. The boundary is stated here so that the absence of masking is not read as an
- * omission, and so that adding it here is recognised as breaking the lookup rather than hardening
- * it.</p>
+ * every transaction. Masking the STORED value is therefore not available, and adding it here is
+ * recognised as breaking the lookup rather than hardening it.</p>
+ *
+ * <p>Refactoring Rationale: what does NOT follow from that is that the value may be rendered
+ * freely, and an earlier version of this note argued that it did on a premise that no longer
+ * holds. It reasoned that this module "exposes no such interface at all: it declares no web
+ * starter, opens no listener and returns nothing over a network", and therefore that no value on
+ * this type leaves the process. Both {@code spring-boot-starter-actuator} and
+ * {@code spring-boot-starter-web} are now declared in {@code services/batch-service/pom.xml}, so
+ * the module does start a servlet container in order to answer the image health probe. The
+ * conclusion the premise supported has been withdrawn with it: this type renders no card number in
+ * its diagnostic string, which {@link #toString()} records, and the reason is no longer that a
+ * rendering cannot escape but that a rendering is not needed.</p>
+ *
+ * <p>Assumptions: the surviving obligation on a consumer of this type is unchanged and is stated
+ * here so it is not lost with the withdrawn premise. The value is available in full to code that
+ * needs it for a keyed read, and any code that carries it towards an interface, a log, a message
+ * attribute or a report must mask it there -- through
+ * {@code com.carddemo.common.security.CardNumberMasker} for a rendering, or through
+ * {@code com.carddemo.common.security.OpaqueIdentifier} where an identity rather than a value is
+ * wanted. The mapper layer of each exposing service is where that obligation is discharged.</p>
  */
+// WHY : Assumptions: this mapping carries the same unsatisfied SEQUENCING DEPENDENCY as the
+//       sibling account mapping, and it is recorded at both sites because a reader arrives at one
+//       or the other rather than at a common ancestor. The migration that creates
+//       {@code account.card_xref} is
+//       services/account-service/src/main/resources/db/migration/V1__account.sql, an
+//       account-service deliverable that is not yet authored; that module holds no db/migration
+//       directory. Until it lands, the column names, widths and the primary key declared below
+//       are described rather than verified, and a job resolving a card number through this
+//       cross-reference against a database migrated with V0 alone fails with
+//       {@code relation "account.card_xref" does not exist}. This module's grant on the table is
+//       SELECT only, granted schema-wide by data-migration/sql/V0__schemas_and_roles.sql, so
+//       unlike the account master there is no conditional per-table grant to re-run for it -- the
+//       missing piece is the table itself and nothing else.
+// WHY : Alternatives Considered: authoring that migration here so the mapping becomes verifiable
+//       immediately, rejected for the ownership reason set out in full on the sibling account
+//       mapping: account-service's own entities are the authority for every column in its schema,
+//       and a migration written from a consuming module would invert that. The dependency is
+//       tracked instead, here, at the account mapping and in
+//       docs/architecture/data-model-and-schema-mapping.md; when the migration lands, re-verify
+//       the sixteen-character key column, the two identifier columns and the dropped pad recorded
+//       below against it.
 @Entity
 @Immutable
 @Table(name = "card_xref", schema = "account")
 public class CardXref {
 
-    // WHAT: XREF-CARD-NUM at app/cpy/CVACT03Y.cpy:5, PIC X(16), offset 0. It is the whole of the
-    //       base cluster key -- app/cbl/CBTRN02C.cbl:43 declares RECORD KEY IS FD-XREF-CARD-NUM
-    //       with no further component -- and therefore the whole of this mapping's primary key.
+    /**
+     * The number of trailing digits of a card number a diagnostic rendering may disclose.
+     *
+     * <p>Assumptions: four, taken from the migration's disclosure rule -- a primary account number is
+     * rendered to its last four digits everywhere except the one administrative card-detail endpoint,
+     * which this module is not. The constant is named rather than written into the rendering so that
+     * the width and its justification sit together, and so that a reader can see the whole disclosure
+     * decision of this type in one declaration.
+     */
+    private static final int CARD_NUMBER_SUFFIX_WIDTH = 4;
+
     // WHY : Assumptions: the column is a fixed-width CHAR(16) and not a VARCHAR(16). The copybook
     //       declares PIC X(16) and the field is a key, which the migration plan's section 0.4.1.3
     //       maps to a fixed-width character column precisely because the width is part of the
@@ -316,36 +372,32 @@ public class CardXref {
     //       no authority to create this table. JdbcTypeCode selects the standard CHAR binding for
     //       reads, writes and validation while leaving the physical definition wholly with the
     //       account-service migration.
+    /**
+     * Maps {@code XREF-CARD-NUM} at {@code app/cpy/CVACT03Y.cpy:5}, {@code PIC X(16)}, offset 0. It
+     * is the whole of the base cluster key -- {@code app/cbl/CBTRN02C.cbl:43} declares RECORD KEY
+     * IS {@code FD-XREF-CARD-NUM} with no further component -- and therefore the whole of this
+     * mapping's primary key.
+     */
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_num", length = 16, nullable = false, updatable = false)
     private String cardNum;
 
-    // WHAT: XREF-CUST-ID at app/cpy/CVACT03Y.cpy:6, PIC 9(09), offset 16. The preflight displays
-    //       it on a successful read, at app/cbl/CBTRN01C.cbl:238, so it is a field the baseline
-    //       observably uses rather than one carried here only to account for the record's bytes.
     // WHY : Assumptions: BIGINT for a nine-digit identifier is a uniformity decision, and it is
     //       stated as one rather than dressed up as a capacity requirement. A 32-bit INTEGER holds
     //       nine digits comfortably and was the alternative considered; the migration plan's
     //       section 0.4.1.3 maps any PIC 9(n) serving as a key or identifier to BIGINT, so that
     //       every identifier across every schema has one width and a later widening of a source
     //       field never forces a column type change and the data movement that goes with it.
+    /**
+     * Maps {@code XREF-CUST-ID} at {@code app/cpy/CVACT03Y.cpy:6}, {@code PIC 9(09)}, offset 16.
+     * The preflight displays it on a successful read, at {@code app/cbl/CBTRN01C.cbl:238}, so it is
+     * a field the baseline observably uses rather than one carried here only to account for the
+     * record's bytes.
+     */
     @Column(name = "customer_id", nullable = false)
     private Long customerId;
 
-    // WHAT: XREF-ACCT-ID at app/cpy/CVACT03Y.cpy:7, PIC 9(11), offset 25. It is also the alternate
-    //       key of the file, declared ALTERNATE RECORD KEY IS FD-XREF-ACCT-ID at
-    //       app/cbl/CBACT04C.cbl:38, which is what makes the by-account read a keyed lookup.
-    // WHAT: both migrated jobs that consume the daily file resolve through this field, and their
-    //       failure behaviours differ. The preflight resolves at app/cbl/CBTRN01C.cbl:171-176 --
-    //       card number in, account identifier out, then a keyed account read -- and on failure
-    //       SKIPS AND REPORTS, displaying 'ACCOUNT ' with the identifier and ' NOT FOUND' at
-    //       app/cbl/CBTRN01C.cbl:178, or 'CARD NUMBER ' with the number and ' COULD NOT BE
-    //       VERIFIED. SKIPPING TRANSACTION ID-' with the transaction identifier at
-    //       app/cbl/CBTRN01C.cbl:181-183. Posting instead REJECTS, with reason 100 at
-    //       app/cbl/CBTRN02C.cbl:385 when the cross-reference misses and reason 101 at
-    //       app/cbl/CBTRN02C.cbl:397 when the account does. One mapping serves both, so neither
-    //       behaviour may be assumed from the other.
     // WHY : Assumptions: BIGINT is required here rather than merely uniform, and the two
     //       identifiers on this row arrive at the same SQL type for different reasons, which is
     //       worth knowing when reading either. Eleven digits exceed the range of a 32-bit INTEGER
@@ -361,6 +413,23 @@ public class CardXref {
     //       against the wrong account for any card whose cross-reference disagrees with an account
     //       field on the transaction, and the resulting balance would be a plausible number
     //       attached to the wrong account rather than a detectable error.
+    /**
+     * Maps {@code XREF-ACCT-ID} at {@code app/cpy/CVACT03Y.cpy:7}, {@code PIC 9(11)}, offset 25. It
+     * is also the alternate key of the file, declared ALTERNATE RECORD KEY IS
+     * {@code FD-XREF-ACCT-ID} at {@code app/cbl/CBACT04C.cbl:38}, which is what makes the
+     * by-account read a keyed lookup.
+     *
+     * <p>Both migrated jobs that consume the daily file resolve through this field, and their
+     * failure behaviours differ. The preflight resolves at {@code app/cbl/CBTRN01C.cbl:171-176} --
+     * card number in, account identifier out, then a keyed account read -- and on failure SKIPS AND
+     * REPORTS, displaying 'ACCOUNT ' with the identifier and ' NOT FOUND' at
+     * {@code app/cbl/CBTRN01C.cbl:178}, or 'CARD NUMBER ' with the number and ' COULD NOT BE
+     * VERIFIED. SKIPPING TRANSACTION ID-' with the transaction identifier at
+     * {@code app/cbl/CBTRN01C.cbl:181-183}. Posting instead REJECTS, with reason 100 at
+     * {@code app/cbl/CBTRN02C.cbl:385} when the cross-reference misses and reason 101 at
+     * {@code app/cbl/CBTRN02C.cbl:397} when the account does. One mapping serves both, so neither
+     * behaviour may be assumed from the other.</p>
+     */
     @Column(name = "account_id", nullable = false)
     private Long accountId;
 
@@ -507,29 +576,59 @@ public class CardXref {
     }
 
     /**
-     * Returns a diagnostic rendering of all three mapped members.
+     * Returns a diagnostic rendering carrying the last four digits of the card number and nothing
+     * else.
      *
-     * <p>Trade-offs: the card number is rendered in full rather than masked, and that is
-     * deliberate. This module declares no web starter, opens no listener and returns nothing over
-     * a network, so a rendering produced here reaches a log this context controls and never a
-     * client. Masking it would withhold the one value that identifies which row a failure concerns
-     * in exchange for defending a boundary this module does not have. A service that does expose an
-     * interface masks at its transfer-object layer instead, which is where the migration plan's
-     * section 0.4.1.9 places the obligation. </p>
+     * <p>Refactoring Rationale: an earlier revision rendered all three members in full, on the
+     * reasoning that this module declares no web starter and opens no listener, so a rendering
+     * produced here reaches a log this context controls rather than a client. The premise is true and
+     * the conclusion does not follow, for two reasons the premise does not address. First, a log is
+     * not a private channel: it is retained, aggregated, searched and readable by every holder of log
+     * access rather than of account access, and a batch job renders one line per record across an
+     * entire daily feed, so the aggregate is a file holding every card number in that feed. Second,
+     * and specific to this type: a cross-reference row's whole content IS the linkage between a card
+     * number, a customer and an account, so rendering all three in full does not merely disclose three
+     * values -- it reproduces {@code CARDXREF} itself, in plain text, in a second place that no
+     * migration control governs. The sibling {@code com.carddemo.batch.domain.Transaction} in this
+     * same package already withholds its card number for the first of those reasons; this type now
+     * agrees with it.
+     *
+     * <p>Trade-offs: the last four digits do not identify the row uniquely, so a reader diagnosing
+     * from this string alone may have to disambiguate between rows sharing a suffix. That is accepted
+     * because the alternative is the aggregate described above, because the step and run identifiers
+     * already in the logging context say which unit of work an entry belongs to, and because the three
+     * accessors above return the full values to a caller that needs them. Rendering nothing at all was
+     * also available and is declined: a rendering that identifies no row is of no diagnostic use, and
+     * the suffix is the same rendering the migration's own published contracts expose.
      *
      * <p>Assumptions: this string is a diagnostic aid and is not an output contract. Nothing parses
      * it, and it is not the byte-exact fixed-width rendering used for parity comparison -- that is
      * produced by the job through {@code com.carddemo.common.codec.FixedWidthCodec} from the
-     * members above -- so widening, reordering or reformatting this string cannot disturb any
+     * members above -- so narrowing, widening or reformatting this string cannot disturb any
      * compared output. </p>
      *
-     * @return a String containing a single-line rendering naming the type and all three mapped
-     *     members
+     * @return a String containing a single-line rendering naming the type and the last four digits of
+     *     the card number, or the absence of a card number when none has been populated
      */
     @Override
     public String toString() {
-        return "CardXref[cardNum=" + cardNum
-                + ", customerId=" + customerId
-                + ", accountId=" + accountId + "]";
+        return "CardXref[cardNumSuffix=" + cardNumberSuffix() + "]";
+    }
+
+    /**
+     * Renders the last four digits of the card number for diagnostic use.
+     *
+     * <p>Assumptions: four is the suffix width the migration's disclosure rule names, and a value
+     * shorter than four digits is rendered as absent rather than in part, because a partial value from
+     * a short or unpopulated field would disclose the whole of whatever it holds while reading like a
+     * suffix of something longer.
+     *
+     * @return exactly four digits, or {@code "none"} when no card number of at least four digits has
+     *     been populated
+     */
+    private String cardNumberSuffix() {
+        return cardNum == null || cardNum.length() < CARD_NUMBER_SUFFIX_WIDTH
+                ? "none"
+                : cardNum.substring(cardNum.length() - CARD_NUMBER_SUFFIX_WIDTH);
     }
 }

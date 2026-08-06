@@ -22,53 +22,29 @@
  * owns the conventions shared by all five test subpackages and is cited the
  * same way.
  *
- * <p><b>Parameters, return values, exceptions or errors.</b> A package
- * declaration accepts no parameters, returns no value and raises nothing, so
- * this charter carries no parameter, return or exception at-clause. The
- * inapplicability is declared rather than left silent, because the
- * Explainability rule's line 39 names a docstring that omits parameters or
- * return values among its forbidden patterns, and a reader has to be able to
- * tell a declared inapplicability from an oversight.
- *
- * <p>Assumptions: fabricating those at-clauses would be worse than omitting
- * them. Javadoc defines no parameter, return or exception concept for a
- * package, and {@code NonEmptyAtclauseDescription} is active in the ruleset, so
- * an invented at-clause would either be discarded by the tool or reported as
- * empty by the gate; an exception at-clause whose description stands in for
- * nothing is the specific mistake that idea leads to. The rule enumerates four
- * docstring elements across its lines 18 to 21 and exactly one of the four has
- * a subject in this compilation unit; this paragraph and the one above it
- * account for the other three. Note also that the rule's validation gate at
- * line 43 names purpose, parameters and return values and does not mention
- * exceptions, so no exception at-clause anywhere in this subtree may be
- * justified by citing that gate.
- *
  * <h2>Target contract: naming a class here is not a claim it is on disk</h2>
  *
- * <p>Assumptions: the inventory below states the package contract the
- * migration plan assigns, not a measurement of the directory holding this
- * file. The plan lands its artifacts one at a time and this charter is
- * authored ahead of the tests it governs, so a named class with no file is
- * planned rather than missing, and the present contents of this directory are
- * read from the directory itself or from
+ * <p>Assumptions: the inventory below states the package contract the migration
+ * plan assigns, and it is not a listing of the directory. A class named here
+ * belongs to this package and a class absent from it does not, whichever files
+ * the directory happens to hold; the present contents are read from the
+ * directory itself or from
  * {@code mvn -f services/transaction-service/pom.xml test} rather than from
- * this comment, which could not stay accurate as each class arrives. The
- * subtree charter states the same reading convention once for all five
- * subpackages, and
+ * this comment, which no comment could keep accurate. The subtree charter
+ * states the same reading convention once for all five subpackages, and
  * {@code services/transaction-service/src/test/resources/application-test.yml}
  * states it again for the profile those tests activate.
  *
- * <p>Alternatives Considered: withholding this charter until the four tests
- * exist. Rejected on two independent grounds. The authors of those tests work
- * from this file for the closed set, the reserved class names and the rulings
- * each test inherits, so writing it last would leave the package with no
- * stated contract during exactly the interval in which one is needed. And the
- * documentation gate treats a directory as a file set: {@code JavadocPackage}
- * demands a {@code package-info.java} in any directory holding an audited
- * compilation unit, so the first integration test to land here would fail the
- * build if this file were not already part of the same package. The cost is
- * that the inventory reads as present tense unless the distinction is
- * declared, which is what the paragraph above is for.
+ * <p>Alternatives Considered: letting the package carry no charter and leaving
+ * the closed set, the reserved class names and the inherited rulings to be
+ * rediscovered per test. Rejected on two independent grounds. Each test in this
+ * package inherits its isolation, determinism, paging and single-sourcing
+ * rulings from here, so without the charter every one of them would be restated
+ * four times and could drift three ways. And the documentation gate treats a
+ * directory as a file set: {@code JavadocPackage} demands a
+ * {@code package-info.java} in any directory holding an audited compilation
+ * unit, so an integration test here without this file beside it fails the
+ * build.
  *
  * <h2>The closed set: four integration tests and no fifth type</h2>
  *
@@ -454,16 +430,15 @@
  * when it has rejected a record, and that is a behaviour a test may require of
  * that program rather than a build policy to adopt here.
  *
- * <h2>Citation discipline, and authoring notes for this file</h2>
+ * <h2>Citation discipline</h2>
  *
  * <p>Assumptions: every path and line number cited above was verified on disk,
  * case-sensitively, before it was written, and none was recalled or inferred
  * from a neighbouring file. Extension case differs by directory in the
  * baseline, so a citation carrying the wrong case does not resolve on a
- * case-sensitive filesystem. An invented citation is the unsupported claim the
- * Explainability rule forbids, and it costs more in a test than elsewhere: a
- * comment naming a line that does not say what the comment claims will be
- * trusted by the next reader precisely because it looks specific.
+ * case-sensitive filesystem. An invented citation costs more in a test than
+ * elsewhere: a comment naming a line that does not say what the comment claims
+ * will be trusted by the next reader precisely because it looks specific.
  *
  * <p>Assumptions: the framing of any difference between baseline and migration
  * is constrained, because the wrong verb turns a documented divergence into a
@@ -472,39 +447,5 @@
  * repaired. The one permitted framing is that the baseline does X, the Java
  * implements Y, and the divergence is documented -- wording that survives
  * review because each of its three clauses is independently checkable.
- *
- * <p>Assumptions: two identifier namespaces collide by number and are kept
- * textually distinct throughout this package. The user-specified rule is
- * Explainability and is cited by its line numbers. The migration plan's
- * transformation rules are numbered with a leading T and are always written
- * with it. "Rule 1" never means "Rule T1", and writing one for the other points
- * a reader at a document that says something else entirely.
- *
- * <p>Trade-offs: the rationale labels used above are TYPED rather than copied
- * out of {@code tests/README.md}. That file carries a non-breaking hyphen
- * across 77 of its lines, and its own list of the four categories at line 548
- * renders the compromise label with that character and with no ordinary hyphen
- * at all. A non-breaking hyphen is indistinguishable from an ordinary one on
- * screen while behaving differently in a search, so a copied label becomes a
- * token that a search for the label fails to find -- which makes a rationale
- * that was genuinely written read as absent to the audit looking for it.
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} carries the full statement of the
- * label convention and is cited rather than restated; the singular
- * parenthesised form the repository uses in its shell and workflow files is not
- * mixed in here.
- *
- * <p>Trade-offs: this compilation unit is pure ASCII with no byte-order mark,
- * holds one Javadoc block and one package declaration and nothing else -- no
- * type, no annotation, no import, no field and no line comment -- and carries
- * no authorship, version or release-marker at-clause, because the ruleset omits
- * the whole Javadoc-formatting family that would ask for them and version
- * control answers those questions more reliably than a comment maintained by
- * hand. Typographic punctuation would read closer to the migration's own prose;
- * ASCII was chosen because it makes the non-breaking-hyphen failure described
- * above unreachable in this file by construction rather than by care. Prose is
- * wrapped at 80 columns to match the sibling charters, and the few lines that
- * exceed it are inline code spans holding paths that cannot be broken, because
- * a line break inside one would insert this comment's margin into the rendered
- * path.
  */
 package com.carddemo.transaction.repository;

@@ -1,5 +1,4 @@
 import {
-  Alert,
   Button,
   Flex,
   Form,
@@ -15,6 +14,7 @@ import { useNavigate, useParams } from "react-router";
 
 import { getCard, updateCard } from "../../api/cards";
 import type { CardDetail, CardUpdateRequest } from "../../api/cards";
+import { MessageBand } from "../../layout/MessageBand";
 import {
   cardDetailPath,
   isOpaqueCardId,
@@ -151,7 +151,21 @@ export function CardUpdateScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       <Typography.Title level={2}>Update card</Typography.Title>
-      {error === null ? null : <Alert type="error" message={error} showIcon />}
+      {/*
+       * Refactoring Rationale: the band replaces a conditional raw antd Alert.
+       * On an update screen the reserved space carries a second consequence
+       * beyond layout stability: the baseline's own update programs re-send the
+       * SAME map with row 23 populated (app/cbl/COCRDUPC.cbl), so the form and
+       * its message occupy one screen with the message line in a fixed place.
+       * A band that appears and disappears would move the very fields an
+       * operator is correcting mid-correction.
+       * Assumptions: the default "error" severity is taken rather than varied
+       * per outcome. A successful save navigates away instead of reporting
+       * success here, so this band only ever carries a failure -- and when a
+       * success message is later required on this screen, `severity="success"`
+       * is the one prop that changes.
+       */}
+      <MessageBand message={error} />
       <Form<CardFormValues>
         form={form}
         layout="vertical"

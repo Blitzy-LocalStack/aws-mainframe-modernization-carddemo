@@ -1,19 +1,57 @@
 # card-service test fixtures -- CVACT02Y card records
 
-Authoritative register for the twelve fixed-width card-record fixtures in this
-directory, and the Explainability carrier for the decisions behind them.
+Authoritative register for the twelve fixed-width card-record fixtures this
+module's test tree holds, and the Explainability carrier for the decisions behind
+them.
 
-Every fixture here is a `CARD-RECORD` as declared by `app/cpy/CVACT02Y.cpy`.
-That copybook is the specification; this file states the contract each sibling
-`.txt` is measured against, and nothing here overrides it. `app/**` is read as
-reference and is never modified by this module -- it is cited by path and line
-only.
+Every fixture named here is a `CARD-RECORD` as declared by
+`app/cpy/CVACT02Y.cpy`. That copybook is the specification; this file states the
+contract each sibling `.txt` is measured against, and nothing here overrides it.
+`app/**` is read as reference and is never modified by this module -- it is cited
+by path and line only.
+
+> **Note -- delivery state, measured.** All **twelve** `.txt` fixtures named in
+> [section 4.1](#41-the-register) are present in this directory, carrying **40
+> records** between them, and every register row is annotated **[present]**
+> accordingly. The record counts, loadability classes and seed provenances
+> recorded there have been re-measured against the bytes rather than restated: 40
+> records at exactly 150 data bytes each, 40 distinct card numbers, zero carriage
+> returns, and the seed runs named per row. The commands in
+> [section 11](#11-verification) therefore have inputs, and that section reports
+> what they returned.
+>
+> The one absence that remains is on the **consuming** side, and
+> [section 10](#10-where-the-docstring-obligation-actually-attaches) is where it
+> belongs: the module's test tree holds `CardApiContractTest` and
+> `SecurityConfigTest` beside two package documentation declarations, and **neither
+> test class loads a fixture from this directory**, so the per-fixture docstring
+> obligation section 10 describes is still owed by whoever writes the first
+> consumer.
+>
+> **Why the annotation is here (Assumption made explicit).**
+> `tests/fixtures/README.md` section 9.3 mandates a **[present]**/**[planned]**
+> marker on every referenced artifact and gives its own reason for doing so: the
+> marker is what keeps a document from describing a future artifact as if it
+> already existed. This register was authored ahead of the bytes it governs, and
+> deliberately so, because it is what the author of those bytes worked from. The
+> markers are kept now that the bytes exist, rather than deleted as spent, because
+> the register still names one artifact class that does not exist -- the consumers
+> in section 10 -- and because a row that carries its availability explicitly is
+> the row a reader can falsify.
 
 Read this file before adding a fixture, before loading one into PostgreSQL, and
 before asserting on one. Section 4 in particular prevents a real and confusing
-failure: three of the twelve fixtures hold values the database schema will not
-accept, and inserting one of those produces a constraint error where a
-validation assertion was intended.
+failure: two of the twelve fixtures -- three records between them -- hold values
+the database schema will not accept, and inserting one of those produces a
+constraint error where a validation assertion was intended.
+
+Refactoring Rationale: the sentence above counted "three of the twelve fixtures"
+and now counts two files and three records. Three is the RECORD count -- one
+out-of-domain status plus two out-of-range months -- and both records live in the
+two `card-schema-reject-*` files. The distinction is worth the extra clause
+because the reader this paragraph is addressing is about to decide which FILES
+may be handed to a repository, and a file count of three would send them looking
+for a third one that does not exist.
 
 ## Contents
 
@@ -219,9 +257,9 @@ so they get different labels.
   misleading failure that points at the wrong layer. Feed Class B bytes to the
   request validator or the mapper directly, never to the repository.
 
-The filenames encode the class at the call site, so a reader of
-`CardRepositoryIT` can tell from the fixture name alone whether a row may be
-inserted:
+The filenames encode the class at the call site, so a reader of `CardRepositoryIT`
+-- still to be written, per section 10 -- will be able to tell from the fixture
+name alone whether a row may be inserted:
 
 | Filename prefix | Class |
 |---|---|
@@ -231,32 +269,38 @@ inserted:
 
 ### 4.1 The register
 
-Twelve fixtures, 40 records in total. "Seed provenance" names the record
+Twelve fixtures, 40 records in total -- **all twelve present, and every count in
+this table re-measured against the bytes**, per the delivery-state note at the top
+of this file. The `Avail.` column carries the marker per row, in the form
+`tests/fixtures/README.md` section 9.3 mandates, so a reader who arrives at this
+table directly reads the availability of each row without having to scroll for it.
+"Seed provenance" names the record
 positions in `app/data/ASCII/carddata.txt` that each fixture draws from; see
 [section 8](#8-synthetic-provenance-attestation) for what is copied verbatim
 and what is authored. Field offsets are never restated per fixture -- they come
-from [section 2](#2-normative-record-layout).
+from [section 2](#2-normative-record-layout). The Class column is a validation
+taxonomy and never a presence flag.
 
-| File | Recs | Class | Encodes | Seed provenance | Authority |
-|---|---|---|---|---|---|
-| `card-list-page-corpus.txt` | 18 | A | 3 pages at page size 7; both interior page boundaries traversable in both directions; a `Y`/`N` status mix at positions 3, 10 and 17 | seed recs 1-18 | `COCRDLIC:177-178`, `:250` |
-| `card-by-account-corpus.txt` | 4 | A | account `00000000901` holding 3 cards, `00000000902` holding 1 card, and `00000000903` holding zero -- absent by design | seed recs 19-22 | `CARDFILE.jcl:85-87` |
-| `card-boundary-expiry-inclusive.txt` | 4 | A | months `01` and `12`, years `1950` and `2099`: all four inclusive bounds | seed recs 23-26 | `COCRDUPC:95`, `:99` |
-| `card-expiry-day-preserved.txt` | 3 | A | days `01`, `15` and `28` at one fixed month and year | seed recs 27-29 | `COCRDUP.CPY:96` |
-| `card-valid-active.txt` | 1 | A | canonical happy path with status `Y`; doubles as the mixed-case-name case | seed rec 30, entirely verbatim | `COCRDUPC:1499-1501` |
-| `card-valid-inactive.txt` | 1 | A | status `N` | seed rec 31 | `COCRDUPC:89-91` |
-| `card-rule-reject-name-non-alpha.txt` | 2 | A-R | an apostrophe, and an appended digit | seed rec 34 verbatim; seed rec 35 with an authored name | `COCRDUPC:822-839` |
-| `card-rule-reject-name-blank.txt` | 2 | A-R | 50 spaces, and 50 ASCII `0` | seed recs 41-42, names authored | `COCRDUPC:811-819` |
-| `card-rule-reject-expiry-year-out-of-range.txt` | 2 | A-R | years `1949` and `2100` | seed recs 36-37 | `COCRDUPC:99` |
-| `card-schema-reject-status-out-of-domain.txt` | 1 | B | status `X` | seed rec 38 | `COCRDUPC:89-91` plus `ck_cards_active_status` |
-| `card-schema-reject-expiry-month-out-of-range.txt` | 2 | B | months `00` and `13` | seed recs 39-40 | `COCRDUPC:95` plus the `DATE` column type |
-| `card-empty-input.txt` | 0 | not applicable | the empty result set | none | `COCRDLIC` no-records path |
+| File | Avail. | Recs | Class | Encodes | Seed provenance | Authority |
+|---|---|---|---|---|---|---|
+| `card-list-page-corpus.txt` | [present] | 18 | A | 3 pages at page size 7; both interior page boundaries traversable in both directions; a `Y`/`N` status mix at positions 3, 10 and 17 | seed recs 1-18 | `COCRDLIC:177-178`, `:250` |
+| `card-by-account-corpus.txt` | [present] | 4 | A | account `00000000901` holding 3 cards, `00000000902` holding 1 card, and `00000000903` holding zero -- absent by design | seed recs 19-22 | `CARDFILE.jcl:85-87` |
+| `card-boundary-expiry-inclusive.txt` | [present] | 4 | A | months `01` and `12`, years `1950` and `2099`: all four inclusive bounds | seed recs 23-26 | `COCRDUPC:95`, `:99` |
+| `card-expiry-day-preserved.txt` | [present] | 3 | A | days `01`, `15` and `28` at one fixed month and year | seed recs 27-29 | `COCRDUP.CPY:96` |
+| `card-valid-active.txt` | [present] | 1 | A | canonical happy path with status `Y`; doubles as the mixed-case-name case | seed rec 30, entirely verbatim | `COCRDUPC:1499-1501` |
+| `card-valid-inactive.txt` | [present] | 1 | A | status `N` | seed rec 31 | `COCRDUPC:89-91` |
+| `card-rule-reject-name-non-alpha.txt` | [present] | 2 | A-R | an apostrophe, and an appended digit | seed rec 34 verbatim; seed rec 35 with an authored name | `COCRDUPC:822-839` |
+| `card-rule-reject-name-blank.txt` | [present] | 2 | A-R | 50 spaces, and 50 ASCII `0` | seed recs 41-42, names authored | `COCRDUPC:811-819` |
+| `card-rule-reject-expiry-year-out-of-range.txt` | [present] | 2 | A-R | years `1949` and `2100` | seed recs 36-37 | `COCRDUPC:99` |
+| `card-schema-reject-status-out-of-domain.txt` | [present] | 1 | B | status `X` | seed rec 38 | `COCRDUPC:89-91` plus `ck_cards_active_status` |
+| `card-schema-reject-expiry-month-out-of-range.txt` | [present] | 2 | B | months `00` and `13` | seed recs 39-40 | `COCRDUPC:95` plus the `DATE` column type |
+| `card-empty-input.txt` | [present] | 0 | not applicable | the empty result set | none | `COCRDLIC` no-records path |
 
 Two rows in that table deserve to be read against each other, because the
 contrast is the whole reason the A-R class exists.
 `card-rule-reject-expiry-year-out-of-range.txt` is Class A-R rather than Class B
-**because `1949-06-15` and `2100-06-15` are both perfectly valid PostgreSQL
-dates.** The `DATE` column stores them without objection; the rule that rejects
+**because `1949-05-19` and `2100-06-04` -- the two dates the file actually
+carries, measured -- are both perfectly valid PostgreSQL dates.** The `DATE` column stores them without objection; the rule that rejects
 them is `88 VALID-YEAR VALUES 1950 THRU 2099` at `app/cbl/COCRDUPC.cbl:99`,
 which lives in the validator and has no schema counterpart. Meanwhile
 `card-schema-reject-expiry-month-out-of-range.txt` is Class B because month `00`
@@ -555,12 +599,50 @@ justify authoring anything at all:
   `00000000903`, used only in `card-by-account-corpus.txt`. They sit
   deliberately outside the seed's `00000000001` to `00000000050` range so they
   can never be confused with a seed account or collide with one loaded from it.
-- **Status bytes**, where a scenario needs `N` or `X`, per measurement 1.
-- **Expiry dates**, where a scenario needs a bound or an out-of-range value, per
-  measurement 2.
+- **Status bytes**, two values in three places, per measurement 1. `N` on the
+  single record of `card-valid-inactive.txt` and on fixture rows 3, 10 and 17 of
+  `card-list-page-corpus.txt`; `X` on the single record of
+  `card-schema-reject-status-out-of-domain.txt`. Every other status byte in this
+  directory is the seed's own `Y`.
+- **Expiry dates, component by component.** Only the components a scenario needs
+  are authored, and each record keeps every other component of its seed date --
+  which is what makes an authored date checkable against the seed position it
+  came from rather than merely plausible:
+  - `card-boundary-expiry-inclusive.txt` authors the YEAR and MONTH of all four
+    records and keeps each seed record's own DAY: `1950-01-20`, `1950-12-10`,
+    `2099-01-23` and `2099-12-19` from seed days 20, 10, 23 and 19. All four days
+    are 28 or lower, so no authored combination can land on a date that does not
+    exist.
+  - `card-rule-reject-expiry-year-out-of-range.txt` authors the YEAR only:
+    `1949-05-19` and `2100-06-04`, keeping seed 36's `05-19` and seed 37's
+    `06-04`.
+  - `card-schema-reject-expiry-month-out-of-range.txt` authors the MONTH only:
+    `2025-00-12` and `2023-13-23`, keeping seed 39's year and day and seed 40's
+    year and day.
+  - `card-expiry-day-preserved.txt` authors the whole date on all three records
+    -- `2025-06-01`, `2025-06-15` and `2025-06-28` -- and is the one fixture that
+    does. Section 6 is the reason: the fixture must hold one FIXED month and year
+    with three DIFFERENT days, and measurement 2 shows the seed offers no month
+    and year pair with three such records to sample. The year and month are
+    inside the seed's own observed ranges (2025 and 06 both occur in the seed),
+    and the three days are 01, 15 and 28, each valid in every month, so the
+    fixture tests day preservation rather than calendar arithmetic.
+
+  Every other expiry date in this directory -- the whole of the page corpus, the
+  by-account corpus, `card-valid-active.txt`, `card-valid-inactive.txt`, and both
+  name-reject fixtures -- is its seed record's date verbatim.
 
 Nothing else is authored. In particular, no card number and no card
 verification value in this directory was generated.
+
+Refactoring Rationale: the two bullets above were previously one line each,
+stating only that status bytes and expiry dates are authored "where a scenario
+needs" one. That was true and not checkable, and it was also incomplete: it
+scoped authored dates to "a bound or an out-of-range value", which does not
+cover `card-expiry-day-preserved.txt` at all -- its dates are neither. Since the
+whole point of this section is that a reader can verify every authored value
+against a seed position, an attestation that omits three authored dates fails at
+exactly the thing it exists to do.
 
 **No secret, credential, endpoint, ARN, cloud account identifier or other
 sensitive value appears in any fixture in this directory, or in this file.** The
@@ -578,7 +660,7 @@ a competent reader would reasonably have expected something else.
 
 ### 9.1 Flat layout, with no scenario subdirectories
 
-**Alternatives Considered:** the house shape is
+Alternatives Considered: the house shape is
 `tests/fixtures/<domain>/<scenario>/<record>.txt`, and measured against the
 checkout there are 20 such scenario directories. The sibling account-service
 fixture tree is assigned a comparable subdivision by record type. Both of those
@@ -588,35 +670,31 @@ one file per scenario, so a subdirectory level would partition nothing while
 adding a path segment in which a rename could silently unpoint a consumer. The
 scenario name is already carried by the filename, where a consumer reads it.
 
-**Assumptions:** fixtures resolve by classpath name from `fixtures/**`. Neither
+Assumptions: fixtures resolve by classpath name from `fixtures/**`. Neither
 this module's nor the sibling's test configuration declares a fixture path, so
 the filename is the binding contract between this directory and its consumers.
 Renaming a fixture is therefore a breaking change and must be done together with
 its consumer.
 
-### 9.2 This README exists even though the sibling service shipped none
+### 9.2 Why the loadability guard lives here and not only in the consumers
 
-**Alternatives Considered:** discharge Rule 1 entirely through the consuming
-test classes' Javadoc, which is what the sibling account-service fixture tree
-does and which is a defensible reading of the rule's function-and-class scoping.
-Rejected here for two specific reasons. First, this directory carries a
-**physical** loadability taxonomy: inserting a Class B row produces a
-check-constraint violation or a date-parse error rather than the validation
-failure the test intended, so the guard needs to be readable before a consumer
-is written, not inside it. Second, `services/card-service/src/test/java`
-currently carries package documentation and **zero test classes** -- no
-`*Test.java` and no `*IT.java` exist in this module yet -- so the consuming
-Javadoc does not yet exist to hold the guard at all.
+Alternatives Considered: documenting the taxonomy solely in the Javadoc of each
+consuming test class, which is what the sibling account-service fixture tree
+does. Rejected here because this directory carries a **physical** loadability
+taxonomy: inserting a Class B row produces a check-constraint violation or a
+date-parse error rather than the validation failure the test intended. A guard
+against that has to be readable while choosing a fixture, which happens before
+any consumer exists to read, and it has to be stated once for the whole
+directory rather than repeated in each consumer that happens to load a row.
 
-**Trade-offs:** one more file that has to be kept in step with the fixtures, and
-which will duplicate a little of what the consuming Javadoc eventually says.
-Accepted, because the alternative leaves the Class B insertion hazard
-undocumented for exactly as long as the test classes are unwritten, which is
-precisely the window in which someone would trip over it.
+Trade-offs: one more file that has to be kept in step with the fixtures, and
+which duplicates a little of what a consumer's Javadoc says about the row it
+loads. Accepted, because the alternative leaves the Class B insertion hazard
+discoverable only from inside a consumer that already made the mistake.
 
 ### 9.3 No `LOW-VALUES` fixture, although the blank branch accepts three patterns
 
-**Alternatives Considered:** add a third record whose name field is 50 NUL
+Alternatives Considered: add a third record whose name field is 50 NUL
 bytes, which would exercise the `LOW-VALUES` arm of the test at
 `app/cbl/COCRDUPC.cbl:811`. Rejected because an embedded `0x00` makes
 `awk '{print length($0)}'` unreliable and would compromise the byte-verification
@@ -625,14 +703,14 @@ directory depends on. The `SPACES` arm reaches the identical branch, the
 identical flag `FLG-CARDNAME-BLANK` and the identical message, so no rule branch
 and no message goes uncovered.
 
-**Trade-offs:** one of the three blank byte-patterns is unrepresented, in
+Trade-offs: one of the three blank byte-patterns is unrepresented, in
 exchange for a verification command that works uniformly on every file here.
 The uncovered pattern is a byte encoding, not a behaviour: all three arms of the
 `OR` at `:811-813` converge on the same two lines, `:815` and `:817`.
 
 ### 9.4 No multi-internal-space name fixture
 
-**Assumptions:** the rule at `app/cbl/COCRDUPC.cbl:822-830` converts every
+Assumptions: the rule at `app/cbl/COCRDUPC.cbl:822-830` converts every
 alphabetic character to a space and then tests the trimmed length for zero.
 Its outcome is therefore invariant to how many internal spaces a name contains
 -- one space or five, the trimmed length is zero either way. Measured, all 50
@@ -643,7 +721,7 @@ overlooked.
 ### 9.5 No separate mixed-case-name fixture
 
 The case-insensitivity requirement is met by `card-valid-active.txt` rather than
-by a dedicated file. **Assumptions:** its name is seed record 30,
+by a dedicated file. Assumptions: its name is seed record 30,
 `Layla Ullrich`, which is Title Case -- uppercase initials with a lowercase
 remainder. That is precisely the shape that
 `app/cbl/COCRDUPC.cbl:1499-1501` uppercases before comparing, so the canonical
@@ -653,7 +731,7 @@ path twice.
 
 ### 9.6 Three loadability classes rather than two
 
-**Alternatives Considered:** a simple valid/invalid split, which is what most
+Alternatives Considered: a simple valid/invalid split, which is what most
 fixture directories use. Rejected because it conflates two materially different
 failures that need different test setups. Year `1949` is a value the schema
 stores without complaint -- `1949-06-15` is a valid `DATE` -- and only the
@@ -663,13 +741,13 @@ two would let a consumer insert a Class B row and receive a constraint error
 where a validation assertion was intended, and the resulting failure names the
 database rather than the rule that was actually under test.
 
-**Trade-offs:** a third label is one more thing to learn before using this
+Trade-offs: a third label is one more thing to learn before using this
 directory. Accepted, and mitigated by encoding the class into the filename
 prefix so it does not have to be looked up.
 
 ### 9.7 Eighteen records in the page corpus
 
-**Trade-offs:** 15 records would give two pages plus a remainder and cross only
+Trade-offs: 15 records would give two pages plus a remainder and cross only
 one interior boundary cleanly. Eighteen gives three pages at page size 7 -- 7
 plus 7 plus 4 -- which yields two interior boundaries, each traversable in both
 the forward and the backward direction, and exercises the read-one-extra
@@ -682,7 +760,7 @@ fixture set is scoped to, so the corpus stays small enough to read by eye.
 Account `00000000903` appears in **no record** of `card-by-account-corpus.txt`,
 and that is deliberate rather than an omission.
 
-**Assumptions:** the access path this fixture exercises is declared
+Assumptions: the access path this fixture exercises is declared
 `NONUNIQUEKEY` at `app/jcl/CARDFILE.jcl:86`, so an account-to-card relation of
 zero, one or many is all legitimate, and zero is the cardinality a query has to
 handle without a row to read. `CardRepository.findByAccountIdOrderByCardNumAsc(Long)`
@@ -698,7 +776,7 @@ lost. It has not: the third account's contribution is the absence itself.
 
 ### 9.9 Card numbers are disjoint across every fixture
 
-**Assumptions:** `card_num` is the primary key of `card.cards`
+Assumptions: `card_num` is the primary key of `card.cards`
 (`CONSTRAINT pk_cards PRIMARY KEY (card_num)` at `V1__card.sql:332`), so two
 fixtures loaded into the same table in the same test must not collide. Each
 fixture therefore draws a distinct, contiguous run of seed record positions --
@@ -716,19 +794,22 @@ attaches to the **test class that loads them**, in
 `services/card-service/src/test/java`. That is where a per-fixture docstring
 belongs, and this file does not relieve whoever writes it.
 
-The consumers assigned to this module are `CardControllerTest`,
-`CardListServiceTest`, `CardUpdateServiceTest`, `CardRepositoryIT` and the card
-mapper test. For each fixture a consumer loads, that consumer's Javadoc should
+The consumers assigned to this module are the four the package documentation
+names -- `CardControllerTest`, `CardListServiceTest`, `CardUpdateServiceTest` and
+`CardRepositoryIT` -- together with the card mapper test, which is named here
+only. **None of the five exists yet**: the test tree currently holds
+`CardApiContractTest` and `SecurityConfigTest`, and neither reads this
+directory. For each fixture a consumer loads, that consumer's Javadoc should
 state the fixture's purpose, its provenance (`app/cpy/CVACT02Y.cpy`, plus the
 seed record positions from the register in
 [section 4.1](#41-the-register)) and the byte layout it relies on -- and, for a
 Class B fixture, that it must not be inserted.
 
-Measured, this module currently carries package documentation and **no test
-class at all**, so none of those consumers exists yet; the package documentation
-under `com/carddemo/card/service` names them as planned targets, and names this
-README among them. Whoever authors them should leave no fixture in this
-directory undocumented, and should treat the register as the checklist.
+The package documentation under `com/carddemo/card/service` names those four
+consumers -- measured, it cites each of them -- and names this README among their
+references. Whoever writes one
+should leave no fixture it loads undocumented, and should treat the register in
+section 4.1 as the checklist.
 
 **Gate note, so that nobody mistakes where the enforcement comes from.**
 `config/checkstyle/checkstyle.xml:185` sets
@@ -747,6 +828,16 @@ These commands verify **shape, not behaviour**. Passing them means a fixture is
 well-formed against [section 3](#3-file-invariants); it says nothing about
 whether the fixture encodes the business rule it claims to. That part is
 verified by the consuming test.
+
+They are written **against a fixture that exists**, and every register row now is,
+so each command below has an input. Substitute a real filename for `<file>`.
+Measured across all twelve fixtures on this branch, the shape checks below return:
+one width group of **150** for every non-empty file, a byte count of exactly
+**151 x record_count** for each, **zero** carriage returns in the directory, **40**
+distinct card numbers across **40** records, and no record beginning with a comment
+character. `card-empty-input.txt` is the one file the width and size checks report
+nothing for, by design -- it holds zero records, which is the property it exists to
+carry.
 
 ```sh
 # every record is exactly 150 data bytes

@@ -1085,6 +1085,49 @@ whose width is meaningful: the group identifier is the lookup key into
 see [Alternate indexes become real secondary
 indexes](#alternate-indexes-become-real-secondary-indexes).
 
+#### Sequencing dependency: this schema's tables are mapped before they are created
+
+The three tables above are **described by this document and by two already-authored
+consuming entities, and are not yet created by any migration.** The migration that
+creates them is
+`services/account-service/src/main/resources/db/migration/V1__account.sql`, an
+account-service deliverable; that module currently holds no `db/migration`
+directory. The dependency is recorded here, rather than left to be met at run time,
+because three distinct artifacts already depend on it:
+
+| Depends on the table | What is deferred until the migration lands |
+|---|---|
+| `batch-service` `domain/Account.java` — `@Table(name = "accounts", schema = "account")` | Every column mapping on that entity, including its `version` column's `BIGINT NOT NULL` claim, is described but not verified against a created table |
+| `batch-service` `domain/CardXref.java` — `@Table(name = "card_xref", schema = "account")` | The `CHAR(16)` key column, the two identifier columns and the dropped 14-byte pad are described but not verified |
+| `data-migration/sql/V0__schemas_and_roles.sql` L778–L791 | The conditional `GRANT UPDATE ON account.accounts TO carddemo_batch` takes its `ELSE` branch and raises a notice instead of granting; the nightly posting and interest jobs cannot rewrite an account master until it is re-run |
+
+> **WHY : Assumptions.** The absence is *anticipated* rather than overlooked. `V0`
+> creates the `account` schema and its roles, and guards the per-table grant with
+> `IF to_regclass('account.accounts') IS NOT NULL … ELSE RAISE NOTICE` precisely so
+> that a first bootstrap — run before any per-service Flyway migration — succeeds
+> instead of failing. The notice names the statement to re-run and falls silent once
+> the grant is in place, so a clean re-run is what confirms the privilege graph is
+> complete.
+>
+> **WHY : Alternatives Considered.** Authoring the migration from one of the
+> consuming modules, so that the mappings above become verifiable at once. Rejected
+> on ownership rather than on effort: `account-service`'s own entities are the
+> authority for every column name, type and constraint in its schema, and they are
+> not yet authored either — so a migration written from a consumer would fix the
+> columns by inference from a *reader's* view of them, and the owning module would
+> afterwards have to be written to match a file it did not author. That inverts the
+> direction of authority this document set maintains everywhere else (copybook →
+> migration → entity → contract) and would leave two files claiming to define one
+> table.
+>
+> **WHY : Trade-offs.** What deferring costs is that a batch account path cannot be
+> exercised end to end against a database migrated with `V0` alone: an attempt fails
+> with `relation "account.accounts" does not exist`. That is the correct failure and
+> it is loud, which is why deferring is acceptable where guessing the columns would
+> not be. **On landing `V1__account.sql`, re-verify every column mapping in this
+> section and on both consuming entities against it, then re-run
+> `V0__schemas_and_roles.sql` so the conditional grant takes its `IF` branch.**
+
 
 ### `card` — `card-service`
 

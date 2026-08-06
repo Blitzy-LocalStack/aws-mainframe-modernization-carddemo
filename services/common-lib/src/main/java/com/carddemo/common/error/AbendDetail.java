@@ -1,5 +1,7 @@
 package com.carddemo.common.error;
 
+import com.carddemo.common.observability.LogSafeText;
+
 /**
  * Carries the four components of the reference baseline's abend data block as one structured value.
  *
@@ -408,24 +410,22 @@ public record AbendDetail(
     /**
      * Replaces every ISO control character in a value with a single space.
      *
+     * <p>Refactoring Rationale: the scan itself now lives in
+     * {@link com.carddemo.common.observability.LogSafeText} and this method delegates to it. It was
+     * moved because a second site needed the identical rule -- the batch entry point sanitises an
+     * operator-supplied argument and an orchestrator-supplied environment override before logging
+     * either -- and two copies of one neutralisation rule are two places for the covered character
+     * range to be narrowed unevenly. This method is kept rather than inlined at its one call site so
+     * that the reason the components of this type are sanitised at all stays recorded where the
+     * components are.</p>
+     *
      * @param value the width-conformed component value, never {@code null}
      * @return {@code value} itself when it carries no control character, so the verbatim guarantee is
      *     literal for the ordinary case, and otherwise a same-length copy with each control character
      *     replaced by a space
      */
     private static String sanitizeControlCharacters(String value) {
-        for (int index = 0; index < value.length(); index++) {
-            if (Character.isISOControl(value.charAt(index))) {
-                StringBuilder sanitized = new StringBuilder(value);
-                for (int scan = index; scan < sanitized.length(); scan++) {
-                    if (Character.isISOControl(sanitized.charAt(scan))) {
-                        sanitized.setCharAt(scan, ' ');
-                    }
-                }
-                return sanitized.toString();
-            }
-        }
-        return value;
+        return LogSafeText.sanitize(value);
     }
 
     /**

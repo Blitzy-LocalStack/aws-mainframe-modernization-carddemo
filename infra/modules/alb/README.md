@@ -22,7 +22,7 @@ deployable when a caller does not supply the shared observability bucket. Target
 groups remain with `ecs-service`; the public edge remains with
 `api-gateway-http`.
 
-**Refactoring Rationale:** the module is net-new infrastructure, but it separates
+Refactoring Rationale: the module is net-new infrastructure, but it separates
 the edge, routing, workload, and network ownership boundaries so that changing a
 listener rule cannot also widen a security group or replace a service target
 group. The [Terraform ADR](../../../docs/adr/ADR-009-iac-tool.md) records the
@@ -34,7 +34,7 @@ The module is **never applied directly**. An environment root composes it:
 
 ```hcl
 # WHAT: call the reusable ALB module from an environment root.
-# WHY : the root owns provider configuration, state and environment values;
+# WHY : Assumptions: the root owns provider configuration, state and environment values;
 #       this child owns only the resources declared by its public contract.
 module "alb" {
   source = "../../modules/alb"
@@ -55,7 +55,7 @@ That boundary has three consequences:
    initialization resolves providers and local modules without contacting remote
    state.
 
-**Alternatives Considered:** applying this directory as a root was rejected
+Alternatives Considered: applying this directory as a root was rejected
 because it would require duplicating provider and backend configuration already
 owned by each environment. That duplication would let region, tags, and state
 placement disagree with the root that supplies the module's inputs.
@@ -74,13 +74,13 @@ internet. The [API and UI ADR](../../../docs/adr/ADR-006-api-and-ui.md) and
 [security architecture](../../../docs/architecture/security-and-identity.md)
 carry the package-wide edge design.
 
-**Alternatives Considered:** an internet-facing ALB was rejected because it
+Alternatives Considered: an internet-facing ALB was rejected because it
 would provide a path around the Cognito JWT authorizer enforced by API Gateway.
 Authentication would then have to be duplicated across seven online service
 configurations, and a missed service would be reachable without the managed edge
 control.
 
-**Assumption:** `internal = true` is hard-coded rather than exposed as an input.
+Assumptions: `internal = true` is hard-coded rather than exposed as an input.
 Making it a `tfvars` switch would turn direct exposure of every routed service
 into a one-line configuration mistake. Removing the choice makes that failure
 mode unrepresentable.
@@ -92,12 +92,12 @@ load-balancer-role public subnets, while the settled environment roots pass
 because `internal = true` withholds public addresses and an internet-routable DNS
 name regardless of the route table attached to the selected subnets.
 
-**Trade-off:** keeping `subnet_ids` tier-agnostic leaves placement with the
+Trade-offs: keeping `subnet_ids` tier-agnostic leaves placement with the
 environment root, where network outputs are available, instead of coupling this
 module to one network layout. The invariant retained here is the one that closes
 the authorizer-bypass path: the ALB scheme cannot become public.
 
-**Assumption:** because the ALB is internal, a policy check requiring a
+Assumptions: because the ALB is internal, a policy check requiring a
 public-facing load balancer to be associated with a WAF is out of scope **by
 construction**. This module creates no WAF association and carries no scanner
 suppression.
@@ -110,7 +110,7 @@ application-to-endpoint on 443."** The VPC Link reaches the ALB's HTTPS listener
 on 443 through an exact security-group-to-security-group edge; no public CIDR is
 part of that path.
 
-**Assumption:** the `network` module creates and owns the ALB security group, and
+Assumptions: the `network` module creates and owns the ALB security group, and
 the environment root supplies its identifier as `alb_security_group_id`. This
 module only attaches that identifier. It declares no `aws_security_group`, no
 `aws_security_group_rule`, accepts no port or CIDR input, and contains no
@@ -121,7 +121,7 @@ creating a dependency cycle.
 The HTTPS listener on port 443 is the module's only listener. No plaintext HTTP
 listener exists, so port 80 is not opened for forwarding or redirecting.
 
-**Alternatives Considered:** an HTTP-to-HTTPS redirect listener was rejected
+Alternatives Considered: an HTTP-to-HTTPS redirect listener was rejected
 because the only client is the API Gateway private integration, which connects
 over HTTPS. A plaintext listener would accept traffic no supported caller needs,
 add another ingress rule to the network-owned matrix, and provide no migration
@@ -132,7 +132,7 @@ for the broader least-privilege and identity decisions.
 
 ## 5. Baseline lineage: the routing table this module succeeds
 
-**Refactoring Rationale:** this module has **no source file in the baseline**; it
+Refactoring Rationale: this module has **no source file in the baseline**; it
 is net-new. Its lineage is structural: a CICS four-character transaction
 identifier dispatched to a named program was the baseline routing table, while
 an ALB path rule dispatching to a named target group is the target routing
@@ -203,7 +203,7 @@ or region values:
 | `aws_partition.current` | Keeps generated policy ARNs partition-aware |
 | `aws_iam_policy_document.access_logs` | Builds the fallback bucket's TLS and delivery policy |
 
-**Refactoring Rationale:** the following omissions are ownership boundaries, not
+Refactoring Rationale: the following omissions are ownership boundaries, not
 unfinished work. Keeping each resource beside the lifecycle it changes prevents
 this routing module from acquiring network, workload, certificate, or DNS
 ownership merely because the ALB consumes those values.
@@ -234,7 +234,7 @@ The settled environment roots feed one root local to both the ALB and
 consumer-facing seam, so another caller can use the module default without
 copying it.
 
-**Refactoring Rationale:** no resource in this module reads
+Refactoring Rationale: no resource in this module reads
 `var.health_check_path`; `outputs.tf` is its only in-module consumer. Removing the
 output would therefore make the variable unused and fail the gating
 `terraform_unused_declarations` rule. Adding a target group here merely to consume
@@ -249,7 +249,7 @@ information that terraform-docs cannot infer.
 
 ### 8.1 Input suppliers and operational contracts
 
-**Assumption:** each supplier is named because an input contract is incomplete
+Assumptions: each supplier is named because an input contract is incomplete
 without its composition boundary. Defaulted inputs are chosen so omission cannot
 disable logging, lower the TLS floor, or remove deletion protection; neutral
 defaults such as `tags = {}` leave environment-owned policy with the caller.
@@ -272,7 +272,7 @@ defaults such as `tags = {}` leave environment-owned policy with the caller.
 | `health_check_path` | The module default or the root's shared health-path local | One absolute path feeds the seven online target groups and container checks; §7 explains the output indirection |
 | `tags` | Optional environment-root additions | Merged after the module's component tag and alongside provider `default_tags`, so caller keys retain precedence |
 
-**Alternatives Considered:** a list for `service_routes` was rejected because
+Alternatives Considered: a list for `service_routes` was rejected because
 `count` would bind resource identity to position. The map's service-name keys are
 stable `for_each` addresses, so insertion or reordering does not recreate
 unrelated listener rules. Explicit priorities remain necessary because they are
@@ -300,7 +300,7 @@ optional aliasing, fallback-bucket integration, and reusable callers. Per the
 module outputs are the admissible source of runtime identifiers; no service
 hard-codes an ALB endpoint.
 
-**Assumption:** none of the ten outputs is marked `sensitive`. They are
+Assumptions: none of the ten outputs is marked `sensitive`. They are
 infrastructure identifiers, a request path, or a nullable bucket ARN rather than
 credentials. Redacting them from plans and `terraform output` would obstruct
 wiring diagnostics without protecting a secret; credentials are generated at
@@ -378,9 +378,9 @@ apply time and written directly to Secrets Manager.
 
 Every category below is gating in
 [`.github/workflows/infra-ci.yml`](../../../.github/workflows/infra-ci.yml);
-none is an advisory report. The first four pass for the settled tree. The
-security category is reported with its measured findings rather than described
-as green when its hard Checkov sub-gate is not.
+none is an advisory report. All five pass for the settled tree; the security
+category is reported with the one bounded exception it carries rather than
+described as unconditionally clean.
 
 | Gate | Invocation or configuration | Module behavior and measured status |
 |---|---|---|
@@ -388,23 +388,70 @@ as green when its hard Checkov sub-gate is not.
 | 2. Terraform validation | Backend-free `init` plus `validate` on `infra/bootstrap`, `infra/envs/dev`, and `infra/envs/prod` | Passes; each root resolves this local child with the root-owned provider configuration |
 | 3. TFLint | Recursive run with [`infra/.tflint.hcl`](../../.tflint.hcl) | Passes; all 15 variables are typed and described, all 10 outputs are described, declarations are used, names are snake_case, and HCL comments use `#` syntax |
 | 4. terraform-docs drift | Version-pinned check-only run with [`infra/.terraform-docs.yml`](../../.terraform-docs.yml) | Passes across all nineteen governed directories; this generated region is byte-identical to the settled HCL |
-| 5. Security and policy | Migration-owned Gitleaks scan, bounded-exception assertions, and the hard Checkov material-security baseline | The module secret scan passes and ALB checks `CKV_AWS_91` and `CKV_AWS_103` pass; Checkov still reports `CKV_AWS_21` and `CKV_AWS_145` on the conditional fallback bucket |
+| 5. Security and policy | Migration-owned Gitleaks scan, bounded-exception assertions, and the hard Checkov material-security baseline | The module secret scan passes; ALB checks `CKV_AWS_91` and `CKV_AWS_103` pass; `CKV_AWS_21` is satisfied by construction on the conditional fallback bucket; `CKV_AWS_145` on that same bucket is the module's one declared bounded exception |
 
-The two open ALB findings are concrete: the fallback bucket has no versioning
-resource and uses S3-managed AES-256 rather than KMS. Supplying the shared
-`observability` bucket makes the fallback resource count zero at apply, but
-Checkov evaluates the conditional resource block statically, so that root wiring
-does not clear either finding. A clean hard gate requires the fallback HCL to
-provide both controls.
+### 9.1 The one bounded exception, and the finding that is no longer open
 
-**Trade-off:** the workflow uses an explicit material-check list because its
+Two findings were previously reported against the conditional fallback log
+bucket. **`CKV_AWS_21` (bucket versioning) is closed by construction** —
+[`main.tf`](main.tf) declares `aws_s3_bucket_versioning.access_logs` alongside
+the bucket, with its own rationale for why an audit destination should survive a
+deletion and why no noncurrent-expiry rule accompanies it.
+
+`CKV_AWS_145` (default encryption by a customer-managed key) remains open and is
+declared as an exception rather than left silently failing. Assumptions:
+Elastic Load Balancing delivers access logs through a service principal that is
+not a grantee on the observability KMS key, so satisfying the check would mean
+widening that key's policy to a delivery service for a bucket holding no
+application record. The bucket therefore carries `AES256`, and
+`#checkov:skip=CKV_AWS_145` is written **on that one resource with that one
+check named**, never as a file-wide or run-wide exclusion. The compensating
+controls are all present in the same HCL: public access blocked, bucket-owner
+enforced ownership, versioning enabled, an exact-source delivery policy, and no
+read grant to any service task.
+
+That is the module's **complete** suppression inventory — one `#checkov:skip`,
+one check, one resource. There is no `--skip-check` argument and no
+module-specific ignore file. Trade-offs: an earlier revision of this section
+claimed the module used "no policy suppression of any kind". A blanket claim of
+that shape is unmaintainable: it was invalidated by an exception added elsewhere
+in the file, and a reader who greps `main.tf` finds the contradiction before they
+find the rationale. Naming the exception, the check and the resource costs three
+sentences and cannot go stale without the grep also changing.
+
+Assumptions: the internal-ALB web-application-firewall condition is separate
+from the above and is inapplicable **by construction** rather than waived — the
+check's precondition is a public-facing load balancer and
+[`main.tf`](main.tf) fixes `internal = true` with no input able to change it, so
+no suppression is written or needed for it.
+
+Trade-offs: the workflow uses an explicit material-check list because its
 offline Checkov distribution does not carry reliable severity metadata;
 selecting `HIGH,CRITICAL` there would select no checks and report a false green
 result. The full scan still records the wider result set.
 
-**Assumption:** this module uses no policy suppression of any kind: no
-`#checkov:skip`, no `--skip-check`, and no module-specific ignore file. The
-internal-ALB WAF condition is inapplicable by construction rather than waived.
+### 9.2 What the access log necessarily retains
+
+Assumptions: an access-log record carries the full request line, so any value a
+caller places in a URI **path** is persisted to the bucket verbatim, and this
+module can neither filter nor redact a delivered field. The bound is therefore
+applied upstream rather than here: the migrated services carry no unmasked
+primary account number into a path they log, which is enforced in
+[`GlobalExceptionHandler`](../../../services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java),
+where the request path is narrowed before it reaches either a log line or a
+response body. Two further bounds hold at this end: the destination is the
+purpose-built bucket described in §9.1 rather than a general log bucket, so the
+records are reachable only by an operator identity; and the header set ALB
+records does not include `Authorization` or `Cookie`, so no bearer credential
+reaches this destination at all.
+
+Alternatives Considered: disabling access logging to remove the residue
+outright. Rejected — the baseline already had that property and it is the defect
+this module corrects. All eight file definitions in `app/csd/CARDDEMO.CSD` are
+`RECOVERY(NONE) JOURNAL(NO)`, so nothing recorded who reached what and nothing
+could be reconstructed afterwards. Giving up the only admission record to avoid a
+residue that is already closed at its source trades an audit capability for
+nothing.
 
 ## 10. Regenerating the Terraform reference
 
@@ -412,13 +459,13 @@ Run both commands from the repository root:
 
 ```bash
 # WHAT: regenerate only the terraform-docs region in this module README.
-# WHY : Assumption: the pinned repository configuration owns marker text,
+# WHY : Assumptions: the pinned repository configuration owns marker text,
 #       heading depth, section selection and byte ordering; hand-written tables
 #       drift from it.
 terraform-docs --config infra/.terraform-docs.yml infra/modules/alb
 
 # WHAT: perform the same non-mutating drift check used by CI.
-# WHY : Trade-off: check-only mode reports a stale file instead of repairing it,
+# WHY : Trade-offs: check-only mode reports a stale file instead of repairing it,
 #       keeping the generated contract reviewable rather than hiding the defect
 #       by rewriting the file during validation.
 terraform-docs --config infra/.terraform-docs.yml \
@@ -444,9 +491,10 @@ hand-written prose outside them are not generator-owned.
 | `terraform destroy` is blocked | `enable_deletion_protection` is true | Set the environment's protection value false, apply that reviewed change, then follow the [teardown runbook](../../../docs/runbooks/teardown.md) |
 | terraform-docs reports the README out of date | A sibling `.tf` contract changed without regenerating the injected region | Run both §10 commands and commit the generated change with the HCL change |
 | TFLint reports `terraform_unused_declarations` | A variable, local, or data source has no reference | Remove the false contract or consume it legitimately; do **not** add `vpc_id`, because `aws_lb` takes no VPC ID and this module owns no target group |
-| Checkov reports `CKV_AWS_21` and `CKV_AWS_145` | The conditional fallback log bucket is not versioned and uses S3-managed encryption | Add versioning and KMS encryption to the fallback-bucket HCL; passing a shared bucket does not remove a statically scanned resource block |
+| Checkov reports `CKV_AWS_145` on the fallback log bucket | Expected. The bucket carries S3-managed encryption because ELB log delivery is not a grantee on the observability KMS key | Nothing to correct — this is the module's one declared bounded exception, suppressed on that single resource with its rationale and compensating controls; see [§9.1](#91-the-one-bounded-exception-and-the-finding-that-is-no-longer-open) |
+| Checkov reports `CKV_AWS_21` on the fallback log bucket | A stale result. `aws_s3_bucket_versioning.access_logs` is declared in [`main.tf`](main.tf), so this finding is closed by construction | Re-run the scan against the current tree; if it persists, the scan is reading a cached or pre-versioning revision |
 
-**Trade-off:** validations catch shape, ranges, key sets, and duplicate IDs during
+Trade-offs: validations catch shape, ranges, key sets, and duplicate IDs during
 planning, but they cannot prove that two distinct subnet IDs belong to distinct
 availability zones or that an external bucket policy grants delivery. Those
 account-state checks remain apply-time failures, so this table names both the
@@ -468,7 +516,7 @@ and written directly to Secrets Manager instead of passing through this module,
 its outputs, or version control. Saved plans and state remain excluded because
 they contain resolved values.
 
-**Assumption:** this posture is structural rather than dependent on a reviewer
+Assumptions: this posture is structural rather than dependent on a reviewer
 recognizing every credential shape. Input/output boundaries keep deployed
 identifiers out of source, the migration-owned Gitleaks gate scans committed
 content, and the [package secrets and configuration flow](../../README.md#9-secrets-and-configuration-flow)

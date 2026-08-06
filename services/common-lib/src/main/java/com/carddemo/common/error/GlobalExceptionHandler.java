@@ -1,5 +1,6 @@
 package com.carddemo.common.error;
 
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
@@ -16,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
+import org.springframework.validation.ObjectError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -55,6 +57,15 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
  * restrict-on-delete mapping below is the sharpest case: a driver's constraint-violation text names
  * the schema, the table and the constraint, so returning it would both fail to tell the caller what to
  * do and disclose the internal shape of the store to an untrusted caller.</p>
+ *
+ * <p>Assumptions: the request path is the one caller-influenced value this class carries, and it is
+ * narrowed once at {@link #pathOf(HttpServletRequest)} rather than at each of the eighteen sites that
+ * read it. A resolved path can hold a primary account number in full -- the published card contract
+ * declares its path parameter {@code pattern '^[0-9]{16}$'} -- so an unnarrowed read would put that
+ * number into nine operational log lines as well as nine response bodies. Narrowing at the sink is
+ * what makes the guarantee survive the next handler added to this advice: a new site inherits the
+ * masking instead of having to remember it, which is the same reason this class exists rather than an
+ * emission call written at each error path.</p>
  *
  * <p>Assumptions: a machine-readable code and the sentence a person reads are separate members of the
  * emitted shape, never one composed string, because the baseline's own structured error record keeps
@@ -392,6 +403,24 @@ public class GlobalExceptionHandler {
     private static final int MAX_CAUSE_DEPTH = 16;
 
     /**
+     * The number of trailing digits of a primary account number that stay legible, four.
+     *
+     * <p>Assumptions: four is the platform-wide masked rendering, published by the card contract as
+     * twelve mask characters followed by four digits. It is the smallest suffix that still lets an
+     * operator and a cardholder agree which card a failure concerned, which is the entire purpose of
+     * retaining any of it.</p>
+     */
+    private static final int ACCOUNT_NUMBER_VISIBLE_DIGITS = 4;
+
+    /**
+     * The character written over each masked digit of a primary account number, an asterisk.
+     *
+     * <p>Assumptions: the asterisk is the character the card contract's own masked examples use, so a
+     * client comparing a payload value with a diagnostic path sees one rendering rather than two.</p>
+     */
+    private static final char ACCOUNT_NUMBER_MASK_CHARACTER = '*';
+
+    /**
      * The operational log this advice writes the caught failure to.
      *
      * <p>Assumptions: one static logger named for this class, so every failure in every service is
@@ -412,6 +441,31 @@ public class GlobalExceptionHandler {
      * import.</p>
      */
     private static final String CORRELATION_ID_MDC_KEY = "correlationId";
+
+    /**
+     * The shortest digit run in a request path that is narrowed as an account number, thirteen.
+     *
+     * <p>Assumptions: thirteen is the first length at which a run cannot be one of the identifiers the
+     * migrated routes legitimately carry. The widest of those is the eleven-digit account identifier
+     * from {@code ACCT-ID PIC 9(11)} at line 5 of {@code app/cpy/CVACT01Y.cpy}, and a twelve-digit run
+     * is left legible as the boundary immediately below, so the threshold sits one digit above every
+     * identifier a diagnostic path is meant to disclose and one digit below the shortest primary
+     * account number in circulation.</p>
+     *
+     * <p>Alternatives Considered: pinning the rule to the sixteen digits {@code CARD-NUM PIC X(16)}
+     * declares at line 5 of {@code app/cpy/CVACT02Y.cpy} and narrowing runs of exactly that width.
+     * Rejected because it fails open on both sides of sixteen: a seventeen- or nineteen-digit run --
+     * a card number with a check digit appended, or two identifiers a client concatenated -- would
+     * pass through in the clear, and so would any longer issuer range this platform later accepts. A
+     * minimum length fails closed instead, which is the direction a masking rule has to fail.</p>
+     *
+     * <p>Trade-offs: a minimum also narrows a sixteen-digit transaction identifier, declared at that
+     * width by {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, so a failed
+     * transaction read reports its identifier reduced to four digits. Nothing is lost operationally,
+     * because the correlation identity in the same body resolves to the operational record, which
+     * holds the unreduced path.</p>
+     */
+    private static final int ACCOUNT_NUMBER_MASK_THRESHOLD = 13;
 
     /**
      * The clock every emitted problem shape reads its timestamp from.
@@ -468,6 +522,20 @@ public class GlobalExceptionHandler {
                     : FieldValidationFlag.NOT_OK;
             fieldErrors.add(new ApiError.FieldError(rejected.getField(), state,
                     messageOf(rejected)));
+        }
+
+        // WHY : Assumptions: a violation raised by a CLASS-level constraint that named no member is
+        //       carried here too, because reading only the field errors above would DROP it entirely and
+        //       answer 400 with an empty per-field array -- a rejection with nothing for the client to
+        //       display. A cross-field rule is expected to attribute itself to the members it concerns,
+        //       and the request types in this migration do so through their validators, so this branch
+        //       is the safety net for one that does not rather than the normal path. The entry is keyed
+        //       by the object name the framework supplies, which names the request type; that is not a
+        //       form control, so it is deliberately reported as a not-acceptable-value state and never
+        //       as the blank state that would ask a form to draw a marker against a field.
+        for (ObjectError global : failure.getBindingResult().getGlobalErrors()) {
+            fieldErrors.add(new ApiError.FieldError(global.getObjectName(),
+                    FieldValidationFlag.NOT_OK, messageOf(global)));
         }
 
         // WHY : Assumptions: logged at warning level rather than error, because a rejected request is
@@ -920,14 +988,99 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Reads the path of the request being answered.
+     * Reads the path of the request being answered, with any primary account number in it rendered to
+     * its last four digits.
+     *
+     * <p>Refactoring Rationale: the path is masked here rather than left to a per-service mapper,
+     * because this advice is the only place that composes it and no mapper runs on a failed request.
+     * The card contract selects a card by its primary account number in the path and justifies that
+     * selector on the stated guarantee that the diagnostic path member is masked, so the guarantee has
+     * to be kept where the member is built. Without it every card failure -- 400, 401, 403, 404 and
+     * 409 alike -- returned the sixteen digits inside a response body, and a body travels further than
+     * a URL does: into client logs, error trackers and support tickets.</p>
      *
      * @param request the request to read, which may be {@code null} when this advice is exercised
      *     without a servlet request
-     * @return the request's URI, or the empty string when no request was supplied
+     * @return the request's URI with every primary account number masked, or the empty string when no
+     *     request was supplied
      */
     private static String pathOf(HttpServletRequest request) {
-        return request == null ? "" : textOr(request.getRequestURI());
+        return request == null ? "" : maskAccountNumbers(textOr(request.getRequestURI()));
+    }
+
+    /**
+     * Narrows every account number in a path to a mask and its last four digits, preserving length.
+     *
+     * <p>Assumptions: an account number is any run of {@value #ACCOUNT_NUMBER_MASK_THRESHOLD} or more
+     * digit characters bounded by non-digits, and the constant's own declaration records why that
+     * length is the boundary. Each withheld digit is overwritten with its own mask character rather
+     * than the run being collapsed to a fixed marker, so the narrowed path is exactly as long as the
+     * one the client called -- which is what lets a reader line a diagnostic path up against an access
+     * record without either one having to be re-parsed.</p>
+     *
+     * <p>Assumptions: the value is scanned rather than parsed. This advice is reached from every
+     * service and must not know which path shapes exist, so no segment position, prefix or route
+     * template appears here; only the digit run does. The alternative, narrowing only paths known to
+     * carry a card number, was rejected because it fails open: a path added later carries its number
+     * in the clear until somebody remembers to extend the list, and the failure is silent.</p>
+     *
+     * <p>Assumptions: the operation is idempotent, and that property is relied upon rather than
+     * hoped for. Narrowing a qualifying run leaves only its four trailing digits as a digit run, which
+     * is below the threshold, so a path that has already been narrowed -- by a caller, or by the
+     * emitted shape's own canonical constructor, which applies the shared masker to whatever path it
+     * is given -- passes through this method unchanged.</p>
+     *
+     * @param path the request path to narrow, never {@code null}; a path whose longest digit run is
+     *     shorter than the threshold is returned unchanged
+     * @return the path with every qualifying digit run reduced to mask characters and that run's last
+     *     four digits, of identical length to {@code path}
+     */
+    static String maskAccountNumbers(String path) {
+        StringBuilder masked = null;
+        int scanned = 0;
+        int length = path.length();
+        while (scanned < length) {
+            if (!isDigit(path.charAt(scanned))) {
+                scanned++;
+                continue;
+            }
+            int runEnd = scanned;
+            while (runEnd < length && isDigit(path.charAt(runEnd))) {
+                runEnd++;
+            }
+            if (runEnd - scanned >= ACCOUNT_NUMBER_MASK_THRESHOLD) {
+                if (masked == null) {
+                    masked = new StringBuilder(path);
+                }
+                // WHY : Assumptions: the four retained digits are the LAST four, which is the only part
+                //       of a card number the migrated platform ever renders, so the mask writes over
+                //       every digit ahead of them and leaves those four where they were. Writing over
+                //       the leading digits in place, rather than replacing the run, is what keeps the
+                //       narrowed path the same length as the one the client called.
+                for (int position = scanned;
+                        position < runEnd - ACCOUNT_NUMBER_VISIBLE_DIGITS;
+                        position++) {
+                    masked.setCharAt(position, ACCOUNT_NUMBER_MASK_CHARACTER);
+                }
+            }
+            scanned = runEnd;
+        }
+        return masked == null ? path : masked.toString();
+    }
+
+    /**
+     * Reports whether a character is one of the ten ASCII digits.
+     *
+     * <p>Assumptions: the ten ASCII digits and nothing else, rather than
+     * {@link Character#isDigit(char)}, which also accepts the decimal digits of other scripts. A path
+     * segment carrying such a digit is not a card number this platform issued, and treating it as one
+     * would make the masking depend on the caller's choice of script.</p>
+     *
+     * @param candidate the character to classify
+     * @return {@code true} for the characters {@code '0'} through {@code '9'}, {@code false} otherwise
+     */
+    private static boolean isDigit(char candidate) {
+        return candidate >= '0' && candidate <= '9';
     }
 
     /**
@@ -941,13 +1094,18 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Extracts the help text a rejected field should display.
+     * Extracts the help text a rejected field or object should display.
      *
-     * @param rejected the framework's own field error, carrying the constraint's resolved message
+     * <p>Assumptions: the parameter is the framework's error supertype rather than the field-error
+     * subtype, so one operation serves both the per-field rejections and the class-level ones. The two
+     * carry their message through the same accessor, so a second copy of this fallback would only be a
+     * second place for it to drift.</p>
+     *
+     * @param rejected the framework's own error, carrying the constraint's resolved message
      * @return the resolved message, or a fixed fallback when the constraint supplied none, so that an
      *     entry can never reach a client with nothing to display
      */
-    private static String messageOf(FieldError rejected) {
+    private static String messageOf(ObjectError rejected) {
         String resolved = rejected.getDefaultMessage();
         // WHY : Assumptions: a blank constraint message is replaced rather than passed through. The
         //       per-field entry type requires content, so an entry built from a blank message would

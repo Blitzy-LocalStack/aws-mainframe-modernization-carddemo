@@ -55,7 +55,7 @@ graph LR
 | `ssm` | Reads runtime configuration and the batch read-only flag |
 | S3 gateway | Routes dataset and statement object traffic through route-table prefix entries, with no endpoint ENI or hourly interface-endpoint charge |
 
-**Assumptions:** the endpoint set is identical in dev and prod. Removing one
+Assumptions: the endpoint set is identical in dev and prod. Removing one
 does not produce a cleanly degraded topology; it silently sends that service's
 traffic through NAT. `interface_endpoint_services` is therefore validated
 against the exact eight-entry set rather than treated as an environment lever.
@@ -109,7 +109,7 @@ module "database" {
 }
 ```
 
-**Refactoring Rationale:** the two ports are module outputs even though they
+Refactoring Rationale: the two ports are module outputs even though they
 begin as inputs. The environment root passes those outputs into the service and
 database modules, making the security-group rule and the listener it admits one
 contract rather than three repeated literals.
@@ -145,22 +145,22 @@ create a second owner for an internal boundary.
 
 ## Deliberate decisions
 
-1. **Isolated data has no default route.** **Alternatives Considered:** placing
+1. **Isolated data has no default route.** Alternatives Considered: placing
    Aurora in the private-application tier. Rejected because no route is a
    routing fact that survives a security-group or credential mistake.
-   **Trade-offs:** direct operator egress and package access from the data tier
+   Trade-offs: direct operator egress and package access from the data tier
    are unavailable.
-2. **One NAT gateway is created per zone.** **Alternatives Considered:** one
+2. **One NAT gateway is created per zone.** Alternatives Considered: one
    shared gateway to reduce the largest fixed network cost. Rejected because a
    zone loss would remove egress from every zone, and a differently shaped dev
    network would not validate prod.
 3. **Exactly three security groups are created.** The managed-boundary group is
    attached to the VPC Link, ALB, and interface endpoint ENIs; separate rules
    distinguish self-referenced listener TLS, application-to-endpoint TLS, and
-   ALB-to-application forwarding. **Alternatives Considered:** attaching
+   ALB-to-application forwarding. Alternatives Considered: attaching
    endpoint ENIs to the application group. Rejected because a self-referenced
    443 rule would also permit task-to-task TLS.
-4. **The ALB group is also the VPC Link group.** **Assumptions:** its
+4. **The ALB group is also the VPC Link group.** Assumptions: its
    self-referenced 443 rule is edge-to-listener only; a separate rule carries
    listener-to-application traffic on `app_container_port`. Reusing that
    managed-boundary identity also keeps the topology at the AAP's three groups
@@ -168,11 +168,11 @@ create a second owner for an internal boundary.
 5. **No subnet auto-assigns a public address.** The NAT gateways allocate their
    own Elastic IPs and the ALB is internal. Enabling auto-assignment would only
    create an unintended public-address path.
-6. **S3 uses a gateway endpoint.** **Trade-offs:** it is a route-table prefix
+6. **S3 uses a gateway endpoint.** Trade-offs: it is a route-table prefix
    entry rather than an ENI with a security group and carries no interface
    endpoint hourly charge. Associating isolated route tables does not create an
    internet path because the route can reach S3 only.
-7. **Subnet CIDRs are derived.** **Alternatives Considered:** three explicit
+7. **Subnet CIDRs are derived.** Alternatives Considered: three explicit
    lists of CIDRs. Nine hand-maintained blocks can overlap or drift from zone
    order; one `cidrsubnet` arithmetic cannot.
 8. **VPC flow logs are owned here.** Their lifecycle follows the VPC, while the

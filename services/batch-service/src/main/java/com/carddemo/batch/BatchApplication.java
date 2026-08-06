@@ -1,5 +1,7 @@
 package com.carddemo.batch;
 
+import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.common.observability.LogSafeText;
 import java.util.Collection;
 import java.util.List;
 import org.slf4j.Logger;
@@ -63,6 +65,32 @@ import org.springframework.context.ConfigurableApplicationContext;
  *   <li>{@code --business-date=<token>} supplies the business date as a job parameter under the key
  *       {@link #BUSINESS_DATE_PARAMETER}. The token is an OPAQUE ten-character value: it is
  *       validated for width and character class only and is then forwarded exactly as received.</li>
+ * </ul>
+ *
+ * <p>Assumptions: the business date is required for ALL SEVEN jobs, not only for the one whose
+ * reference step carries a {@code PARM}, and the reason is stated here because a reader who checks
+ * the reference drivers will find only one of them passing a date. Three separate uses make it
+ * mandatory, and they are cumulative rather than alternative:</p>
+ *
+ * <ul>
+ *   <li>ONE job takes it from the baseline directly. {@code app/jcl/INTCALC.jcl:22} runs
+ *       {@code PGM=CBACT04C,PARM='2022071800'}, and {@code app/cbl/CBACT04C.cbl:476-480}
+ *       concatenates that value into every generated {@code TRAN-ID}, so for {@code calculate-interest}
+ *       the token's bytes are part of the module's observable output.</li>
+ *   <li>THREE more address a dataset generation by it. {@code post-transactions} creates a generation
+ *       of the reject stream ({@code app/jcl/POSTTRAN.jcl:38}), {@code backup-transactions} creates
+ *       one of the backup dataset ({@code app/jcl/TRANBKP.jcl:33}) and {@code combine-transactions}
+ *       reads two current generations and creates one of the combined dataset
+ *       ({@code app/jcl/COMBTRAN.jcl:24,26,37}). A generation's object-storage coordinate is
+ *       {@code dt=YYYY-MM-DD/gen=NNNN}, so a step that could not name a date could not name where to
+ *       read or write.</li>
+ *   <li>ALL SEVEN are identified by it. {@link #startJob} adds the token as an IDENTIFYING job
+ *       parameter, so it forms the identity of the job instance; that is what makes one night's run
+ *       distinguishable from the next and what lets an orchestration redrive recognise an already
+ *       completed night as a no-op instead of processing the same feed twice. Making the option
+ *       optional for the three jobs with neither a {@code PARM} nor a generation -- the preflight and
+ *       the export/import pair -- would give those three ONE job instance for all time, and the second
+ *       run of any of them would then be refused whatever date it was given.</li>
  * </ul>
  *
  * <p>Assumptions: the business-date token is a passthrough rather than a date in one canonical
@@ -366,6 +394,55 @@ public class BatchApplication {
     public static final String ERROR_CODE_FATAL = "CARDDEMO-BATCH-0003";
 
     /**
+     * The stable code reported when the requested business date had already completed.
+     *
+     * <p>Assumptions: this is an OUTCOME code rather than an error code, and it is separate from the
+     * three above because the run neither failed nor did any work. It exists so that a redrive no-op
+     * is queryable: the restart contract this class implements depends on a repeated business date
+     * reporting success, and without a code an operator cannot tell a state that re-ran and skipped
+     * from a state that re-ran and posted the night a second time -- which is the one question a
+     * redrive raises.</p>
+     */
+    public static final String OUTCOME_CODE_ALREADY_COMPLETE = "CARDDEMO-BATCH-0004";
+
+    /**
+     * The token the orchestration records on the warn edge, reused verbatim in the warn log line.
+     *
+     * <p>Assumptions: this string is NOT chosen here. The daily state machine's warn edge writes
+     * {@code code = "POSTING_REJECTS_PRESENT"} into its execution state -- the {@code Pass} state
+     * named {@code RecordPostingWarning} in {@code infra/modules/step-functions-batch/main.tf} -- and
+     * emitting the same token means one search matches both the execution history and the log stream.
+     * A second spelling for one outcome would leave an operator joining the two by eye, which is the
+     * work this token exists to remove.</p>
+     */
+    public static final String WARNING_CODE_POSTING_REJECTS = "POSTING_REJECTS_PRESENT";
+
+    /**
+     * The widest a caller-supplied or job-supplied value may be when echoed into a diagnostic.
+     *
+     * <p>Assumptions: the bound is derived from the two values it applies to rather than chosen for
+     * roundness. The widest legitimate job token is a job name and the widest legitimate date token is
+     * {@code BUSINESS_DATE_LENGTH} characters, so sixty-four is comfortably above anything correct
+     * while being far below what an unbounded echo admits.</p>
+     *
+     * <p>Trade-offs: a value longer than this is truncated and marked, so the diagnostic stops being a
+     * faithful copy of what was passed. That is the point: an unbounded echo of an argument supplied by
+     * whatever assembled the container command lets one malformed invocation write an arbitrarily large
+     * record into a log stream billed by ingested volume, and a truncated value is still enough to
+     * recognise the mistake.</p>
+     */
+    public static final int MAX_ECHOED_VALUE_LENGTH = 64;
+
+    /**
+     * The marker appended to a diagnostic value that was truncated at the echo bound.
+     *
+     * <p>Assumptions: truncation is MARKED rather than silent. An unmarked truncation is
+     * indistinguishable from a value that really was that long, so an operator reading the diagnostic
+     * would look for a sixty-four-character argument that was never passed.</p>
+     */
+    public static final String TRUNCATION_MARKER = "...[truncated]";
+
+    /**
      * The environment variable naming the run this task belongs to.
      *
      * <p>Assumptions: the orchestrator supplies its execution name here through the container
@@ -478,9 +555,24 @@ public class BatchApplication {
             //       operator running the image by hand to discover the argument contract needs the
             //       usage text on the terminal whatever the logging state is. Every failure raised
             //       AFTER the context is up goes to the logger alone.
-            LOG.error("event=batch.usage.rejected code={} reason={}", ERROR_CODE_USAGE,
-                    rejection.getMessage());
-            System.err.println("carddemo batch: " + rejection.getMessage());
+            // WHY : Refactoring Rationale: the rejection text is neutralised before it is written,
+            //       because it is the ONLY value in this class assembled from the command line and
+            //       every rejection message quotes the offending token back. A token carrying a line
+            //       feed would therefore end this event's line and begin a second line that the
+            //       caller composed -- level, event name and all -- in a stream that a collector
+            //       parses one line per event, which is the concern named CWE-117. Both destinations
+            //       are neutralised rather than only the log: standard error is collected from the
+            //       container as readily as the log stream is, so sanitising one and not the other
+            //       would leave the same forged record reachable through the other channel.
+            // WHY : Alternatives Considered: rejecting the argument without echoing it, which would
+            //       remove the value from the line entirely. Rejected because the whole purpose of
+            //       this diagnostic is to tell an operator which token was wrong, and a refusal that
+            //       does not name it sends them to the usage text with no idea which of their two
+            //       arguments to change. Neutralising keeps the token readable and keeps the record
+            //       one record. The usage text itself is a compile-time constant and needs nothing.
+            String reason = LogSafeText.sanitize(rejection.getMessage());
+            LOG.error("event=batch.usage.rejected code={} reason={}", ERROR_CODE_USAGE, reason);
+            System.err.println("carddemo batch: " + reason);
             System.err.println(usage());
             return EXIT_STATUS_HARD_FAILURE;
         }
@@ -597,13 +689,30 @@ public class BatchApplication {
      * observability wiring cannot alter the argument contract that
      * {@link #execute(String[])} validates.</p>
      *
+     * <p>Refactoring Rationale: the supplied value is neutralised as well as trimmed, and the two do
+     * different work. Trimming removes the surrounding whitespace an override picks up from the
+     * orchestration definition it was written in; neutralising replaces any ISO control character
+     * inside it. Trimming alone is not enough, because it leaves an interior line feed untouched, and
+     * this value is placed into the diagnostic context that EVERY line this process logs carries --
+     * so one malformed override would forge a second line under every one of them, for the whole run.
+     * That is the concern named CWE-117, and this is the widest-reach instance of it in this module:
+     * the other sanitised value affects one line, this one affects all of them.</p>
+     *
+     * <p>Assumptions: an environment override is outside this process's control even though an
+     * orchestrator supplies it. The value travels from a state-machine definition through a container
+     * override, so it can be set by anything that can edit either, and treating it as trusted because
+     * of where it usually comes from is the assumption this neutralisation withdraws.</p>
+     *
      * @return the orchestrator's run identifier when {@link #RUN_ID_VARIABLE} is set to a non-blank
-     *     value, and the fixed token {@code unorchestrated} otherwise, which distinguishes a manual
-     *     run from an orchestrated run whose override was omitted
+     *     value, trimmed and with every ISO control character replaced by a space, and the fixed token
+     *     {@code unorchestrated} otherwise, which distinguishes a manual run from an orchestrated run
+     *     whose override was omitted
      */
     private static String runIdentifier() {
         String supplied = System.getenv(RUN_ID_VARIABLE);
-        return supplied == null || supplied.isBlank() ? "unorchestrated" : supplied.trim();
+        return supplied == null || supplied.isBlank()
+                ? "unorchestrated"
+                : LogSafeText.sanitize(supplied.trim());
     }
 
     /**
@@ -642,7 +751,9 @@ public class BatchApplication {
                 .toJobParameters();
         try {
             JobExecution execution = operator.start(job, parameters);
-            return exitStatusOf(execution);
+            int exitStatus = exitStatusOf(execution);
+            logJobOutcome(jobName, businessDate, execution, exitStatus);
+            return exitStatus;
         } catch (JobInstanceAlreadyCompleteException alreadyDone) {
             // WHY : Assumptions: a repeat of a business date that already completed is a no-op that
             //       reports success, which is the module's restart contract rather than leniency.
@@ -651,11 +762,159 @@ public class BatchApplication {
             //       invoked a second time. Reporting a hard failure there would fail the chain on a
             //       step whose work is already committed and would make redrive unusable; the run
             //       ledger this module keeps is what records that the work was done once.
+            // WHY : Refactoring Rationale: this branch now writes to the LOG as well, and previously
+            //       wrote only to standard error. Standard error alone broke this class's own logging
+            //       invariant in the one place it mattered most: the line carried no level, no
+            //       timestamp and -- decisively -- no correlation identifier, even though the mapped
+            //       diagnostic context is populated on this path, so a redrive no-op could not be
+            //       joined to the execution that caused it and could not be counted at all. The
+            //       redrive behaviour this branch implements is precisely the scenario the restart
+            //       contract depends on, so it is the last outcome that should be unqueryable.
+            // WHY : Trade-offs: warn rather than info, and the tier is deliberate. The process still
+            //       reports the clean exit status, so nothing downstream changes; but a state that did
+            //       no work when an operator expected a night to post is worth surfacing, and warn is
+            //       the lowest level a filtered operational view is guaranteed to show.
+            // WHY : Assumptions: the standard-error line is KEPT beside the log line rather than
+            //       replaced by it, for the same reason the usage diagnostic keeps one: an operator
+            //       running this image by hand reads the terminal, and this is the one outcome that
+            //       looks like a silent success from the exit status alone.
+            LOG.warn("event=batch.job.already-complete code={} job={} businessDate={} outcome={}",
+                    OUTCOME_CODE_ALREADY_COMPLETE, jobName, businessDate,
+                    BatchReturnCode.CLEAN.name());
             System.err.println("carddemo batch: job '" + jobName + "' has already completed for "
                     + BUSINESS_DATE_PARAMETER + " '" + businessDate + "'; nothing to do: "
                     + alreadyDone.getMessage());
             return EXIT_STATUS_CLEAN;
         }
+    }
+
+    /**
+     * Reports the outcome of a finished job execution at the level its tier deserves.
+     *
+     * <p>Refactoring Rationale: before this method existed, every log site in this class was on a
+     * failure path, so a clean night and a night that correctly rejected transactions produced
+     * IDENTICAL output -- none at all -- and so did a job that completed with a failed batch status
+     * without raising anything. The graded outcome was durably recorded in two places, the execution
+     * state of the orchestration and the run ledger, and in neither of them can an operator watching a
+     * log or metric stream see it: distinguishing the tiers required opening an execution history or
+     * querying the database. One line per finished execution makes the tier visible where the rest of
+     * the night's evidence already is, and makes the warn tier countable.</p>
+     *
+     * <p>Assumptions: the tier is resolved through {@link BatchReturnCode} rather than compared against
+     * the three integer constants again here. That type owns the tier vocabulary and its own
+     * documentation of what each tier means, so naming the tier from it keeps one spelling; a local
+     * comparison chain would be a second place for the tiers to be described and to drift. The
+     * resolution cannot reject its input, because {@link #exitStatusOf(JobExecution)} yields exactly
+     * the three values that type models.</p>
+     *
+     * <p>Assumptions: the warn line carries the orchestration's own warn token, so the log record and
+     * the execution state can be searched with one string. It does not carry a reject COUNT, and the
+     * reason is that this class cannot know one: the count lives inside the posting step, which
+     * publishes it as the execution's exit description. That description is echoed here -- bounded and
+     * sanitised, because an exit description is job-supplied text and a failed step's description can
+     * carry a whole stack trace -- so the count appears in the line as soon as a job records one, and
+     * no placeholder is emitted meanwhile.</p>
+     *
+     * <p>Trade-offs: the level differs by tier, which means one grep for a single level does not find
+     * every outcome. That is preferred to one level for all three: an operational view filtered at warn
+     * would then either show every clean night or hide the warn tier, and the whole purpose of the line
+     * is that the middle tier is neither invisible nor indistinguishable from a failure.</p>
+     *
+     * <p>Assumptions: package-private rather than private, for the same reason
+     * {@link #exitStatusOf(JobExecution)} is: the mapping from a finished execution to the line an
+     * operator reads is a contract worth asserting directly, and asserting it through a started job
+     * would need a job repository, a datasource and a migrated schema before it could observe a single
+     * line.</p>
+     *
+     * @param jobName the validated job token that ran, reported so a line names its own state
+     * @param businessDate the business-date token the run was given, reported so a rerun of one night
+     *     can be told from the run of the next
+     * @param execution the finished job execution, read for its batch status and its exit status only
+     * @param exitStatus the process exit status {@link #exitStatusOf(JobExecution)} derived from that
+     *     execution, one of the three declared tiers
+     */
+    static void logJobOutcome(String jobName, String businessDate, JobExecution execution,
+            int exitStatus) {
+
+        BatchReturnCode tier = BatchReturnCode.fromNumericValue(exitStatus);
+        ExitStatus frameworkStatus = execution.getExitStatus();
+        String detail = sanitiseForDiagnostic(frameworkStatus.getExitDescription());
+
+        switch (tier) {
+            case CLEAN -> LOG.info(
+                    "event=batch.job.outcome outcome={} exitStatus={} job={} businessDate={}"
+                            + " batchStatus={} exitCode={}",
+                    tier.name(), exitStatus, jobName, businessDate, execution.getStatus(),
+                    frameworkStatus.getExitCode());
+            case SOFT_WARN -> LOG.warn(
+                    "event=batch.job.outcome outcome={} code={} exitStatus={} job={}"
+                            + " businessDate={} batchStatus={} exitCode={} detail={}",
+                    tier.name(), WARNING_CODE_POSTING_REJECTS, exitStatus, jobName, businessDate,
+                    execution.getStatus(), frameworkStatus.getExitCode(), detail);
+            case HARD_FAILURE -> LOG.error(
+                    "event=batch.job.outcome outcome={} code={} exitStatus={} job={}"
+                            + " businessDate={} batchStatus={} exitCode={} detail={}",
+                    tier.name(), ERROR_CODE_JOB_FAILED, exitStatus, jobName, businessDate,
+                    execution.getStatus(), frameworkStatus.getExitCode(), detail);
+            default -> LOG.error(
+                    "event=batch.job.outcome outcome=unmodelled exitStatus={} job={}"
+                            + " businessDate={}",
+                    exitStatus, jobName, businessDate);
+        }
+    }
+
+    /**
+     * Bounds and sanitises a value before it is echoed into a diagnostic.
+     *
+     * <p>Refactoring Rationale: the values this is applied to are the only two in this class that
+     * neither originate here nor are validated before being echoed -- a rejected command-line argument
+     * and a job-supplied exit description -- and both previously reached the log verbatim and unbounded.
+     * A line feed inside such a value splits one log record into two, so a value carrying one can forge
+     * a second record that looks like a line this system emitted; an unbounded value lets a single
+     * malformed invocation write an arbitrarily large record into a stream billed by volume. Bounding
+     * and stripping removes both without removing the diagnostic.</p>
+     *
+     * <p>Assumptions: a control character is REPLACED rather than deleted, so the value's length and
+     * the position of the offending byte are both still readable. Deleting it would silently join the
+     * text either side, which changes what the reader believes was passed.</p>
+     *
+     * <p>Trade-offs: every character above the printable ASCII range is replaced too, not only the two
+     * that split a record. A code point that renders identically to an ASCII character would otherwise
+     * let a diagnostic read as one token while being another, which is the same reason the correlation
+     * filter in the shared kernel restricts its identity alphabet to ASCII. The cost is that a
+     * legitimately non-ASCII argument is shown as masked bytes; no argument this module accepts is
+     * non-ASCII, because both option contracts are digits, hyphen-minus and lower-case letters.</p>
+     *
+     * @param value the text to bound and sanitise, which may be {@code null} when a job recorded no
+     *     exit description
+     * @return the empty string when {@code value} is {@code null}, otherwise the value with every
+     *     character outside printable ASCII replaced and, when it exceeded
+     *     {@link #MAX_ECHOED_VALUE_LENGTH}, truncated to that width and marked with
+     *     {@link #TRUNCATION_MARKER}
+     */
+    static String sanitiseForDiagnostic(String value) {
+        if (value == null) {
+            return "";
+        }
+
+        boolean truncated = value.length() > MAX_ECHOED_VALUE_LENGTH;
+        int retained = truncated ? MAX_ECHOED_VALUE_LENGTH : value.length();
+        StringBuilder sanitised = new StringBuilder(retained + TRUNCATION_MARKER.length());
+
+        for (int index = 0; index < retained; index++) {
+            char character = value.charAt(index);
+            // WHY : Assumptions: the accepted range is the printable ASCII block, space through tilde,
+            //       tested by explicit comparison rather than by the platform's is-printable predicate.
+            //       That predicate answers for the whole of Unicode, so it would admit the code points
+            //       this replacement exists to exclude.
+            sanitised.append(character >= ' ' && character <= '~' ? character : '?');
+        }
+
+        if (truncated) {
+            sanitised.append(TRUNCATION_MARKER);
+        }
+
+        return sanitised.toString();
     }
 
     /**
@@ -739,7 +998,13 @@ public class BatchApplication {
             throw new IllegalArgumentException(JOB_OPTION + " is required and was not supplied");
         }
         if (!JOB_NAMES.contains(value)) {
-            throw new IllegalArgumentException(JOB_OPTION + " value '" + value
+            // WHY : Refactoring Rationale: the rejected value is bounded and sanitised before it
+            //       reaches the message, and the message is what the usage diagnostic echoes to the
+            //       log and to standard error. Sanitising HERE rather than at the echo site is what
+            //       makes every consumer of this exception safe -- including a future caller that
+            //       catches it and reports it somewhere this class does not know about -- and it is
+            //       the sanitisation, not the echo, that was the defect.
+            throw new IllegalArgumentException(JOB_OPTION + " value '" + sanitiseForDiagnostic(value)
                     + "' is not a job this module runs");
         }
         return value;
@@ -766,7 +1031,12 @@ public class BatchApplication {
                     + " is required and was not supplied");
         }
         if (!isWellFormedBusinessDate(value)) {
-            throw new IllegalArgumentException(BUSINESS_DATE_OPTION + " value '" + value
+            // WHY : Assumptions: the same sanitisation as the job token above, and it matters more
+            //       here. A malformed date is the likelier of the two rejections to carry something
+            //       unexpected, because a date is assembled by whatever built the container command
+            //       rather than chosen from a fixed set of seven tokens.
+            throw new IllegalArgumentException(BUSINESS_DATE_OPTION + " value '"
+                    + sanitiseForDiagnostic(value)
                     + "' is not exactly " + BUSINESS_DATE_LENGTH
                     + " characters of ASCII digits and hyphen-minus");
         }
@@ -798,6 +1068,12 @@ public class BatchApplication {
             //       overlapping sources would run whichever job the convention happened to favour
             //       and the operator would have no way to tell which from the log.
             if (found != null) {
+                // WHY : Assumptions: this message names the option and nothing else, so it carries no
+                //       caller-supplied text and needs no sanitisation. Echoing the two conflicting
+                //       values was considered and rejected: they are the values in dispute, so a
+                //       reader gains nothing from them that the option name does not already give,
+                //       and echoing them would put two untrusted strings into a diagnostic instead of
+                //       none.
                 throw new IllegalArgumentException(option + " was supplied more than once");
             }
             found = argument.substring(option.length());

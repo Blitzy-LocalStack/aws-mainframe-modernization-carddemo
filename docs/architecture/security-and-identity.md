@@ -224,7 +224,7 @@ boundary still includes `auth-service`. The browser sends the credential over TL
 managed identity provider for verification. The service never persists the value
 and has no code path that compares it with an application-owned record.
 
-**Assumptions:** the transient value is request-scoped and is not copied into MDC,
+Assumptions: the transient value is request-scoped and is not copied into MDC,
 structured logs, metrics, traces, exception messages, response objects or
 diagnostic renderers. Authentication failures return stable message identifiers
 rather than provider exception text. Java cannot guarantee immediate erasure of a

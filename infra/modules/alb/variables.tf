@@ -120,8 +120,8 @@
 #     `sensitive` is therefore withheld deliberately -- applying it would
 #     redact these values from plan output, which is exactly where a reviewer
 #     confirms that the subnets and routes are the intended ones.
-#   - Assumption (the hop OUT of this load balancer is encrypted too, and this
-#     module is not where that is configured): traffic arrives on the single
+#   - Assumptions: the hop OUT of this load balancer is encrypted too, and this
+#     module is not where that is configured. Traffic arrives on the single
 #     HTTPS listener under the TLS 1.2 floor `ssl_policy` pins, and it leaves
 #     for a task over HTTPS as well, because the ecs-service module fixes its
 #     target group and health check at `target_protocol = "HTTPS"` and each

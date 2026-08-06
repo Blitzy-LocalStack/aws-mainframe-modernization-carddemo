@@ -1,10 +1,12 @@
 package com.carddemo.authorization.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.web.CursorToken;
 
 /**
- * Projects the pending-authorization summary screen onto one flat response payload of 62 components, one
- * for each data field that screen's symbolic map declares.
+ * Projects the pending-authorization summary screen onto one flat response payload of 67 components: 62
+ * for the data fields that screen's symbolic map declares, and five opaque row selectors the screen does
+ * not declare because the baseline holds them in the communication area instead.
  *
  * <p><strong>Purpose.</strong> This record is the outbound half of the pending-authorization summary
  * endpoint. It carries what one screenful of that screen carries and nothing besides: six header positions,
@@ -159,13 +161,13 @@ import com.carddemo.common.money.Money;
  * <ul>
  *   <li>{@code lastKey} is {@code CDEMO-CPVS-PAUKEY-LAST}, declared at L121 and set by
  *       {@code MOVE PA-AUTHORIZATION-KEY TO CDEMO-CPVS-PAUKEY-LAST} at L434 to L435.
- *   <li>{@code firstKey} and {@code prevCursor} are the {@code CDEMO-CPVS-PAUKEY-PREV-PG} stack, declared
- *       at L120, pushed at L439 to L440 and popped by the backward path at L365 to L368.
+ *   <li>{@code firstKey} is the {@code CDEMO-CPVS-PAUKEY-PREV-PG} stack, declared at L120, pushed at L439
+ *       to L440 and popped by the backward path at L365 to L368; its presence is what makes a backward
+ *       step expressible, which is the same thing the backward guard {@code IF CDEMO-CPVS-PAGE-NUM > 1}
+ *       at L365 decided, so the envelope needs no separate indicator for it.
  *   <li>{@code hasNext} is {@code CDEMO-CPVS-NEXT-PAGE-FLG}, declared at L123 with its two condition names
  *       at L124 and L125, set at L374 and tested at L404; the baseline establishes it by reading one row
  *       beyond the five displayed at L445 to L452, which is the same probe the envelope documents.
- *   <li>{@code hasPrev} is the backward guard {@code IF CDEMO-CPVS-PAGE-NUM > 1} at L365, carried as a
- *       stated value rather than inferred from the presence of a first row.
  *   <li>The nullable cursor tokens are the baseline's sentinel discipline:
  *       {@code IF CDEMO-CPVS-PAUKEY-LAST = SPACES OR LOW-VALUES} at L391 and {@code MOVE LOW-VALUES} at
  *       L422.
@@ -180,21 +182,45 @@ import com.carddemo.common.money.Money;
  * needs no such table and therefore carries no such bound, so a page number would import the bound while
  * importing nothing that uses it.
  *
- * <p>Trade-offs: the row-addressing key is absent because it is not on the screen either.
- * {@code MOVE PA-AUTHORIZATION-KEY TO CDEMO-CPVS-AUTH-KEYS(n)} at L545, L557, L569, L581 and L593 stores
- * one eight-position key per displayed row in the communication area, and a mark on a row moves that stored
- * key into {@code CDEMO-CPVS-PAU-SELECTED} across L288 to L305. That key is
+ * <h2>The five row selectors</h2>
+ *
+ * <p>Refactoring Rationale: this record previously carried NO row-addressing value, on the stated ground
+ * that the key is not on the screen either, and that ground was true about the map and wrong about the
+ * payload. {@code MOVE PA-AUTHORIZATION-KEY TO CDEMO-CPVS-AUTH-KEYS(n)} at L545, L557, L569, L581 and L593
+ * stores one eight-position key per displayed row in the communication area, and a mark on a row moves that
+ * stored key into {@code CDEMO-CPVS-PAU-SELECTED} across L288 to L305. That key is
  * {@code PA-AUTH-DATE-9C PIC S9(05) COMP-3} at {@code cpy/CIPAUDTY.cpy} L20, three bytes, followed by
  * {@code PA-AUTH-TIME-9C PIC S9(09) COMP-3} at L21, five bytes, which is exactly the eight positions the
  * slot declares. It is a different item from the displayed {@code PDATE0nI} and {@code PTIME0nI}, which
  * render {@code PA-AUTH-ORIG-DATE} and {@code PA-AUTH-ORIG-TIME}, both {@code PIC X(06)} at L22 and L23, so
- * neither can be reconstructed from the other and the two are not interchangeable. No sixty-third component
- * is added for it. The cost is real and is stated rather than left implicit: resolving a marked row to the
- * address of its detail view is work for the api and service packages, which answer it through the path
- * parameter of the detail endpoint, and this record does not carry the value that resolution consumes.
+ * neither can be reconstructed from the other and the two are not interchangeable.
+ *
+ * <p>Refactoring Rationale: the consequence of omitting it was that a client of this payload could not act
+ * on a row at all. The migration retires the communication area, so a stateless client holds nothing
+ * between turns and the row key has exactly one place left to travel -- this response. Deferring the
+ * problem to "the path parameter of the detail endpoint", which is what the earlier reasoning did, only
+ * moves it: a client cannot put a value in a path it was never given. The five components are therefore the
+ * migrated form of the communication area's key table, one per displayed row, and they are what the detail
+ * and fraud-marking operations take as their subject.
+ *
+ * <p>Assumptions: a selector is an OPAQUE sealed token and never the key itself, and the canonical
+ * constructor refuses one that is not sealed. Publishing the raw eight-position key would hand a client
+ * three joined identifiers it could edit, so a client could open or mark any authorization on any account
+ * by arithmetic on a value this service handed it. {@code com.carddemo.common.web.CursorToken} seals the
+ * key with an authentication code bound to the query and the authenticated subject, which is the same
+ * mechanism the page envelope's cursors use, so a token is usable only by the subject it was issued to and
+ * only for the operation it was issued for. Sealing and opening belong to the api and service packages,
+ * which hold the key material; this record carries the sealed value and asserts only its shape.
+ *
+ * <p>Trade-offs: five discrete components rather than one list of selectors. A list would express "the rows
+ * actually returned" more directly and would add one component instead of five. It is declined because
+ * every other per-row datum on this record is a discrete row-indexed component, and a single list would
+ * make the selector the one row datum a reader has to index differently from the seven beside it -- and
+ * would introduce a second way to say that a row is unpopulated, since a short list and a null component
+ * would both mean it.
  *
  * <p>Alternatives Considered: Lombok, for the accessors. Rejected because generated accessors cannot carry
- * the Javadoc this file is obliged to write, and a Java 21 record with 62 declared components gives the
+ * the Javadoc this file is obliged to write, and a Java 21 record with 67 declared components gives the
  * same brevity while leaving every member documentable.
  *
  * <p>Alternatives Considered: MapStruct, for the projection that fills this record. Rejected because the
@@ -205,11 +231,11 @@ import com.carddemo.common.money.Money;
  * justification written at the mapping site, and a generated mapper has nowhere to put one.
  *
  * <p>Alternatives Considered: five nested eight-component row records instead of 40 flat components. That
- * was genuinely available and groups the list more legibly. Rejected because it would make the top level 27
- * components, which is neither the shape the map describes nor the count both derivations agree on: the
- * arity would change silently while every count written in this file still said 62. The row grouping is
- * carried by the component names instead, each prefixed with its row index, so the grouping is legible
- * without altering the arity.
+ * was genuinely available and groups the list more legibly. Rejected because it would reduce the top level
+ * to 27 components, which is neither the shape the map describes nor the count its two derivations agree on:
+ * the map-derived arity would change while the derivations that established it still yielded 62, so the two
+ * would no longer be comparable. The row grouping is carried by the component names instead, each prefixed
+ * with its row index, so the grouping is legible without altering the arity.
  *
  * <p>Alternatives Considered: declaring the two enforced constraints as bean-validation annotations on the
  * components, which is what the sibling request record {@code com.carddemo.reporting.dto.StatementRequest}
@@ -223,19 +249,22 @@ import com.carddemo.common.money.Money;
  * caller-supplied field for a per-field entry to name. The canonical constructor therefore refuses, and it
  * refuses at construction so that no instance can exist in a state this file documents as impossible.
  *
- * <p>Alternatives Considered: overriding {@code toString} to withhold component values from a log, as that
- * same sibling record does for its card number. Rejected because the two values the migration masks or
- * suppresses are not components of this record at all: no primary account number is declared anywhere on
- * this map, the card number that exists in this context is {@code PA-CARD-NUM PIC X(16)} at
- * {@code cpy/CIPAUDTY.cpy} L24, a segment field the summary screen never renders, and no card verification
- * value exists in either segment. The components that are personal -- the composed name, the two composed
- * address lines and the telephone number -- are shown whole on the screen this record projects, at
- * {@code cbl/COPAUS0C.cbl} L763, L769, L776 and L779, so masking them here would put the payload at odds
- * with the screen while withholding nothing the screen withholds.
+ * <p>Refactoring Rationale: {@code toString} IS overridden, at the foot of this file, to withhold every
+ * component value from a log. An earlier revision declined to override it, on the reasoning that the
+ * migration's masking rules name a primary account number and a card verification value, that neither is a
+ * component here, and that the personal components are shown whole on the screen this record projects at
+ * {@code cbl/COPAUS0C.cbl} L763, L769, L776 and L779. Every one of those statements is true and the
+ * conclusion still does not follow, because a screen and a log are different channels: the screen renders
+ * to one operator already authorised for that one account, while a rendering reaches a log that is
+ * retained, aggregated and readable by every holder of log access. A composed name, two address lines, a
+ * telephone number, a credit limit and six balances emitted once per served request accumulate into a
+ * searchable copy of the customer file, which no screen produces. The override therefore names the screen
+ * and the count of populated rows and nothing else; the components and their accessors are untouched, so
+ * the payload the screen needs is unchanged.
  *
  * <h2>Documentation contract</h2>
  *
- * <p><b>Parameters, return values, exceptions or errors at the type level.</b> The 62 record components are
+ * <p><b>Parameters, return values, exceptions or errors at the type level.</b> The 67 record components are
  * this type's parameters and each carries its own at-clause below. A type declaration returns no value and
  * raises nothing, so no return or exception at-clause appears on this block; the canonical constructor
  * declared in the body carries its own, including the exception it raises. The inapplicability is stated
@@ -244,18 +273,20 @@ import com.carddemo.common.money.Money;
  * tell a declared inapplicability from an oversight.
  *
  * <p>Assumptions: this block exists because that rule requires a docstring on every new class at L15 and
- * requires the language's own format at L22, which for Java names Javadoc; the 62 at-clauses exist because
+ * requires the language's own format at L22, which for Java names Javadoc; the 67 at-clauses exist because
  * L19 requires a name, a type and a description for each parameter and L22 makes the Javadoc tag the form
  * that requirement takes. The rule states the consequence of an omission in its validation gate at L43. The
  * migration plan separately mechanises the presence half of that gate by binding a documentation check to
- * the Maven {@code validate} phase, which runs before compilation, so one missing at-clause on 62
+ * the Maven {@code validate} phase, which runs before compilation, so one missing at-clause on 67
  * components both breaches the rule and stops the build. The two authorities are independent, and the
  * mechanised check being silent about something is not permission under the rule.
  *
  * <p>Assumptions: the test channel for this context is not authored yet, so the assertions it owes this
- * record are stated here rather than deferred to it. They are: that the component count is exactly 62; that
- * the declaration order places {@code row5Selection} last within row five, after
- * {@code row5ApprovedAmount}; that the message component accepts 78 positions and refuses 79; that every
+ * record are stated here rather than deferred to it. They are: that the component count is exactly 67, of
+ * which 62 are map-derived and five are row selectors; that the declaration order places
+ * {@code row5Selection} last within row five, after {@code row5ApprovedAmount}, and places the five
+ * selectors after the message line so no map-derived ordinal moves; that a selector which is not a sealed
+ * token is refused; that the message component accepts 78 positions and refuses 79; that every
  * monetary component serialises as a JSON string, which the shared kernel's money module fixes rather than
  * this record; that a row match status accepts only {@code 'P'}, {@code 'D'}, {@code 'E'} and {@code 'M'};
  * that a row approval status accepts only {@code 'A'} and {@code 'D'}; and that no serialised property name
@@ -497,6 +528,18 @@ import com.carddemo.common.money.Money;
  * @param message the message line, map field {@code ERRMSGI} declared at {@code cpy-bms/COPAU00.cpy} L390,
  *     bounded at 78 positions as the assumption on it above sets out; the baseline clears it at
  *     {@code cbl/COPAUS0C.cbl} L186 and fills it from {@code WS-MESSAGE PIC X(80)} at L692
+ * @param row1Selector the opaque sealed token addressing the authorization displayed in row 1, the
+ *     migrated form of {@code CDEMO-CPVS-AUTH-KEYS(1)} stored at {@code cbl/COPAUS0C.cbl} L545; it is
+ *     {@code null} when the row is unpopulated, and it is what the detail and fraud-marking operations
+ *     take as their subject
+ * @param row2Selector the opaque sealed token addressing the authorization displayed in row 2, from
+ *     {@code CDEMO-CPVS-AUTH-KEYS(2)} at L557; {@code null} when the row is unpopulated
+ * @param row3Selector the opaque sealed token addressing the authorization displayed in row 3, from
+ *     {@code CDEMO-CPVS-AUTH-KEYS(3)} at L569; {@code null} when the row is unpopulated
+ * @param row4Selector the opaque sealed token addressing the authorization displayed in row 4, from
+ *     {@code CDEMO-CPVS-AUTH-KEYS(4)} at L581; {@code null} when the row is unpopulated
+ * @param row5Selector the opaque sealed token addressing the authorization displayed in row 5, from
+ *     {@code CDEMO-CPVS-AUTH-KEYS(5)} at L593; {@code null} when the row is unpopulated
  */
 public record PendingAuthSummaryResponse(
         String transactionName,  //  1  TRNNAMEI X(4) L24
@@ -560,7 +603,17 @@ public record PendingAuthSummaryResponse(
         String row5MatchStatus,  // 59  PSTAT05I X(1) L372
         Money row5ApprovedAmount,  // 60  PAMT005I X(12) L378
         String row5Selection,  // 61  SEL0005I X(1) L384
-        String message) {  // 62  ERRMSGI X(78) L390
+        String message,  // 62  ERRMSGI X(78) L390
+        // Assumptions: the five selectors follow the map-derived components rather than sitting beside
+        //   the row data they belong to, and the ordering is deliberate. Every component above carries
+        //   its map ordinal in a trailing comment, and inserting a selector inside a row would move
+        //   every ordinal after it, so the comments would then disagree with the two derivations that
+        //   established them. Appending leaves all 62 ordinals where the map put them.
+        String row1Selector,  // 63  no map field; CDEMO-CPVS-AUTH-KEYS(1) L545
+        String row2Selector,  // 64  no map field; CDEMO-CPVS-AUTH-KEYS(2) L557
+        String row3Selector,  // 65  no map field; CDEMO-CPVS-AUTH-KEYS(3) L569
+        String row4Selector,  // 66  no map field; CDEMO-CPVS-AUTH-KEYS(4) L581
+        String row5Selector) {  // 67  no map field; CDEMO-CPVS-AUTH-KEYS(5) L593
 
     /**
      * The number of positions the reference tree declares for the message line.
@@ -606,9 +659,10 @@ public record PendingAuthSummaryResponse(
      * Refuses the three component families whose value domain the reference tree fixes, so that no instance
      * can exist in a state this type documents as impossible.
      *
-     * <p>Assumptions: exactly eleven of the 62 components are inspected here, and the other 51 are stored
-     * as supplied. The eleven are the message line, whose 78 positions four declarations agree on, and the
-     * five match statuses and five approval statuses, whose domains the reference tree closes explicitly.
+     * <p>Assumptions: exactly sixteen of the 67 components are inspected here, and the other 51 are stored
+     * as supplied. They are the message line, whose 78 positions four declarations agree on; the five match
+     * statuses and five approval statuses, whose domains the reference tree closes explicitly; and the five
+     * row selectors, whose sealed shape is asserted so that a raw key cannot be published as one.
      * Nothing else is checked, because for every remaining component the only number available is the map
      * width, and the assumption recorded on this type explains why a check sized from a map width would
      * admit values the stored field cannot hold.
@@ -760,8 +814,15 @@ public record PendingAuthSummaryResponse(
      *     admits any non-blank position as a mark at {@code cbl/COPAUS0C.cbl} L302
      * @param message the message line as supplied, which may be {@code null} or blank when a response
      *     carries no message; refused when it exceeds 78 positions
-     * @throws IllegalArgumentException when the message component exceeds 78 positions, or when a match
-     *     status or an approval status is present and is not one position drawn from its closed domain
+     * @param row1Selector the row 1 selector as supplied, refused unless it is absent or carries the
+     *     sealed token shape
+     * @param row2Selector the row 2 selector as supplied, refused on the same terms as row 1
+     * @param row3Selector the row 3 selector as supplied, refused on the same terms as row 1
+     * @param row4Selector the row 4 selector as supplied, refused on the same terms as row 1
+     * @param row5Selector the row 5 selector as supplied, refused on the same terms as row 1
+     * @throws IllegalArgumentException when the message component exceeds 78 positions, when a match
+     *     status or an approval status is present and is not one position drawn from its closed domain, or
+     *     when a row selector is present and is not a sealed token
      */
     public PendingAuthSummaryResponse {
         // Assumptions: the message line is checked first because it is the one component
@@ -773,7 +834,7 @@ public record PendingAuthSummaryResponse(
         //   an array, because a record's components are not indexable and gathering them into
         //   one would allocate on every construction of a payload that is built per request.
         //   The component name is passed as a literal so a refusal names the exact component,
-        //   which is information no reflective loop over 62 components could supply here.
+        //   which is information no reflective loop over 67 components could supply here.
         requireClosedDomain(row1ApprovalStatus, APPROVAL_STATUS_DOMAIN, "row1ApprovalStatus");
         requireClosedDomain(row1MatchStatus, MATCH_STATUS_DOMAIN, "row1MatchStatus");
         requireClosedDomain(row2ApprovalStatus, APPROVAL_STATUS_DOMAIN, "row2ApprovalStatus");
@@ -784,6 +845,18 @@ public record PendingAuthSummaryResponse(
         requireClosedDomain(row4MatchStatus, MATCH_STATUS_DOMAIN, "row4MatchStatus");
         requireClosedDomain(row5ApprovalStatus, APPROVAL_STATUS_DOMAIN, "row5ApprovalStatus");
         requireClosedDomain(row5MatchStatus, MATCH_STATUS_DOMAIN, "row5MatchStatus");
+
+        // Assumptions: the five selector checks are written out for the same reason the ten row checks
+        //   above are, and they are checked at all because this is the boundary where a raw key would
+        //   otherwise escape. The shared kernel publishes the shape predicate precisely so that a bare
+        //   composite key fails as a token rather than being accepted as one, so calling it here is
+        //   what makes "opaque" a property of every instance rather than a property of the mapper that
+        //   happened to build it.
+        requireSealedSelector(row1Selector, "row1Selector");
+        requireSealedSelector(row2Selector, "row2Selector");
+        requireSealedSelector(row3Selector, "row3Selector");
+        requireSealedSelector(row4Selector, "row4Selector");
+        requireSealedSelector(row5Selector, "row5Selector");
     }
 
     /**
@@ -834,7 +907,7 @@ public record PendingAuthSummaryResponse(
      * @param candidate the code as supplied, which may be {@code null} or blank for an absent row
      * @param domain the admitted characters, one per admitted value, searched rather than parsed
      * @param componentName the record component being checked, reproduced in the refusal so it
-     *     names the one component at fault out of 62
+     *     names the one component at fault out of 67
      * @throws IllegalArgumentException when {@code candidate} is present and is not exactly one
      *     character drawn from {@code domain}
      */
@@ -854,6 +927,49 @@ public record PendingAuthSummaryResponse(
     }
 
     /**
+     * Refuses a row selector that is present and is not a sealed token.
+     *
+     * <p>Assumptions: the shape predicate lives in the shared kernel beside the sealing it validates, and
+     * it is called rather than reimplemented, so this record cannot come to accept a shape the sealer no
+     * longer produces. Its purpose there is stated as making a raw key fail as a token rather than be
+     * accepted as one, which is exactly the failure this guard exists to prevent at this boundary.
+     *
+     * <p>Assumptions: an absent selector passes, on the same reading as every other absent component on
+     * this record -- a page of fewer than five rows leaves the trailing selectors unset, and that is a real
+     * case rather than a hypothetical one. A BLANK selector is likewise absent, because the reference tree
+     * clears an unused key slot to spaces.
+     *
+     * <p>Trade-offs: only the shape is asserted, not the authentication code. Verifying the code needs the
+     * key material, which belongs to the service layer and must not reach a response payload; the shape
+     * check is what this boundary can assert honestly, and it is sufficient for the failure that actually
+     * threatens here, which is a raw key published in place of a token.
+     *
+     * <p><strong>Return value.</strong> This guard returns no value; normal completion means the selector
+     * is absent or carries the sealed shape.
+     *
+     * @param candidate the selector as supplied, which may be {@code null} or blank for an unpopulated row
+     * @param componentName the record component being checked, reproduced in the refusal so it names the
+     *     one component at fault
+     * @throws IllegalArgumentException when {@code candidate} is present and does not carry the sealed
+     *     token shape
+     */
+    private static void requireSealedSelector(String candidate, String componentName) {
+        if (isAbsent(candidate)) {
+            return;
+        }
+
+        if (!CursorToken.hasSealedShape(candidate)) {
+            // WHY : Assumptions: the refusal names the component and the length and NOT the value. A
+            // value that failed this check is either a raw composite key, which is three identifiers a
+            // log should not carry, or a corrupted token, whose text tells a reader nothing the length
+            // does not.
+            throw new IllegalArgumentException(componentName + " must be a sealed cursor token or"
+                    + " absent, but carried " + candidate.length() + " characters that do not match the"
+                    + " sealed shape");
+        }
+    }
+
+    /**
      * Reports whether a component value carries no content.
      *
      * <p>Assumptions: blank counts as absent because the reference tree pads a constant-width field
@@ -867,5 +983,64 @@ public record PendingAuthSummaryResponse(
      */
     private static boolean isAbsent(String candidate) {
         return candidate == null || candidate.isBlank();
+    }
+
+    /**
+     * Returns a diagnostic rendering that names the screen and withholds every value it carries.
+     *
+     * <p>Assumptions: the only components rendered are the transaction identifier this screen runs
+     * under, the program name, and how many of the five rows are populated. None of the three is
+     * personal, monetary or an identifier of an account, a customer or a card, and together they are
+     * enough to say WHICH response an entry concerns while saying nothing about WHOSE.
+     *
+     * <p>Refactoring Rationale: this override replaces the record's generated rendering, which
+     * emitted all 67 components, and it replaces a rationale that had reasoned its way to leaving it
+     * that way. That rationale argued the personal components are shown whole on the screen this
+     * record projects -- at {@code cbl/COPAUS0C.cbl} L763, L769, L776 and L779 -- so withholding them
+     * here would put the payload at odds with the screen. The observation is true and the conclusion
+     * does not follow from it, because the two are different channels with different audiences: the
+     * screen renders to one authorised operator who has already been authorised for that one account,
+     * whereas this rendering reaches a log, which is retained, aggregated, searched and readable by
+     * every holder of log access rather than of account access. A composed name, two address lines, a
+     * telephone number, a credit limit and six balances written once per served request accumulate
+     * into a searchable copy of the customer file, which no screen ever produces. The record still
+     * carries every component and every accessor still returns it, so nothing the screen renders is
+     * lost; only the log line is narrowed.
+     *
+     * <p>Trade-offs: a test failure comparing two instances of this record no longer shows which
+     * component differs, which the generated rendering did show. That cost is accepted because the
+     * assertions this record owes are written against its accessors rather than against its rendering,
+     * and because the alternative -- keeping the values for the convenience of a failure message --
+     * pays for that convenience in every successful request as well.
+     *
+     * @return a single-line rendering naming the type, the transaction identifier, the program name
+     *     and the count of populated rows, and carrying no other component value
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthSummaryResponse[transactionName=" + transactionName
+                + ", programName=" + programName
+                + ", populatedRows=" + populatedRowCount()
+                + ", withheld=64 components]";
+    }
+
+    /**
+     * Counts how many of the five row slots carry a transaction identifier.
+     *
+     * <p>Assumptions: the transaction identifier is the component tested because it is the one datum
+     * every populated row has -- the baseline fills it for each row it renders and leaves the slot
+     * spaces otherwise -- so a blank identifier means an unpopulated slot exactly as it does there.
+     *
+     * @return a count from zero through five
+     */
+    private int populatedRowCount() {
+        int populated = 0;
+        for (String identifier : new String[] {row1TransactionId, row2TransactionId,
+                row3TransactionId, row4TransactionId, row5TransactionId}) {
+            if (!isAbsent(identifier)) {
+                populated++;
+            }
+        }
+        return populated;
     }
 }

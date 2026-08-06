@@ -4,10 +4,12 @@
 -- WHAT: Supplies the contiguous ascending row volume that makes keyset
 --       pagination over the Flyway-created auth.users table observable at the
 --       baseline page size of ten.
---       Consumer: UserRepositoryIT loads this file as a forward contract and
---       drives the forward query, the backward query, the size-plus-one probe,
---       the exact hasNext boundary, the short final page and both empty-cursor
---       directions from this one block by varying only the cursor.
+--       Consumer, not authored yet -- the module's test tree holds
+--       AuthApiContractTest and SecurityConfigTest only, and neither reads this
+--       file: UserRepositoryIT will load it as a forward contract and drive the
+--       forward query, the backward query, the size-plus-one probe, the exact
+--       hasNext boundary, the short final page and both empty-cursor directions
+--       from this one block by varying only the cursor.
 --       Load result: twenty-one deterministic rows, KSET0001 through KSET0021,
 --       in strict ascending key order, spanning both the A and U user types.
 --       Failure modes: a repeated cognito_sub is rejected by UNIQUE, a user_type
@@ -27,29 +29,7 @@
 --       single-sourced, so this file cites the layout rather than restating it.
 --       Trade-offs: SQL ties the fixture to PostgreSQL syntax, in exchange for
 --       being directly loadable and for keeping every rationale beside its row.
---       (2) Alternatives Considered: tests/fixtures/README.md L59-L64 records
---       rationale in a companion document, but states its own reason plainly -
---       those fixtures are static .txt files that cannot carry docstrings. SQL
---       can, so a README here would duplicate rationale and, worse, could not
---       satisfy the adjacency the rule requires for a per-row boundary note.
---       Trade-offs: in-file explanation makes this fixture long, and accepts
---       that length to remove a second artifact that could drift away from the
---       rows it describes.
---       (3) Assumptions: this header and the rationale blocks below the closing
---       ruler are the SQL analogue of a docstring, and the analogue is written
---       down rather than merely applied so that a reviewer can hold later edits
---       to the same shape. WHAT and Consumer carry the purpose and the input
---       contract, Load result carries the return analogue, and Failure modes
---       carries the error analogue. The rule's single-line relief for trivial
---       accessors has no analogue for a data file and is not claimed here.
---       (4) Assumptions: this fixture is MECHANICALLY UNCHECKED, and authoring
---       discipline is the only protection. config/checkstyle/checkstyle.xml L185
---       scopes the Checker to fileExtensions java, so no Checkstyle rule reaches
---       a .sql file at all; config/checkstyle/suppressions.xml L216-L251 is a
---       defensive path guard that its own comment records as never load-bearing
---       for fixture data; and tests/README.md L549 makes review the gate
---       instead. Nothing in the build will report a missing rationale here.
---       (5) Assumptions: ten rows to a page is a baseline contract rather than a
+--       (2) Assumptions: ten rows to a page is a baseline contract rather than a
 --       tunable, and it rests on two LIVE authorities. First, the
 --       POPULATE-USER-DATA paragraph at app/cbl/COUSR00C.cbl L384 opens an
 --       EVALUATE at L386 whose only row branches are WHEN 1 at L387 through
@@ -62,14 +42,14 @@
 --       no procedure-division reference, so that block is dead and cannot
 --       warrant the count on its own. The card-list screen's count does not
 --       transfer either; each screen carries its own occurrence total.
---       (6) Assumptions: app/cbl/COUSR00C.cbl L66 copies COCOM01Y and extends
+--       (3) Assumptions: app/cbl/COUSR00C.cbl L66 copies COCOM01Y and extends
 --       it at L67 with CDEMO-CU00-USRID-FIRST PIC X(08) at L68,
 --       CDEMO-CU00-USRID-LAST PIC X(08) at L69 and CDEMO-CU00-PAGE-NUM
 --       PIC 9(08) at L70. A first-key and last-key pair carried across the
 --       pseudo-conversational gap already IS a keyset cursor, so the target
 --       envelope of firstKey, lastKey and hasNext is a one-to-one mapping
 --       rather than an approximation, and this block is shaped to prove it.
---       (7) Assumptions: two query shapes read this block. Forward selects
+--       (4) Assumptions: two query shapes read this block. Forward selects
 --       WHERE user_id > lastKey ORDER BY user_id ASC LIMIT size + 1, where the
 --       extra row is a probe that sets hasNext and is then discarded from the
 --       returned items. Backward selects WHERE user_id < firstKey ORDER BY
@@ -78,7 +58,7 @@
 --       deterministic only if the keys totally order, which is why every
 --       identifier below is exactly eight characters with a zero-padded
 --       ascending counter, making lexical order and numeric order the same.
---       (8) Refactoring Rationale: offset pagination is rejected outright, not
+--       (5) Refactoring Rationale: offset pagination is rejected outright, not
 --       merely disfavoured. Skipping a counted number of rows repeats and drops
 --       rows once a concurrent insert lands inside the range already scanned,
 --       and that is an observable behaviour change which browsing by key does
@@ -88,7 +68,7 @@
 --       CDEMO-CU00-PAGE-NUM is read at app/cbl/COUSR00C.cbl L248 solely to
 --       decide whether the top-of-list refusal at L251-L252 is due. Neither
 --       computes a row position, so this fixture carries no ordinal at all.
---       (9) Alternatives Considered: twenty rows were rejected. Twenty reach the
+--       (6) Alternatives Considered: twenty rows were rejected. Twenty reach the
 --       exact hasNext FALSE boundary but cannot also produce a page shorter than
 --       ten, and adding a second twenty-row file to get one would repeat twenty
 --       near-identical rows for no new coverage while risking a primary-key and
@@ -110,7 +90,7 @@
 --       the short final page. Line five reads backward, returning KSET0011 down
 --       to KSET0002 in descending order for reversal to ascending, with KSET0001
 --       found as its probe.
---       (10) Refactoring Rationale: the short final page exists in this block
+--       (7) Refactoring Rationale: the short final page exists in this block
 --       because the baseline leaves its last-key cursor stale, and this is the
 --       row set that pins that divergence. At app/cbl/COUSR00C.cbl L387-L389 the
 --       WHEN 1 branch is the only writer of CDEMO-CU00-USRID-FIRST, at
@@ -121,7 +101,7 @@
 --       parity and sets lastKey from the actual last returned row; the COBOL is
 --       untouched, and the divergence stays registered in
 --       docs/architecture/cobol-to-service-traceability.md.
---       (11) Assumptions: the two empty-cursor sentinels are asymmetric and both
+--       (8) Assumptions: the two empty-cursor sentinels are asymmetric and both
 --       have to stay observable. app/cbl/COUSR00C.cbl L239-L243 and L262-L266
 --       apply the SAME test, = SPACES OR LOW-VALUES, but substitute DIFFERENT
 --       values: LOW-VALUES when reading backward at L240 and HIGH-VALUES when
@@ -131,25 +111,25 @@
 --       and KSET0021 as the last-row boundary an empty forward cursor walks to.
 --       The two guarded refusals sit at L248 with L251-L252 and at L270 with
 --       L273-L274.
---       (12) Assumptions: app/cpy/COCOM01Y.cpy L26-L28 is the domain authority,
+--       (9) Assumptions: app/cpy/COCOM01Y.cpy L26-L28 is the domain authority,
 --       declaring CDEMO-USER-TYPE PIC X(01) with 88-level values A for
 --       administrator and U for user. app/cpy/CSUSR01Y.cpy L22 establishes the
 --       one-character width only; that copybook declares no 88-level value
 --       anywhere, so it cannot close the domain. app/cpy-bms/COUSR00.CPY L96
 --       independently shows UTYPE01I PIC X(1), not a wider field.
---       (13) Assumptions: the two name fields stay separate, following
+--       (10) Assumptions: the two name fields stay separate, following
 --       app/cpy/CSUSR01Y.cpy L19-L20 and app/cpy-bms/COUSR00.CPY L84 and L90,
 --       twenty characters each. The concatenated USER-NAME PIC X(25) at
 --       app/cbl/COUSR00C.cbl L62 belongs to the dead block that item (5) names
 --       at L56-L62, and is deliberately not modelled.
---       (14) Assumptions: PostgreSQL blank-pads CHAR on retrieval and does not
+--       (11) Assumptions: PostgreSQL blank-pads CHAR on retrieval and does not
 --       pad VARCHAR, so user_id and user_type come back padded while the two
 --       names do not, and the mapper trims them on read. The literals below are
 --       logical values. Every identifier is exactly eight characters, so the
 --       cursor comparisons in (7) carry no padding ambiguity; a shorter key
 --       would be compared against its padded stored form and could order
 --       differently from the arithmetic in (9).
---       (15) Assumptions: U carries two unrelated meanings in the baseline and
+--       (12) Assumptions: U carries two unrelated meanings in the baseline and
 --       only one of them belongs here. At app/cpy/COCOM01Y.cpy L28 it means
 --       user. In the list-screen selection path it means update, at
 --       app/cbl/COUSR00C.cbl L74 and L189-L190, with D for delete at L200 and
@@ -157,7 +137,7 @@
 --       app/cpy-bms/COUSR00.CPY L72. auth.users has no selection column, so
 --       every U below carries the user-type meaning. Mixing the two would
 --       silently change what every list assertion is measuring.
---       (16) Assumptions: the KSET prefix and the b2 marker inside each
+--       (13) Assumptions: the KSET prefix and the b2 marker inside each
 --       cognito_sub keep this file disjoint from users.sql, which reserves BASE
 --       and a1 for itself. Disjointness is load-bearing because cognito_sub is
 --       NOT NULL UNIQUE and V1__auth.sql seeds no rows, so one duplicated value
@@ -165,7 +145,7 @@
 --       Trade-offs: BASE sorting ahead of KSET is a diagnostic aid only - it
 --       makes a mis-load obvious in failure output. It is NOT the isolation
 --       mechanism; the unqualified DELETE below is.
---       (17) Refactoring Rationale: the target declines parity with the legacy
+--       (14) Refactoring Rationale: the target declines parity with the legacy
 --       cleartext authenticator, which is the one place in this migration where
 --       parity is declined outright. The baseline declares it at
 --       app/cpy/CSUSR01Y.cpy L21, compares it directly at app/cbl/COSGN00C.cbl
@@ -279,7 +259,7 @@ INSERT INTO auth.users (user_id, first_name, last_name, user_type, cognito_sub) 
     ('KSET0021', 'KeysetRow21', 'WindowTail',      'U', '00000000-0000-4000-8000-00000000b221');
 
 --
--- WHAT: Registers the state that is deliberately absent from this fixture.
+-- Register of the state that is deliberately absent from this fixture.
 -- WHY : Assumptions: (1) no cleartext authentication material and no derived
 --       verifier exists, in any column, literal or identifier; only the
 --       synthetic Cognito subject reference remains, per (17); (2) no lifecycle
@@ -287,12 +267,11 @@ INSERT INTO auth.users (user_id, first_name, last_name, user_type, cognito_sub) 
 --       target; (3) no application-managed and no engine-managed row revision
 --       token exists; (4) no positional paging metadata, no ordinal and no
 --       index-derived pagination exists, and the display-only counters named in
---       (8) never drive a query; (5) no list-screen selection marker is
+--       (15) never drive a query; (5) no list-screen selection marker is
 --       persisted, so neither selection value from (15) appears as data;
---       (6) no schema, role, privilege or structure-changing statement appears,
+--       (16) no schema, role, privilege or structure-changing statement appears,
 --       because data-migration/sql/V0__schemas_and_roles.sql owns the schemas
 --       and roles and V1__auth.sql owns this table; (7) no binary and no EBCDIC
 --       content appears, because a fixture has to be reviewable in a diff; and
---       (8) no floating-point and no monetary value exists, there being none in
+--       (17) no floating-point and no monetary value exists, there being none in
 --       this bounded context, with the prohibition standing regardless.
-

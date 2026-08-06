@@ -69,7 +69,7 @@ public class AuthReplyOutbox {
      * still deliverable after a restart that changed nothing about the running configuration, and it
      * means two acquirers with two reply queues can be served by one consumer.</p>
      */
-    @Column(name = "reply_queue_url", nullable = false, length = 1024)
+    @Column(name = "reply_to_queue_url", nullable = false, length = 1024)
     private String replyQueueUrl;
 
     /**

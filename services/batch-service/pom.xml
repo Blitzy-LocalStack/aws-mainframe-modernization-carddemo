@@ -206,7 +206,20 @@
                datasource, while the actuator database indicator can. The cost
                is a listener in an otherwise one-shot process; BatchApplication
                closes the context and calls System.exit with the job status, so
-               that listener cannot keep a completed task alive. -->
+               that listener cannot keep a completed task alive.
+         WHY : Assumptions: the listener this starter brings is bound to the
+               LOOPBACK address, not to every interface. The bind is declared at
+               the server.address key of
+               services/batch-service/src/main/resources/application.yml, which
+               records why: the probe is the listener's only client and reaches
+               it from inside the task's own network namespace, whereas an
+               all-interfaces bind would also expose it on the task's elastic
+               network interface for the duration of every run. Naming the
+               dependency here without naming that bind would leave a reader of
+               this file believing the starter's reachability is whatever the
+               framework defaults to. Anyone removing that key is removing the
+               only thing that keeps this starter's footprint to its one
+               consumer. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>

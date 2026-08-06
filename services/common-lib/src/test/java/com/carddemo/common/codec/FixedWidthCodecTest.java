@@ -351,6 +351,14 @@ class FixedWidthCodecTest {
      * TWENTY-SIX BLANKS, which is real data rather than a defect: a daily transaction has not been
      * posted yet, so no wall-clock stamp has been written into it.</p>
      *
+     * <p>Assumptions: the card number in this image is published synthetic seed data, not a
+     * credential. It is committed upstream in this repository's own reference extracts --
+     * {@code app/data/ASCII/carddata.txt}, {@code app/data/ASCII/dailytran.txt} and
+     * {@code app/data/ASCII/cardxref.txt} -- and is transcribed here so the decoded value can be
+     * asserted against the same bytes the parity fixtures hold. Substituting a different number
+     * would break that correspondence without removing any exposure, because there is none to
+     * remove.</p>
+     *
      * @return the exact 350-byte daily-transaction row as a character image
      */
     private static String dailyTransactionImage() {
@@ -499,13 +507,21 @@ class FixedWidthCodecTest {
     /**
      * Proves the storage-regime enumeration exposes exactly five constants in declaration order.
      *
-     * <p>Assumptions: the order is asserted and not just the membership, because the constants are
-     * ordinal-bearing and a reordering would silently change any persisted or transmitted ordinal. The
-     * five are also asserted to be exhaustive: the parity oracle's field descriptor admits only three
-     * regimes -- character, unsigned display and zoned decimal -- and a fourth and fifth exist here
-     * solely because {@code app/cpy/CVEXPORT.cpy} and the two authorization segment copybooks store
-     * money packed and identifiers binary. A sixth constant would mean an unrepresented regime had been
-     * found in the corpus.</p>
+     * <p>Assumptions: the order is asserted alongside the membership because the declaration order is
+     * how this enumeration DOCUMENTS the corpus -- character data first as the default regime, then the
+     * two display regimes, then the two usage-driven ones -- so a reordering would leave the class
+     * documentation describing a sequence the type no longer has. It is emphatically NOT asserted as a
+     * persisted or transmitted contract: no production path anywhere in this module calls
+     * {@code ordinal()}, no column or wire field carries a regime ordinal, and nothing outside this
+     * enumeration depends on which integer a constant happens to occupy. The ordinal assertions an
+     * earlier revision carried are therefore removed rather than restated, because a test that pins a
+     * value nothing consumes reads as a wire contract that does not exist.</p>
+     *
+     * <p>Assumptions: the five are also asserted to be exhaustive. The parity oracle's field descriptor
+     * admits only three regimes -- character, unsigned display and zoned decimal -- and a fourth and
+     * fifth exist here solely because {@code app/cpy/CVEXPORT.cpy} and the two authorization segment
+     * copybooks store money packed and identifiers binary. A sixth constant would mean an unrepresented
+     * regime had been found in the corpus.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -515,8 +531,6 @@ class FixedWidthCodecTest {
                 new Kind[] {Kind.TEXT, Kind.UINT, Kind.ZONED, Kind.PACKED, Kind.BINARY},
                 Kind.values(),
                 "the storage-regime constants changed in number or in order");
-        assertEquals(0, Kind.TEXT.ordinal());
-        assertEquals(4, Kind.BINARY.ordinal());
     }
 
     /**
@@ -2861,9 +2875,11 @@ class FixedWidthCodecTest {
      * built from minus zero carries signum zero and is indistinguishable from a value built from zero. The
      * consequence is implemented and stated rather than left to be discovered -- decoding either
      * overpunched zero yields the same value, and encoding a zero always emits the opening brace. This is
-     * therefore the ONE span for which decode followed by encode is not byte-identical, and the
+     * therefore the ONE span for which decode followed by the PLAIN encode is not byte-identical, and the
      * divergence is exactly one byte at the overpunch position rather than unexplained drift. It is
-     * recorded in the migration's traceability register as a documented divergence.</p>
+     * registered under identifier D-SIGNED-ZERO-ZONED in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, and the sign-preserving record encoder
+     * exercised in the test below reproduces the same span with no divergence at all.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -2932,6 +2948,66 @@ class FixedWidthCodecTest {
         FixedWidthCodec.encodeField(FixedWidthCodec.decodeField(positiveZeroSpan, packedBalance),
                 packedBalance, positiveReEncoded);
         assertArrayEquals(positiveZeroSpan, positiveReEncoded);
+    }
+
+    /**
+     * Proves the sign-preserving record encoder reproduces a record's signed zeroes byte for byte.
+     *
+     * <p>Assumptions: this is the operation a loader uses when it must write a record back exactly as it
+     * read it, and it has no exception. The value map alone cannot carry the distinction between the two
+     * zero overpunches, so the encoder is given the record the values were decoded from and restores the
+     * carrier for exactly those fields whose value is a signed zero. The account row is used because it
+     * declares two zoned zeroes at adjacent offsets, so the assertion covers both a field that was
+     * altered to the negative form and one that was left positive -- an encoder that wrote the negative
+     * carrier unconditionally would fail the second.</p>
+     *
+     * <p>Assumptions: the whole record is compared rather than the two carrier bytes alone, because the
+     * property being proved is that restoring a carrier disturbs nothing else in a 300-byte record.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void theSignPreservingRecordEncoderReproducesSignedZeroesByteForByte() {
+        RecordSpec account = CopybookLayout.layout("ACCOUNT");
+        int cycleCreditOverpunch = account.field("ACCT-CURR-CYC-CREDIT").end() - 1;
+        int cycleDebitOverpunch = account.field("ACCT-CURR-CYC-DEBIT").end() - 1;
+
+        byte[] source = accountImage().getBytes(ASCII);
+        assertEquals('{', (char) source[cycleCreditOverpunch],
+                "the reference row stores the positive zero form in the cycle-credit field");
+        source[cycleDebitOverpunch] = '}';
+
+        Map<String, Object> decoded = FixedWidthCodec.decodeRecord(source, account);
+        byte[] reEncoded = FixedWidthCodec.encodeRecordPreservingSign(decoded, account, source);
+
+        assertArrayEquals(source, reEncoded,
+                "the sign-preserving encoder must reproduce the source record exactly");
+        assertEquals('}', (char) reEncoded[cycleDebitOverpunch],
+                "the negative zero carrier must survive the round trip");
+        assertEquals('{', (char) reEncoded[cycleCreditOverpunch],
+                "the positive zero carrier must not be rewritten as the negative one");
+    }
+
+    /**
+     * Proves the sign-preserving record encoder still rejects a source record of the wrong length.
+     *
+     * <p>Assumptions: the source record is read for its sign carriers by absolute offset, so a record of
+     * another length would either read past its end or read a carrier from the wrong field. Refusing is
+     * what keeps the operation from silently taking a byte from an unrelated position; the expected
+     * exception is captured so none escapes this test.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void theSignPreservingRecordEncoderRejectsAMisSizedSourceRecord() {
+        RecordSpec account = CopybookLayout.layout("ACCOUNT");
+        byte[] source = accountImage().getBytes(ASCII);
+        Map<String, Object> decoded = FixedWidthCodec.decodeRecord(source, account);
+
+        RecordLengthException refusal = assertThrows(RecordLengthException.class,
+                () -> FixedWidthCodec.encodeRecordPreservingSign(decoded, account, new byte[1]));
+
+        assertThat(refusal).hasMessageContaining("sign-carrier source");
     }
 
 

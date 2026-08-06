@@ -19,17 +19,19 @@
  * - Downstream: `ui/src/App.tsx`, and nothing else. That module mounts the only
  *   `ConfigProvider` in the application and hands it the object exported here.
  *
- * Why this module writes down no design value
- * -------------------------------------------
+ * Why this module writes down almost no design value
+ * --------------------------------------------------
  * `tokens.ts` deliberately records token *names* and never colour, spacing or
- * typography *values*, so there is no authored value here to bind. The
- * design-token reference states the consequence of filling that gap in anyway:
- * the bridge reads the derived token layers rather than setting them, and a theme
- * entry that merely restates a value the algorithm would have produced anyway
- * pins that one value while everything computed alongside it keeps moving. Both
- * value blocks below are therefore present and empty. That is a recorded decision
- * rather than unfinished work, and each block carries its reasoning at the point
- * of use so the emptiness cannot be read as an omission.
+ * typography *values*, so for all but one decision there is no authored value
+ * here to bind. The design-token reference states the consequence of filling that
+ * gap in anyway: a theme entry that merely restates a value the algorithm would
+ * have produced pins that one value while everything computed alongside it keeps
+ * moving. The per-component block below is therefore present and empty, and the
+ * value block holds exactly two entries — the pair that separates the
+ * informational colour role from the primary one, which is the single design
+ * decision a token name cannot carry, because the library ships both roles with
+ * the same seed value. Each block states its reasoning at the point of use, so
+ * neither the emptiness nor the two exceptions can be read as accidental.
  *
  * WHY (non-obvious design decisions)
  * ----------------------------------
@@ -63,14 +65,17 @@
 import { theme } from "antd";
 import type { ThemeConfig } from "antd";
 
+import { BMS_SEED_PALETTE_ANCHORS } from "./tokens";
+
 /**
  * The theme handed to the application's only `ConfigProvider`.
  *
- * It governs four things and deliberately not a fifth: the algorithm that derives
- * the map and alias token layers from the seed layer, the CSS-variable scope
- * those layers are emitted into, the class-name shape of the emitted style, and
- * whether style is generated at run time at all. It governs no individual token
- * value, for the reason recorded in the module header above.
+ * It governs five things: the algorithm that derives the map and alias token
+ * layers from the seed layer, the CSS-variable scope those layers are emitted
+ * into, the class-name shape of the emitted style, whether style is generated at
+ * run time at all, and the one pair of seed values that separates the
+ * informational colour role from the primary one. It governs no other individual
+ * token value, for the reason recorded in the module header above.
  *
  * Trade-offs: this is a documented object literal rather than a factory function.
  * A factory was considered and rejected because nothing here is parameterised.
@@ -176,16 +181,17 @@ export const cardDemoTheme: ThemeConfig = {
   zeroRuntime: false,
 
   /*
-   * Assumptions: this is empty by decision, and empty is not the same as absent.
+   * Assumptions: this block holds exactly the overrides a token NAME cannot
+   * carry, and is otherwise empty by decision — empty is not the same as absent.
    * `tokens.ts` resolves every measured design value to a named token and records
-   * no value for any of them, so there is nothing here to bind. The design-token
-   * reference names the failure mode that filling it in would produce: a theme
-   * entry restating a value the algorithm would have derived anyway, which pins
-   * that one value while the values computed alongside it keep moving. The seed
-   * layer is where an override belongs when one is genuinely needed, and the three
-   * roles the bridge resolves onto derived tokens — secondary text, heading text
-   * and strong weight — need none, because they are consumed by name and the
-   * derived defaults already carry them.
+   * no value for any of them, so with two exceptions there is nothing here to
+   * bind. The design-token reference names the failure mode that filling it in
+   * wholesale would produce: a theme entry restating a value the algorithm would
+   * have derived anyway, which pins that one value while the values computed
+   * alongside it keep moving. The three roles the bridge resolves onto derived
+   * tokens — secondary text, heading text and strong weight — are therefore
+   * absent, because they are consumed by name and the derived defaults already
+   * carry them.
    *
    * Assumptions: the fixed-pitch requirement is met by the default rather than by
    * an override, which is why it is recorded here as reasoning and not as an
@@ -204,20 +210,70 @@ export const cardDemoTheme: ThemeConfig = {
    * rendered as text, and a monospaced face is what allows a column of such text
    * to be read as a column.
    *
-   * Trade-offs: one consequence of leaving the seed layer alone is recorded here
-   * rather than left to be discovered. At the pinned version the primary and
-   * informational colour seeds hold the same value, so the 289 field definitions
-   * the source marks blue and the 127 it marks turquoise resolve to one rendered
-   * colour, even though the bridge keeps them on two distinct token names.
-   * Separating them would mean giving the informational seed a turquoise value,
-   * which is exactly the bespoke turquoise token the design-token reference
-   * considered and rejected for carrying a literal colour value. The coincidence
-   * is therefore recorded as an auditable consequence of that decision rather
-   * than quietly reversed here, and because the two roles keep distinct names, a
-   * later decision to separate them changes one recorded value rather than 127
-   * field definitions.
+   * Refactoring Rationale: the two entries below exist because two token names
+   * were deriving one rendered colour, which the bridge cannot fix by naming
+   * alone. At the pinned version the library's own seed sets the primary and the
+   * informational colour to the same value, so the 384 field definitions the
+   * source marks blue and the 157 it marks turquoise — 289 and 127 across the
+   * base 17 — resolved identically even though `tokens.ts` keeps them on two
+   * distinct names. A previous revision left the seed layer alone and recorded
+   * that collapse as an auditable consequence. That is withdrawn as inconsistent:
+   * the gap register states that the turquoise original is preserved, and the same
+   * collapse is rejected outright for the four pink fields on the grounds that
+   * "collapsing them erases exactly the distinction being migrated" — so
+   * accepting it for 157 fields while refusing it for 4 was indefensible. The
+   * seed layer is where the correction belongs, because the design-token
+   * reference's own rule is that the bridge sets the seed layer wherever a seed
+   * token expresses the role, precisely so that everything derived from it moves
+   * together.
+   *
+   * Alternatives Considered, both rejected: a bespoke turquoise hex value, which
+   * is the literal the design-token reference forbids — it would have no recorded
+   * origin, could not be diffed against the library, and would survive a palette
+   * change while everything around it moved. And overriding the derived
+   * informational shades directly instead of the seed, which pins one shade of a
+   * ten-step ramp while the other nine keep deriving from a value it no longer
+   * agrees with. What is used instead is the design system's OWN cyan palette
+   * anchor, read out of the library's default seed through the name recorded in
+   * `BMS_SEED_PALETTE_ANCHORS`: it is the system's only cyan-family hue, it is a
+   * settable seed token rather than a literal, and reading it here means the hue
+   * is still the library's to change.
+   *
+   * Assumptions: the informational separation does not stay inside the
+   * informational role on its own, and the second entry is what confines it.
+   * Computed from the package's own `theme.getDesignToken` accessor at the pinned
+   * version, the first entry alone moves 13 derived tokens: the informational
+   * colour and its nine-shade ramp, which is the intent, plus the link colour and
+   * its hover and active shades, which is not — the link colour derives from the
+   * informational seed whenever its own seed is left empty. Nothing in the 21
+   * mapsets is a hyperlink, so there is no measured source value asking for a
+   * turquoise link; pinning the link seed to the blue anchor holds the link colour
+   * exactly where the library's default put it and brings the total movement down
+   * to the 10 tokens of the informational ramp. Verified in the same computation:
+   * the primary, base text and secondary text colours do not move.
+   *
+   * Trade-offs: the informational colour is measurably less contrasting as text
+   * after this change, and the numbers are stated rather than left for a reader to
+   * discover. Against white it measures 2.21:1 where the blue it used to share
+   * measured 4.10:1; inside the message band, against the informational alert
+   * background it measures 2.11:1 where it measured 3.66:1 before. The reason it
+   * is accepted is that this is the class of value every semantic colour the
+   * library ships already is — each is a mid-ramp palette anchor rather than a
+   * text shade, so measured the same way on their own alert backgrounds the
+   * success colour gives 2.21:1 and the error colour 2.99:1, and the informational
+   * role was the outlier only because it happened to be blue. Two properties keep
+   * that acceptable: the message band never carries severity by colour alone,
+   * since it renders a per-severity icon and a per-severity ARIA role alongside
+   * the colour, and the derived text-grade shade of the same ramp stays available
+   * by name to any consumer that needs a darker value. No conformance level is
+   * claimed here or anywhere in this tree, and the design-token reference records
+   * that no accessibility audit has been performed; these are measurements,
+   * offered so that the change is auditable.
    */
-  token: {},
+  token: {
+    colorInfo: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.TURQUOISE],
+    colorLink: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.BLUE],
+  },
 
   /*
    * Assumptions: this is empty by decision. Version 6 of the design system was

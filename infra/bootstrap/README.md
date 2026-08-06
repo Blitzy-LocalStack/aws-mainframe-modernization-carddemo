@@ -88,17 +88,25 @@ that hosts a CardDemo environment.
 # WHAT: initialize the local-state root, save a reviewable plan, apply exactly
 #       that plan, and print the values consumed by the environment backends.
 # WHY : Alternatives Considered: a bare `terraform apply` was rejected because
-#       it creates a second implicit plan at apply time. Saving `tfplan` makes
+#       it creates a second implicit plan at apply time. Saving the plan makes
 #       the reviewed graph and the applied graph identical.
+# WHY : Assumptions: the plan file is named `bootstrap.tfplan` and not a bare
+#       `tfplan`, because the ignore rules that keep it out of a commit match on
+#       the `.tfplan` SUFFIX. A bare `tfplan` has no suffix to match and is
+#       therefore trackable; `git check-ignore -v infra/bootstrap/bootstrap.tfplan`
+#       resolves against `.gitignore`, while the same command on
+#       `infra/bootstrap/tfplan` returns nothing. The `.json` rendering follows the
+#       same rule, so `bootstrap.tfplan.json` is covered and `tfplan.json` is not.
 terraform -chdir=infra/bootstrap init
-terraform -chdir=infra/bootstrap plan -out=tfplan
-terraform -chdir=infra/bootstrap apply tfplan
+terraform -chdir=infra/bootstrap plan -out=bootstrap.tfplan
+terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 terraform -chdir=infra/bootstrap output
 ```
 
 `init` takes no `-backend-config` arguments because this root has no remote
-backend. The `tfplan` file is a local binary review artifact; remove
-`infra/bootstrap/tfplan` when the apply is complete and never commit it.
+backend. The `bootstrap.tfplan` file is a local binary review artifact; remove
+`infra/bootstrap/bootstrap.tfplan` when the apply is complete and never commit
+it. Section 6 records what the ignore rules do and do not carry.
 
 Override non-secret configuration on the plan command without editing a tracked
 file. For example, append `-var 'name_prefix=<prefix>'`,
@@ -209,6 +217,37 @@ excludes `.terraform/`, `*.tfstate`, `*.tfstate.*`, `*.tfplan`, and
 `*.tfplan.*`. Local state can still contain infrastructure identifiers and
 provider-returned sensitive values, so keep it on encrypted, access-controlled
 storage even though version control ignores it.
+
+Read those five patterns as suffix matches, because that is what decides whether
+the artifacts this README tells you to create are actually covered. Every one of
+them is: local state is written as `terraform.tfstate` with backups as
+`terraform.tfstate.*`, and section 3 and section 10 both name the saved plan
+`bootstrap.tfplan`, whose `terraform show -json` rendering is
+`bootstrap.tfplan.json`. Confirm rather than assume, on any path before you create
+it:
+
+```bash
+# WHAT: assert that a saved plan and its JSON rendering are both ignored before
+#       any apply writes them.
+# WHY : Assumptions: a saved plan is not a diff summary. It embeds the resolved
+#       value of every attribute the apply will set, which for the wider stack
+#       includes the Aurora master password and the Cognito seed-user passwords
+#       the random provider generates, so one committed plan discloses what one
+#       committed state file would. `git check-ignore` is the only authority on
+#       whether a given NAME is covered; reading the pattern list is not, because
+#       `*.tfplan` matches on the suffix and a bare `tfplan` has none.
+# WHY : Trade-offs: an ignore rule reduces accidental staging and cannot defeat
+#       `git add -f`, so this check is the cheap guard and not the control. The
+#       gitleaks step in .github/workflows/infra-ci.yml remains authoritative for
+#       content, and removing the artifact after the apply remains the real answer.
+git check-ignore -v infra/bootstrap/bootstrap.tfplan \
+                    infra/bootstrap/bootstrap.tfplan.json \
+                    infra/bootstrap/terraform.tfstate
+```
+
+Each of the three prints the matching rule. A path that prints nothing is
+**tracked** and must be renamed to a covered form rather than trusted, which is
+why no command in this document saves a plan to a bare `tfplan`.
 
 Alternatives Considered: a random bucket suffix was rejected because it would
 make loss of local state harder to recover. The deterministic state-bucket name
@@ -401,9 +440,12 @@ audit trail, purge the audit bucket, and destroy with the same override:
 # WHY : Trade-offs: this permanently discards every retained state version, so
 #       the destructive behavior requires an explicit variable rather than a
 #       permissive default.
-terraform -chdir=infra/bootstrap plan -out=tfplan \
+# WHY : Assumptions: the plan name matches section 3 for the reason section 6
+#       records -- the ignore rules match the `.tfplan` suffix, so a bare `tfplan`
+#       would be trackable. Remove the file once the destroy completes.
+terraform -chdir=infra/bootstrap plan -out=bootstrap.tfplan \
   -var 'state_bucket_force_destroy=true'
-terraform -chdir=infra/bootstrap apply tfplan
+terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 ```
 
 Assumptions: the variable controls only the state bucket. The audit bucket is
@@ -729,9 +771,13 @@ OIDC provider resource establishes trust metadata, not a credential.
 
 Assumptions: no `terraform.tfvars` belongs to this root. Apply-time overrides
 use `-var` with non-secret values. Local `.terraform/`, state files, and plan
-files are excluded by the repository-root `.gitignore`;
-`.terraform.lock.hcl` remains tracked because it contains provider versions and
-checksums, not credentials.
+files are excluded by the repository-root `.gitignore` -- state and plan files by
+their `.tfstate` and `.tfplan` **suffixes**, which is why every command in this
+document names the saved plan `bootstrap.tfplan` and section 6 gives the
+`git check-ignore` invocation that proves a given path is covered rather than
+asking the reader to infer it from the pattern list. `.terraform.lock.hcl`
+remains tracked because it contains provider versions and checksums, not
+credentials.
 
 Trade-offs: outputs are intentionally visible identifiers, but state files can
 contain sensitive provider values. The controls are therefore structural: local

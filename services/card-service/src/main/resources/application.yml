@@ -644,8 +644,17 @@ spring:
 # -----------------------------------------------------------------------------
 # Trade-offs: (1) the health path is a deployment contract and is documented as one,
 #       not as a convenience; (2) the surface is kept to three endpoints because
-#       every endpoint exposed here is reachable from inside the private network
-#       without a token.
+#       exposing an endpoint here is what makes it EXIST, and an endpoint that
+#       exists is one more thing reachable from inside the private network.
+# Refactoring Rationale: clause (2) previously read "every endpoint exposed here is
+#       reachable from inside the private network without a token", which was true
+#       while this module had no filter chain and became false when
+#       config/SecurityConfig.java landed: that class opens /actuator/health/**
+#       ALONE and leaves info and the scrape path behind the chain, which was
+#       verified by starting this module's jar and reading the status codes -- health
+#       answers 200, info and prometheus answer 401. The list below and that class
+#       are two independent narrowings of the same surface, and neither substitutes
+#       for the other.
 # -----------------------------------------------------------------------------
 management:
   endpoints:
@@ -865,6 +874,25 @@ carddemo:
       expected-token-use: access
       expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are configured rather than left
+    #       implicit, and common-lib's JwtRoleConverter compares them with its own
+    #       compiled constants and REFUSES TO START on a mismatch. This is
+    #       therefore the point at which a deployed pool whose groups were renamed
+    #       becomes a startup failure instead of a service that authenticates every
+    #       request and authorizes none. The defaults are the same two names
+    #       infra/modules/cognito fixes as non-overridable, so an environment that
+    #       sets neither variable still starts correctly.
+    # WHY : Trade-offs: the property shape is identical in every service that has
+    #       a filter chain, which duplicates two keys per service. The alternative
+    #       - one shared configuration source - was rejected because a service must
+    #       be startable on its own, and a missing shared source would fail eight
+    #       deployables for one edit. The cost is two lines per service; what it
+    #       buys is that no service depends on another's configuration to know what
+    #       an administrator is.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
   card:
     list:

@@ -707,13 +707,29 @@ logging:
 #       - so an audience validator would reject every access token the sign-on
 #       flow issues while accepting the identity tokens this block exists to
 #       refuse. It would invert the control.
-#       (4) Assumptions: these keys are read by config/SecurityConfig.java, which
-#       installs a delegating token validator ahead of the group mapping, so a
-#       token failing any of the three never reaches JwtRoleConverter and no
-#       authority is derived from it. common-lib's security package owns the
-#       group mapping alone and explicitly no token validation, so the validator
-#       belongs to each service; the property shape is identical in every service
-#       so the eight filter chains cannot diverge in what they accept.
+#       (4) Assumptions: these three keys are read by config/SecurityConfig.java,
+#       whose jwtDecoder bean composes the framework's own issuer-and-time
+#       validators FIRST and then a delegating CognitoAccessTokenValidator, so a
+#       token failing any of the three is rejected during decoding and never
+#       reaches JwtRoleConverter -- no authority is derived from it. The
+#       validator has to be installed per service rather than shared, because
+#       adding one requires building the JwtDecoder and the framework offers no
+#       hook to extend the validator chain it composes from issuer-uri;
+#       common-lib therefore publishes the validator class and the group mapping
+#       and owns neither filter chain. The property shape below is identical in
+#       every context that publishes a web endpoint -- auth, account, card,
+#       transaction, reference, reporting and authorization -- so those chains
+#       cannot diverge in what they accept. batch-service is the deliberate
+#       exception and declares none of these keys: it publishes no business or
+#       administrative route at all, only the actuator health group its own
+#       pom.xml records the reasoning for.
+#       Refactoring Rationale: an earlier revision of this block asserted the
+#       same wiring while no SecurityConfig existed in this module and nothing in
+#       the repository read these keys, so the values documented an intention
+#       rather than enforcing anything. Because a resource server given only an
+#       issuer location still authenticates a validly signed token, that gap was
+#       not visible as a failure -- it would have surfaced as an identity token
+#       being accepted. The claim and the wiring are now the same thing.
 #       (5) Trade-offs: required-scope names the scope the pool grants to a token
 #       obtained through its authentication API rather than a custom
 #       resource-server scope. Custom scopes are granted only through the OAuth
@@ -729,3 +745,22 @@ carddemo:
       expected-token-use: access
       expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are declared here, in the same shape
+    #       every other context declares them, and are read by
+    #       config/SecurityConfig.java -- which hands them to the shared
+    #       JwtRoleConverter. The converter compares each against its own compiled
+    #       constant and refuses to start on a mismatch, so this pair is what turns
+    #       a user pool whose groups were renamed into a startup failure instead of
+    #       a service that authenticates every request and authorizes none.
+    #       Trade-offs: the fallbacks are the two names infra/modules/cognito fixes
+    #       as non-overridable, so a local run needs no environment at all, while a
+    #       deployment that renames a group sets the variables and fails fast if the
+    #       new name and the compiled constant disagree. A no-default form was
+    #       considered and rejected here specifically: unlike the client id, which
+    #       is deployment-specific and must never be guessed, these two names are
+    #       part of the application's own authorization vocabulary and a wrong value
+    #       is caught by the converter rather than being silently accepted.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}

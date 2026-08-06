@@ -467,7 +467,7 @@ not reproduced here, so there is one place to correct them.
   — why the batch chain invokes tasks in this cluster from a state machine.
 * [The code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
   — the convention this document is written to, including the four rationale
-  labels and the `# WHAT:` / `# WHY :` idiom.
+  labels and the paired what-and-why comment idiom.
 * [The deploy runbook](../../../docs/runbooks/deploy.md) and
   [the teardown runbook](../../../docs/runbooks/teardown.md) — the exact operator
   command sequences.

@@ -252,14 +252,23 @@ jobs:
       # Alternatives Considered: a bare auto-approved apply. Rejected because it
       # re-plans at execution time; applying the saved plan guarantees the
       # reviewed change set is the one sent to AWS.
+      # Assumptions: the saved plan is named "<env>.tfplan" rather than a bare
+      # "tfplan". A saved plan embeds the resolved value of every attribute the
+      # apply will set, which for this stack includes the generated Aurora master
+      # password and the Cognito seed-user passwords, and the repository ignore
+      # rules match on the ".tfplan" SUFFIX -- a bare "tfplan" has no suffix to
+      # match and stays trackable. infra/README.md, infra/bootstrap/README.md and
+      # both environment READMEs use the same convention, so an operator
+      # reproducing this step locally writes a name "git check-ignore" covers.
       - name: Plan and apply the complete environment
         shell: bash
         run: |
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"
-          terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars -out=tfplan
-          terraform -chdir="$root" show -no-color tfplan > deploy-reports/terraform-plan.txt
-          terraform -chdir="$root" apply -input=false tfplan
+          plan_file="${{ inputs.environment }}.tfplan"
+          terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars -out="$plan_file"
+          terraform -chdir="$root" show -no-color "$plan_file" > deploy-reports/terraform-plan.txt
+          terraform -chdir="$root" apply -input=false "$plan_file"
 
       # Assumptions: CloudFront serves the S3 origin, not the UI container image.
       # The invalidation is limited to the entry document and route fallback so
@@ -294,4 +303,5 @@ jobs:
         shell: bash
         run: |
           root="infra/envs/${{ inputs.environment }}"
-          rm -f "$root/deployment.auto.tfvars.json" "$root/ecr.tfplan" "$root/tfplan"
+          rm -f "$root/deployment.auto.tfvars.json" "$root/ecr.tfplan" \
+                "$root/${{ inputs.environment }}.tfplan"

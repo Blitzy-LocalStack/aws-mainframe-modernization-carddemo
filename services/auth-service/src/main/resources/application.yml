@@ -588,3 +588,22 @@ carddemo:
       expected-token-use: access
       expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are configured rather than left
+    #   implicit, and common-lib's JwtRoleConverter compares them with its own
+    #   compiled constants and REFUSES TO START on a mismatch. This is therefore
+    #   the point at which a deployed pool whose groups were renamed becomes a
+    #   startup failure instead of a service that authenticates every request and
+    #   authorizes none -- which on THIS context would be the widest possible
+    #   failure, because the five operations behind that authority create, alter
+    #   and delete the rows that decide who is an administrator. The defaults are
+    #   the same two names infra/modules/cognito fixes as non-overridable, so an
+    #   environment that sets neither variable still starts correctly.
+    # WHY : Trade-offs: the property shape is identical in every service that has
+    #   a filter chain, which duplicates two keys per service. The alternative --
+    #   one shared configuration source -- was rejected because a service must be
+    #   startable on its own, and a missing shared source would fail eight
+    #   deployables for one edit.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}

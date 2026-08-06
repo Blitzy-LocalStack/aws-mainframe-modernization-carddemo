@@ -16,18 +16,10 @@ import org.hibernate.type.SqlTypes;
 //       type-documentation gate reads, while this uninterrupted rationale block still belongs to
 //       the same declaration.
 //
-// WHAT: the record is 350 bytes and the offset arithmetic is written out once here, because every
-//       type, length and scale decision below is derived from it and an unnoticed shortfall shifts
-//       every field after the point it occurs. Reading app/cpy/CVTRA05Y.cpy:5-18 in order and
-//       accumulating the declared widths, with a zoned S9(09)V99 occupying 11 bytes in DISPLAY
-//       usage: 0 + 16 = 16, + 2 = 18, + 4 = 22, + 10 = 32, + 100 = 132, + 11 = 143, + 9 = 152,
-//       + 50 = 202, + 50 = 252, + 10 = 262, + 16 = 278, + 26 = 304, + 26 = 330, + 20 = 350. The
-//       three offsets that matter most downstream fall out of that sum as 262 for the card number,
-//       278 for the origination stamp and 304 for the processing stamp.
-//
 // WHY : Assumptions: those three offsets are corroborated three independent ways, recorded here so
 //       that nobody re-derives them and so that a disagreement with any one source is recognised as
-//       a finding rather than absorbed as a rounding difference. First, the summation above.
+//       a finding rather than absorbed as a rounding difference. First, the summation the Javadoc
+//       below sets out field by field.
 //       Second, app/jcl/TRANREPT.jcl:41-42 declares the same two fields to the sort utility as
 //       TRAN-CARD-NUM,263,16,ZD and TRAN-PROC-DT,305,10,CH in ONE-BASED positions, which are
 //       zero-based 262 and 304. Third, app/jcl/TRANIDX.jcl:27 defines a VSAM alternate index over
@@ -47,17 +39,6 @@ import org.hibernate.type.SqlTypes;
 //       remainder, and 16 plus 334 is 350; and app/jcl/INTCALC.jcl:39 declares the dataset the
 //       interest job writes as DCB=(RECFM=F,LRECL=350,BLKSIZE=0). Recording the width here keeps
 //       the layout reconstructible from this type alone, without opening the copybook.
-//
-// WHAT: three naming artifacts sit in the file descriptions of this record, and none arose in this
-//       migration. Both programs that write the record agree on its key name -- FD-TRANS-ID at
-//       app/cbl/CBTRN02C.cbl:73 and at app/cbl/CBACT04C.cbl:91 -- but app/cbl/CBTRN02C.cbl:68 also
-//       declares a SEPARATE 16-byte key named FD-TRAN-ID, one character shorter, belonging to the
-//       DAILY-transaction file described at app/cbl/CBTRN02C.cbl:66-69 rather than to this record.
-//       The 334-byte remainder is named FD-ACCT-DATA at app/cbl/CBTRN02C.cbl:74 and at
-//       app/cbl/CBACT04C.cbl:92, yet app/cbl/CBACT04C.cbl:87 already uses that same name, in the
-//       same program, for the 289-byte remainder of the ACCOUNT record. And the daily file's
-//       334-byte remainder is named FD-CUST-DATA at app/cbl/CBTRN02C.cbl:69, a third unrelated name
-//       for the same-sized tail of a transaction-shaped record.
 //
 // WHY : Assumptions: those names are carried exactly as written wherever any of them is cited,
 //       because a citation whose text has been tidied no longer locates the byte range it claims to.
@@ -87,6 +68,27 @@ import org.hibernate.type.SqlTypes;
  * the specification rather than a provenance note. The SQL column shown for each is the column that
  * physically exists, and the section on schema ownership explains why that distinction is
  * load-bearing here.</p>
+ *
+ * <p>The record is 350 bytes, and the offset arithmetic is written out once here because every type,
+ * length and scale decision below is derived from it and an unnoticed shortfall shifts every field
+ * after the point it occurs. Reading {@code app/cpy/CVTRA05Y.cpy:5-18} in order and accumulating the
+ * declared widths, with a zoned {@code S9(09)V99} occupying 11 bytes in {@code DISPLAY} usage:
+ * 0 + 16 = 16, + 2 = 18, + 4 = 22, + 10 = 32, + 100 = 132, + 11 = 143, + 9 = 152, + 50 = 202,
+ * + 50 = 252, + 10 = 262, + 16 = 278, + 26 = 304, + 26 = 330, + 20 = 350. The three offsets that
+ * matter most downstream fall out of that sum as 262 for the card number, 278 for the origination
+ * stamp and 304 for the processing stamp.</p>
+ *
+ * <p>Three naming artifacts sit in the file descriptions of this record, and none arose in this
+ * migration. Both programs that write the record agree on its key name -- {@code FD-TRANS-ID} at
+ * {@code app/cbl/CBTRN02C.cbl:73} and at {@code app/cbl/CBACT04C.cbl:91} -- but
+ * {@code app/cbl/CBTRN02C.cbl:68} also declares a <b>separate</b> 16-byte key named
+ * {@code FD-TRAN-ID}, one character shorter, belonging to the daily-transaction file described at
+ * {@code app/cbl/CBTRN02C.cbl:66-69} rather than to this record. The 334-byte remainder is named
+ * {@code FD-ACCT-DATA} at {@code app/cbl/CBTRN02C.cbl:74} and at {@code app/cbl/CBACT04C.cbl:92},
+ * yet {@code app/cbl/CBACT04C.cbl:87} already uses that same name, in the same program, for the
+ * 289-byte remainder of the account record. And the daily file's 334-byte remainder is named
+ * {@code FD-CUST-DATA} at {@code app/cbl/CBTRN02C.cbl:69}, a third unrelated name for the
+ * same-sized tail of a transaction-shaped record.</p>
  *
  * <table border="1">
  *   <caption>Field derivation from {@code app/cpy/CVTRA05Y.cpy}, with the physical column</caption>
@@ -145,10 +147,10 @@ import org.hibernate.type.SqlTypes;
  * line 116, the primary key at line 255, {@code idx_transactions_card_num} at line 269 and
  * {@code idx_transactions_proc_ts} at line 291. <b>This type depends on those indexes and must not
  * declare them.</b> Schema evolution belongs to Flyway, and this module's JPA schema setting is an
- * assertion against the shape already present rather than a generator of it:
- * {@code services/batch-service/src/main/resources/application.yml:625} sets it to {@code validate}
- * and the rationale block above that line explains why this module in particular cannot use
- * anything weaker.</p>
+ * assertion against the shape already present rather than a generator of it: this module's
+ * {@code application.yml} sets {@code spring.jpa.hibernate.ddl-auto} to {@code validate}, and the
+ * rationale carried at that key explains why this module in particular cannot use anything
+ * weaker.</p>
  *
  * <p>Trade-offs: declaring the two indexes on this very type is genuinely tempting, because the
  * jobs in this module are their heaviest writer and a reader auditing an access path would find the
@@ -285,18 +287,67 @@ import org.hibernate.type.SqlTypes;
  * is not read as an omission, and so that adding it is recognised as breaking parity rather than
  * improving posture. The one place this module could plausibly leak the value is a log line, and
  * the rendering method at the foot of this type addresses that specifically.</p>
+ *
+ * <h2>Record geometry, and the naming artifacts in the file descriptions</h2>
+ *
+ * <p>Assumptions: the record is 350 bytes and the offset arithmetic is written out once here,
+ * because every type, length and scale decision below is derived from it and an unnoticed shortfall
+ * shifts every field after the point it occurs. Reading app/cpy/CVTRA05Y.cpy:5-18 in order and
+ * accumulating the declared widths, with a zoned S9(09)V99 occupying 11 bytes in DISPLAY usage: 0 +
+ * 16 = 16, + 2 = 18, + 4 = 22, + 10 = 32, + 100 = 132, + 11 = 143, + 9 = 152, + 50 = 202, + 50 =
+ * 252, + 10 = 262, + 16 = 278, + 26 = 304, + 26 = 330, + 20 = 350. The three offsets that matter
+ * most downstream fall out of that sum as 262 for the card number, 278 for the origination stamp
+ * and 304 for the processing stamp.</p>
+ *
+ * <p>Assumptions: those three offsets are corroborated three independent ways, recorded here so
+ * that nobody re-derives them and so that a disagreement with any one source is recognised as a
+ * finding rather than absorbed as a rounding difference. First, the summation above. Second,
+ * app/jcl/TRANREPT.jcl:41-42 declares the same two fields to the sort utility as
+ * TRAN-CARD-NUM,263,16,ZD and TRAN-PROC-DT,305,10,CH in ONE-BASED positions, which are zero-based
+ * 262 and 304. Third, app/jcl/TRANIDX.jcl:27 defines a VSAM alternate index over this record as
+ * KEYS(26 304) -- a 26-byte key beginning at zero-based offset 304, which is exactly the processing
+ * stamp. All three agree, and the owning migration reached the same numbers independently:
+ * services/transaction-service/src/main/resources/db/migration/ V1__ledger.sql:219 records the card
+ * number as "Bytes 263-278, which is zero-based offset 262" and :242 records the processing stamp
+ * as "Bytes 305-330, which is zero-based offset 304". That module also restates the alternate-index
+ * key at V1__ledger.sql:276.</p>
+ *
+ * <p>Assumptions: the trailing FILLER at app/cpy/CVTRA05Y.cpy:18 is padding to the fixed record
+ * length rather than data, so the migration plan's transformation rule T1 drops it and requires the
+ * drop be recorded. Its width is 20 bytes beginning at offset 330, so 330 plus 20 is the declared
+ * 350, which the copybook header states at app/cpy/CVTRA05Y.cpy:2 as RECLN = 350. Two file
+ * descriptions written independently of that header agree: app/cbl/CBACT04C.cbl:89-92 subdivides
+ * the record into a 16-byte key and a 334-byte remainder, and 16 plus 334 is 350; and
+ * app/jcl/INTCALC.jcl:39 declares the dataset the interest job writes as
+ * DCB=(RECFM=F,LRECL=350,BLKSIZE=0). Recording the width here keeps the layout reconstructible from
+ * this type alone, without opening the copybook.</p>
+ *
+ * <p>Assumptions: three naming artifacts sit in the file descriptions of this record, and none
+ * arose in this migration. Both programs that write the record agree on its key name -- FD-TRANS-ID
+ * at app/cbl/CBTRN02C.cbl:73 and at app/cbl/CBACT04C.cbl:91 -- but app/cbl/CBTRN02C.cbl:68 also
+ * declares a SEPARATE 16-byte key named FD-TRAN-ID, one character shorter, belonging to the
+ * DAILY-transaction file described at app/cbl/CBTRN02C.cbl:66-69 rather than to this record. The
+ * 334-byte remainder is named FD-ACCT-DATA at app/cbl/CBTRN02C.cbl:74 and at
+ * app/cbl/CBACT04C.cbl:92, yet app/cbl/CBACT04C.cbl:87 already uses that same name, in the same
+ * program, for the 289-byte remainder of the ACCOUNT record. And the daily file's 334-byte
+ * remainder is named FD-CUST-DATA at app/cbl/CBTRN02C.cbl:69, a third unrelated name for the
+ * same-sized tail of a transaction-shaped record.</p>
+ *
+ * <p>Assumptions: those names are carried exactly as written wherever any of them is cited, because
+ * a citation whose text has been tidied no longer locates the byte range it claims to. The first
+ * artifact is the one that can actually mislead: FD-TRAN-ID and FD-TRANS-ID differ by a single
+ * character, sit four lines apart in one program, and are the keys of TWO DIFFERENT FILES, so
+ * reading either as the other silently attributes this record's key to the daily feed. The Java
+ * members below take their names from the physical column instead of from any file description, and
+ * transformation rule T1 is why that is safe: the copybook is the normative declaration and a file
+ * description is a program-local view of it, so a mapping that followed a program's declaration
+ * would depend on which program was consulted -- and here it would additionally depend on which of
+ * two adjacent declarations was read.</p>
  */
 @Entity
 @Table(name = "transactions", schema = "ledger")
 public class Transaction {
 
-    // WHAT: TRAN-ID at app/cpy/CVTRA05Y.cpy:5, PIC X(16), offset 0. It is the whole of the record
-    //       key: app/cbl/CBTRN02C.cbl:34-37 selects the master ORGANIZATION IS INDEXED with
-    //       RECORD KEY IS FD-TRANS-ID at line 37, declaring no further component, so it is the whole
-    //       of this mapping's primary key too.
-    //       The physical column is transaction_id, declared CHAR(16) NOT NULL at
-    //       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:126 and
-    //       named by the primary-key constraint at that file's line 255.
     // WHY : Alternatives Considered: the copybook abbreviates the field TRAN-ID and the member here
     //       is transactionId, following the physical column rather than the copybook spelling. The
     //       alternative -- a member named tranId with the column supplied only through the
@@ -336,13 +387,20 @@ public class Transaction {
     //       Rewriting it in place would not amend a transaction; it would reassign one posted
     //       transaction's amount, card and stamps to a different identifier, and the row the
     //       original identifier named would then be absent from every extract that reads by key.
+    /**
+     * Maps {@code TRAN-ID} at {@code app/cpy/CVTRA05Y.cpy:5}, {@code PIC X(16)}, offset 0. It is
+     * the whole of the record key: {@code app/cbl/CBTRN02C.cbl:34-37} selects the master
+     * ORGANIZATION IS INDEXED with RECORD KEY IS {@code FD-TRANS-ID} at line 37, declaring no
+     * further component, so it is the whole of this mapping's primary key too. The physical column
+     * is {@code transaction_id}, declared {@code CHAR(16)} NOT NULL at
+     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:126} and
+     * named by the primary-key constraint at that file's line 255.
+     */
     @Id
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String transactionId;
 
-    // WHAT: TRAN-TYPE-CD at app/cpy/CVTRA05Y.cpy:6, PIC X(02), offset 16. Physical column type_cd,
-    //       CHAR(2) at V1__ledger.sql:132.
     // WHY : Assumptions: PIC X(02) is a character picture and the field is a fixed code, so the
     //       migration plan's section 0.4.1.3 makes its fixed width part of the contract rather than
     //       an upper bound. The baseline agrees where it expressed this same field relationally:
@@ -356,12 +414,14 @@ public class Transaction {
     //       moves the literal '01' into this two-character field and :483 moves '05' into a field
     //       declared PIC 9(04); the first stays two characters while the second becomes four. The
     //       widths differ and so does the picture class, and both are preserved.
+    /**
+     * Maps {@code TRAN-TYPE-CD} at {@code app/cpy/CVTRA05Y.cpy:6}, {@code PIC X(02)}, offset 16.
+     * Physical column {@code type_cd}, {@code CHAR(2)} at {@code V1__ledger.sql:132}.
+     */
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "type_cd", length = 2)
     private String typeCd;
 
-    // WHAT: TRAN-CAT-CD at app/cpy/CVTRA05Y.cpy:7, PIC 9(04) -- a NUMERIC picture -- offset 18.
-    //       Physical column category_cd, CHAR(4) at V1__ledger.sql:146.
     // WHY : Alternatives Considered: a small-integer column with a Short member, which a width-only
     //       reading of PIC 9(04) invites because four digits reach only 9999. Rejected on four
     //       grounds, the last of which is decisive. The category code is a LABEL rather than a
@@ -390,12 +450,15 @@ public class Transaction {
     //       reason given on the key above. Note that the same logical code is spelled cat_cd on
     //       reference.transaction_categories, so the two names do denote one domain and neither
     //       spelling should be assumed from the other.
+    /**
+     * Maps {@code TRAN-CAT-CD} at {@code app/cpy/CVTRA05Y.cpy:7}, {@code PIC 9(04)} -- a NUMERIC
+     * picture -- offset 18. Physical column {@code category_cd}, {@code CHAR(4)} at
+     * {@code V1__ledger.sql:146}.
+     */
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "category_cd", length = 4)
     private String categoryCd;
 
-    // WHAT: TRAN-SOURCE at app/cpy/CVTRA05Y.cpy:8, PIC X(10), offset 22. Physical column source,
-    //       CHAR(10) at V1__ledger.sql:156.
     // WHY : Assumptions: CHAR(10) rather than a variable-width column, because the baseline compares
     //       this field blank-padded to its full declared width and fixed-width character comparison
     //       reproduces that, where a variable-width column would treat a trimmed value and a padded
@@ -414,12 +477,14 @@ public class Transaction {
     //       identifier at any query site that uses MERGE -- rather than by a mapping that would fail
     //       schema validation at start-up. The member name drops the prefix in step with every other
     //       field so that no reader has to remember which one field kept it.
+    /**
+     * Maps {@code TRAN-SOURCE} at {@code app/cpy/CVTRA05Y.cpy:8}, {@code PIC X(10)}, offset 22.
+     * Physical column {@code source}, {@code CHAR(10)} at {@code V1__ledger.sql:156}.
+     */
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "source", length = 10)
     private String source;
 
-    // WHAT: TRAN-DESC at app/cpy/CVTRA05Y.cpy:9, PIC X(100), offset 32. Physical column description,
-    //       VARCHAR(100) at V1__ledger.sql:166.
     // WHY : Assumptions: variable width rather than fixed, and this is the first of four columns
     //       where that choice is taken. The migration plan's section 0.4.1.3 treats a descriptive
     //       PIC X(n) field's trailing blanks as padding to the fixed record length rather than as
@@ -433,11 +498,13 @@ public class Transaction {
     //       twenty-four characters into a hundred-character field. No constraint narrowing this
     //       column's domain is declared, because the source domain includes both that short value
     //       and the blank remainder.
+    /**
+     * Maps {@code TRAN-DESC} at {@code app/cpy/CVTRA05Y.cpy:9}, {@code PIC X(100)}, offset 32.
+     * Physical column {@code description}, {@code VARCHAR(100)} at {@code V1__ledger.sql:166}.
+     */
     @Column(name = "description", length = 100)
     private String description;
 
-    // WHAT: TRAN-AMT at app/cpy/CVTRA05Y.cpy:10, PIC S9(09)V99, offset 132. Physical column amount,
-    //       NUMERIC(11,2) at V1__ledger.sql:178.
     // WHY : Assumptions: nine integer digits plus two fractional digits is eleven digits of
     //       significance, occupying eleven bytes in DISPLAY usage, so the precision is 11 and the
     //       scale is 2. The scale is exactly the scale that com.carddemo.common.money.Money declares
@@ -478,11 +545,13 @@ public class Transaction {
     //       no ROUNDED phrase at all. Because app/cbl/CBACT04C.cbl:467 then accumulates per row, the
     //       accrued total is the sum of truncated values rather than the truncation of a sum, and
     //       reordering the multiplication and the division would change the result in cents.
+    /**
+     * Maps {@code TRAN-AMT} at {@code app/cpy/CVTRA05Y.cpy:10}, {@code PIC S9(09)V99}, offset 132.
+     * Physical column {@code amount}, {@code NUMERIC(11,2)} at {@code V1__ledger.sql:178}.
+     */
     @Column(name = "amount", precision = 11, scale = 2)
     private BigDecimal amount;
 
-    // WHAT: TRAN-MERCHANT-ID at app/cpy/CVTRA05Y.cpy:11, PIC 9(09), offset 143. Physical column
-    //       merchant_id, BIGINT at V1__ledger.sql:187.
     // WHY : Assumptions: an identifier, so the migration plan's section 0.4.1.3 maps it to BIGINT
     //       with a Long member. A 32-bit integer holds nine digits comfortably and was the
     //       alternative considered; the wider type is chosen so that every identifier across every
@@ -494,11 +563,13 @@ public class Transaction {
     //       non-zero constraint may be added. app/cbl/CBACT04C.cbl:491 writes MOVE 0 TO
     //       TRAN-MERCHANT-ID on every generated interest transaction, so a constraint excluding zero
     //       would reject one of the two producers of this table outright.
+    /**
+     * Maps {@code TRAN-MERCHANT-ID} at {@code app/cpy/CVTRA05Y.cpy:11}, {@code PIC 9(09)}, offset
+     * 143. Physical column {@code merchant_id}, {@code BIGINT} at {@code V1__ledger.sql:187}.
+     */
     @Column(name = "merchant_id")
     private Long merchantId;
 
-    // WHAT: TRAN-MERCHANT-NAME at app/cpy/CVTRA05Y.cpy:12, PIC X(50), offset 152. Physical column
-    //       merchant_name, VARCHAR(50) at V1__ledger.sql:195.
     // WHY : Assumptions: descriptive, so variable width by the same reasoning as the description
     //       column above -- trailing blanks pad the record to its fixed length and are not compared
     //       as part of a code.
@@ -508,22 +579,28 @@ public class Transaction {
     //       on every generated interest transaction, because an accrual has no merchant. A
     //       non-blank constraint would therefore reject the interest producer, and normalising blank
     //       to null would change the rendered output the committed parity expectations compare.
+    /**
+     * Maps {@code TRAN-MERCHANT-NAME} at {@code app/cpy/CVTRA05Y.cpy:12}, {@code PIC X(50)}, offset
+     * 152. Physical column {@code merchant_name}, {@code VARCHAR(50)} at
+     * {@code V1__ledger.sql:195}.
+     */
     @Column(name = "merchant_name", length = 50)
     private String merchantName;
 
-    // WHAT: TRAN-MERCHANT-CITY at app/cpy/CVTRA05Y.cpy:13, PIC X(50), offset 202. Physical column
-    //       merchant_city, VARCHAR(50) at V1__ledger.sql:199.
     // WHY : Assumptions: descriptive, so variable width, on the same reasoning as the merchant name
     //       immediately above -- trailing blanks pad the record to its fixed length and are not
     //       compared as part of a code. An all-blank value is likewise legitimate, written at
     //       app/cbl/CBACT04C.cbl:493, so no constraint requiring content is declared. The rationale
     //       is restated rather than only cross-referenced because a reader auditing one field should
     //       not have to reconstruct its justification from a neighbour's.
+    /**
+     * Maps {@code TRAN-MERCHANT-CITY} at {@code app/cpy/CVTRA05Y.cpy:13}, {@code PIC X(50)}, offset
+     * 202. Physical column {@code merchant_city}, {@code VARCHAR(50)} at
+     * {@code V1__ledger.sql:199}.
+     */
     @Column(name = "merchant_city", length = 50)
     private String merchantCity;
 
-    // WHAT: TRAN-MERCHANT-ZIP at app/cpy/CVTRA05Y.cpy:14, PIC X(10), offset 252. Physical column
-    //       merchant_zip, CHAR(10) at V1__ledger.sql:206.
     // WHY : Assumptions: fixed width, unlike the two descriptive merchant columns immediately above
     //       it, because a postal code is matched as a code and its leading zeros are significant.
     //       The owning migration records at V1__ledger.sql:201-205 that 27 of the 300 values in the
@@ -531,14 +608,14 @@ public class Transaction {
     //       comparison the baseline performs, which is the same property the source column relies
     //       on. This field sits between two variable-width neighbours, so the difference is called
     //       out here rather than left to look like an inconsistency.
+    /**
+     * Maps {@code TRAN-MERCHANT-ZIP} at {@code app/cpy/CVTRA05Y.cpy:14}, {@code PIC X(10)}, offset
+     * 252. Physical column {@code merchant_zip}, {@code CHAR(10)} at {@code V1__ledger.sql:206}.
+     */
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_zip", length = 10)
     private String merchantZip;
 
-    // WHAT: TRAN-CARD-NUM at app/cpy/CVTRA05Y.cpy:15, PIC X(16), offset 262 -- the offset
-    //       corroborated three ways in the block above this class. Physical column card_num,
-    //       CHAR(16) at V1__ledger.sql:220, indexed by idx_transactions_card_num at
-    //       V1__ledger.sql:269.
     // WHY : Assumptions: CHAR(16) and never a numeric type. app/cpy/CVTRA05Y.cpy:15 declares an
     //       alphanumeric picture, the baseline performs no arithmetic on the value anywhere -- only
     //       moves and comparisons -- and a numeric mapping would discard a leading zero, silently
@@ -553,12 +630,16 @@ public class Transaction {
     //       written by that producer carries the card the account resolves to. Posting instead copies
     //       it from the daily record at app/cbl/CBTRN02C.cbl:435. Both routes populate the same
     //       column, so neither may be assumed from the other when reading a row back.
+    /**
+     * Maps {@code TRAN-CARD-NUM} at {@code app/cpy/CVTRA05Y.cpy:15}, {@code PIC X(16)}, offset 262
+     * -- the offset corroborated three ways in the block above this class. Physical column
+     * {@code card_num}, {@code CHAR(16)} at {@code V1__ledger.sql:220}, indexed by
+     * {@code idx_transactions_card_num} at {@code V1__ledger.sql:269}.
+     */
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_num", length = 16)
     private String cardNum;
 
-    // WHAT: TRAN-ORIG-TS at app/cpy/CVTRA05Y.cpy:16, PIC X(26), offset 278. Physical column
-    //       orig_ts, TIMESTAMP(6) at V1__ledger.sql:229.
     // WHY : Assumptions: PIC X(26) holding the form yyyy-MM-dd HH:mm:ss followed by a point and six
     //       fractional digits maps to microsecond precision exactly -- nineteen characters to the
     //       second, the point, then six digits is twenty-six -- so the mapping truncates no digit on
@@ -572,13 +653,13 @@ public class Transaction {
     //       value, so a zone-qualified mapping would have to invent an offset and would fabricate
     //       data. A local date-time also matches the type the shared formatter itself uses, which is
     //       forced by the same fact.
+    /**
+     * Maps {@code TRAN-ORIG-TS} at {@code app/cpy/CVTRA05Y.cpy:16}, {@code PIC X(26)}, offset 278.
+     * Physical column {@code orig_ts}, {@code TIMESTAMP(6)} at {@code V1__ledger.sql:229}.
+     */
     @Column(name = "orig_ts")
     private LocalDateTime origTs;
 
-    // WHAT: TRAN-PROC-TS at app/cpy/CVTRA05Y.cpy:17, PIC X(26), offset 304 -- the offset the
-    //       alternate-index definition at app/jcl/TRANIDX.jcl:27 confirms. Physical column proc_ts,
-    //       and the one column beyond the primary key that the owning migration declares NOT NULL,
-    //       at V1__ledger.sql:245. Indexed by idx_transactions_proc_ts at V1__ledger.sql:291.
     // WHY : Assumptions: this member is declared non-nullable and the twelve columns above it are
     //       not, and the asymmetry is the owning migration's rather than this mapping's invention.
     //       V1__ledger.sql:231-244 records why: every writer of this table sets the processing stamp,
@@ -586,16 +667,6 @@ public class Transaction {
     //       nullability declared on each member here mirrors the physical column exactly, because
     //       declaring a column non-nullable that the owning service permits to be null would have
     //       this module reject a row that service wrote deliberately.
-    // WHAT: the two stamps are produced DIFFERENTLY by the two producers, and this is the field pair
-    //       where the converging-producers section above has an observable consequence. In posting,
-    //       app/cbl/CBTRN02C.cbl:436 copies the feed's own origination stamp straight through, then
-    //       :437 performs a single timestamp read and :438 moves that fresh value here -- so the two
-    //       differ and the origination stamp is the earlier. The clock behind that read is the wall
-    //       clock, at app/cbl/CBTRN02C.cbl:692-693, because app/jcl/POSTTRAN.jcl:23 passes no
-    //       parameter to the posting step at all. In interest accrual,
-    //       app/cbl/CBACT04C.cbl:496 performs one timestamp read and :497 and :498 move THE SAME
-    //       VALUE into both stamps -- so on a generated interest transaction the two are identical by
-    //       construction.
     // WHY : Assumptions: it follows that strict ordering between the two stamps IS NOT AN INVARIANT
     //       of this table, and a test asserting the origination stamp is always strictly earlier
     //       would fail on interest rows while appearing to check something real. The only invariant
@@ -605,6 +676,24 @@ public class Transaction {
     //       ten-character token -- which is what keeps a rerun reproducible where a clock read would
     //       not be. That token and the punctuated twenty-six-character stamped form are different
     //       shapes serving different purposes and are not interchangeable.
+    /**
+     * Maps {@code TRAN-PROC-TS} at {@code app/cpy/CVTRA05Y.cpy:17}, {@code PIC X(26)}, offset 304
+     * -- the offset the alternate-index definition at {@code app/jcl/TRANIDX.jcl:27} confirms.
+     * Physical column {@code proc_ts}, and the one column beyond the primary key that the owning
+     * migration declares NOT NULL, at {@code V1__ledger.sql:245}. Indexed by
+     * {@code idx_transactions_proc_ts} at {@code V1__ledger.sql:291}.
+     *
+     * <p>The two stamps are produced DIFFERENTLY by the two producers, and this is the field pair
+     * where the converging-producers section above has an observable consequence. In posting,
+     * {@code app/cbl/CBTRN02C.cbl:436} copies the feed's own origination stamp straight through,
+     * then :437 performs a single timestamp read and :438 moves that fresh value here -- so the two
+     * differ and the origination stamp is the earlier. The clock behind that read is the wall
+     * clock, at {@code app/cbl/CBTRN02C.cbl:692-693}, because {@code app/jcl/POSTTRAN.jcl:23}
+     * passes no parameter to the posting step at all. In interest accrual,
+     * {@code app/cbl/CBACT04C.cbl:496} performs one timestamp read and :497 and :498 move THE SAME
+     * VALUE into both stamps -- so on a generated interest transaction the two are identical by
+     * construction.</p>
+     */
     @Column(name = "proc_ts", nullable = false)
     private LocalDateTime procTs;
 
@@ -639,7 +728,7 @@ public class Transaction {
      * produces a plausible row, which is precisely the class of error the offset table above this
      * class exists to prevent. A generated builder was rejected outright because the annotation
      * processor that would generate it is prohibited across this project, its generated members
-     * being unable to carry the documentation the project's Explainability rule requires. A
+     * being unable to carry documentation at all. A
      * hand-written nested builder was the closest rival and is refused as disproportionate: it adds
      * a nested type with thirteen documented methods of its own, and it removes no ordering hazard
      * that a named setter does not already remove, since a builder call is named exactly as a setter
@@ -1002,12 +1091,15 @@ public class Transaction {
      * names the row uniquely, being the whole of the primary key, so including the card number would
      * add nothing to a reader's ability to locate the row while placing an unmasked primary account
      * number in a log line -- and a batch job renders one such line per record across an entire
-     * daily feed, so the aggregate is a log holding every card number in the feed. That is the one
-     * exposure this module could plausibly create, given that it opens no request path at all, and
-     * the migration plan's section 0.4.1.9 masking discipline is the reason it is closed here. What
-     * is given up is that a failure diagnosed from this string alone does not name the card; the
-     * identifier resolves it against the stored row, and the accessor above returns the full value to
-     * a caller that needs it. </p>
+     * daily feed, so the aggregate is a log holding every card number in the feed. The migration
+     * plan's section 0.4.1.9 masking discipline is the reason it is closed here. Note that the
+     * exposure is the retained log itself and does NOT depend on this module opening a request path:
+     * {@code services/batch-service/pom.xml} declares both {@code spring-boot-starter-actuator} and
+     * {@code spring-boot-starter-web} so that the container can answer the image health probe, and
+     * this rendering would be just as durable if it declared neither. What is given up is that a
+     * failure diagnosed from this string alone does not name the card; the identifier resolves it
+     * against the stored row, and the accessor above returns the full value to a caller that needs
+     * it. </p>
      *
      * <p>Trade-offs: this string is a diagnostic aid and is expressly NOT an output contract.
      * Nothing parses it, and it is not the byte-exact fixed-width rendering the committed parity
@@ -1017,15 +1109,25 @@ public class Transaction {
      * Relying on it for that rendering instead would break parity silently, because the two would
      * agree on content while differing on every byte position. </p>
      *
+     * <p>Refactoring Rationale: THE AMOUNT IS OMITTED TOO, and an earlier revision rendered it. The
+     * paragraph above closes the card number on the reasoning that a batch job renders one such line
+     * per record across an entire daily feed, so the aggregate is a log holding every card number in
+     * the feed. That reasoning applies unchanged to the amount -- the aggregate is then a log holding
+     * every amount in the feed, which is the transaction file's monetary content in a second place no
+     * migration control governs -- and it was not applied to it. The four members that remain are an
+     * identifier and three codes: none is a monetary value, none is personal, and together they say
+     * which row an entry concerns without saying what it was worth. The accessor above returns the
+     * amount to a caller that needs it, so nothing is unavailable to the job itself. </p>
+     *
      * @return a String containing a single-line rendering naming the type, the transaction
-     *     identifier, the type and category codes, the amount and the processing stamp
+     *     identifier, the type and category codes and the processing stamp, and carrying neither the
+     *     card number nor the amount
      */
     @Override
     public String toString() {
         return "Transaction[transactionId=" + transactionId
                 + ", typeCd=" + typeCd
                 + ", categoryCd=" + categoryCd
-                + ", amount=" + amount
                 + ", procTs=" + procTs + "]";
     }
 }

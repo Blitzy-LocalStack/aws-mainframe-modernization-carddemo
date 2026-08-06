@@ -830,9 +830,26 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
       #       because a log bucket that cannot be written to protects nothing.
       #       If this is ever "harmonised" up to `aws:kms`, logging stops --
       #       which is exactly the gate this bucket exists to satisfy.
-      #       Alternatives Considered: switching to standard logging v2, which
-      #       does support an SSE-KMS destination and would remove this
-      #       concession. Rejected above, for what the policy scanners can see.
+      #       Assumptions: the constraint applies to the S3 DESTINATION of the
+      #       standard logging v2 delivery this module already uses, so it is not
+      #       removed by choosing the newer mechanism -- the newer mechanism is
+      #       what is in place. An earlier revision of this comment offered
+      #       "switch to standard logging v2" as a rejected alternative, which
+      #       contradicted the delivery declared above and would have sent a
+      #       reader looking for a migration that had already happened. What v2
+      #       does buy over the legacy path is the curated field list, and that
+      #       is recorded on the delivery and on the distribution rather than
+      #       here.
+      #       Alternatives Considered: a CloudWatch Logs destination instead of
+      #       an S3 one, which the customer-managed key does cover. Rejected
+      #       because these records are retained for audit over months and are
+      #       read rarely, which is the access shape object storage is priced
+      #       and lifecycled for; log-group storage would cost materially more
+      #       for the same bytes and would lose the noncurrent-version
+      #       protection the bucket below provides. The one control given up is
+      #       named rather than glossed: default encryption by the module's own
+      #       key, replaced by S3-managed encryption plus the four compensating
+      #       controls asserted on this bucket.
       sse_algorithm = "AES256"
     }
   }
@@ -1547,9 +1564,37 @@ resource "aws_cloudfront_distribution" "spa" {
 #   needs no second provider alias; DNS is not managed by this package; and the
 #   web-ACL rejection is recorded in full at `web_acl_id` above.
 #
-# No scanner suppression:
-#   Refactoring Rationale: both buckets now use the customer-managed S3 key, and
-#   standard logging v2 supplies the distribution audit stream without the
-#   legacy SSE-S3 or ACL exception. Security findings are therefore resolved by
-#   configuration rather than hidden at either resource.
+# Scanner suppressions -- the complete inventory is two, and both are scoped:
+#   Assumptions: this module writes exactly two `#checkov:skip` comments, each
+#   naming ONE check on ONE resource, and no `--skip-check` argument or
+#   module-specific ignore file anywhere.
+#     1. `CKV_AWS_145` on `aws_s3_bucket.logs` -- the log destination carries
+#        AES256 rather than the customer-managed key, because a delivery that
+#        cannot write its destination protects nothing. The constraint, the
+#        rejected alternative and the compensating controls (public access
+#        blocked, bucket-owner enforced ownership, versioning, and the
+#        delivery-scoped bucket policy) are written in full on that bucket's
+#        `aws_s3_bucket_server_side_encryption_configuration` above. The SPA
+#        origin bucket is unaffected and does use the customer-managed key.
+#     2. `CKV_AWS_86` on `aws_cloudfront_distribution.spa` -- the distribution IS
+#        access-logged, through the CloudWatch Logs standard logging v2 delivery
+#        declared above with a curated field list. The check recognises only the
+#        legacy `logging_config` argument, whose fixed schema cannot omit the
+#        query-string, cookie and referrer fields, so answering the check would
+#        mean deploying a strictly weaker logging path. The rationale sits on the
+#        distribution resource itself.
+#   Refactoring Rationale: an earlier revision of this block declared "No
+#   scanner suppression" and claimed both buckets used the customer-managed key.
+#   Neither statement survived the exceptions that were subsequently added ten
+#   and four hundred lines above it, and a summary that contradicts the file it
+#   summarises is worse than no summary: a reviewer greps `checkov:skip`, finds
+#   two hits, and can no longer trust anything else the block asserts. The
+#   inventory is stated here by check and by resource so that it cannot drift
+#   without the same grep changing.
+#   Trade-offs: naming the exceptions here duplicates two rationales that are
+#   already written at their resources. The duplication is deliberate and is kept
+#   to a one-line summary each: this block is the file's index of what is NOT
+#   answered by configuration, and an index that omits an entry is the failure
+#   mode being corrected. The full reasoning stays at the resource, which is
+#   where a reader changing the setting will be.
 # =============================================================================

@@ -2,11 +2,45 @@
 
 This folder holds the fixed-width record images that the transaction-service
 tests load into the `ledger` schema. Ten scenario subfolders sit beside this
-file, one per behaviour under test, and each carries its own `README.md`
-together with three record files: `dailytran.txt`, `transact.txt` and
-`tcatbal.txt`. The purpose of this document is narrow and specific: it holds the
-reasoning that is **the same for all ten scenarios**, so that no scenario has to
-repeat it and no reader has to reconstruct it from ten partial copies.
+file, one per behaviour under test. The purpose of this document is narrow and
+specific: it holds the reasoning that is **the same for all ten scenarios**, so
+that no scenario has to repeat it and no reader has to reconstruct it from ten
+partial copies.
+
+Availability, stated up front and using the `[present]`/`[planned]` convention of
+section 9.3, because the rest of this document reasons about a record shape rather
+than about a file count and a reader must not have to infer which files exist.
+Every count below was measured on this branch rather than recalled, and the
+section that can independently re-measure it is named beside it:
+
+- All ten scenario subfolders are **[present]**, and each carries all three
+  record files -- `dailytran.txt`, `transact.txt` and `tcatbal.txt` -- for
+  **thirty record files** in total. Section 3.1 settles WHICH record types belong
+  in this folder, and the set it fixes is now the set every scenario holds.
+- Exactly two of those thirty files are **deliberately zero bytes**:
+  `empty_input/dailytran.txt` and `zero_balance/tcatbal.txt`. For both, the
+  emptiness IS the discriminating property, so a present-but-empty file is the
+  authored artifact and not a missing one. The remaining twenty-eight each carry
+  exactly one record -- 350 bytes for `dailytran.txt` and `transact.txt`, 50
+  bytes for `tcatbal.txt` -- and section 3.3 carries the measured line-ending
+  result for all thirty.
+- All ten per-scenario `README.md` files are **[present]**, and each carries the
+  byte-level attestation section 7 owes. Section 8 is the template they were
+  authored from and remains the checklist any eleventh scenario is held to. This
+  document is not a substitute for them: it holds only what is uniform across all
+  ten.
+
+Refactoring Rationale: this block previously reported a partial tree -- seven
+folders, ten record files and no scenario README -- and that report was accurate
+when it was written. It is re-derived here because the corpus was completed
+afterwards, and a stale availability marker is worse than no marker at all: it
+tells a reader that an artifact sitting in front of them does not exist, and it
+quietly retires the obligation the marker was carrying. The one consequence that
+mattered most is now discharged rather than annotated -- the one-cent
+discriminator pair named in section 1.1, `boundary_exact_limit` and
+`reject_102_overlimit`, is present in full, so the credit-limit boundary that
+separates return code 0 from the soft-warn return code 4 has a fixture on both
+sides of it.
 
 > **Purpose and sources of truth.** Two documents govern the bytes in this tree
 > and this file is subordinate to both. The **byte-encoding contract** -- record
@@ -26,33 +60,57 @@ repeat it and no reader has to reconstruct it from ten partial copies.
 > with the artifacts it forces into scope listed at section 0.2.1.6. Rule 1 asks
 > that a justification sit **adjacent** to the thing it explains, and separately
 > forbids **restating what an artifact already shows**. A decision that is
-> uniform across all ten scenarios has no single scenario to sit adjacent to, and
-> copying it into ten sibling READMEs would be exactly the restatement the rule
+> uniform across every scenario has no single scenario to sit adjacent to, and
+> copying it into each sibling README would be exactly the restatement the rule
 > forbids. The folder is therefore the only location that satisfies both clauses
 > at once, which is what makes this file rule-mandated rather than decorative.
 > Rule 1's validation gate is conjunctive -- the documentation and the reasoning
 > are both required -- so a folder-wide decision recorded nowhere would fail
 > review even though every scenario README were present.
 
+> **Note -- the inventory is measured, not projected.** The set described in
+> [section 1](#1-scope-and-inventory) is both the target contract and the current
+> state of the tree: **10 scenario subfolders, 30 record files and 10 scenario
+> `README.md` files, all present.** Two obligations that used to be conditional on
+> that state are therefore discharged rather than outstanding: Decision A's "three
+> record files per scenario" is both the shape each scenario is authored to and the
+> shape each one holds, and [section 8](#8-authoring-a-scenario-readme) describes
+> ten documents that exist rather than ten that do not. The commands in
+> [section 10](#10-verification-commands) glob `*/*.txt`, so they cover all 30
+> record files, and the byte sweep there covers this document together with all ten
+> scenario READMEs.
+>
+> **Why the annotation is here (Assumption made explicit).** This file also uses
+> the **[present]**/**[planned]** convention of master section 9.3 in
+> [section 5](#5-what-consumes-these-fixtures), where the artifacts it names are
+> still genuinely mixed, and for the reason master section 9.3 states: the marker
+> keeps a document from describing a future artifact as if it already existed.
+> Applying it to section 5 and not to this file's own inventory would leave the
+> convention half-applied, which is why the inventory carries it as well even now
+> that every marker in it reads **[present]**.
+
 ---
 
 ## 1. Scope and inventory
 
 Ten scenarios, three record files each. The set is deliberately small and every
-member earns its place by proving one discriminating property.
+member earns its place by proving one discriminating property. The final column of the table records WHERE
+that property lives, because for three scenarios it is deliberately not in the
+`dailytran.txt` bytes -- see section 1.3, which exists so that a reader comparing
+two identical files does not take one of them for a copy-paste error.
 
-| Scenario | Discriminating property it exists to prove | Expected outcome |
-|---|---|---|
-| `happy_path` | the byte-shape template: one well-formed record that clears both boundary gates | posts, no reject |
-| `boundary_exact_limit` | an amount landing exactly on the credit limit | posts |
-| `boundary_expiry_equal` | a transaction date exactly equal to the expiration date | posts |
-| `zero_balance` | the create arm of the category-balance fork, via a truly empty `tcatbal.txt` | posts, category row created |
-| `empty_input` | a present-but-empty primary input, via a truly empty `dailytran.txt` | no records processed, no reject |
-| `reject_100_card_missing` | the card number resolves to no cross-reference row | reject 100, `INVALID CARD NUMBER FOUND` |
-| `reject_101_acct_missing` | the resolved account does not exist | reject 101, `ACCOUNT RECORD NOT FOUND` |
-| `reject_102_overlimit` | one cent past the same limit | reject 102, `OVERLIMIT TRANSACTION` |
-| `reject_103_expired` | one day past the same date | reject 103, `TRANSACTION RECEIVED AFTER ACCT EXPIRATION` |
-| `reject_109_rewrite_invalid_key` | a failure raised after validation has already passed | reject 109, `ACCOUNT RECORD NOT FOUND` |
+| Scenario | Discriminating property it exists to prove | Expected outcome | Property carried by |
+|---|---|---|---|
+| `happy_path` | the byte-shape template: one well-formed record that clears both boundary gates | posts, no reject | the record |
+| `boundary_exact_limit` | an amount landing exactly on the credit limit | posts | the record |
+| `boundary_expiry_equal` | a transaction date exactly equal to the expiration date | posts | the record |
+| `zero_balance` | the create arm of the category-balance fork, via a truly empty `tcatbal.txt` | posts, category row created | a sibling file |
+| `empty_input` | a present-but-empty primary input, via a truly empty `dailytran.txt` | no records processed, no reject | the file's emptiness |
+| `reject_100_card_missing` | the card number resolves to no cross-reference row | reject 100, `INVALID CARD NUMBER FOUND` | the record |
+| `reject_101_acct_missing` | the resolved account does not exist | reject 101, `ACCOUNT RECORD NOT FOUND` | a precondition |
+| `reject_102_overlimit` | one cent past the same limit | reject 102, `OVERLIMIT TRANSACTION` | the record |
+| `reject_103_expired` | one day past the same date | reject 103, `TRANSACTION RECEIVED AFTER ACCT EXPIRATION` | the record |
+| `reject_109_rewrite_invalid_key` | a failure raised after validation has already passed | reject 109, `ACCOUNT RECORD NOT FOUND` | a precondition |
 
 ### 1.1 The two discriminator pairs
 
@@ -60,16 +118,36 @@ The set is built around two pairs, and the pairing is the point of it. Each pair
 must agree **byte for byte except in the single field that moves**, because a
 pair that differs in two fields no longer isolates which one caused the outcome.
 
+**Both pairs are present, and both agreements were measured rather than assumed.**
+Each pair was compared byte by byte on this branch: the one-cent pair differs at
+**exactly one byte, position 143**, and the one-day pair at **exactly one byte,
+position 288**. Each measurement is reported below beside the rule the pair
+straddles. Assumptions: this property holds when a pair is authored together and
+stops holding silently when one member is later edited alone, which is why it is
+recorded as a measurement with its positions rather than as an intention -- a
+reader can re-run the comparison, and a reader cannot re-run an intention.
+
 - **One cent.** `boundary_exact_limit` and `reject_102_overlimit` differ only in
   the amount at positions 133-143. The comparison in
   [`app/cbl/CBTRN02C.cbl`](../../../../../../app/cbl/CBTRN02C.cbl) line 407 is
   `IF ACCT-CREDIT-LIMIT >= WS-TEMP-BAL`, so landing exactly on the limit takes
-  the pass arm and one cent beyond takes the reject arm.
+  the pass arm and one cent beyond takes the reject arm. Both members are present
+  and the agreement holds as stated, measured on this branch: the amount field at
+  positions 133-143 reads `0000020650{` in the first and `0000020650A` in the
+  second, so the two records differ **from each other at exactly one byte,
+  position 143** -- the sign-overpunch low-order digit, where `{` carries a
+  positive zero and `A` a positive one under master section 3.4. The pair
+  therefore moves the amount by one cent and moves nothing else, which is the
+  property that makes the outcome attributable to the limit comparison alone.
 - **One day.** `boundary_expiry_equal` and `reject_103_expired` differ only in
   the date carried in the first ten bytes of the originating timestamp at
   positions 279-304. Line 414 of the same program is
   `IF ACCT-EXPIRAION-DATE >= DALYTRAN-ORIG-TS (1:10)`, so an equal date passes
-  and one day beyond rejects.
+  and one day beyond rejects. Both members of this pair are present and the
+  agreement holds as stated, measured on this branch: each differs from
+  `happy_path/dailytran.txt` only inside the ten date bytes at 279-288, carrying
+  `2024-12-13` and `2024-12-14` against the template's `2022-06-10`, and the two
+  differ **from each other at exactly one byte**, position 288.
 
 Both comparisons are inclusive on the pass side. The copybook field name in that
 second comparison is the baseline spelling `ACCT-EXPIRAION-DATE` and is quoted
@@ -104,6 +182,93 @@ succeeded.
 > `reason_desc` therefore cannot tell 101 from 109 and will pass against the wrong
 > scenario; only `reason_code` separates them. Any assertion covering either
 > scenario must include the code.
+
+### 1.3 Three `dailytran.txt` files are byte-identical to `happy_path`, deliberately
+
+This is recorded because it looks like a defect and is not. Measured with `cmp`
+against `happy_path/dailytran.txt`, the ten scenarios relate to the template as
+follows -- positions are one-based:
+
+| Scenario | Differs from `happy_path` at | Field that moves |
+|---|---|---|
+| `boundary_exact_limit` | 138-143 | the amount, to `0000020650{` |
+| `reject_102_overlimit` | 138-143 | the amount, to `0000020650A` |
+| `boundary_expiry_equal` | 282, 284, 285, 288 | the originating date, to `2024-12-13` |
+| `reject_103_expired` | 282, 284, 285, 288 | the originating date, to `2024-12-14` |
+| `reject_100_card_missing` | 263-278 | the card number, to `9999999999999999` |
+| `reject_101_acct_missing` | nowhere | none |
+| `reject_109_rewrite_invalid_key` | nowhere | none |
+| `zero_balance` | nowhere | none |
+| `empty_input` | the file is empty | none |
+
+Assumptions: the three scenarios that differ nowhere are discriminated by
+something other than a byte of the input record -- for two of them a precondition
+the TEST establishes over data this folder deliberately does not own, and for the
+third a sibling file that this folder does ship.
+
+- `reject_100_card_missing` is the one "not found" scenario that DOES move a
+  byte: it carries `9999999999999999` in the card field, fifteen of the sixteen
+  bytes changing from the template -- the sixteenth is position 266, which
+  already held a `9`. The value is unresolvable by construction rather than by
+  omission, and that is a measurement: `app/data/ASCII/cardxref.txt` holds fifty
+  rows and none begins with it. The reference tree reaches the same reason from
+  the other direction -- its `reject_100_card_missing/dailytran.txt` is
+  byte-identical to that tree's `happy_path/dailytran.txt` and its own
+  `cardxref.txt` supplies a single row for a different card, so the record's card
+  resolves to nothing. That construction is unavailable here because Decision A
+  keeps the cross-reference out of this folder: with no `cardxref.txt` of its own,
+  the scenario has to express the absence inside the one file it does ship.
+- `reject_101_acct_missing` is the complement, and it moves no byte at all. Reason
+  101 requires the cross-reference read to have **succeeded** and the account it
+  names to be absent, so the card here must be a resolvable one -- and the
+  template's `4859452612877065` is precisely that, the card the seed
+  cross-reference maps to account `00000000007` at row 21. The absent-account half
+  is a state the consuming test establishes, per Decision A. This is also how the
+  reference tree builds the same scenario: its `reject_101_acct_missing` carries
+  the happy card and separates itself by shipping an `acctdata.txt` that holds a
+  different account. Moving the card here would be actively wrong rather than
+  merely unnecessary -- see the note below.
+- `reject_109_rewrite_invalid_key` reaches its reason on the account rewrite,
+  after validation has already returned zero, so by construction nothing in the
+  input record can express it; section 1.2 sets out the ordering.
+- `zero_balance` is discriminated by its empty `tcatbal.txt` sibling, not by the
+  input record.
+
+> **A card substitution in `reject_101_acct_missing` is specifically wrong, and
+> the reason is worth recording where the next author will meet it.** The card
+> `0927987108636232` reads like the natural choice for this scenario, because it
+> is a published seed value that resolves -- row 4 of
+> [`app/data/ASCII/cardxref.txt`](../../../../../../app/data/ASCII/cardxref.txt)
+> maps it to customer `000000020` and account `00000000020`, measured -- and
+> because it carries the leading zero that item 1 of the table in section 4.2
+> forbids normalising. It was carried here and has been withdrawn. Assumptions: it
+> resolves only if the consuming test seeds that particular cross-reference row.
+> The reference corpus's resolvable-card scenarios ship a single row mapping
+> `4859452612877065`, and `0927987108636232` appears there only as the decoy row
+> of `reject_100_card_missing`, never as a daily record's card. Under a
+> cross-reference tier of that minimal shape the card resolves to nothing, and
+> because [`app/cbl/CBTRN02C.cbl`](../../../../../../app/cbl/CBTRN02C.cbl) checks
+> reason 100 at lines 385-387 **before** reason 101 at lines 397-399, the record
+> would express reason 100 -- so the scenario would be named for one reason and
+> encode its predecessor. Byte identity with `happy_path` removes the dependency
+> entirely: the card is the one every resolvable-card scenario maps, leaving the
+> account-tier omission as the single condition the test has to establish.
+> Trade-offs: byte identity costs this scenario any visible marker of its own, so
+> its identity rests on its folder name and on the account state a test supplies,
+> and it costs the folder the leading-zero round-trip that the withdrawn card
+> happened to carry. Both are accepted. The first is preferable to a fixture whose
+> bytes contradict its name, and the second is answered by the closing paragraph
+> of section 4.2: a leading-zero round-trip deserves a fixture authored and named
+> for that purpose, not one smuggled into a scenario whose discriminator is
+> something else.
+
+Trade-offs: the alternative was to give each of those three a distinct,
+invented input record so that every fixture differed from every other. It is
+rejected because an invented card number or amount would assert a discriminator
+the program does not read for that reason code, and a reader would then be unable
+to tell which field the scenario actually turns on. A byte-identical file plus a
+stated precondition is checkable; a plausible-looking difference that nothing
+consumes is not.
 
 ---
 
@@ -206,13 +371,24 @@ reasonably expect to have been taken. Each therefore names that alternative and
 what concretely goes wrong under it, tagged with the category names from Rule 1
 in the one written form the documentation standard permits.
 
-### 3.1 Decision A -- three record files per scenario, not five
+### 3.1 Decision A -- three record layouts per scenario, not five
 
-Every scenario here ships `dailytran.txt`, `transact.txt` and `tcatbal.txt`. The
-reference posting scenarios ship a different set: they add the account master and
+Every scenario here ships `dailytran.txt`, `transact.txt` and `tcatbal.txt` --
+the set the availability block at the head of this file measures, and the set all
+ten scenarios hold. The reference posting scenarios ship a different set: they add the account master and
 the card cross-reference, because `CBTRN02C` opens those two files during
 validation. **This folder ships neither of them**, and that is a choice rather
 than an omission.
+
+Assumptions: "three, not five" is a statement about the file set a scenario may
+contain, and it remains that statement now that every folder holds all three. What
+this decision fixes is the CEILING and the composition: a scenario in this folder
+never acquires a fourth or fifth record file, whatever else it gains. The
+distinction matters because the two failures are not symmetrical -- a folder short
+of `tcatbal.txt` is incomplete and can be completed, whereas a folder holding
+`acctdata.txt` would have taken another bounded context's records, which no later
+addition repairs. Only the first of those two was ever true here, and it no longer
+is.
 
 Alternatives Considered: mirroring the reference tree's five-file shape was
 evaluated and rejected on ownership grounds. `CBTRN02C` is batch-service's
@@ -261,9 +437,13 @@ at any price, whereas the duplication costs only diligence.
 
 ### 3.3 Decision C -- every file here is LF-only, including `tcatbal.txt`
 
-All three record files in all ten scenarios use LF line endings and end with a
-single trailing newline. Master sections 3.2 and 3.3 are the authority for both
-rules and state why; this section records only the folder-level consequence.
+Every record file in every scenario here uses LF line endings and ends with a
+single trailing newline. That is measured, not asserted: across all **30** record
+files the carriage-return count is **zero**, and each of the 28 non-empty files
+ends with exactly one line feed -- the two zero-byte files named in the
+availability block carry no bytes at all to terminate. Master sections 3.2 and 3.3
+are the authority for both rules and state why; this section records only the
+folder-level consequence.
 
 Assumptions: the loader treats each physical line as exactly one fixed-length
 record, so a stray carriage return is absorbed into the trailing field or the
@@ -350,6 +530,21 @@ behaviour, and any divergence is documented; nothing in `app/**` is edited.
 | The seed file is `dailytran.txt` while the dataset it loads is named `DALYTRAN` | `app/data/ASCII/dailytran.txt` against [`app/jcl/POSTTRAN.jcl`](../../../../../../app/jcl/POSTTRAN.jcl) line 31 | the two spellings genuinely differ in the baseline. **Normalise neither.** Fixture file names follow the seed file name, so the name in this folder is `dailytran.txt` |
 | There is **no `transact.txt` in `app/data/ASCII/`** -- that directory holds exactly nine files | `app/data/ASCII/` | the posted-transaction master is not seeded in ASCII form, so every `transact.txt` in this folder is authored from the `CVTRA05Y` layout rather than copied from a seed row. Each scenario README must therefore attest those bytes as synthetic in its own words, per section 7 |
 
+Assumptions: the first row states a property of the **seed** and an obligation on
+the **column**, and it is not a claim that a fixture in this folder currently
+carries that card. Measured on this branch, no `dailytran.txt` here carries it:
+nine of the ten carry `4859452612877065`, which is also a published seed value and
+has no leading zero, and the tenth -- `reject_100_card_missing` -- carries the
+deliberately unresolvable `9999999999999999`. Section 1.3 records why the one
+scenario that formerly carried the leading-zero card must not. The obligation the row establishes is therefore
+outstanding on the schema side, where `V1__ledger.sql` declares the card column
+`CHAR(16)`, and a fixture whose purpose is to prove the leading zero survives a
+round trip has to be authored with that card **and named for that purpose**,
+rather than smuggled into a scenario whose discriminator is something else
+entirely. Trade-offs: keeping the row here rather than deleting it costs this
+paragraph, and buys a reader the seed evidence for a rule the folder does not yet
+exercise; deleting it would leave the `CHAR(16)` choice looking arbitrary.
+
 ---
 
 ## 5. What consumes these fixtures
@@ -358,12 +553,32 @@ This section uses the `[present]` and `[planned]` convention of master section
 9.3. Its purpose is to keep a document from describing a future artifact as
 though it already exists, which is the failure this annotation prevents.
 
-- `services/transaction-service/src/test/java/**` -- **[planned]**. It carries no
-  test class yet; the only files under it are documentation-only
-  `package-info.java` declarations. Repository integration tests, by convention
-  named `*RepositoryIT`, and unit tests named `*Test`, will read these fixtures
-  once authored. **No specific test class is named here, because naming one would
-  assert the existence of something that does not exist.**
+- `services/transaction-service/src/test/java/**` -- **[present]**, but **no
+  consumer of these fixtures is present yet**. Measured on this branch the tree
+  holds four test classes --
+  [`TransactionApiContractTest`](../../java/com/carddemo/transaction/dto/TransactionApiContractTest.java),
+  [`TransactionAddRequestTest`](../../java/com/carddemo/transaction/dto/TransactionAddRequestTest.java),
+  [`FixedWidthMappingTest`](../../java/com/carddemo/transaction/domain/FixedWidthMappingTest.java)
+  and
+  [`TransactionRepositoryIT`](../../java/com/carddemo/transaction/repository/TransactionRepositoryIT.java)
+  -- beside five documentation-only `package-info.java` declarations, and **not one
+  of them reads a byte from this folder**. The contract test binds the published
+  OpenAPI document to the request and response records; the mapping test asserts
+  the fixed-width offsets against the entity; and the repository integration test
+  builds every row it needs in code, through `save(...)` calls on literal values,
+  rather than loading a record image. So every record file here is still loaded by
+  nothing.
+
+  Refactoring Rationale: this bullet has been re-derived twice, and the second
+  re-derivation is the reason it is now phrased around the consumer rather than
+  around the class count. It first read `[planned]` with no test class at all; it
+  then named the single contract test; the tree now holds four classes including
+  the `*RepositoryIT` this section used to describe as the thing that would read
+  these bytes once authored. The fact a fixture author actually needs -- whether
+  anything reads them -- survived all three states unchanged, so it is stated
+  first and the inventory is stated as a measurement behind it. Adding another test
+  class no longer falsifies the sentence; making one of them load a record file is
+  the single change that must update it.
 - [`../application-test.yml`](../application-test.yml) -- **[present]** sibling.
   Three of the things it supplies are what make an assertion on these bytes
   reproducible at all: it pins schema resolution to `ledger` for both the
@@ -379,8 +594,10 @@ though it already exists, which is the failure this annotation prevents.
   `idx_transactions_proc_ts`.
 - [`tests/fixtures/README.md`](../../../../../../tests/fixtures/README.md) --
   **[present]**, the authoritative byte contract of section 4.1.
-- The integration tests -- **[planned]** -- will run against a real PostgreSQL
-  instance through Testcontainers. Assumptions: the non-unique index on the
+- Integration testing against a real PostgreSQL instance through Testcontainers
+  -- **[present]**: `TransactionRepositoryIT` runs against `postgres:17-alpine`
+  and applies this module's own migration. A **fixture-loading** integration test
+  is the part that remains **[planned]**. Assumptions: the non-unique index on the
   processing timestamp and the key-ordered read paths these records feed are
   properties of the real engine; an in-memory substitute cannot exercise either,
   so a test that passed against one would prove nothing about the behaviour being
@@ -415,11 +632,28 @@ folder and is worth stating in the folder that the authors work in:
 
 ## 7. Provenance and data governance
 
-Every record file in this folder carries a primary account number, so the
-attestation mandated by master sections 10.1 through 10.3 applies to **every one
-of the ten scenarios** without exception. Those sections carry the attestation
+Every non-empty record file in this folder carries a primary account number, so
+the attestation mandated by master sections 10.1 through 10.3 applies to **every
+scenario** without exception. Those sections carry the attestation
 itself and the reasoning for deriving from the published seeds rather than
 minting fresh values; neither is restated here.
+
+> **Satisfied, and measured rather than assumed.** All ten scenario `README.md`
+> files exist -- see the availability block at the head of this file -- and each
+> carries a provenance attestation section covering the three required items, so
+> the obligation stated here is **met for every scenario**. The instance that was
+> sharpest while the gap was open is now the clearest evidence that it is closed:
+> item 7 of the table in section 4.2 establishes that no `transact.txt` is seeded
+> in `app/data/ASCII/`, so `empty_input/transact.txt` is authored from the
+> `CVTRA05Y` layout, and
+> [`empty_input/README.md`](empty_input/README.md) section 4.2 accounts for those
+> bytes explicitly -- naming the daily record they derive from, the field it
+> reshaped, and the layout measurement that makes the derivation sound.
+> Assumptions: this paragraph is kept, rather than deleted once the gap closed,
+> because the gap can reopen. An eleventh scenario arrives with record bytes before
+> it arrives with a README, and a mandate written in the present tense reads as
+> satisfied at exactly that moment. Stating the state as measured leaves the next
+> author a claim to falsify instead of a sentence to trust.
 
 What this index adds is the folder-level obligation. Each scenario README must
 record, briefly and in its own words, the three things master section 10.3
@@ -441,7 +675,14 @@ such.
 
 ## 8. Authoring a scenario README
 
-One place to look, so that ten scenario documents come out consistent.
+One place to look, so that ten scenario documents come out consistent -- and they
+do: all ten exist, and each was authored against the requirements below. This
+section is therefore both the record of what they were held to and the checklist
+any eleventh scenario is held to; section 7 records that the governance obligation
+it carries is met for all ten. Assumptions: an author arriving to add a scenario
+reads this list, and an author arriving to review one reads it as the acceptance
+criteria for the ten already here. Keeping one list for both uses is what stops
+the two from drifting into two lists that disagree.
 
 **The four required items** are master section 9.1's, and every scenario README
 must carry all four: the scenario intent; the exact business rule it exercises,

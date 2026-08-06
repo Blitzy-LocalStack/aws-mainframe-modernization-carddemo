@@ -247,6 +247,43 @@ logging:
 
 carddemo:
   security:
+    # WHY : Assumptions: validating the issuer is not validating the token. The
+    #       issuer-uri above makes the filter chain verify the signature, the
+    #       issuer and the time claims, and that is where its guarantees end. One
+    #       user pool mints TWO token kinds from the same signing key: an access
+    #       token, whose token_use claim is `access`, and an identity token, whose
+    #       token_use claim is `id`. Both are validly signed by the configured
+    #       issuer, so without the three checks below an identity token - meant to
+    #       describe a user to a client, never to authorize an API call - would be
+    #       accepted here. In this context the consequence is a fraud mark applied
+    #       or a pending authorization disclosed on the wrong credential.
+    #       Assumptions: these three keys are read by config/SecurityConfig.java,
+    #       whose jwtDecoder bean composes the framework's own issuer-and-time
+    #       validators FIRST and then a delegating CognitoAccessTokenValidator, so
+    #       a token failing any of the three is rejected during decoding and never
+    #       reaches JwtRoleConverter. The shape is identical in every context that
+    #       publishes a web endpoint, so those chains cannot diverge in what they
+    #       accept.
+    #       Alternatives Considered: the framework's own
+    #       spring.security.oauth2.resourceserver.jwt.audiences key, which is the
+    #       obvious declarative route and is wrong here. A Cognito ACCESS token
+    #       carries no aud claim at all - the client id travels in client_id
+    #       instead - so an audience validator would reject every access token the
+    #       sign-on flow issues while accepting the identity tokens these keys
+    #       exist to refuse. It would invert the control.
+    #       Trade-offs: required-scope names the scope the pool grants to a token
+    #       obtained through its authentication API rather than a custom
+    #       resource-server scope. Custom scopes are granted only through the
+    #       OAuth flows this design does not use, so requiring one would reject
+    #       every token the sign-on flow can produce. What the value still buys is
+    #       decisive: an identity token carries no scope claim whatsoever, so
+    #       requiring any scope at all is a second, independent rejection of the
+    #       wrong token kind.
+    jwt:
+      expected-token-use: access
+      expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
+      required-scope: aws.cognito.signin.user.admin
+
     cognito:
       # WHY : Assumptions: these exist to be COMPARED, not to be chosen.
       #       common-lib's JwtRoleConverter holds the authority vocabulary as
@@ -299,3 +336,43 @@ carddemo:
     #       noticeable interval.
     outbox-poll-interval-ms: 1000
     outbox-batch-size: 25
+
+    # WHY : (1) Assumptions: this is the set of queue addresses a reply may be sent
+    #       to, and the consumer compares the request's reply-to attribute against
+    #       it by EXACT match. The attribute is chosen by whoever can put a message
+    #       on the request queue, and a reply carries a card number, a transaction
+    #       identifier and an authorization outcome -- so without this list the
+    #       service would deliver that payload to any address a requester named,
+    #       including a queue in another account.
+    #       (2) Alternatives Considered: matching the address against a prefix or a
+    #       pattern instead. Rejected because the legitimate set is a deployment
+    #       fact rather than a shape: any pattern loose enough to cover the reply
+    #       queues of several requesters also covers a queue whose name a requester
+    #       could arrange to match.
+    #       (3) Assumptions: the value is COMMA-SEPARATED and carries no default, so
+    #       it can be supplied by the single environment variable the task
+    #       definition sets from the sqs module's reply-queue outputs, and an
+    #       unset list stops startup rather than leaving every requester silently
+    #       unanswered.
+    reply-queue-allowlist: ${CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST}
+
+  account-context:
+    # WHY : (1) Assumptions: this context decides an authorization against records
+    #       the ACCOUNT context owns -- the card cross-reference, the account master
+    #       and the customer master, read by COPAUA0C at its paragraphs 5100, 5200
+    #       and 5300. It reaches them over that context's published contract rather
+    #       than over a database grant, which is what keeps one owner per schema.
+    #       The address arrives from a Terraform output, so it carries no default: a
+    #       default would let this service start against a plausible-looking wrong
+    #       address and decline every authorization with the not-found reason.
+    #       (2) Trade-offs: the two timeouts are short and deliberately so. Both
+    #       calls run inside the deciding transaction, which is holding a row lock
+    #       on the account's summary by the time the second is made, so an unbounded
+    #       read would hold a lock and a pooled connection for as long as the
+    #       dependency stayed silent. Three seconds is well beyond the in-network
+    #       latency of a keyed read and well inside the queue's own visibility
+    #       timeout, so a stalled dependency surfaces as a redelivered message
+    #       rather than as an exhausted connection pool.
+    base-url: ${CARDDEMO_ACCOUNT_CONTEXT_BASE_URL}
+    connect-timeout-ms: 2000
+    read-timeout-ms: 3000

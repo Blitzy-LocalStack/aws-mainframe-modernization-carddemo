@@ -11,17 +11,29 @@
 #   and log pattern, and the module-local report-execution and object-storage
 #   keys this context owns.
 #
-#   NEITHER application-dev.yml NOR application-prod.yml EXISTS FOR THIS MODULE
-#   YET. This document is therefore the whole of the configuration today, and it
-#   is written to start the service with no profile active at all -- which is why
-#   every value a profile would otherwise tune is a concrete literal here rather
-#   than a deployment-injection marker. When those two overlays are authored they
-#   may differ from this document only in sizing, retention and verbosity, never
-#   in topology, so a setting that changes behaviour rather than capacity belongs
-#   here and not in a profile. Every statement below about what a profile MAY and
-#   MAY NOT vary is that forward constraint, not a description of overlays that
-#   exist; a reader can confirm the current state with
+#   BOTH application-dev.yml AND application-prod.yml NOW EXIST FOR THIS MODULE.
+#   This document remains written to start the service with no profile active at
+#   all -- which is why every value a profile would otherwise tune is a concrete
+#   literal here rather than a deployment-injection marker -- and the two overlays
+#   beside it differ from it only in sizing, retention and verbosity, never in
+#   topology, so a setting that changes behaviour rather than capacity belongs here
+#   and not in a profile. Every statement below about what a profile MAY and MAY
+#   NOT vary is therefore a constraint those two files are HELD TO rather than a
+#   forward-looking note: the development overlay narrows the pool to two
+#   connections with no idle floor, halves the streaming fetch size, raises the root
+#   and project log levels and widens the health detail payload; the production
+#   overlay widens the pool to eight with a floor of two, shortens the acquisition
+#   timeout to ten seconds, and restates the fetch size, both log levels and the
+#   closed health detail so that no development value can be read as applying
+#   everywhere. A reader confirms the set with
 #   `ls services/reporting-service/src/main/resources`.
+#
+#   Refactoring Rationale: this paragraph previously stated that neither overlay
+#   existed. It was accurate when written and became false as each was authored,
+#   which is precisely the drift a reader cannot detect from inside the file -- the
+#   surrounding constraints read identically whether they describe files that exist
+#   or files that do not. It is restated as a description of the shipped tree so
+#   that the check named above actually falsifies it if it goes stale again.
 #
 #   Four COBOL programs are the behavioural oracle for this context. They are
 #   read and never modified, and the uppercase .CBL and .JCL spellings are the
@@ -449,8 +461,32 @@ spring:
   #       account identifier and no environment credential. A namespace is not a
   #       secret; an account-qualified path would be, which is why the fallback
   #       stops at the service segment.
+  #       (4) Refactoring Rationale: the classpath entry was ADDED, and it is
+  #       first in the list. This service was the only one of the eight that
+  #       depended on common-lib and never imported the cross-cutting defaults
+  #       that module publishes, and the omission had a visible cost: the console
+  #       pattern below was a locally-written copy naming ONE of the four
+  #       mapped-diagnostic-context keys, so the edge-request identity that
+  #       CorrelationIdFilter publishes under `requestId` -- the key that joins a
+  #       service line to its API Gateway access-log record -- was present in the
+  #       context and absent from every line this service logged, and the two
+  #       tracing keys with it. Importing the shared document supplies the
+  #       four-key pattern that the other seven services already log, so one
+  #       query spans all eight. It also supplies the OpenTelemetry export
+  #       defaults, which this file never set: without them a local run or a test
+  #       of this service alone would attempt OTLP export to a collector that is
+  #       not listening, because the exporter arrives on the classpath through the
+  #       shared starter whether or not a deployment supplies a sidecar.
+  #       (5) Assumptions: importing cannot silently change any value this file
+  #       already sets. The imported document's own header records that imported
+  #       values sit BENEATH the importing file in precedence, so every key
+  #       declared below still wins -- including `carddemo.environment` and
+  #       `carddemo.version`, which this file declares for its own reasons and
+  #       which the shared document also defaults from the same two variables to
+  #       the same sentinel.
   config:
     import:
+      - "classpath:/carddemo-common-defaults.yml"
       - "optional:aws-parameterstore:${CARDDEMO_CONFIG_PREFIX:/carddemo/reporting}/"
       - "optional:aws-secretsmanager:${CARDDEMO_CONFIG_PREFIX:/carddemo/reporting}/"
 
@@ -922,39 +958,46 @@ management:
       #       the production overlay does not.
       show-details: never
 
-# WHY : (1) Assumptions: the pattern names %X{correlationId} explicitly, and that
-#       key is not a choice made here. CorrelationIdFilter in
-#       com.carddemo.common.web echoes an inbound X-Correlation-Id header
-#       verbatim or mints a fresh identity, publishes it to the mapped diagnostic
-#       context under the constant CORRELATION_ID_MDC_KEY whose value is
-#       `correlationId`, and clears it in a finally block; that class's own
-#       documentation states the key is a contract with a logging configuration
-#       rather than an internal detail. The framework's default console pattern
-#       contains no reference to the diagnostic context at all, so leaving the
-#       pattern alone would mean the filter published an identity that never
-#       reached a single log line, and cross-service tracing would be lost while
-#       appearing to be configured. The identity is at most twenty-four
-#       characters, the declared width of 05 WS-SAVE-CORRELID PIC X(24) at
-#       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L45, and it never
-#       carries a credential.
-#       (2) Alternatives Considered: a logging back-end configuration file in this
-#       folder instead of these properties. Rejected, and such a file must not be
-#       added: the framework's own logging plus the shared MetricsConfig already
-#       cover what this service needs, and a bespoke appender here would diverge
-#       from the log-group shape the seven peer services produce, which is what
-#       makes one query able to span them. The whole configuration is therefore
-#       expressed as properties.
-#       (3) Trade-offs: the root logger sits at WARN and only this project's own
-#       package is raised to INFO, so framework start-up narration stays out of a
-#       stream billed by ingested volume. What is given up is that narration; what
+# WHY : (1) Refactoring Rationale: NO console pattern is declared here, and the
+#       one that was declared here has been removed. It was a local copy naming
+#       only %X{correlationId}, which left the other three context keys off every
+#       line this service logged -- %X{requestId}, the edge identity that joins a
+#       service line to its API Gateway access-log record, and the two tracing
+#       keys Micrometer contributes. The pattern is single-sourced in
+#       carddemo-common-defaults.yml, imported by the spring.config.import above,
+#       exactly as the six peer services that already import it do. Two sources for
+#       one pattern is how a request ends up rendered two different ways depending
+#       on which service logged it, and it is also how a key renamed in
+#       CorrelationIdFilter gets renamed in the shared file and missed here --
+#       which produces a line with a silently empty field rather than an error.
+#       (2) Assumptions: the keys are a contract with that filter and not an
+#       internal detail. CorrelationIdFilter in com.carddemo.common.web echoes an
+#       inbound X-Correlation-Id header verbatim or mints a fresh identity,
+#       publishes it under CORRELATION_ID_MDC_KEY (`correlationId`), publishes the
+#       edge identity under REQUEST_ID_MDC_KEY (`requestId`), and clears both in a
+#       finally block. The correlation identity is at most twenty-four characters,
+#       the declared width of 05 WS-SAVE-CORRELID PIC X(24) at
+#       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L45, and neither key ever
+#       carries a credential -- which is what makes rendering both on every line
+#       safe.
+#       (3) Alternatives Considered: keeping the local pattern and merely appending
+#       the missing key to it. Rejected because it would have fixed the symptom and
+#       kept the duplication that caused it, and it would still have omitted the
+#       two tracing keys. A logging back-end configuration file in this folder was
+#       also considered and must not be added: the framework's own logging plus the
+#       shared MetricsConfig cover what this service needs, and a bespoke appender
+#       would diverge from the log-group shape the seven peer services produce,
+#       which is what makes one query able to span them.
+#       (4) Trade-offs: the levels below ARE declared here, because they are
+#       genuinely per-service. The root logger sits at WARN and only this project's
+#       own package is raised to INFO, so framework start-up narration stays out of
+#       a stream billed by ingested volume. What is given up is that narration; what
 #       is kept is every line this project's own code emits, which is where a
 #       report submission or a failed view read is reported.
 logging:
   level:
     root: WARN
     com.carddemo: INFO
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%X{correlationId:-}] %logger{36} : %msg%n"
 
 carddemo:
 
@@ -1031,6 +1074,25 @@ carddemo:
       expected-token-use: access
       expected-client-id: ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID}
       required-scope: aws.cognito.signin.user.admin
+
+    # WHY : Assumptions: the two group names are declared here, in the same shape
+    #       every other context declares them, and are read by
+    #       config/SecurityConfig.java -- which hands them to the shared
+    #       JwtRoleConverter. The converter compares each against its own compiled
+    #       constant and refuses to start on a mismatch, so this pair is what turns
+    #       a user pool whose groups were renamed into a startup failure instead of
+    #       a service that authenticates every request and authorizes none.
+    #       Trade-offs: the fallbacks are the two names infra/modules/cognito fixes
+    #       as non-overridable, so a local run needs no environment at all, while a
+    #       deployment that renames a group sets the variables and fails fast if the
+    #       new name and the compiled constant disagree. A no-default form was
+    #       considered and rejected here specifically: unlike the client id, which
+    #       is deployment-specific and must never be guessed, these two names are
+    #       part of the application's own authorization vocabulary and a wrong value
+    #       is caught by the converter rather than being silently accepted.
+    cognito:
+      admin-group-name: ${CARDDEMO_COGNITO_ADMIN_GROUP_NAME:carddemo-admin}
+      user-group-name: ${CARDDEMO_COGNITO_USER_GROUP_NAME:carddemo-user}
 
   reporting:
 

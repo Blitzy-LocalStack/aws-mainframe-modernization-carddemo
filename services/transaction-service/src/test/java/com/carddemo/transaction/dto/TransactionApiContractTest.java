@@ -1,0 +1,506 @@
+package com.carddemo.transaction.dto;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+
+import com.carddemo.common.web.CorrelationIdFilter;
+import jakarta.validation.constraints.Pattern;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.RecordComponent;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.yaml.snakeyaml.Yaml;
+
+/**
+ * Holds the published transaction contract and this module's request and response types to each other.
+ *
+ * <h2>Why this test exists</h2>
+ *
+ * <p>Refactoring Rationale: the review that prompted this class found six independent disagreements
+ * between the contract this module publishes and the types it would serialise. The published paths
+ * omitted the version prefix the edge routes on, so every published path was one no deployment
+ * answered. One confirmation member was named for a noun invented during the migration on one side and
+ * for the copybook field on the other. One member the response record carries was absent from the
+ * created-body schema. Five identifier fields were bounded by a shared any-length digit run on the Java
+ * side while the contract stated an exact width per field, so a value of the wrong length was accepted
+ * by validation and then refused by the column. The paging direction was published as two lower-case
+ * tokens and enumerated in Java as two upper-case constant names, so the serialised form of the enum
+ * matched neither. And the correlation identity was bounded at a width the shared filter does not
+ * enforce. Not one of those was visible to a compiler, because a schema is a document and a constraint
+ * is an annotation argument.</p>
+ *
+ * <p>Assumptions: the contract is read from the CLASSPATH, so this asserts against the artifact the
+ * module actually publishes rather than against a file the source tree happens to hold.</p>
+ *
+ * <p>Alternatives Considered: generating the request and response types from the contract, which would
+ * make the disagreement impossible rather than merely detectable. Rejected for this module because the
+ * mapping is not mechanical - it truncates padding, masks the primary account number, narrows an edit
+ * mask and renames three misspelled baseline fields, each of which needs a justification at the point
+ * of the decision that a generator cannot hold - and because the migration plan states the mapping
+ * layer is hand-written for exactly that reason. Asserting the agreement keeps the annotated types and
+ * their rationale while making drift fail a build.</p>
+ */
+class TransactionApiContractTest {
+
+    /** Classpath location of the contract this module publishes. */
+    private static final String CONTRACT_RESOURCE = "/openapi/transaction-api.yaml";
+
+    /** The paths the edge and the load balancer route to this module, from the committed IaC. */
+    private static final List<String> DEPLOYED_PATHS = List.of(
+            "/api/v1/transactions", "/api/v1/transactions/{transactionId}", "/api/v1/billpay");
+
+    /**
+     * Each published schema paired with the Java constraint that must agree with it.
+     *
+     * <p>Assumptions: the two sides are compared modulo one deliberate difference. The Java patterns
+     * carry a leading empty alternative and the published patterns do not, because absence over HTTP
+     * is omission or the empty string while a bean-validation pattern is evaluated against whatever
+     * arrived - so the Java side must admit the empty string and let a separate requiredness rule
+     * decide, whereas the contract describes only the shape of a value that IS present. What must
+     * agree is the shape itself, which is what this map asserts.</p>
+     */
+    private static final Map<String, String> SCHEMA_TO_JAVA_PATTERN = schemaToJavaPattern();
+
+    /** Each published schema paired with the record component whose constraint must carry it. */
+    private static final Map<String, String> SCHEMA_TO_COMPONENT = schemaToComponent();
+
+    /** The parsed contract, loaded once per test instance. */
+    private final Map<String, Object> contract = loadContract();
+
+    /**
+     * Builds the schema-to-constraint table.
+     *
+     * @return the published schema name against the Java pattern constant that must match it
+     */
+    private static Map<String, String> schemaToJavaPattern() {
+        Map<String, String> table = new LinkedHashMap<>();
+        table.put("AccountId", TransactionAddRequest.ACCOUNT_ID_DIGITS);
+        table.put("CardNumber", TransactionAddRequest.CARD_NUMBER_DIGITS);
+        table.put("TransactionTypeCode", TransactionAddRequest.TYPE_CODE_DIGITS);
+        table.put("TransactionCategoryCode", TransactionAddRequest.CATEGORY_CODE_DIGITS);
+        table.put("MerchantId", TransactionAddRequest.MERCHANT_ID_DIGITS);
+        table.put("DateOnly10", TransactionAddRequest.ISO_DATE_SHAPE);
+        return Map.copyOf(table);
+    }
+
+    /**
+     * Builds the schema-to-component table.
+     *
+     * @return the published schema name against the record component that must declare its constraint
+     */
+    private static Map<String, String> schemaToComponent() {
+        Map<String, String> table = new LinkedHashMap<>();
+        table.put("AccountId", "accountId");
+        table.put("CardNumber", "cardNumber");
+        table.put("TransactionTypeCode", "typeCode");
+        table.put("TransactionCategoryCode", "categoryCode");
+        table.put("MerchantId", "merchantId");
+        table.put("DateOnly10", "originDate");
+        return Map.copyOf(table);
+    }
+
+    /**
+     * Reads and parses the published contract from the classpath.
+     *
+     * @return the whole document as nested maps and lists; never {@code null}
+     * @throws IllegalStateException if the resource is absent, which would mean the module publishes
+     *     no contract at all, or if it cannot be read or parsed as a mapping
+     */
+    private static Map<String, Object> loadContract() {
+        try (InputStream resource =
+                TransactionApiContractTest.class.getResourceAsStream(CONTRACT_RESOURCE)) {
+            if (resource == null) {
+                throw new IllegalStateException(
+                        "the published contract is absent from the classpath at " + CONTRACT_RESOURCE);
+            }
+            Object parsed = new Yaml().load(resource);
+            if (!(parsed instanceof Map)) {
+                throw new IllegalStateException(
+                        "the published contract at " + CONTRACT_RESOURCE + " is not a mapping");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> document = (Map<String, Object>) parsed;
+            return document;
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(
+                    "the published contract at " + CONTRACT_RESOURCE + " could not be read", failure);
+        }
+    }
+
+    /**
+     * Returns one nested mapping by key.
+     *
+     * @param parent the enclosing mapping; must not be {@code null}
+     * @param key the key to read
+     * @return the nested mapping
+     * @throws IllegalStateException if the key is absent or does not hold a mapping, so a structural
+     *     assumption fails where it is made rather than as a cast far from its cause
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mapping(Map<String, Object> parent, String key) {
+        Object value = parent.get(key);
+        if (!(value instanceof Map)) {
+            throw new IllegalStateException("expected a mapping at \"" + key + "\"");
+        }
+        return (Map<String, Object>) value;
+    }
+
+    /**
+     * Returns one named schema from the contract's component section.
+     *
+     * @param name the schema name
+     * @return the schema as a mapping
+     */
+    private Map<String, Object> schema(String name) {
+        return mapping(mapping(mapping(contract, "components"), "schemas"), name);
+    }
+
+    /**
+     * Returns one named parameter from the contract's component section.
+     *
+     * @param name the parameter name
+     * @return the parameter as a mapping
+     */
+    private Map<String, Object> parameter(String name) {
+        return mapping(mapping(mapping(contract, "components"), "parameters"), name);
+    }
+
+    /**
+     * Returns the list a schema publishes under a key, as strings.
+     *
+     * @param owner the schema or other mapping to read from
+     * @param key the key holding a sequence
+     * @return the sequence rendered as strings; empty when the key is absent
+     */
+    private static List<String> strings(Map<String, Object> owner, String key) {
+        Object value = owner.get(key);
+        if (!(value instanceof List<?> sequence)) {
+            return List.of();
+        }
+        return sequence.stream().map(String::valueOf).toList();
+    }
+
+    /**
+     * Strips the anchors from a published pattern so it can be compared with a bean-validation one.
+     *
+     * @param published the pattern as the contract states it, anchored at both ends
+     * @return the same expression without its anchors
+     */
+    private static String unanchored(String published) {
+        String body = published.startsWith("^") ? published.substring(1) : published;
+        return body.endsWith("$") ? body.substring(0, body.length() - 1) : body;
+    }
+
+    /**
+     * Removes the leading empty alternative a bean-validation pattern carries for the absent case.
+     *
+     * @param declared the pattern as the Java constraint states it
+     * @return the same expression without its empty alternative
+     */
+    private static String withoutEmptyAlternative(String declared) {
+        return declared.startsWith("|") ? declared.substring(1) : declared;
+    }
+
+    /**
+     * Reads the pattern a record component's bean-validation constraint applies.
+     *
+     * @param owner the record type declaring the component
+     * @param componentName the component to read
+     * @return the regular expression the constraint applies
+     * @throws IllegalStateException if the component carries no pattern constraint, which would mean
+     *     the published shape is enforced nowhere
+     */
+    private static String appliedPattern(Class<?> owner, String componentName) {
+        try {
+            Field field = owner.getDeclaredField(componentName);
+            Pattern constraint = field.getAnnotation(Pattern.class);
+            if (constraint == null) {
+                throw new IllegalStateException(owner.getSimpleName() + "." + componentName
+                        + " declares no pattern constraint, so its published shape is unenforced");
+            }
+            return constraint.regexp();
+        } catch (NoSuchFieldException absent) {
+            throw new IllegalStateException(
+                    owner.getSimpleName() + " declares no component named " + componentName, absent);
+        }
+    }
+
+    /**
+     * Reports whether a record type declares a component of the given name.
+     *
+     * @param owner the record type to inspect
+     * @param componentName the component name to look for
+     * @return {@code true} when the component is declared
+     */
+    private static boolean declaresComponent(Class<?> owner, String componentName) {
+        return Arrays.stream(owner.getRecordComponents())
+                .map(RecordComponent::getName)
+                .anyMatch(componentName::equals);
+    }
+
+    // WHY : Refactoring Rationale: the paths are asserted against the committed edge and load-balancer
+    //       route tables rather than against one another, because the defect this closes was that the
+    //       contract published three paths without the version prefix while every deployed route
+    //       carries it. Comparing the contract only with itself would have been consistent and still
+    //       wrong. The bill-payment spelling is taken FROM the IaC for the same reason.
+    /**
+     * Asserts that the published paths are exactly the ones the deployed route tables forward, and
+     * that no path carries a primary account number.
+     */
+    @Test
+    @DisplayName("the published paths are exactly the ones the edge routes")
+    void publishedPathsAreTheDeployedPaths() {
+        Map<String, Object> paths = mapping(contract, "paths");
+        assertThat(paths.keySet()).containsExactlyInAnyOrderElementsOf(DEPLOYED_PATHS);
+        assertThat(paths.keySet())
+                .as("the load balancer refuses a rule whose pattern does not begin with the version"
+                        + " prefix, so an unversioned path is unreachable")
+                .allSatisfy(path -> assertThat(path).startsWith("/api/v1/"));
+        assertThat(paths.keySet())
+                .as("a primary account number may never appear in a request line, which is logged and"
+                        + " retained by every hop between the browser and the service")
+                .noneMatch(path -> path.contains("cardNumber"));
+    }
+
+    // WHY : Assumptions: the member is asserted to be OPTIONAL, not merely present. The baseline
+    //       answers a blank confirmation by displaying the payable balance and asking for another
+    //       turn (app/cbl/COBIL00C.cbl lines 169 to 188), so a required confirmation would make the
+    //       preview state unreachable and would change observable behaviour rather than tightening a
+    //       contract.
+    /**
+     * Asserts that both request bodies publish the confirmation member under the name the Java records
+     * bind, that neither requires it, and that its published bound and value domain are the ones the
+     * Java constraint applies.
+     *
+     * <p>Assumptions: the published name is asserted against the record component itself rather than
+     * against a literal, because that identity IS the contract here. Neither of these types declares a
+     * property-naming strategy or a per-property serialisation annotation, so a component name is the
+     * published member name; and because both bodies close themselves with
+     * {@code additionalProperties: false} while this module rejects unknown properties, publishing a
+     * different spelling would refuse every contract-conformant body rather than merely reading
+     * oddly.</p>
+     */
+    @Test
+    @DisplayName("the confirmation member is published under the bound name, is optional, and shares"
+            + " one value domain")
+    void confirmationIsPublishedUnderTheBoundNameAndOptionalOnBothBodies() {
+        String boundName = "confirmation";
+        assertThat(Arrays.stream(TransactionAddRequest.class.getRecordComponents())
+                .map(RecordComponent::getName))
+                .as("the asserted name must be the one the record actually binds")
+                .contains(boundName);
+        assertThat(Arrays.stream(BillPaymentRequest.class.getRecordComponents())
+                .map(RecordComponent::getName))
+                .as("both bodies must bind one spelling, or a client sends a different name to two"
+                        + " operations that read the same copybook field")
+                .contains(boundName);
+
+        for (String bodyName : List.of("TransactionCreateRequest", "BillPaymentRequest")) {
+            Map<String, Object> body = schema(bodyName);
+            assertThat(mapping(body, "properties"))
+                    .as("%s must publish the confirmation under the name its record binds", bodyName)
+                    .containsKey(boundName);
+            assertThat(strings(body, "required"))
+                    .as("%s must not require the confirmation, or its preview state is unreachable",
+                            bodyName)
+                    .doesNotContain("confirm", boundName);
+            assertThat(mapping(body, "properties"))
+                    .as("%s must not also carry the withdrawn shorter spelling", bodyName)
+                    .doesNotContainKey("confirm");
+        }
+
+        Map<String, Object> confirmation = schema("Confirmation");
+        assertThat(confirmation.get("maxLength")).isEqualTo(TransactionAddRequest.CONFIRM_WIDTH);
+        assertThat(unanchored(String.valueOf(confirmation.get("pattern"))))
+                .isEqualTo(TransactionAddRequest.CONFIRM_VALUES);
+        assertThat(appliedPattern(TransactionAddRequest.class, boundName))
+                .isEqualTo(TransactionAddRequest.CONFIRM_VALUES);
+        assertThat(appliedPattern(BillPaymentRequest.class, "accountId"))
+                .as("the payment body must bound its account identifier to the declared width rather"
+                        + " than to an any-length digit run")
+                .isEqualTo(unanchored(String.valueOf(schema("AccountId").get("pattern"))));
+    }
+
+    /**
+     * Asserts that each published identifier shape is the shape the Java constraint applies, so a
+     * value of the wrong length cannot pass validation and then be refused by a column.
+     */
+    @Test
+    @DisplayName("each published identifier shape is the one the Java constraint applies")
+    void publishedShapesAgreeWithTheAppliedConstraints() {
+        SCHEMA_TO_JAVA_PATTERN.forEach((schemaName, javaPattern) -> {
+            String published = unanchored(String.valueOf(schema(schemaName).get("pattern")));
+            assertThat(withoutEmptyAlternative(javaPattern))
+                    .as("schema %s and its Java constraint must describe one shape", schemaName)
+                    .isEqualTo(published);
+            assertThat(appliedPattern(TransactionAddRequest.class,
+                    SCHEMA_TO_COMPONENT.get(schemaName)))
+                    .as("the constant compared for %s must be the one actually applied to %s",
+                            schemaName, SCHEMA_TO_COMPONENT.get(schemaName))
+                    .isEqualTo(javaPattern);
+        });
+    }
+
+    // WHY : Assumptions: nine integer digits is the RECORD's domain (TRAN-AMT PIC S9(09)V99 at
+    //       app/cpy/CVTRA05Y.cpy line 9), not the screen's. The add screen's own edit mask shows
+    //       eight, and taking the screen as the bound would refuse amounts the file holds; taking ten
+    //       - the width of the balance edit on the same map - would accept amounts it cannot store.
+    //       Both errors are one character wide, which is why the boundary is asserted rather than
+    //       described.
+    /**
+     * Asserts that the published transaction amount admits nine integer digits and refuses ten, and
+     * that the account balance is separately allowed the tenth digit its own field declares.
+     */
+    @Test
+    @DisplayName("the amount domain is nine integer digits and the balance domain is ten")
+    void amountAndBalanceDomainsAreDistinct() {
+        java.util.regex.Pattern amount =
+                java.util.regex.Pattern.compile(String.valueOf(schema("TransactionAmount")
+                        .get("pattern")));
+        assertThat(amount.matcher("999999999.99").matches()).isTrue();
+        assertThat(amount.matcher("-999999999.99").matches()).isTrue();
+        assertThat(amount.matcher("1000000000.99").matches())
+                .as("a ten-digit amount does not fit the record field and must be refused")
+                .isFalse();
+
+        java.util.regex.Pattern balance =
+                java.util.regex.Pattern.compile(String.valueOf(schema("AccountBalance")
+                        .get("pattern")));
+        assertThat(balance.matcher("1000000000.99").matches())
+                .as("the balance field declares ten integer digits, so the two domains differ by one"
+                        + " digit and must not be described by one schema")
+                .isTrue();
+    }
+
+    // WHY : Assumptions: the enum's serialised form is asserted through fromWireValue rather than by
+    //       name, because the defect was precisely that the names and the tokens differed. Comparing
+    //       Direction.values() by name() would have reproduced the bug in the test.
+    /**
+     * Asserts that the published direction vocabulary is what the Java enum serialises and accepts,
+     * that its default is the forward token, and that no paging input is named after a row identity.
+     */
+    @Test
+    @DisplayName("the direction vocabulary is what the Java enum serialises and accepts")
+    void directionVocabularyMatchesTheJavaEnum() {
+        List<String> published = strings(schema("PageDirection"), "enum");
+        assertThat(published)
+                .containsExactly(
+                        TransactionListRequest.Direction.NEXT.wireValue(),
+                        TransactionListRequest.Direction.PREVIOUS.wireValue());
+        published.forEach(token -> assertThatCode(
+                () -> TransactionListRequest.Direction.fromWireValue(token))
+                .as("the published token %s must be one the request type accepts", token)
+                .doesNotThrowAnyException());
+        assertThat(schema("PageDirection").get("default"))
+                .isEqualTo(TransactionListRequest.Direction.NEXT.wireValue());
+
+        assertThat(parameter("Cursor").get("name")).isEqualTo("cursor");
+        assertThat(parameter("Direction").get("name")).isEqualTo("direction");
+        assertThat(mapping(mapping(contract, "components"), "parameters").keySet())
+                .as("a request parameter named after a response row identity is the collision this"
+                        + " contract removed: those members are null on exactly the page whose"
+                        + " cursors are not")
+                .doesNotContain("FirstKey", "LastKey");
+    }
+
+    /**
+     * Asserts that the page envelope declares and requires exactly the four members the shared
+     * response type carries, so no generated client receives an accessor for a member no service
+     * emits and no strict client rejects a valid response for a member no service sends.
+     *
+     * <p>Assumptions: the four are read from the shared type rather than restated as a literal list
+     * where the type can be reached, because the whole defect this asserts against was a contract that
+     * named members the type does not declare.</p>
+     */
+    @Test
+    @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
+    void pageEnvelopeDeclaresExactlyTheSharedEnvelopeMembers() {
+        assertThat(strings(schema("TransactionPage"), "required"))
+                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
+    }
+
+    /**
+     * Asserts that the created-body schema requires every member the Java response record carries, so
+     * a client is not left treating a value that is always present as optional.
+     */
+    @Test
+    @DisplayName("the created body requires every member the response record carries")
+    void createdBodyRequiresEveryResponseMember() {
+        List<String> required = strings(schema("TransactionCreated"), "required");
+        List<String> components = Arrays.stream(TransactionAddResponse.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .toList();
+        assertThat(required).containsExactlyInAnyOrderElementsOf(components);
+        assertThat(components)
+                .as("the amount is the member an earlier revision of this contract omitted")
+                .contains("amount");
+    }
+
+    /**
+     * Asserts that the browse filter is published and bounded exactly as the request type bounds it.
+     */
+    @Test
+    @DisplayName("the browse filter is published and bounded as the request type bounds it")
+    void browseFilterIsPublishedAndBounded() {
+        Map<String, Object> filter = parameter("TransactionIdFilter");
+        assertThat(filter.get("name")).isEqualTo("transactionIdFilter");
+        assertThat(filter.get("in")).isEqualTo("query");
+        assertThat(declaresComponent(TransactionListRequest.class, "transactionIdFilter")).isTrue();
+        assertThat(withoutEmptyAlternative(
+                appliedPattern(TransactionListRequest.class, "transactionIdFilter")))
+                .as("the filter and the published identifier must describe one shape")
+                .isEqualTo(unanchored(String.valueOf(schema("TransactionId").get("pattern"))));
+    }
+
+    // WHY : Assumptions: the detail body is asserted to reference the MASKED schema rather than the
+    //       full one, because both exist in this document and they differ only in a pattern. The
+    //       migration plan permits the full number on one administrative card endpoint in another
+    //       context and nowhere in this one.
+    /**
+     * Asserts that the transaction detail discloses only a masked card number, and that the summary
+     * discloses none at all.
+     */
+    @Test
+    @DisplayName("the detail body discloses a masked card number and the summary none")
+    void disclosureBoundaryIsStructural() {
+        Map<String, Object> detailCard =
+                mapping(mapping(schema("TransactionDetail"), "properties"), "cardNumber");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> composed = (List<Map<String, Object>>) detailCard.get("allOf");
+        assertThat(composed)
+                .as("the detail's card member must compose the masked schema")
+                .anySatisfy(part -> assertThat(String.valueOf(part.get("$ref")))
+                        .isEqualTo("#/components/schemas/MaskedCardNumber"));
+        assertThat(mapping(schema("TransactionSummary"), "properties"))
+                .as("a list row has no need of a card number at all, and the narrowest disclosure is"
+                        + " none")
+                .doesNotContainKey("cardNumber");
+    }
+
+    /**
+     * Asserts that the published correlation bound, character set and header name are exactly what the
+     * shared filter enforces.
+     */
+    @Test
+    @DisplayName("the correlation identity is bounded exactly as the shared filter enforces")
+    void correlationIdentityMatchesTheSharedFilter() {
+        Map<String, Object> correlationId = schema("CorrelationId");
+        assertThat(correlationId.get("maxLength"))
+                .isEqualTo(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH);
+
+        java.util.regex.Pattern declared =
+                java.util.regex.Pattern.compile(String.valueOf(correlationId.get("pattern")));
+        assertThat(declared.matcher("A".repeat(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH))
+                .matches()).isTrue();
+        assertThat(declared.matcher("8f1c0e42-3a55-4d21-9b7e-6c0f2a9d4471").matches())
+                .as("a thirty-six-character identity is what the filter refuses with 400")
+                .isFalse();
+        assertThat(parameter("CorrelationIdHeader").get("name"))
+                .isEqualTo(CorrelationIdFilter.CORRELATION_ID_HEADER);
+    }
+}

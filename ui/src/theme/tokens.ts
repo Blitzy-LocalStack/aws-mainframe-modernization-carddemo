@@ -250,6 +250,17 @@ export const BMS_COLOR_TOKENS = {
   /*
    * Alternatives Considered: a bespoke turquoise token. Ant Design exposes no
    * turquoise semantic, and a literal hue would bypass the CSS-variable theme.
+   *
+   * Refactoring Rationale: the token name resolves the ROLE, and a second
+   * decision is required to stop the role rendering as blue. At the pinned
+   * version the informational and primary colour seeds hold the same value, so
+   * these two distinct names derived one rendered colour and the 157 turquoise
+   * field definitions were indistinguishable from the 384 blue ones — the same
+   * collapse this module rejects `colorPrimary` for on the PINK entry below.
+   * The separation is made once, in the seed layer, from the palette anchor
+   * named in {@link BMS_SEED_PALETTE_ANCHORS} and applied by
+   * `ui/src/theme/antdTheme.ts`. It is recorded here so a reader of this entry
+   * alone does not conclude the two roles still collapse.
    */
   TURQUOISE: "colorInfo",
   /*
@@ -293,6 +304,51 @@ export const BMS_COLOR_TOKENS = {
   | "PINK",
   AntdTokenName
 >;
+
+/**
+ * Preset palette anchor whose hue each separated semantic colour seed is taken
+ * from.
+ *
+ * Purpose: the informational and primary semantic tokens ship with the same seed
+ * value, so `TURQUOISE` and `BLUE` are two names for one rendered colour until
+ * the informational seed is separated. This map records which of the design
+ * system's OWN palette anchors carries each of those two hues, and
+ * `ui/src/theme/antdTheme.ts` reads the anchor's value out of the library's
+ * default seed: the turquoise anchor supplies the separated informational seed,
+ * and the blue anchor is the reference the link seed is pinned to so that it does
+ * not follow the informational role away from the library's default. Exactly
+ * these two entries exist; every other {@link BMS_COLOR_TOKENS} entry already
+ * derives a distinct value and needs no anchor.
+ *
+ * WHY an anchor NAME rather than a colour value
+ * Assumptions: this module records names and never values, and that invariant
+ * survives here because these are names too — `blue` and `cyan` are settable
+ * tokens of the design system's own seed layer, so the hue is read from the
+ * library at run time rather than written down. A hex literal for turquoise was
+ * the alternative and is rejected for the reason stated on the TURQUOISE entry
+ * of {@link BMS_COLOR_TOKENS}: a literal has no recorded origin, cannot be
+ * diffed against the library, and would keep its value through a palette change
+ * while everything around it moved.
+ *
+ * Alternatives Considered: an anchor for every one of the eight measured
+ * colours, for symmetry. Rejected because seven of the eight already resolve to
+ * distinct derived values, so those entries would restate what the library
+ * supplies and would pin seven palettes to defend one distinction — inviting
+ * exactly the "override a value the algorithm would have produced anyway"
+ * failure that `ui/src/theme/antdTheme.ts` records against filling its value
+ * blocks wholesale.
+ *
+ * Assumptions: the names are constrained to {@link AntdTokenName} so that a
+ * palette renamed or dropped by a future major version fails compilation here
+ * rather than silently supplying `undefined` to the theme, which the library
+ * would then ignore without complaint.
+ */
+export const BMS_SEED_PALETTE_ANCHORS = {
+  /** Anchor behind `colorPrimary`, kept as the reference the link role follows. */
+  BLUE: "blue",
+  /** Nearest anchor to 3270 turquoise, and the system's only cyan-family hue. */
+  TURQUOISE: "cyan",
+} as const satisfies Record<"BLUE" | "TURQUOISE", AntdTokenName>;
 
 /**
  * Tokens for the five colour constants that executable programs move at run time.

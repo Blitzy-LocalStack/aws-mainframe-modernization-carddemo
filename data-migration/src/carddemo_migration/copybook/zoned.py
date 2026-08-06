@@ -231,7 +231,7 @@ The negative zero is the one span that does not return unchanged::
 
 Design decisions (WHY)
 ----------------------
-WHY (Trade-offs):
+Trade-offs:
     **Standard library only.** This module imports ``re``, ``decimal`` and ``typing`` and
     nothing else outside the standard library. The consequence bought is concrete: the
     codec imports and runs against its known-answer vectors on a bare checkout with no
@@ -241,13 +241,13 @@ WHY (Trade-offs):
     that even a bare checkout, before any test dependency is installed, can import and use
     it. The accepted cost is that a convenience such as resolving a dataset location cannot
     live here and belongs to a loader instead.
-WHY (Assumptions):
+Assumptions:
     **Every validation raises; none asserts.** ``python -O`` strips ``assert`` statements
     outright, so an assertion is not a validation but a check that disappears in the
     deployment where a misread amount actually costs money. Every guarantee in this module
     is enforced by an explicit ``raise``, and the two error types below exist so a caller
     can tell an alignment fault from a content fault.
-WHY (Assumptions):
+Assumptions:
     **Exact fixed point at every hop, and no ``float`` anywhere.** A binary
     floating-point number cannot represent ten cents exactly, so a single conversion
     through one would silently corrupt a monetary total. Decoding therefore produces
@@ -282,14 +282,14 @@ from typing import Final
 
 from carddemo_migration.copybook.layouts import FieldSpec, Kind, mask_field, zoned_width
 
-# WHY (Trade-offs): keeping this import boundary to the standard library plus ``layouts``
+# Trade-offs: keeping this import boundary to the standard library plus ``layouts``
 #   makes the codec importable in a bare checkout before a database driver, AWS SDK, or
 #   character-set package is installed. The accepted cost is that record loading,
 #   transcoding, and persistence stay outside this module; the concrete benefit is that a
 #   money-field decode can be reproduced without infrastructure that might hide the actual
 #   byte-to-value decision.
 
-# WHY (Assumptions): the public surface is declared explicitly and in sorted order so a
+# Assumptions: the public surface is declared explicitly and in sorted order so a
 #   consumer's import list can be checked against it mechanically, and so that the two
 #   error types are advertised as part of the contract rather than left to be discovered by
 #   a caller writing an except clause. The sibling geometry module declares its surface the
@@ -303,7 +303,7 @@ __all__ = [
     "encode_zoned_field",
 ]
 
-# WHY (Alternatives Considered): the sign and the digit could be resolved with a dictionary
+# Alternatives Considered: the sign and the digit could be resolved with a dictionary
 #   literal mapping each of the twenty characters to a signed digit, or with a cascade of
 #   comparisons. Two index strings are used instead because the POSITION in the string IS
 #   the digit value, which makes the encode direction a direct ``table[digit]`` lookup and
@@ -317,7 +317,7 @@ __all__ = [
 _POS_OVERPUNCH: Final[str] = "{ABCDEFGHI"
 _NEG_OVERPUNCH: Final[str] = "}JKLMNOPQR"
 
-# WHY (Trade-offs): the plain-digit portion of a span is validated with one precompiled
+# Trade-offs: the plain-digit portion of a span is validated with one precompiled
 #   pattern rather than with ad-hoc ``str.isdigit`` calls at each site. Two things are
 #   bought. The check accepts exactly the ten ASCII digits, where ``str.isdigit`` also
 #   accepts the decimal digits of other scripts -- characters a fixed-width record produced
@@ -329,14 +329,14 @@ _NEG_OVERPUNCH: Final[str] = "}JKLMNOPQR"
 #   approach for the same reason.
 _DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]*")
 
-# WHY (Assumptions): a display field is right-aligned within its declared width and padded
+# Assumptions: a display field is right-aligned within its declared width and padded
 #   on the LEFT with this character, which the corpus shows directly -- the credit limit at
 #   line 7 of ``app/data/ASCII/acctdata.txt`` holds ``00000020650{`` and not ``20650{``
 #   followed by spaces. Padding on the right, or with spaces on either side, produces a
 #   field the baseline programs read as non-numeric.
 _PAD_DIGIT: Final[str] = "0"
 
-# WHY (Assumptions): the encode path quantises inside a private decimal context whose
+# Assumptions: the encode path quantises inside a private decimal context whose
 #   precision is the field width plus this margin. The margin exists so that a value WIDER
 #   than the field still quantises successfully and is then refused by the explicit width
 #   check below with a message naming both widths, rather than failing as an inscrutable
@@ -344,7 +344,7 @@ _PAD_DIGIT: Final[str] = "0"
 #   field needs, since the widest declaration in the corpus is twelve digit positions.
 _QUANTIZE_PRECISION_MARGIN: Final[int] = 8
 
-# WHY (Assumptions): only these two of the five storage regimes are display regimes, so
+# Assumptions: only these two of the five storage regimes are display regimes, so
 #   only these two can reach this module. Packed and binary fields are a different byte
 #   layout altogether and belong to ``packed``; a character field has no numeric reading at
 #   all. Naming the admissible set once means the field-oriented entry points reject a
@@ -353,7 +353,7 @@ _QUANTIZE_PRECISION_MARGIN: Final[int] = 8
 _DISPLAY_KINDS: Final[frozenset[Kind]] = frozenset({Kind.ZONED, Kind.UINT})
 
 
-# WHY (Assumptions): every contract violation below is enforced with an explicit exception
+# Assumptions: every contract violation below is enforced with an explicit exception
 #   rather than an ``assert``. Optimised Python removes assertions under ``python -O``;
 #   losing a width or sign check in that mode would turn malformed financial input into a
 #   plausible value instead of a visible failure. Both public errors remain ValueError
@@ -410,7 +410,7 @@ class ZonedSpanWidthError(ZonedDecimalError):
     """
 
 
-# WHY (Trade-offs): a sensitive field's content is withheld completely rather than using
+# Trade-offs: a sensitive field's content is withheld completely rather than using
 #   ``mask_field``'s same-width last-four concession. A record diff needs stable width and
 #   a small identifying suffix; an exception can be copied into a log aggregator, where
 #   even that suffix broadens disclosure. Non-sensitive content is routed through the
@@ -658,7 +658,7 @@ def _field_geometry(field: FieldSpec) -> tuple[int, int, bool]:
     if not isinstance(field, FieldSpec):
         raise TypeError(f"field must be FieldSpec, not {type(field).__name__}")
     if field.kind not in _DISPLAY_KINDS:
-        # WHY (Assumptions): all eleven base masters contain zero ``COMP`` or
+        # Assumptions: all eleven base masters contain zero ``COMP`` or
         #   ``COMP-3`` declarations, so their numerics are display fields. Packed and
         #   binary storage occurs in other record families and has different digit and
         #   sign placement; accepting either here would make one codec guess between
@@ -670,7 +670,7 @@ def _field_geometry(field: FieldSpec) -> tuple[int, int, bool]:
             )
         )
     if field.kind is Kind.UINT:
-        # WHY (Assumptions): unsigned ``PIC 9(n)`` fields carry an ordinary digit in the
+        # Assumptions: unsigned ``PIC 9(n)`` fields carry an ordinary digit in the
         #   low-order position, so layouts records their digit count once as ``length``
         #   and deliberately leaves both digit-count attributes at zero. Deriving
         #   ``(length, 0, False)`` preserves keys such as ACCT-ID and CUST-ID; treating
@@ -757,14 +757,14 @@ def decode_zoned(
 
     negative = False
     if signed:
-        # WHY (Assumptions): signed mode means the EBCDIC SIGN CONVENTION explicitly.
+        # Assumptions: signed mode means the EBCDIC SIGN CONVENTION explicitly.
         #   ``tests/README.md`` lines 273-274 warn that the ASCII sign default misreads
         #   these bytes and silently corrupts negative balances, so a caller cannot
         #   switch modes by presenting a different-looking final character.
         positive_digit = _POS_OVERPUNCH.find(last)
         negative_digit = _NEG_OVERPUNCH.find(last)
 
-        # WHY (Assumptions): the printable characters are the IBM ASCII trailing-sign
+        # Assumptions: the printable characters are the IBM ASCII trailing-sign
         #   MAPPING while the contract is named ``-fsign=EBCDIC`` by the COBOL compiler.
         #   Both names are retained because one describes the characters and the other
         #   describes their sign convention; neither invokes cp037 character decoding.
@@ -774,7 +774,7 @@ def decode_zoned(
             last_digit = str(negative_digit)
             negative = True
         elif _first_non_digit(last) is None:
-            # WHY (Alternatives Considered): silently treating a plain trailing digit as
+            # Alternatives Considered: silently treating a plain trailing digit as
             #   positive was rejected. In a signed field it proves the producer used a
             #   different sign convention, so tolerance would convert the detectable
             #   ``-fsign=ASCII`` configuration error into a plausible amount with an
@@ -817,7 +817,7 @@ def decode_zoned(
             )
         )
 
-    # WHY (Assumptions): an overpunch is the LOW-ORDER DIGIT carrying a sign, not a
+    # Assumptions: an overpunch is the LOW-ORDER DIGIT carrying a sign, not a
     #   sign-only suffix. Appending its table index makes ``0000005047G`` become the
     #   digits ``00000050477`` and therefore 504.77; dropping that seven would produce
     #   50.47, a plausible value wrong by a factor of ten.
@@ -825,7 +825,7 @@ def decode_zoned(
     integer_boundary = width - dec_digits
     integer_part = digits[:integer_boundary] or _PAD_DIGIT
 
-    # WHY (Trade-offs): constructing Decimal from one explicit numeric string costs one
+    # Trade-offs: constructing Decimal from one explicit numeric string costs one
     #   allocation, but it is independent of the caller's decimal precision and cannot
     #   overflow an integer intermediate. That keeps every twelve-digit money field
     #   exact under any ambient decimal context.
@@ -834,12 +834,12 @@ def decode_zoned(
     else:
         number = integer_part
 
-    # WHY (Assumptions): preserving exactly ``dec_digits`` characters after the point is
+    # Assumptions: preserving exactly ``dec_digits`` characters after the point is
     #   what preserves the declared scale. Calling ``normalize()`` would make 2065.00
     #   and 2065 compare equal while discarding the exponent needed by golden-master
     #   checks and downstream NUMERIC(p,2) parity.
 
-    # WHY (Trade-offs): a closing-brace zero is normalised to an opening-brace zero on
+    # Trade-offs: a closing-brace zero is normalised to an opening-brace zero on
     #   re-encode because the Java parity codec has no signed-zero representation. This
     #   is the one accepted non-byte-identical round trip; retaining a minus here would
     #   make Python and Java disagree on the same source span.
@@ -898,7 +898,7 @@ def encode_zoned(
     """
     width = _require_geometry(int_digits, dec_digits, signed, field=field)
 
-    # WHY (Assumptions): a binary floating-point value cannot represent ten cents
+    # Assumptions: a binary floating-point value cannot represent ten cents
     #   exactly, and ``bool`` is an ``int`` subclass despite not being a monetary value.
     #   Rejecting both before Decimal conversion prevents ``0.10`` from carrying a hidden
     #   approximation and prevents ``True`` from silently becoming one unit.
@@ -941,13 +941,13 @@ def encode_zoned(
             _failure("encode_zoned requires a finite decimal value", field=field)
         )
 
-    # WHY (Assumptions): the quantum is constructed from Decimal's exact tuple form rather
+    # Assumptions: the quantum is constructed from Decimal's exact tuple form rather
     #   than through arithmetic in the caller's active context. A low ambient precision
     #   must not change the target exponent or make the same field encode differently in
     #   two batch processes.
     quantum = Decimal((0, (1,), -dec_digits))
 
-    # WHY (Trade-offs): encoding is lossless-or-throw. Silent truncation and silent
+    # Trade-offs: encoding is lossless-or-throw. Silent truncation and silent
     #   rounding were both rejected because a codec that chooses a rounding rule hides a
     #   business decision from the audit trail. Quantising privately and comparing the
     #   result to the input accepts redundant trailing zeroes but refuses any non-zero
@@ -974,7 +974,7 @@ def encode_zoned(
             )
         )
 
-    # WHY (Trade-offs): signum comparison deliberately makes negative zero non-negative.
+    # Trade-offs: signum comparison deliberately makes negative zero non-negative.
     #   A decoded ``}`` zero therefore emits ``{`` on re-encode, matching the Java codec
     #   and documenting the sole byte-level exception to the otherwise exact round-trip
     #   law instead of allowing language-specific signed-zero behaviour to diverge.
@@ -984,7 +984,7 @@ def encode_zoned(
             _failure("cannot encode a negative value in an unsigned display field", field=field)
         )
 
-    # WHY (Assumptions): quantisation should make the scaled magnitude a plain digit run,
+    # Assumptions: quantisation should make the scaled magnitude a plain digit run,
     #   but that invariant is revalidated rather than asserted or fed through ``int()``.
     #   An unexpected exponent form must raise visibly; coercing it could truncate a
     #   decimal position while still returning a field of the declared width.
@@ -1059,14 +1059,14 @@ def decode_zoned_field(record: str, field: FieldSpec) -> Decimal:
             )
         )
 
-    # WHY (Assumptions): decoding is anchored on one declared field and never on a
+    # Assumptions: decoding is anchored on one declared field and never on a
     #   pattern scan over a record. ``3580010001P`` occurs at zero-based offset 12 in
     #   ``dailytran.txt`` only because it straddles DALYTRAN-ID and three following code
     #   fields; scanning would report it as a nine-figure negative amount, while slicing
     #   the declared AMT at offset 132 yields the actual 504.77.
     span = text[field.start : field.end]
 
-    # WHY (Assumptions): a whole record may contain sign bytes, packed nibbles, padding
+    # Assumptions: a whole record may contain sign bytes, packed nibbles, padding
     #   low values, and ordinary text. Passing only this fixed-width span prevents a
     #   character decoder from replacing one non-text byte while preserving record
     #   length, a failure mode that leaves every later offset apparently valid.

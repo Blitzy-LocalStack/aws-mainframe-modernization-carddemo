@@ -1,5 +1,6 @@
 package com.carddemo.reporting.dto;
 
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -222,35 +223,23 @@ public record StatementRequest(
      * addresses the resource in a request path and in the correlation of a run, so masking it would
      * make a log unusable while withholding nothing the path had not already carried.</p>
      *
+     * <p>Refactoring Rationale: the masking arithmetic used to live in a private method here and now
+     * comes from the shared kernel. It was moved because a second site needed the same rule -- the
+     * shared advice masks a card-number-shaped run out of the request target it echoes -- and because
+     * the local rule and the published contract had already begun to disagree: the local one rendered
+     * a fixed four-character mask followed by the tail, which is shorter than the number it stands
+     * for, while every masked example in the published contracts renders at the number's own width. A
+     * reader cannot tell a short rendering from a truncated value, so the shared rule keeps the width
+     * and this rendering changes with it. Nothing parses this string, so the change of width is
+     * confined to what an operator reads.</p>
+     *
      * @return the request with its card number reduced to a mask and its last four digits, and its
      *     account identifier unchanged; an absent component renders as {@code null}
      */
     @Override
     public String toString() {
-        return "StatementRequest[cardNumber=" + maskCardNumber(cardNumber)
+        return "StatementRequest[cardNumber=" + CardNumberMasker.mask(cardNumber)
                 + ", accountId=" + accountId + ']';
-    }
-
-    /**
-     * Reduces a card number to a fixed mask and its trailing four digits.
-     *
-     * @param cardNumber the normalised card number, or {@code null} for an unnarrowed run
-     * @return {@code null} when {@code cardNumber} is {@code null}; otherwise the string
-     *     {@code "****"} followed by at most the last four characters, so a value shorter than four
-     *     characters is rendered whole rather than padded into something it is not
-     */
-    private static String maskCardNumber(String cardNumber) {
-        if (cardNumber == null) {
-            return null;
-        }
-
-        // WHY : Assumptions: the tail is taken with a bounded start index rather than by subtracting
-        //       four, because a value shorter than four characters is reachable here -- the constraint
-        //       on this component bounds its maximum and not its minimum -- and subtracting would raise
-        //       out of a rendering method, replacing a log line with an unrelated failure at exactly
-        //       the moment the log line was wanted.
-        int tailStart = Math.max(0, cardNumber.length() - 4);
-        return "****" + cardNumber.substring(tailStart);
     }
 
     /**

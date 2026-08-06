@@ -5,6 +5,8 @@ import jakarta.persistence.EmbeddedId;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * One pending authorization recorded against an account.
@@ -56,6 +58,15 @@ public class PendingAuthDetail {
      * The originating date as the acquirer supplied it,
      * {@code PA-AUTH-ORIG-DATE PIC X(06)} at line 23 of the copybook.
      */
+    // WHY : Alternatives Considered: relying on the declared length alone was evaluated and rejected,
+    //       because a Java String otherwise selects the JDBC VARCHAR binding and schema validation then
+    //       rejects this schema's CHAR columns even though every width agrees. Spelling the physical
+    //       type into columnDefinition was rejected too: that would duplicate vendor DDL inside a
+    //       mapping which has no authority to create the table. The type code below selects the standard
+    //       CHAR binding for reads, writes and validation while leaving the physical definition wholly
+    //       with V1__authorization.sql, and it is the same mechanism the batch context's own entities
+    //       use for the identical reason.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_orig_date", length = 6)
     private String authOrigDate;
 
@@ -63,6 +74,7 @@ public class PendingAuthDetail {
      * The originating time as the acquirer supplied it,
      * {@code PA-AUTH-ORIG-TIME PIC X(06)} at line 24.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_orig_time", length = 6)
     private String authOrigTime;
 
@@ -70,30 +82,35 @@ public class PendingAuthDetail {
      * The primary account number the authorization was presented against,
      * {@code PA-CARD-NUM PIC X(16)} at line 25.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_num", nullable = false, length = 16)
     private String cardNum;
 
     /**
      * The authorization type, {@code PA-AUTH-TYPE PIC X(04)} at line 26.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_type", length = 4)
     private String authType;
 
     /**
      * The card expiry date as presented, {@code PA-CARD-EXPIRY-DATE PIC X(04)} at line 27.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "card_expiry_date", length = 4)
     private String cardExpiryDate;
 
     /**
      * The network message type, {@code PA-MESSAGE-TYPE PIC X(06)} at line 28.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "message_type", length = 6)
     private String messageType;
 
     /**
      * The network message source, {@code PA-MESSAGE-SOURCE PIC X(06)} at line 29.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "message_source", length = 6)
     private String messageSource;
 
@@ -101,37 +118,41 @@ public class PendingAuthDetail {
      * The authorization identification code returned to the acquirer,
      * {@code PA-AUTH-ID-CODE PIC X(06)} at line 30.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_id_code", length = 6)
     private String authIdCode;
 
     /**
      * The response code returned to the acquirer, {@code PA-AUTH-RESP-CODE PIC X(02)} at line 31.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_resp_code", length = 2)
     private String authRespCode;
 
     /**
      * The response reason returned to the acquirer, {@code PA-AUTH-RESP-REASON PIC X(04)} at line 32.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_resp_reason", length = 4)
     private String authRespReason;
 
     /**
      * The processing code, {@code PA-PROCESSING-CODE PIC X(06)} at line 33.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "processing_code", length = 6)
     private String processingCode;
 
     /**
      * The amount the acquirer requested, {@code PA-TRANSACTION-AMT S9(10)V99 COMP-3} at line 34.
      */
-    @Column(name = "transaction_amount", nullable = false, precision = 12, scale = 2)
+    @Column(name = "transaction_amt", nullable = false, precision = 12, scale = 2)
     private BigDecimal transactionAmount;
 
     /**
      * The amount actually approved, {@code PA-APPROVED-AMT S9(10)V99 COMP-3} at line 35.
      */
-    @Column(name = "approved_amount", nullable = false, precision = 12, scale = 2)
+    @Column(name = "approved_amt", nullable = false, precision = 12, scale = 2)
     private BigDecimal approvedAmount;
 
     /**
@@ -142,12 +163,14 @@ public class PendingAuthDetail {
      * {@code docs/architecture/data-model-and-schema-mapping.md} so no reader has to guess whether the
      * two names denote the same field.</p>
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_category_code", length = 4)
     private String merchantCategoryCode;
 
     /**
      * The acquirer country, {@code PA-ACQR-COUNTRY-CODE PIC X(03)} at line 37.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "acqr_country_code", length = 3)
     private String acqrCountryCode;
 
@@ -160,6 +183,7 @@ public class PendingAuthDetail {
     /**
      * The merchant identifier, {@code PA-MERCHANT-ID PIC X(15)} at line 39.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_id", length = 15)
     private String merchantId;
 
@@ -172,18 +196,21 @@ public class PendingAuthDetail {
     /**
      * The merchant city, {@code PA-MERCHANT-CITY PIC X(13)} at line 41.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_city", length = 13)
     private String merchantCity;
 
     /**
      * The merchant state, {@code PA-MERCHANT-STATE PIC X(02)} at line 42.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_state", length = 2)
     private String merchantState;
 
     /**
      * The merchant postal code, {@code PA-MERCHANT-ZIP PIC X(09)} at line 43.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "merchant_zip", length = 9)
     private String merchantZip;
 
@@ -194,7 +221,8 @@ public class PendingAuthDetail {
      * is why it is stored rather than discarded after the decision -- it is how a redelivered request is
      * recognised as one already answered.</p>
      */
-    @Column(name = "transaction_id", length = 15)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "transaction_id", nullable = false, length = 15)
     private String transactionId;
 
     /**
@@ -202,6 +230,7 @@ public class PendingAuthDetail {
      * {@code PA-MATCH-STATUS PIC X(01)} at line 52, whose condition names admit exactly
      * {@code 'P'}, {@code 'D'}, {@code 'E'} and {@code 'M'}.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "match_status", nullable = false, length = 1)
     private String matchStatus;
 
@@ -210,13 +239,15 @@ public class PendingAuthDetail {
      * {@code PA-AUTH-FRAUD PIC X(01)} at line 53, whose condition names admit {@code 'F'} and
      * {@code 'R'} and whose absent state is unmarked.
      */
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "auth_fraud", length = 1)
     private String authFraud;
 
     /**
      * When the fraud mark was applied, {@code PA-FRAUD-RPT-DATE PIC X(08)} at line 53.
      */
-    @Column(name = "fraud_report_date", length = 8)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "fraud_rpt_date", length = 8)
     private String fraudReportDate;
 
     /**
