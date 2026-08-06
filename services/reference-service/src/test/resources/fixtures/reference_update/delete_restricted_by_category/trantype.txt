@@ -1,0 +1,2 @@
+06Reversal                                          00000000
+99Unreferenced type for delete fixture              00000000
