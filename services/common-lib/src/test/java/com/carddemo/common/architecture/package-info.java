@@ -2,23 +2,30 @@
  * Owns the single build-enforced ArchUnit gate that every migrated CardDemo service module is held
  * to.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>Contract, and the tree state that satisfies it</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: this charter was authored one checkpoint ahead of the class it governs, so it
+ * originally described a <b>target contract</b> rather than a measurement of the directory. That gap
+ * is now closed. {@code LayeringRulesTest} is present beside this file, Surefire runs its six test
+ * methods in this module, the jar plugin packages it into
+ * {@code common-lib-<version>-tests.jar}, and the {@code architecture-rules} execution in
+ * {@code services/pom.xml} re-runs it inside every module that consumes the shared kernel. Every
+ * inventory and count below is therefore a description of files that exist, and
+ * {@code mvn -f services/pom.xml test} is the authority that cannot go stale.</p>
+ *
+ * <p>Refactoring Rationale: while the class was absent this section had to warn a reader not to read
+ * the inventory as present tense. Leaving that warning in place once the class landed would be worse
+ * than having no warning at all, because a reader who believes a gate enforces nothing stops looking
+ * for the enforcement that is in fact running, and the whole point of an executable invariant is
+ * that a reader can trust it without re-deriving it.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work
  * from -- which type belongs here, which may not, what the closed set is -- so
  * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * the interval in which one is needed. The cost of authoring it first was that its
+ * inventory read as present tense before it was true, which the paragraph above
+ * now resolves in the only durable way: by the class being there.</p>
  *
  * <p>Three invariants of the migrated decomposition are asserted here as an executable test rather
  * than described as a convention: a {@code ..domain..} type may not reach for an AWS SDK, web or
@@ -168,11 +175,11 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Target contract: two {@code .java} files and no others -- this descriptor, and
- * {@code LayeringRulesTest}, which is to hold the invariants described above. That class is authored
- * at a later index of the same plan, so at this checkpoint the directory holds this descriptor alone
- * and NO engine enforces layering anywhere in the reactor; until it lands the invariants above are
- * carried by review. The package deliberately carries no helper, no base class, no second rule
+ * <p>Two {@code .java} files and no others -- this descriptor, and {@code LayeringRulesTest}, which
+ * holds the invariants described above. Both are present: the rule class declares three
+ * {@code @Test} methods carrying the invariants and three more guarding against a vacuous pass, and
+ * the {@code architecture-rules} execution runs all six in this module and in each of the eight
+ * consumers of the shared kernel. The package deliberately carries no helper, no base class, no second rule
  * class, no fixture and no resource, because a rule split between a class and a helper can be
  * weakened by editing the helper, where the change reads as maintenance rather than as the
  * relaxation of an architectural constraint that it is. The class name and this directory are

@@ -73,6 +73,21 @@ import org.springframework.context.annotation.Configuration;
  * also declares these three keys through framework properties converges on one tag per key rather
  * than publishing either key twice.</p>
  *
+ * <p>Assumptions: where a key collides, the MEASURED precedence is that the meter's OWN tag wins and
+ * the common tag is discarded -- a meter registered as {@code counter("x", "service", "impostor")}
+ * against a filter contributing {@code service=auth-service} publishes {@code service=impostor}, and
+ * the same holds for {@code environment} and {@code version}. This direction is stated explicitly
+ * because it is the opposite of what a reader may expect from a mechanism described as applying tags
+ * "unconditionally" and "to every meter", and because it decides how a collision must be handled. It
+ * is the useful direction: a call site that deliberately names one of these keys is expressing
+ * something the registry-level default cannot know, and a filter that overrode it would make the
+ * override impossible rather than merely unnecessary. The consequence for a caller is that the three
+ * keys are RESERVED at every call site. A meter that names one of them is not adding a dimension, it
+ * is silently replacing the label an operator uses to attribute the series, which produces a series
+ * that reads as belonging to a context that did not emit it -- the precise unattributable-series
+ * failure the decision record above rejects a per-call-site scheme to avoid. No meter in this
+ * migration names any of the three, and none should.</p>
+ *
  * <p>Assumptions: this class owns none of the three values it labels with, and the property contract
  * it depends on is stated on {@code SERVICE_PROPERTY}, {@code ENVIRONMENT_PROPERTY} and
  * {@code VERSION_PROPERTY} below. Nothing here embeds the name of a service, the name of an
@@ -102,6 +117,30 @@ import org.springframework.context.annotation.Configuration;
  * exactly, whereas the money contract of this migration is exact scale-two decimal arithmetic from
  * the database column through to the wire. Money is therefore counted and timed -- how many postings,
  * how long a posting took -- and never measured.</p>
+ *
+ * <p>Assumptions: the exclusion above is a contract on the DEPLOYMENT, not a check this class
+ * performs. Nothing here masks, redacts, validates or inspects the three values it is given: they are
+ * normalised for blankness and otherwise emitted verbatim, so a {@code service} value of sixteen
+ * digits is published as sixteen digits and a {@code version} value shaped like an access key is
+ * published as that key. {@code com.carddemo.common.security.CardNumberMasker} is deliberately NOT
+ * applied to them. This is recorded because the omission is invisible from the outside -- a reader who
+ * sees a masker in the same library may reasonably assume telemetry is behind it -- and because the
+ * consequence is not recoverable: a value that reaches a metrics backend has left the process, is
+ * retained for the backend's retention window, appears in every dashboard and alert built on the
+ * series, and cannot be recalled by fixing the property afterwards.</p>
+ *
+ * <p>Alternatives Considered: masking the three values here, or rejecting a value that looks like a
+ * secret, was evaluated and rejected. All three are deployment IDENTITIES drawn from small closed sets
+ * -- one of eight context names, one of a handful of environment names, one image identity -- so any
+ * detector would be guessing at a value whose legitimate shape it cannot know, and the two failure
+ * directions are both bad: masking a legitimate value silently destroys the attribution the tag exists
+ * to provide, and failing startup over a false positive takes a service down for a cosmetic reason. A
+ * value that is secret in one of these three properties is a misconfiguration of the deployment, and
+ * the place to prevent it is where the value is set -- the task definition and the Terraform variables
+ * that populate it, which carry sizing and identity values only and never a credential, with every
+ * credential resolved from Secrets Manager instead. Trade-offs: this class therefore trusts its input,
+ * and that trust is why the prohibition is written here in the contract a deployer reads rather than
+ * left to be discovered.</p>
  *
  * <p>Alternatives Considered: a fourth and a fifth tag were available and were rejected. The
  * reference baseline carries a genuinely structured diagnostic record at

@@ -47,6 +47,29 @@ package com.carddemo.common.security;
  * one class whose whole purpose is to avoid handling card numbers, and it fails in the wrong direction --
  * a real number that failed the test would be echoed in full.</p>
  *
+ * <p>Assumptions: a run is a run of digits and nothing else, so a card number written with separators is
+ * NOT detected. {@code 4111-1111-1111-1111} and {@code 4111 1111 1111 1111} are each four runs of four
+ * digits, no run reaches sixteen, and {@link #maskEmbeddedCardNumbers(String)} returns them unchanged. This
+ * is stated explicitly because the omission is invisible from the method's own contract, and a reader who
+ * assumes otherwise would apply this class to the wrong kind of input. It is harmless for every path this
+ * migration actually masks: the baseline carries a card number in exactly one shape, the sixteen contiguous
+ * characters of {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy}, and every value that
+ * reaches this class comes from that field, from a request path segment bound to it, or from the
+ * {@code PA-RQ-CARD-NUM PIC X(16)} of the authorization wire contract. None of the three can hold a
+ * separator: the copybook field has no room for one within its declared width, and a separated form fails
+ * the digits-only validation on the way in long before anything renders it.</p>
+ *
+ * <p>Trade-offs: widening the rule to skip embedded separators was rejected for this migration. It would
+ * begin masking values that are legitimately separated and not card numbers at all -- a timestamp
+ * {@code 2022-07-18 09:30:00.123456} is a separated digit sequence of more than sixteen digits, and the
+ * migration renders those in full by contract -- so the change would trade a hazard this system cannot
+ * reach for a regression it demonstrably can. The condition under which the wider rule becomes necessary is
+ * a free-text ingress: a comment, a note or an operator-supplied description that a user can type a card
+ * number into in whatever shape they please. No such field exists in the baseline record layouts. Should one
+ * be added, the correct change is a separator-tolerant scan that requires the separators to be uniform and
+ * the digit count to be exactly sixteen or more, ADDED beside the run rule rather than replacing it, so the
+ * contiguous case keeps the behaviour the current callers and their tests rely on.</p>
+ *
  * <p>Assumptions: this class does not sanitise control characters, and does not need to for the paths it is
  * applied to. A request line cannot carry a raw carriage return or line feed and remain a request line, so
  * a servlet container never presents one in a request target; a client that tries must percent-encode it,

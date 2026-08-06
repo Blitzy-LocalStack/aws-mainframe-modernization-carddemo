@@ -457,7 +457,7 @@ statement-ordered transaction view, and the interest-generated transaction. A tw
 reader covers the 500-byte packed export record described in
 [`CVEXPORT`](../app/cpy/CVEXPORT.cpy), which likewise has no base master of its own.
 
-### 6.2 Six facts a reader would otherwise rediscover the hard way
+### 6.2 Seven facts a reader would otherwise rediscover the hard way
 
 Each of these was measured against the repository, and each one silently breaks a
 reader that does not know it.
@@ -528,6 +528,64 @@ package. Two subtleties are worth carrying: the sort control types the card numb
 zoned decimal although the copybook declares `PIC X(16)`, and `TRAN-PROC-DT` covers
 only the **first 10 characters** of the 26-character `TRAN-PROC-TS` — its date prefix,
 not the whole stamp.
+
+**The EBCDIC and ASCII twins are not identical, and one divergence changes money.**
+Nine of the eleven datasets ship in both encodings, and for every one of them the two
+forms agree field for field — except at exactly **two** field values, both measured
+against the raw bytes:
+
+| Dataset | Record | Field | EBCDIC form | ASCII form |
+|---|---|---|---|---|
+| `DISCGRP` | 34 (`DEFAULT`/type `07`/cat `0001`) | `DIS-INT-RATE` | `00150{` → **15.00** | `00000{` → **0.00** |
+| `ACCTDATA` | 49 (`ACCT-ID 00000000049`) | `ACCT-ADDR-ZIP` | `ZEROAPR   ` | `A000000000` |
+
+**The first one decides interest.** Record 34 is the `DEFAULT` disclosure-group row,
+and [`CBACT04C`](../app/cbl/CBACT04C.cbl) falls back to that row's rate whenever an
+account's own group key is not found — VSAM status 23, the fallback the reference suite
+asserts by name. So a `DEFAULT`-fallback account accrues **15.00%** if the EBCDIC
+extract was loaded and **nothing at all** if the ASCII one was, on identical inputs,
+with no error either way. The second divergence is cosmetic by comparison: 290 of the
+record's 300 characters are identical and the field is an address ZIP that no
+calculation reads.
+
+**This package therefore treats EBCDIC as authoritative wherever both forms exist.**
+Assumptions: the EBCDIC `.PS` files are the mainframe extracts — fixed-length blocked
+records carrying sign overpunch and packed fields, in the encoding the baseline
+programs actually read — whereas the ASCII `.txt` files are convenience conversions of
+them, which is already visible from the two shape findings above: `cardxref.txt` has
+lost its trailing `FILLER` and three of the nine have acquired CRLF terminators.
+Neither is a property of the source data; both are artefacts of the conversion. A
+conversion that dropped fourteen bytes from one file is not the form to trust when it
+disagrees with the original about a rate. Alternatives Considered: loading the ASCII
+form by default because it is the easier path and needs no codec, which was rejected on
+exactly that reasoning; and reconciling the two by editing one file, which is
+forbidden outright — `app/**` is REFERENCE-only, so the divergence is recorded here and
+resolved by the choice of source, never by changing a byte of either extract.
+Trade-offs: `load-dataset`'s optional `--encoding {ascii,ebcdic}` still lets an
+operator deliberately load the ASCII twin of any dataset that ships both, so the
+capability is not removed; what this fact buys is that using it is an informed decision
+with a known consequence rather than an accident. Note that
+neither divergence is a codec defect: the per-field cp037 path re-encodes all 626
+EBCDIC seed records byte-identically, so both differences are genuinely present in the
+shipped files.
+
+```bash
+# WHAT: reproduce both twin divergences straight from the raw bytes.
+# WHY : Assumptions: the EBCDIC file is opened in BINARY mode and sliced by record
+#       length before any decode, because it has no line terminators at all and a text
+#       read would both mis-frame it and corrupt the sign bytes -- the hazard section 7
+#       exists for. The ASCII twin is split on newlines because it does have them.
+python3 - <<'PY'
+eb = open("app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS", "rb").read()
+asc = open("app/data/ASCII/discgrp.txt", "rb").read().split(b"\n")
+rec = 34
+e = eb[(rec - 1) * 50:rec * 50].decode("cp037")
+a = asc[rec - 1].decode("latin-1")
+print("group        ", repr(e[0:10]))
+print("EBCDIC rate  ", repr(e[16:22]), eb[(rec - 1) * 50 + 16:(rec - 1) * 50 + 22].hex())
+print("ASCII  rate  ", repr(a[16:22]))
+PY
+```
 
 ### 6.3 Two numeric regimes, and they are two
 

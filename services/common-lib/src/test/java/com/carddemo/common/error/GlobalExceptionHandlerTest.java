@@ -288,6 +288,148 @@ class GlobalExceptionHandlerTest {
     }
 
     /**
+     * Confirms a failure the caller's own input provoked is answered 400 with a field array, not 500
+     * with an abend.
+     *
+     * <p>Refactoring Rationale: every caller-input failure that was not one of three named persistence
+     * conflicts used to be answered as an internal failure -- HTTP 500, critical severity, abend block
+     * populated -- so a malformed date raised the alert severity reserved for a broken service.
+     * Transformation rule T7 makes the per-field array the way a rejection is expressed, so all five
+     * properties are asserted together: the status, the code, the severity, the ABSENCE of the abend
+     * block, and a non-empty array with something for a client to display.</p>
+     */
+    @Test
+    @DisplayName("a rejected-input failure is answered 400 with a field array and no abend block")
+    void rejectedCallerInputIsAnsweredAsFourHundred() {
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                new IllegalArgumentException("Open Date: date carries content at width 9"),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_VALIDATION);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
+        assertThat(response.getBody().fieldErrors()).hasSize(1);
+        assertThat(response.getBody().fieldErrors().get(0).field())
+                .isEqualTo(GlobalExceptionHandler.FIELD_REQUEST);
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+    }
+
+    /**
+     * Confirms the caught diagnostic is written to the operational record and never to the body.
+     *
+     * <p>Assumptions: this is the half of the mapping that keeps the widened 400 safe. The handler
+     * claims the whole rejected-input family, including failures raised by libraries whose messages
+     * this repository does not control, so the client-facing sentence has to be fixed while the caught
+     * text goes to the log under the same correlation identity.</p>
+     */
+    @Test
+    @DisplayName("the rejected-input diagnostic is logged and never rendered")
+    void rejectedCallerInputDiagnosticIsLoggedNotRendered() {
+        String diagnostic = "PA-RQ-TRANSACTION-ID arrived as 14 characters";
+
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                new IllegalArgumentException(diagnostic), requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message()).doesNotContain(diagnostic);
+        assertThat(this.captured.list).isNotEmpty();
+        assertThat(this.captured.list.get(0).getFormattedMessage())
+                .contains("status=400")
+                .contains(diagnostic)
+                .doesNotContain(CARD_NUMBER);
+    }
+
+    /**
+     * Confirms the rejected-input answer is reached by the runtime entry point as well as by dispatch.
+     *
+     * <p>Assumptions: a component inside the application, and every test of the mapping, calls the
+     * runtime handler directly rather than going through the framework's dispatch, so the two routes
+     * have to agree. A number that is not a number is included because it arrives as a
+     * {@code NumberFormatException}, which is a member of the family by inheritance rather than by
+     * name -- the property that lets one handler claim the money parser, the codecs and the date
+     * validator at once.</p>
+     */
+    @Test
+    @DisplayName("the runtime entry point maps rejected input to the same 400 answer")
+    void runtimeEntryPointDelegatesRejectedInput() {
+        ResponseEntity<ApiError> fromArgument = this.handler.onRuntimeFailure(
+                new IllegalArgumentException("width 9"), requestFor(CARD_PATH));
+        ResponseEntity<ApiError> fromNumber = this.handler.onRuntimeFailure(
+                new NumberFormatException("not-a-number"), requestFor(CARD_PATH));
+
+        assertThat(fromArgument.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(fromNumber.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(fromArgument.getBody()).isNotNull();
+        assertThat(fromNumber.getBody()).isNotNull();
+        assertThat(fromArgument.getBody().abend()).isNull();
+        assertThat(fromNumber.getBody().abend()).isNull();
+        assertThat(fromNumber.getBody().code()).isEqualTo(ApiError.CODE_VALIDATION);
+    }
+
+    /**
+     * Confirms a genuinely unexpected failure is still an internal failure with its abend block.
+     *
+     * <p>Assumptions: this is the counterpart that keeps the widening honest. Neither a null
+     * dereference nor an illegal state is a member of the rejected-input family, so both must keep
+     * reaching the internal answer; without this assertion a later widening of the 400 mapping could
+     * quietly reclassify a broken service as a bad request, which is the same defect in the opposite
+     * direction.</p>
+     */
+    @Test
+    @DisplayName("an unexpected failure still yields 500 with its abend block")
+    void unexpectedFailuresAreStillInternal() {
+        ResponseEntity<ApiError> fromNull = this.handler.onRuntimeFailure(
+                new NullPointerException("npe"), requestFor(CARD_PATH));
+        ResponseEntity<ApiError> fromState = this.handler.onRuntimeFailure(
+                new IllegalStateException("bad state"), requestFor(CARD_PATH));
+
+        assertThat(fromNull.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(fromState.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(fromNull.getBody()).isNotNull();
+        assertThat(fromState.getBody()).isNotNull();
+        assertThat(fromNull.getBody().severity()).isEqualTo(ApiError.Severity.CRITICAL);
+        assertThat(fromNull.getBody().abend()).isNotNull();
+        assertThat(fromState.getBody().abend()).isNotNull();
+        assertThat(fromState.getBody().code()).isEqualTo(ApiError.CODE_INTERNAL);
+    }
+
+    /**
+     * Confirms every status this advice emits is a real HTTP status inside the published code range.
+     *
+     * <p>Assumptions: this is where the status half of the shape's construction contract is decided,
+     * rather than inside the factory. The factory renders a failure, so refusing an argument there
+     * would replace an odd status with no body at all; every status the system actually emits comes
+     * from a handler, and a handler's status is decidable without running the application, so
+     * asserting the whole set here places the failure at build time without adding a way for an error
+     * response to fail.</p>
+     */
+    @Test
+    @DisplayName("every emitted status is inside the HTTP status range")
+    void everyEmittedStatusIsAValidHttpStatus() {
+        MockHttpServletRequest request = requestFor(CARD_PATH);
+
+        assertThat(this.handler.onMissingRecord(new NoSuchElementException(), request).getBody())
+                .isNotNull()
+                .satisfies(body -> assertThat(body.status()).isEqualTo(HttpStatus.NOT_FOUND.value()));
+        assertThat(this.handler.onAccessDenied(new AccessDeniedException("d"), request).getBody())
+                .isNotNull()
+                .satisfies(body -> assertThat(body.status()).isEqualTo(HttpStatus.FORBIDDEN.value()));
+        assertThat(this.handler.onRejectedCallerInput(new IllegalArgumentException("x"), request)
+                .getBody())
+                .isNotNull()
+                .satisfies(body ->
+                        assertThat(body.status()).isEqualTo(HttpStatus.BAD_REQUEST.value()));
+        assertThat(this.handler.onUnexpectedFailure(new IllegalStateException("x"), request).getBody())
+                .isNotNull()
+                .satisfies(body -> assertThat(body.status())
+                        .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value()));
+    }
+
+    /**
      * Builds a request reporting the given URI, with no query string.
      *
      * @param uri the request URI a container would report, never {@code null}

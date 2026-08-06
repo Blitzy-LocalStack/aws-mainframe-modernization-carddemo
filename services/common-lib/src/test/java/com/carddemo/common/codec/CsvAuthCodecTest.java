@@ -21,6 +21,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -1814,9 +1815,9 @@ class CsvAuthCodecTest {
     /**
      * The private correlation source identity is exactly sixteen plus fifteen characters.
      *
-     * <p>Assumptions: {@code CORRELATION_KEY_LENGTH} describes the value protected by the tokeniser,
-     * not the public token it returns. The source is {@code PA-*-CARD-NUM X(16)} followed by
-     * {@code PA-*-TRANSACTION-ID X(15)}, and the single-byte wire character set makes those
+     * <p>Assumptions: {@code CORRELATION_COMPOSITE_LENGTH} describes the value protected by the
+     * tokeniser, not the public token it returns. The source is {@code PA-*-CARD-NUM X(16)} followed
+     * by {@code PA-*-TRANSACTION-ID X(15)}, and the single-byte wire character set makes those
      * thirty-one characters thirty-one bytes without any numeric interpretation.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
@@ -1826,10 +1827,40 @@ class CsvAuthCodecTest {
     void correlationSourceIdentityIsExactlyThirtyOneCharacters() {
         assertEquals(16, CsvAuthCodec.CARD_NUM_WIDTH);
         assertEquals(15, CsvAuthCodec.TRANSACTION_ID_WIDTH);
-        assertEquals(31, CsvAuthCodec.CORRELATION_KEY_LENGTH);
+        assertEquals(31, CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
         assertEquals(
                 CsvAuthCodec.CARD_NUM_WIDTH + CsvAuthCodec.TRANSACTION_ID_WIDTH,
-                CsvAuthCodec.CORRELATION_KEY_LENGTH);
+                CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
+    }
+
+    /**
+     * The two published correlation widths name two different quantities and neither describes the
+     * other.
+     *
+     * <p>Refactoring Rationale: a single constant used to be named for the correlation key and carried
+     * the width of the composite the key is derived from, so a consumer sizing a column or a buffer
+     * from it was wrong by nine characters in the direction that truncates. This test pins both
+     * quantities and pins the returned token to the one that actually describes it, so the two cannot
+     * be silently merged again.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the composite width and the token width are published as two distinct constants")
+    void correlationCompositeAndTokenWidthsArePublishedApart() {
+        assertEquals(31, CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH);
+        assertEquals(22, CsvAuthCodec.CORRELATION_TOKEN_LENGTH);
+        assertEquals(OpaqueIdentifier.TOKEN_LENGTH, CsvAuthCodec.CORRELATION_TOKEN_LENGTH);
+        assertNotEquals(CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH,
+                CsvAuthCodec.CORRELATION_TOKEN_LENGTH);
+
+        String requestToken =
+                request(CARD_NUM, TRANSACTION_ID).correlationKey(new OpaqueIdentifier(KEY));
+        String replyToken =
+                reply(CARD_NUM, TRANSACTION_ID).correlationKey(new OpaqueIdentifier(KEY));
+
+        assertEquals(CsvAuthCodec.CORRELATION_TOKEN_LENGTH, requestToken.length());
+        assertEquals(CsvAuthCodec.CORRELATION_TOKEN_LENGTH, replyToken.length());
     }
 
     /**
@@ -1873,7 +1904,7 @@ class CsvAuthCodecTest {
                 .doesNotContain(CARD_NUM)
                 .doesNotContain(TRANSACTION_ID);
         assertEquals(22, OpaqueIdentifier.TOKEN_LENGTH);
-        assertFalse(token.length() == CsvAuthCodec.CORRELATION_KEY_LENGTH,
+        assertFalse(token.length() == CsvAuthCodec.CORRELATION_COMPOSITE_LENGTH,
                 "the opaque token must not be confused with the private source width");
     }
 
@@ -2459,17 +2490,26 @@ class CsvAuthCodecTest {
     }
 
     /**
-     * Under-width character fields are accepted and restored to declared width on re-encode.
+     * Under-width character values are accepted BY A CARRIER and restored to declared width on
+     * re-encode.
      *
      * <p>Assumptions: decoded carriers store character values without trailing COBOL pad, so strict
-     * exact-width construction would reject the codec's own output. The production boundary instead
+     * exact-width construction would reject the codec's own output. The carrier boundary therefore
      * accepts short values, preserves their meaningful characters and right-pads them when rebuilding
      * the wire; no value is silently truncated.</p>
+     *
+     * <p>Assumptions: this tolerance belongs to the CARRIER and not to the WIRE, and the distinction
+     * is the whole of why both this test and the truncation tests below can hold at once. What is
+     * decoded here is a full-width payload, because the encoder padded every field out to its declared
+     * width first. A payload that arrives short is a different thing entirely -- bytes lost in transit
+     * rather than a value stored trimmed -- and
+     * {@code truncatedRequestPayloadIsRefusedRatherThanShorteningTheTransactionId} pins its
+     * refusal.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("under-width fields are accepted and right-padded on re-encode")
+    @DisplayName("under-width carrier values are accepted and right-padded on re-encode")
     void underWidthCharacterFieldsAreAcceptedAndRightPadded() {
         AuthRequest shortRequest = request("4111", "TX1");
         AuthReply shortReply = reply("4111", "TX1");
@@ -2484,6 +2524,269 @@ class CsvAuthCodecTest {
         assertEquals(15, fieldAt(replyPayload, 1).length());
         assertTrue(fieldAt(requestPayload, 2).startsWith("4111"));
         assertTrue(fieldAt(requestPayload, 17).startsWith("TX1"));
+    }
+
+    /**
+     * A request payload short of its declared length is refused instead of shortening the transaction
+     * identifier.
+     *
+     * <p>Refactoring Rationale: width used to be checked as an upper bound alone, so a payload one,
+     * two or three bytes short still split into eighteen fields, every token still fitted, and the
+     * final token -- {@code PA-RQ-TRANSACTION-ID} -- silently lost that many characters. The
+     * consequences compounded rather than surfacing: the shortened value re-emitted at the full 169
+     * characters, so the corruption became indistinguishable from a well-formed payload; the
+     * correlation token changed, so a reply carrying the original identifier no longer matched it; and
+     * two identifiers differing only in their last character collapsed onto one, so a genuinely
+     * distinct authorization could be discarded as a duplicate by a deduplicating transport. Each
+     * dropped-byte count is asserted separately because the defect was uniform rather than positional
+     * and a single case would not have shown that.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     *
+     * @param droppedBytes the {@code int} number of trailing characters to remove from an otherwise
+     *     well-formed payload
+     */
+    @ParameterizedTest(name = "a payload {0} character(s) short is refused")
+    @ValueSource(ints = {1, 2, 3})
+    @DisplayName("a truncated request payload is refused rather than shortening the transaction id")
+    void truncatedRequestPayloadIsRefusedRatherThanShorteningTheTransactionId(int droppedBytes) {
+        String intact = CsvAuthCodec.encodeRequest(request(CARD_NUM, TRANSACTION_ID));
+        String truncated = intact.substring(0, intact.length() - droppedBytes);
+
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, intact.length());
+
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> CsvAuthCodec.decodeRequest(truncated));
+
+        assertTrue(failure.getMessage().contains("PA-RQ-TRANSACTION-ID"));
+        assertTrue(failure.getMessage().contains("declares 15"));
+        assertTrue(failure.getMessage()
+                .contains("as " + (CsvAuthCodec.TRANSACTION_ID_WIDTH - droppedBytes) + " characters"));
+        assertFalse(failure.getMessage().contains(TRANSACTION_ID),
+                "the transaction identifier is sensitive and must stay out of the diagnostic");
+    }
+
+    /**
+     * A request whose trailing transaction identifier is entirely absent is refused.
+     *
+     * <p>Assumptions: cutting the payload at its final delimiter leaves eighteen fields of which the
+     * last is empty, so the field-count check cannot see the loss and only a width requirement can.
+     * An empty identifier is the most damaging case of the same defect rather than a separate one: it
+     * still re-emits as fifteen pad characters, and every request that lost its identifier would then
+     * correlate and deduplicate against every other.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     */
+    @Test
+    @DisplayName("a request with an entirely absent transaction id is refused")
+    void requestWithAnAbsentTrailingTransactionIdIsRefused() {
+        String intact = CsvAuthCodec.encodeRequest(request(CARD_NUM, TRANSACTION_ID));
+        String emptyTail = intact.substring(0, intact.lastIndexOf(',') + 1);
+
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> CsvAuthCodec.decodeRequest(emptyTail));
+
+        assertTrue(failure.getMessage().contains("PA-RQ-TRANSACTION-ID"));
+        assertTrue(failure.getMessage().contains("as 0 characters"));
+    }
+
+    /**
+     * A short text field in the middle of a request payload is refused by its own name.
+     *
+     * <p>Assumptions: the requirement is a property of every text field rather than of the trailing
+     * one, so it is asserted away from the end of the payload as well. This case is the one that shows
+     * the defect was never positional: the trailing field merely made it easiest to reach, because
+     * losing bytes in transit removes them from the end.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     */
+    @Test
+    @DisplayName("a short mid-payload text field is refused by name")
+    void shortMidPayloadTextFieldIsRefused() {
+        String shortMerchantCategory = "JJ";
+        String malformed = withField(ORDERED_REQUEST_PAYLOAD, 9, shortMerchantCategory);
+
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> CsvAuthCodec.decodeRequest(malformed));
+
+        assertTrue(failure.getMessage().contains("PA-RQ-MERCHANT-CATAGORY-CODE"));
+        assertTrue(failure.getMessage().contains("as 2 characters"));
+        assertTrue(failure.getMessage().contains("declares 4"));
+    }
+
+    /**
+     * A transport buffer one byte short of the declared request length is refused.
+     *
+     * <p>Assumptions: the byte-oriented entry point is asserted separately from the text one because it
+     * is the route a queue consumer takes, and because it is the route the substitution defect
+     * travelled: a supplementary code point encoded to one byte instead of two, so the frame arrived at
+     * 168 bytes with every field after the substitution shifted one position earlier. A caller that
+     * passes the length it received cannot detect that by itself, which is why the refusal has to come
+     * from the codec.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     */
+    @Test
+    @DisplayName("a 168-byte request frame is refused")
+    void truncatedRequestByteFrameIsRefused() {
+        byte[] intact = CsvAuthCodec.encodeRequestBytes(request(CARD_NUM, TRANSACTION_ID));
+
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, intact.length);
+
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> CsvAuthCodec.decodeRequest(intact, intact.length - 1));
+
+        assertTrue(failure.getMessage().contains("PA-RQ-TRANSACTION-ID"));
+        assertTrue(failure.getMessage().contains("declares 15"));
+    }
+
+    /**
+     * A short reply text field is refused, and the tolerated trailing pad token is still tolerated.
+     *
+     * <p>Assumptions: both halves are asserted in one test because they are the same boundary read two
+     * ways. The reply's trailing framing token is structure the reference {@code STRING} produces and
+     * is dropped before any width is examined, so requiring the six business tokens to reach their
+     * declared widths cannot reject the canonical form, the 62-character form without a trailing
+     * delimiter, or the 64-byte frame the reference put actually sends.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     */
+    @Test
+    @DisplayName("a short reply text field is refused while the trailing pad token stays tolerated")
+    void shortReplyTextFieldIsRefusedWithoutBreakingTheTrailingPadTolerance() {
+        String malformed = withField(CANONICAL_REPLY_PAYLOAD, 2, "A0001");
+
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> CsvAuthCodec.decodeReply(malformed));
+
+        assertTrue(failure.getMessage().contains("PA-RL-AUTH-ID-CODE"));
+        assertTrue(failure.getMessage().contains("as 5 characters"));
+        assertTrue(failure.getMessage().contains("declares 6"));
+
+        AuthReply canonical = CsvAuthCodec.decodeReply(CANONICAL_REPLY_PAYLOAD);
+        assertEquals(canonical, CsvAuthCodec.decodeReply(CANONICAL_REPLY_PAYLOAD + " "));
+        assertEquals(canonical, CsvAuthCodec.decodeReply(
+                CANONICAL_REPLY_PAYLOAD.substring(0, CANONICAL_REPLY_PAYLOAD.length() - 1)));
+    }
+
+    /**
+     * A zero-suppressed money token is still accepted, because the money field is exempt by design.
+     *
+     * <p>Trade-offs: the width requirement exempts the one money ordinal in each payload, and this test
+     * is what keeps that exemption honest by pinning it. The reference reply mask
+     * {@code PIC -zzzzzzzzz9.99} suppresses leading zeros and the transport may pad around the token,
+     * so a legitimate amount need not occupy its declared fourteen positions; the geometry that matters
+     * is inside the value -- at most ten integer digits, one literal point, exactly two fraction digits
+     * -- and that is what refuses a truncated amount. A width requirement over the money token would
+     * reject amounts the reference program emits.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a zero-suppressed reply amount is accepted despite being narrower than fourteen")
+    void zeroSuppressedReplyAmountRemainsExemptFromTheWidthRequirement() {
+        String suppressed = withField(CANONICAL_REPLY_PAYLOAD, 5, "100.99");
+
+        AuthReply decoded = CsvAuthCodec.decodeReply(suppressed);
+
+        assertEquals(Money.of("100.99"), decoded.approvedAmount());
+        assertEquals(6, fieldAt(suppressed, 5).length());
+        assertTrue(fieldAt(suppressed, 5).length() < CsvAuthCodec.REPLY_FIELD_WIDTHS.get(5));
+    }
+
+    /**
+     * A character the single-byte wire cannot represent is refused where the field enters.
+     *
+     * <p>Refactoring Rationale: such a character used to be accepted by the carrier and then replaced
+     * with a question mark by the encoder, which changed the value with nothing raised and nothing a
+     * caller could inspect. The emoji case was worse than lossy: a supplementary code point is two Java
+     * characters and encodes to ONE substitute byte, so the payload came out a byte short of its
+     * declared length, every field after it shifted one position earlier, and the under-width token
+     * that produced was absorbed silently as well. Refusing at the field is what makes the failure name
+     * the field, and it closes the text and byte emission paths together.</p>
+     *
+     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * test.</p>
+     *
+     * @param merchantName the {@link String} merchant name carrying one character above U+00FF
+     */
+    @ParameterizedTest(name = "an unrepresentable character in {0} is refused")
+    @ValueSource(strings = {"CAF\u0100", "OMEGA \u03a9", "CJK \u4e2d", "CAFE\u0301",
+        "OK \ud83d\ude00"})
+    @DisplayName("a character outside the single-byte wire range is refused, never substituted")
+    void unrepresentableCharacterIsRefusedRatherThanSubstituted(String merchantName) {
+        AuthMessageFormatException failure = assertThrows(
+                AuthMessageFormatException.class,
+                () -> new AuthRequest("220718", "120000", CARD_NUM, "A", "1231", "0100", "POS",
+                        "000", Money.of("1000.00"), "5411", "USA", "90", "MERCH000000001",
+                        merchantName, "CITY", "TX", "75001", TRANSACTION_ID));
+
+        assertTrue(failure.getMessage().contains("PA-RQ-MERCHANT-NAME"));
+        assertTrue(failure.getMessage()
+                .contains("the single-byte wire character set cannot represent"));
+        assertTrue(failure.getMessage().contains("U+0000 to U+00FF range"));
+        assertFalse(failure.getMessage().contains("?"),
+                "a refusal must not show the substitute the encoder would have written");
+    }
+
+    /**
+     * A character inside the single-byte wire range still round-trips as exactly one byte.
+     *
+     * <p>Assumptions: this is the counterpart the refusal above needs to be meaningful. The wire
+     * encoding maps U+0000 through U+00FF onto the byte values 0x00 through 0xFF one for one, so an
+     * accented Latin-1 letter is legitimate data on this wire and is preserved rather than refused;
+     * refusing it would narrow the contract instead of protecting it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a Latin-1 character round-trips as one byte and is not refused")
+    void latinOneCharacterRoundTripsAsExactlyOneByte() {
+        AuthRequest accented = new AuthRequest("220718", "120000", CARD_NUM, "A", "1231", "0100",
+                "POS", "000", Money.of("1000.00"), "5411", "USA", "90", "MERCH000000001",
+                "CAF\u00c9", "CITY", "TX", "75001", TRANSACTION_ID);
+
+        byte[] wire = CsvAuthCodec.encodeRequestBytes(accented);
+
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, wire.length);
+        assertEquals((byte) 0xc9, wire[REQUEST_DELIMITER_POSITIONS.get(12) + 4]);
+        assertEquals("CAF\u00c9", CsvAuthCodec.decodeRequest(wire, wire.length).merchantName());
+    }
+
+    /**
+     * Every emitted payload carries exactly one byte per character.
+     *
+     * <p>Assumptions: this is the post-condition whose absence let a 168-byte request leave the
+     * encoder. The declared wire length is handed to the transport as the message length without
+     * measuring the array, so a payload whose byte count and character count disagree would arrive at a
+     * consumer with every field after the disagreement shifted, and the consumer would have no way to
+     * tell. Asserting it over both payloads and over a negative amount covers the sign position as
+     * well.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("emitted payloads are one byte per character in both directions")
+    void emittedPayloadsCarryOneBytePerCharacter() {
+        String requestPayload = CsvAuthCodec.encodeRequest(request(CARD_NUM, TRANSACTION_ID));
+        byte[] requestWire = CsvAuthCodec.encodeRequestBytes(request(CARD_NUM, TRANSACTION_ID));
+        String replyPayload = CsvAuthCodec.encodeReply(replyWith(Money.of("-100.99")));
+        byte[] replyWire = CsvAuthCodec.encodeReplyBytes(replyWith(Money.of("-100.99")));
+
+        assertEquals(requestPayload.length(), requestWire.length);
+        assertEquals(replyPayload.length(), replyWire.length);
+        assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, requestWire.length);
+        assertEquals(CsvAuthCodec.REPLY_WIRE_LENGTH, replyWire.length);
     }
 
     /**

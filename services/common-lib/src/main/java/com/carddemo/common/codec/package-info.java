@@ -266,6 +266,37 @@
  * on the delimiter and then rejects a trailing empty element would reject every
  * well-formed reply the baseline produces.
  *
+ * <p>Assumptions: the request length is 169 and NOT 170, and the figure 170 is
+ * recorded here because it is arrived at honestly and is still wrong. It is the
+ * declaration arithmetic -- the 153 bytes the copybook declares plus seventeen
+ * commas -- and adopting it means emitting the money token at the fourteen
+ * characters line 27 declares, which the thirteen-character receiver at line 63
+ * of {@code COPAUA0C.cbl} then truncates by its last character, the second cents
+ * digit. Anyone reconciling a document or a scope statement that says 170 against
+ * this package should change the statement, not the codec.
+ *
+ * <h2>Two padding conventions, and which codec applies which</h2>
+ *
+ * <p>Assumptions: the two codecs return a character field differently, and a
+ * caller moving a value from one to the other has to know which convention it is
+ * holding. {@code FixedWidthCodec} returns a text field AT ITS DECLARED WIDTH,
+ * pad retained, because a fixed-width record has no delimiter and the pad is part
+ * of the field's own geometry -- trimming it would make a re-encoded record a
+ * different length from the one that was read. {@code CsvAuthCodec} returns a
+ * character field with its TRAILING PAD REMOVED, because on a delimited wire the
+ * pad is framing the delimiter already accounts for, and its encoder pads every
+ * value back out to the declared width on the way out.
+ *
+ * <p>Trade-offs: each codec is self-consistent under a round trip, which is what
+ * makes the difference safe to live with and easy to miss. The compromise
+ * accepted is that a value taken from a fixed-width record and handed to the
+ * delimited encoder arrives carrying pad the encoder will then treat as data,
+ * exceed its declared width, and be refused -- a loud failure rather than a
+ * silent one, but a failure whose cause is this paragraph. Normalising both to
+ * one convention was rejected because each convention is the correct one for its
+ * own wire: a record has no delimiters to recover a field boundary from, and a
+ * delimited payload has no fixed offsets to preserve.
+ *
  * <p>The business tuple across the pair is the card number of sixteen
  * characters followed by the transaction identifier of fifteen, thirty-one
  * characters in total. Before it becomes transport metadata,

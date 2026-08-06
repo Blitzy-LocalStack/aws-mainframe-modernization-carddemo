@@ -742,11 +742,25 @@ public record ApiError(
     /**
      * Writes the aggregate message only while its message-off state is still present.
      *
-     * <p>Refactoring Rationale: the first non-null candidate wins because the four
-     * {@code IF WS-RETURN-MSG-OFF} sites at lines 218, 233, 263 and 305 of
-     * {@code app/cpy/CSUTLDPY.cpy} guard every aggregate write. An empty string is already a
-     * message, not message-off, because {@code LOW-VALUES} at line 30 of
-     * {@code app/cpy/CVCRD01Y.cpy} is distinguishable from blanks.
+     * <p>Refactoring Rationale: the first candidate that arrives while this shape is still in its
+     * message-off state wins, because the four {@code IF WS-RETURN-MSG-OFF} sites at lines 218, 233,
+     * 263 and 305 of {@code app/cpy/CSUTLDPY.cpy} guard every aggregate write in the reference
+     * validator. The field those sites guard is {@code WS-RETURN-MSG PIC X(75)}, and its off-state is
+     * declared {@code 88 WS-RETURN-MSG-OFF VALUE SPACES} -- at line 174 of
+     * {@code app/cbl/COCRDUPC.cbl} and at line 250 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}. A BLANK aggregate is therefore
+     * message-off in the reference, and this method previously treated only {@code null} as such, so a
+     * shape carrying an empty or all-blank message silently refused its first real message -- the exact
+     * inverse of the first-message-wins behaviour it exists to reproduce.
+     *
+     * <p>Assumptions: the {@code LOW-VALUES} off-state at line 30 of {@code app/cpy/CVCRD01Y.cpy}
+     * belongs to a DIFFERENT field, {@code CCARD-RETURN-MSG}, and citing it here was the error behind
+     * the previous reading. Over HTTP neither byte reaches this type at all: an aggregate the caller
+     * never set arrives as {@code null}, one a mapper defaulted arrives empty, and one padded out to
+     * its declared width arrives blank. {@link FieldValidationFlag#isNeverSupplied(String)} already
+     * folds all of those into one predicate for the field entries, so it is reused here rather than
+     * restated, which keeps one definition of never-supplied across the two halves of the same
+     * response.
      *
      * @param candidate the aggregate message to latch; may be empty but must not be {@code null}
      * @return this instance when a message is already present, otherwise a new instance carrying
@@ -755,7 +769,7 @@ public record ApiError(
      */
     public ApiError latchMessage(String candidate) {
         Objects.requireNonNull(candidate, "candidate must not be null");
-        if (this.message != null) {
+        if (!FieldValidationFlag.isNeverSupplied(this.message)) {
             return this;
         }
 
@@ -822,6 +836,20 @@ public record ApiError(
      * {@link TimestampFormatter#formatNow(Clock)} using the caller's explicit clock. The resulting
      * {@code yyyy-MM-dd HH:mm:ss.SSSSSS} form contains a space between date and time, and this file
      * never resolves an ambient clock of its own.
+     *
+     * <p>Trade-offs: two published contracts of this type are asserted at BUILD time rather than
+     * enforced here by refusing an argument, and the choice is deliberate in both cases.
+     * {@link #MESSAGE_RENDERING_WIDTH} is the 75-character band the reference message line occupies,
+     * and {@code status} is expected to be a real HTTP status. Refusing either here would put a throw
+     * inside the one code path whose whole purpose is to RENDER a failure: a message eight characters
+     * too long would stop producing a body a client could read and start producing no body at all, and
+     * an odd status would do the same. That trades a cosmetic defect for an outage of the error
+     * channel. Every message this system can emit is a named constant, and every status is supplied by
+     * a handler from an {@code HttpStatus} member, so both properties are decidable without running
+     * the application: {@code ApiErrorTest} asserts the band over every emittable message constant and
+     * over the composed validator messages, and the handler tests assert the status of every response
+     * shape. That places the failure at build time, which is what the width being a contract requires,
+     * without inventing a new way for an error response to fail.
      *
      * @param code the stable machine code for the failure
      * @param message the aggregate message, including {@code null} for message-off

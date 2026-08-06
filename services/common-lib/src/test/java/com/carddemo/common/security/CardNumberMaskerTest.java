@@ -136,4 +136,50 @@ class CardNumberMaskerTest {
 
         assertThat(CardNumberMasker.maskEmbeddedCardNumbers(arabicIndicRun)).isSameAs(arabicIndicRun);
     }
+
+    /**
+     * Pins the separator boundary: a card number written with separators is not detected as one.
+     *
+     * <p>Assumptions: this asserts a LIMITATION rather than a desirable behaviour, and it is asserted
+     * deliberately so the boundary is a build-enforced fact instead of something a reader has to infer
+     * from the scan. Each separated form below is four runs of four digits, no run reaches the
+     * sixteen-digit threshold, and the text is returned unchanged. The limitation is harmless for this
+     * migration because every value that reaches this class comes from a sixteen-character display
+     * field that cannot hold a separator within its declared width, which the class documentation
+     * records with the copybook reference.</p>
+     *
+     * <p>Trade-offs: pinning a limitation costs a failing test if someone later widens the rule, and
+     * that cost is the point. Widening it is a behavioural change with a regression risk the class
+     * documentation names -- a timestamp is a separated digit sequence this migration renders in full
+     * -- so it should be an explicit decision that updates this test, not an unremarked improvement.</p>
+     */
+    @Test
+    @DisplayName("a separated card number is not detected, which is the documented limitation")
+    void separatedCardNumberIsNotDetected() {
+        String hyphenated = "4111-1111-1111-1111";
+        String spaced = "4111 1111 1111 1111";
+
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(hyphenated)).isSameAs(hyphenated);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(spaced)).isSameAs(spaced);
+    }
+
+    /**
+     * Confirms the contiguous form this system actually carries is masked, next to the separated form.
+     *
+     * <p>Assumptions: pairing the two in one test is what makes the limitation readable. The separated
+     * value passes through and the contiguous value does not, so the boundary is the presence of a
+     * separator and nothing else -- not the digits, not the length in characters, not the position.</p>
+     */
+    @Test
+    @DisplayName("the contiguous form the baseline carries is masked while the separated form is not")
+    void contiguousFormIsMaskedWhereSeparatedFormIsNot() {
+        String separated = "4111-1111-1111-1111";
+        String contiguous = separated.replace("-", "");
+
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(separated)).isSameAs(separated);
+        assertThat(CardNumberMasker.maskEmbeddedCardNumbers(contiguous))
+            .isNotEqualTo(contiguous)
+            .endsWith("1111")
+            .hasSameSizeAs(contiguous);
+    }
 }

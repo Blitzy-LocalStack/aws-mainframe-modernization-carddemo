@@ -405,9 +405,33 @@ levels are given separately and each is labelled.
 | Quantity | Request | Reply | What it is |
 |---|---|---|---|
 | Sum of copybook-declared field widths | **153** | **57** | Declaration arithmetic only; request ordinal nine is wider here than its actual receiver |
+| Declaration arithmetic *plus* delimiters — **do not adopt** | **170** | **63** | 153 + 17 commas. Recorded only so the figure is recognisable; see the note below |
 | Target codec emitted-width sum | **152** | **57** | Seventeen request widths plus the observed 13-character amount; six reply widths with the emitted mask |
 | Target codec canonical wire length | **169** | **63** | Request: 152 + 17 interior commas. Reply: 57 + 6 commas, including the trailing comma |
 | What the baseline producer emits | **not observable** | **63 built, 64 passed to MQPUT1** | No request producer exists; the reply pointer contributes one trailing pad byte to the passed length |
+
+> **Reconciled — the request wire length is 169, and 170 is the figure to reject.**
+> The two differ by exactly one byte of the money field, so the choice is a data
+> decision rather than a counting preference and is settled here in writing rather
+> than left to be rediscovered. Reaching 170 requires emitting ordinal nine at the
+> fourteen characters
+> [`CCPAURQY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CCPAURQY.cpy) L27
+> declares for `PIC +9(10).99`. The only consumer in the repository cannot hold
+> fourteen: L63 of
+> [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+> declares the receiving field `WS-TRANSACTION-AMT-AN PIC X(13)`, the `UNSTRING`
+> hands ordinal nine into that field at L364, and L376–L377 then evaluate
+> `FUNCTION NUMVAL` over it. An alphanumeric move into a shorter field drops the
+> **last** character, which for this token is the second cents digit — so a
+> 14-character token is received as the amount **divided by ten**, with nothing
+> raised anywhere. `CsvAuthCodec.REQUEST_WIRE_LENGTH` is therefore 169 and its
+> `REQUEST_MONEY_WIDTH` is 13. **A scope statement, ticket or review comment that
+> says 170 should be corrected against this section; the codec should not be
+> "corrected" to match it.** The measurable consequence is bounded and loud rather
+> than silent: the emittable *negative* amount domain narrows to
+> `-999999999.99 … -0.01`, because a negative value spends one of the thirteen
+> positions on its sign, and a more negative value is **refused by name** rather
+> than truncated. Every positive amount `0.00 … 9999999999.99` round-trips exactly.
 
 > **Measured — the emitted reply is longer than the interior-delimiter arithmetic
 > predicts, because the `STRING` appends a comma after the last field too.** The

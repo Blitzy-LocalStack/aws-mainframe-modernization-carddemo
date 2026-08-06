@@ -248,9 +248,27 @@ public final class CsvAuthCodec {
     /**
      * The request length this class emits, the emitted width sum plus seventeen interior delimiters.
      *
-     * <p>Assumptions: this is an emission self-check, not an observed producer contract. The
-     * reference consumer's {@code UNSTRING ... DELIMITED BY ','} imposes no total length -- only that
-     * each token fit its receiver -- and no request producer exists in the repository to observe.</p>
+     * <p>Assumptions: this is an emission self-check as well as the length a decoded payload must
+     * reach. The reference consumer's {@code UNSTRING ... DELIMITED BY ','} imposes no total length of
+     * its own -- only that each token fit its receiver -- and no request producer exists in the
+     * repository to observe. Because every field is emitted at its declared width, requiring each
+     * token to reach that width is equivalent to requiring the payload to reach this length, and
+     * {@link #requireDeclaredTokenWidths(java.util.List, java.util.List, java.util.List, int, String)}
+     * is where that equivalence is enforced.</p>
+     *
+     * <p>Assumptions: this value is 169 and NOT 170, and the difference is one byte of the money
+     * field rather than a counting mistake. 170 is the copybook-declaration arithmetic -- the 153
+     * bytes {@code CCPAURQY.cpy} declares at lines 19 to 36 plus seventeen commas -- and it is
+     * recorded here as the figure this contract deliberately does not adopt, because arriving at it
+     * requires emitting the money field at the fourteen characters line 27 declares. Line 63 of
+     * {@code COPAUA0C.cbl} declares the receiving field {@code WS-TRANSACTION-AMT-AN PIC X(13)}, the
+     * {@code UNSTRING} hands ordinal nine into that field at line 364, and lines 376 and 377 then
+     * evaluate {@code FUNCTION NUMVAL} over it. A fourteen-character token moved into a
+     * thirteen-character field loses its LAST character, which is the second cents digit, so the
+     * amount the consumer computes is the amount sent divided by ten. Emitting thirteen is therefore
+     * the data-safe reading, and it agrees with
+     * {@code docs/architecture/messaging-contracts.md}. Anyone reconciling this constant against a
+     * document or a scope statement that says 170 should change the statement, not this value.</p>
      */
     public static final int REQUEST_WIRE_LENGTH = 169;
 
@@ -271,9 +289,36 @@ public final class CsvAuthCodec {
     public static final int REPLY_WIRE_LENGTH = 63;
 
     /**
-     * The length of the correlation key that matches a reply to its request.
+     * The width of the positional card-number and transaction-identifier pair a correlation token is
+     * derived FROM, before that pair is tokenised.
+     *
+     * <p>Refactoring Rationale: this constant was named for the correlation key itself and it never
+     * described one. It is {@link #CARD_NUM_WIDTH} plus {@link #TRANSACTION_ID_WIDTH}, which is the
+     * plaintext composite {@code buildCorrelationKey} assembles; the value
+     * {@link AuthRequest#correlationKey(OpaqueIdentifier)} publishes is that composite AFTER
+     * {@link OpaqueIdentifier#token(String, String)} has tokenised it, and is
+     * {@link #CORRELATION_TOKEN_LENGTH} characters. A consumer sizing a column or a buffer from the
+     * former name was therefore wrong by nine characters in the direction that truncates. The two
+     * quantities are now named apart so neither can be read as the other.</p>
+     *
+     * <p>Assumptions: the rename is deliberately source-incompatible rather than additive. Leaving
+     * the old name in place beside a correctly named companion would keep a published constant whose
+     * name asserts something untrue, and changing its VALUE to 22 under the same name would silently
+     * halve a buffer a consumer had already sized -- a change no compiler could report. Removing the
+     * name makes every consumer stop compiling and re-decide which of the two quantities it meant.</p>
      */
-    public static final int CORRELATION_KEY_LENGTH = 31;
+    public static final int CORRELATION_COMPOSITE_LENGTH = 31;
+
+    /**
+     * The length of the correlation token that matches a reply to its request.
+     *
+     * <p>Assumptions: this is the width of the value the two {@code correlationKey} accessors return,
+     * and it is the tokeniser's own output width rather than an independent figure, so it is taken
+     * from {@link OpaqueIdentifier#TOKEN_LENGTH} rather than restated as a literal. Restating it
+     * would create a second place for the token width to live and a way for the two to disagree
+     * after a change to the tokeniser.</p>
+     */
+    public static final int CORRELATION_TOKEN_LENGTH = OpaqueIdentifier.TOKEN_LENGTH;
 
     /**
      * The greatest number of characters a payload may carry before it is parsed at all.
@@ -340,6 +385,29 @@ public final class CsvAuthCodec {
      * an alphanumeric move and silently divides the cents by ten.</p>
      */
     public static final int REQUEST_MONEY_WIDTH = 13;
+
+    /**
+     * The zero-based ordinal of the request's money field, at line 27 of {@code CCPAURQY.cpy}.
+     *
+     * <p>Assumptions: exactly one of the eighteen request fields is money, and that one is exempt
+     * from the declared-width equality
+     * {@link #requireDeclaredTokenWidths(java.util.List, java.util.List, java.util.List, int, String)}
+     * imposes on the other seventeen. The ordinal is named here rather than written as a literal at
+     * the two sites that need it, because a field inserted ahead of it would otherwise leave one
+     * site exempting the wrong field while everything still compiled.</p>
+     */
+    public static final int REQUEST_AMOUNT_ORDINAL = 8;
+
+    /**
+     * The zero-based ordinal of the reply's money field, at line 24 of {@code CCPAURLY.cpy}.
+     *
+     * <p>Assumptions: this is the reply's LAST field, which is why the truncation defect the width
+     * equality now closes was invisible on a reply and visible on a request. A short trailing token
+     * on a reply is a short money token, and the picture clause already refuses one whose digit
+     * positions do not close; the request's last field is
+     * {@code PA-RQ-TRANSACTION-ID PIC X(15)}, which has no picture to violate.</p>
+     */
+    public static final int REPLY_AMOUNT_ORDINAL = 5;
 
     /**
      * The number of integer digit positions in the reply's edited display money rendering.
@@ -497,6 +565,27 @@ public final class CsvAuthCodec {
      * The pad character {@code DELIMITED BY SIZE} contributes for an unused declared position.
      */
     private static final char PAD = ' ';
+
+    /**
+     * The highest code point the single-byte wire encoding can represent.
+     *
+     * <p>Assumptions: ISO-8859-1 maps U+0000 through U+00FF onto the byte values 0x00 through 0xFF
+     * one for one, so this bound is the whole of its representable set rather than a chosen limit. It
+     * is declared as a constant because the same bound is both the test in
+     * {@link #indexOfUnrepresentableCharacter(String)} and the value quoted in the refusal, and a
+     * refusal quoting a different number from the one it applied would be worse than no number.</p>
+     */
+    private static final char WIRE_CHARACTER_MAXIMUM = '\u00ff';
+
+    /**
+     * The representable character range, spelled for a refusal message.
+     *
+     * <p>Assumptions: the range is written out rather than derived from
+     * {@link #WIRE_CHARACTER_MAXIMUM} at run time, because rendering that character into a message
+     * would place a non-ASCII byte in a diagnostic that a log or a terminal then has to encode -- the
+     * very class of problem this contract's single-byte discipline exists to avoid.</p>
+     */
+    private static final String WIRE_CHARACTER_RANGE_DESCRIPTION = "U+0000 to U+00FF range";
 
     /**
      * The zero digit, used to left-pad the integer part of the edited display rendering.
@@ -1002,6 +1091,8 @@ public final class CsvAuthCodec {
      */
     public static AuthRequest decodeRequest(String payload) {
         List<String> tokens = splitOnDelimiter(payload, REQUEST_FIELD_COUNT, "request");
+        requireDeclaredTokenWidths(tokens, REQUEST_FIELD_WIDTHS, REQUEST_FIELD_NAMES,
+                REQUEST_AMOUNT_ORDINAL, "request");
 
         return new AuthRequest(
                 tokens.get(0),
@@ -1115,6 +1206,8 @@ public final class CsvAuthCodec {
      */
     public static AuthReply decodeReply(String payload) {
         List<String> tokens = splitOnDelimiter(payload, REPLY_FIELD_COUNT, "reply");
+        requireDeclaredTokenWidths(tokens, REPLY_FIELD_WIDTHS, REPLY_FIELD_NAMES,
+                REPLY_AMOUNT_ORDINAL, "reply");
 
         return new AuthReply(
                 tokens.get(0),
@@ -1708,6 +1801,75 @@ public final class CsvAuthCodec {
     }
 
     /**
+     * Establishes that every character token reached the width its copybook line declares.
+     *
+     * <p>Refactoring Rationale: width was previously checked as an upper bound alone, in
+     * {@link #characterField(String, String, int)}, and an upper bound is only half of a fixed-width
+     * contract. A payload one byte short of its declared length split into the right number of fields,
+     * every token fitted, and the LAST token silently lost its final character -- on a request that
+     * token is {@code PA-RQ-TRANSACTION-ID}, the value the migrated messaging design uses as the
+     * deduplication identifier and as half of the correlation identity. The consequences compounded
+     * rather than announcing themselves: the shortened value re-emitted at the full declared width, so
+     * the corruption became indistinguishable from a well-formed payload; the correlation token
+     * changed, so a reply carrying the original identifier no longer matched; and two identifiers
+     * differing only in their last character collapsed onto one, so a genuinely distinct authorization
+     * could be discarded as a duplicate. This method supplies the missing half.</p>
+     *
+     * <p>Assumptions: only the SHORT direction is reported here, and the long direction stays where it
+     * was. Rejecting both here would duplicate a check that already exists and would replace its
+     * wording, and the two directions are not symmetric in their cause: an over-width token is a
+     * producer emitting a value its field cannot hold, while an under-width token is a payload that
+     * lost bytes in transit. Together the two bounds make the width an equality, and because every
+     * field is emitted at its declared width, that equality is also what makes the total payload
+     * length equal {@link #REQUEST_WIRE_LENGTH} or {@link #REPLY_WIRE_LENGTH} without a second check
+     * over the whole payload.</p>
+     *
+     * <p>Trade-offs: the money ordinal is exempt, and that exemption is narrow rather than
+     * convenient. The reference reply mask {@code PIC -zzzzzzzzz9.99} suppresses leading zeros, so a
+     * legitimate reply amount does not occupy its declared fourteen positions, and the transport may
+     * pad around the token; {@link #parseMoney(String, String)} therefore accepts a zero-suppressed or
+     * pad-extended token and validates the geometry INSIDE the value instead -- at most ten integer
+     * digits, one literal point, exactly two fraction digits. That inner geometry is what refuses a
+     * truncated amount, which is why a short money token cannot change a value silently and a short
+     * text token could.</p>
+     *
+     * <p>Assumptions: this runs after the field-count and control-character checks in
+     * {@link #splitOnDelimiter(String, int, String)} rather than before them, so a payload with the
+     * wrong number of fields is still reported as a field-count failure and a payload carrying a
+     * control character is still reported by position. A width complaint about a token that only
+     * exists because a delimiter was lost would send a reader to the wrong field.</p>
+     *
+     * @param fields the tokens in wire order, exactly as many as the copybook declares; must not be
+     *     {@code null}
+     * @param widths the declared width of each field, positionally aligned with {@code fields}
+     * @param names the copybook name of each field, positionally aligned with {@code fields}
+     * @param amountOrdinal the zero-based ordinal of the money field, which is exempt from the width
+     *     requirement for the reason recorded above
+     * @param payloadName the payload's name, used to compose a failure message
+     * @throws AuthMessageFormatException if any character token is shorter than its declared width;
+     *     the message carries the value only for a field outside {@link #SENSITIVE_FIELD_NAMES}, as
+     *     {@link #fieldFailure(String, String, CharSequence)} records
+     */
+    private static void requireDeclaredTokenWidths(List<String> fields, List<Integer> widths,
+            List<String> names, int amountOrdinal, String payloadName) {
+        for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
+            if (fieldIndex == amountOrdinal) {
+                continue;
+            }
+
+            String token = fields.get(fieldIndex);
+            int declaredWidth = widths.get(fieldIndex);
+            if (token.length() < declaredWidth) {
+                throw fieldFailure(names.get(fieldIndex), "arrived in the " + payloadName
+                        + " payload as " + token.length() + " characters but the copybook declares "
+                        + declaredWidth + "; every field is padded out to its declared width on this"
+                        + " wire, so a shorter token means the payload lost bytes and the value cannot"
+                        + " be reconstructed by padding it back", token);
+            }
+        }
+    }
+
+    /**
      * Reads the leading bytes of a transport buffer as payload text.
      *
      * <p>Assumptions: the payload length is taken from the caller and never from the buffer, because
@@ -1787,9 +1949,30 @@ public final class CsvAuthCodec {
      *
      * @param payload the assembled payload text
      * @return the payload bytes, one byte per character
+     * @throws AuthMessageFormatException if the encoded array is not one byte per character, which
+     *     can only mean a character escaped the representability check at the field boundary
      */
     private static byte[] toWireBytes(String payload) {
-        return payload.getBytes(StandardCharsets.ISO_8859_1);
+        byte[] wire = payload.getBytes(StandardCharsets.ISO_8859_1);
+
+        // WHY : Assumptions: this post-condition protects a future edit rather than the current
+        //       caller. Every character reaching here has already been established as representable
+        //       in the single-byte wire encoding by characterField, so the array length is determined
+        //       by the payload length alone. What it would catch is a value that entered by some
+        //       later route without passing that check -- the exact shape of the defect that emitted
+        //       a 168-byte request, where a supplementary code point counted as two characters and
+        //       encoded as one byte. Length is the one property of the encoding a caller relies on,
+        //       because the declared wire length is passed to the transport as the message length
+        //       without measuring the array, so a length mismatch has to be loud here rather than
+        //       arriving at a consumer as a payload whose fields have all shifted.
+        if (wire.length != payload.length()) {
+            throw new AuthMessageFormatException("the assembled payload is " + payload.length()
+                    + " characters but encodes to " + wire.length + " bytes; this wire is single-byte"
+                    + " throughout, so the two must agree and a value that is not representable in it"
+                    + " must be refused at the field rather than substituted here");
+        }
+
+        return wire;
     }
 
     /**
@@ -1834,7 +2017,55 @@ public final class CsvAuthCodec {
                     + " declares " + declaredWidth, normalised);
         }
 
+        // WHY : Refactoring Rationale: a character outside the wire's single-byte range used to be
+        //       accepted here and was then replaced with a question mark by the encoder, which is a
+        //       silent value change no caller could detect. The surrogate case was worse than lossy:
+        //       a supplementary code point is two Java characters but encodes to ONE substitute byte,
+        //       so the emitted payload came out a byte short of its declared length, every field
+        //       after it shifted by one position, and the under-width token that produced was then
+        //       absorbed silently as well. Refusing the character where the field ENTERS is what
+        //       makes the failure name the field, and it closes both the encode path and the
+        //       byte-emitting path with one check.
+        int unrepresentable = indexOfUnrepresentableCharacter(normalised);
+        if (unrepresentable >= 0) {
+            throw fieldFailure(cobolName, "carries a character at zero-based position "
+                    + unrepresentable + " that the single-byte wire character set cannot represent;"
+                    + " every field this contract declares is a display picture, so a value outside"
+                    + " the " + WIRE_CHARACTER_RANGE_DESCRIPTION + " has no encoding on this wire and"
+                    + " substituting one would change the value silently", null);
+        }
+
         return normalised;
+    }
+
+    /**
+     * Finds the first character a single-byte wire encoding cannot represent.
+     *
+     * <p>Assumptions: the wire encoding is ISO-8859-1, which maps the code points U+0000 through
+     * U+00FF onto the byte values 0x00 through 0xFF one for one and can represent nothing else. The
+     * representable set is therefore exactly a numeric range, and a comparison against its upper
+     * bound is an exact test rather than an approximation of one. The test also catches a lone or
+     * paired surrogate, because every surrogate code unit lies above the bound.</p>
+     *
+     * <p>Alternatives Considered: a {@code CharsetEncoder} configured to report an unmappable
+     * character, which is the general form of this test and is what a multi-byte charset would
+     * require. It was not adopted for two reasons that both matter here: it reports a position in the
+     * encoder's own input buffer rather than in the field, so a diagnostic built from it could not
+     * name the field's own offset, and it needs an encoder instance per call because an encoder is
+     * stateful and not safe to share. The numeric bound is exact for this charset and stays a pure
+     * function.</p>
+     *
+     * @param value the field value to scan, already normalised of its trailing pad
+     * @return the zero-based position of the first character above the wire range, or -1 when every
+     *     character is representable
+     */
+    private static int indexOfUnrepresentableCharacter(String value) {
+        for (int position = 0; position < value.length(); position++) {
+            if (value.charAt(position) > WIRE_CHARACTER_MAXIMUM) {
+                return position;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -1868,7 +2099,9 @@ public final class CsvAuthCodec {
      *     {@code TRANSACTION_ID_WIDTH} characters
      * @param transactionIdName the copybook name of the transaction identifier field on the carrier
      *     that asked, used only to compose a failure message
-     * @return the correlation key, exactly {@code CORRELATION_KEY_LENGTH} characters long
+     * @return the plaintext positional composite, exactly {@link #CORRELATION_COMPOSITE_LENGTH}
+     *     characters long; this is the value a correlation token is derived from and is never
+     *     published, so it is not {@link #CORRELATION_TOKEN_LENGTH} characters
      * @throws AuthMessageFormatException if either part is longer than its declared width
      */
     private static String buildCorrelationKey(String cardNum, String cardNumName,

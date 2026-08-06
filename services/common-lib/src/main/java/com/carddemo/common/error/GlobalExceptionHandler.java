@@ -1,5 +1,6 @@
 package com.carddemo.common.error;
 
+import com.carddemo.common.observability.LogSafeText;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
@@ -278,6 +279,18 @@ public class GlobalExceptionHandler {
      * failure only, while the field markers accumulate.</p>
      */
     public static final String MESSAGE_VALIDATION_FAILED = "Please correct the highlighted fields";
+
+    /**
+     * The field-entry key used when a rejected request identifies no member of its own.
+     *
+     * <p>Assumptions: a per-field array whose entry names the request rather than a control is the
+     * honest shape for a failure that carries no field identity, and it is already the shape this class
+     * produces for a class-level constraint violation, which the framework reports keyed by the bound
+     * object's name. The key is published as a constant so a client can match on it, and so the two
+     * sites that emit an unattributed entry cannot drift into two different spellings of the same
+     * idea.</p>
+     */
+    public static final String FIELD_REQUEST = "request";
 
     /**
      * The message returned when a request body could not be read at all.
@@ -797,6 +810,19 @@ public class GlobalExceptionHandler {
                     pathOf(request), this.clock));
         }
 
+        // WHY : Assumptions: this branch exists even though the framework would route an
+        //       IllegalArgumentException to onRejectedCallerInput on its own, because the framework's
+        //       dispatch is not the only way into this method. A caller inside the application, and
+        //       every test that exercises the mapping directly, calls this method with a
+        //       RuntimeException and is entitled to the same answer the framework would produce.
+        //       Without the delegation the class would hold two different mappings for one type and
+        //       which one applied would depend on how the failure arrived, which is precisely the kind
+        //       of divergence a shared kernel must not have. The three conflict tests above run first
+        //       because none of them is an IllegalArgumentException and their answer is more specific.
+        if (failure instanceof IllegalArgumentException rejectedInput) {
+            return onRejectedCallerInput(rejectedInput, request);
+        }
+
         return onUnexpectedFailure(failure, request);
     }
 
@@ -976,6 +1002,75 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Renders a failure the caller's own input provoked as HTTP 400 with the per-field array.
+     *
+     * <p>Refactoring Rationale: every caller-input failure that was not one of three named persistence
+     * conflicts used to reach {@link #onUnexpectedFailure(Exception, HttpServletRequest)} and be
+     * answered as HTTP 500 with severity critical and an abend block. Two things were wrong with that
+     * and they are separate. It told a caller the service had failed when the caller had in fact sent
+     * something the service correctly refused -- a malformed date being the canonical case, and
+     * transformation rule T7 requires exactly that shape of refusal to surface as a structured
+     * per-field array. And it raised the severity reserved for an abend on an ordinary typing mistake,
+     * so the channel that is supposed to mean a service is broken would carry a steady stream of
+     * requests that were merely wrong, which is how an alert channel stops being read.
+     *
+     * <p>Assumptions: the whole {@link IllegalArgumentException} family is claimed, which is wider than
+     * it first reads and is the intent. {@link NumberFormatException} extends it, so a money value that
+     * is not a number arrives here; the shared codecs' own format failures extend it, so a malformed
+     * wire payload arrives here; and the shared date validator raises it directly. What does NOT extend
+     * it is the set this class must keep answering differently -- a null dereference, an illegal state,
+     * and the three persistence conflicts, none of which is an
+     * {@link IllegalArgumentException} -- so each of those still reaches its own answer.
+     *
+     * <p>Alternatives Considered: matching a wrapped cause as well, the way the persistence conflicts
+     * are matched by walking the cause chain. It was rejected because the two situations are not alike.
+     * A persistence provider deliberately wraps its own failures, so the cause chain is where the
+     * meaning lives; an {@link IllegalArgumentException} discovered somewhere inside an infrastructure
+     * failure is evidence about that infrastructure rather than about the caller, and reporting it as
+     * caller input would tell a client to correct a request it had sent correctly. The test here is
+     * therefore the declared type alone.
+     *
+     * @param failure the rejected-input failure that propagated out of a handler method; its message is
+     *     logged and never rendered, and it is never {@code null} on any path the framework reaches
+     *     this method by
+     * @param request the request that failed, read only for its path
+     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, {@link #MESSAGE_VALIDATION_FAILED},
+     *     warning severity, no abend detail and one field entry attributing the failure to the request;
+     *     never {@code null}
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiError> onRejectedCallerInput(IllegalArgumentException failure,
+            HttpServletRequest request) {
+
+        // WHY : Assumptions: the caught message is logged and never rendered, which is the same
+        //       division this class already applies to an unreadable body. A validator or codec in the
+        //       shared kernel writes a diagnostic that is safe by construction -- it names a copybook
+        //       field and a width and withholds the value of any sensitive one -- but this handler
+        //       catches the whole type, including a failure raised by a library it has never seen, and
+        //       there is no way to tell the two apart from here. Sending a fixed sentence to the client
+        //       and the full text to the log is what makes the reply safe for every member of the type
+        //       rather than for the members this repository happens to raise.
+        LOG.warn("event=api.request.rejected code={} status=400 path={} exception={} detail={}",
+                ApiError.CODE_VALIDATION, pathOf(request), failure.getClass().getName(),
+                LogSafeText.sanitize(failure.getMessage()));
+
+        // WHY : Assumptions: the entry is keyed by a name for the request as a whole because this
+        //       failure carries no field identity to key it by. That is not a new convention: a
+        //       class-level constraint violation reaching onInvalidBody names no member either, and is
+        //       reported there keyed by the object name for exactly this reason. The state is the
+        //       not-acceptable-value one rather than the blank one, because the blank state asks a form
+        //       to draw a marker against a control and no control has been identified. Answering with
+        //       an EMPTY array was rejected: transformation rule T7 makes the per-field array the way a
+        //       rejection is expressed, and an empty one gives a client a 400 with nothing to display.
+        List<ApiError.FieldError> fieldErrors = List.of(new ApiError.FieldError(
+                FIELD_REQUEST, FieldValidationFlag.NOT_OK, MESSAGE_VALIDATION_FAILED));
+
+        return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_VALIDATION_FAILED,
+                HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
+                this.clock));
+    }
+
+    /**
      * Reads the correlation identity established for the current request.
      *
      * @return the identity the shared kernel's correlation filter published for this request, or the
@@ -998,6 +1093,22 @@ public class GlobalExceptionHandler {
      * to be kept where the member is built. Without it every card failure -- 400, 401, 403, 404 and
      * 409 alike -- returned the sixteen digits inside a response body, and a body travels further than
      * a URL does: into client logs, error trackers and support tickets.</p>
+     *
+     * <p>Assumptions: what this returns is safe to place in a JSON body and in a log line, and is NOT
+     * escaped for HTML. Three things are done to it and they are the three that matter for those two
+     * destinations: control characters are neutralised so a value cannot forge a log record, primary
+     * account numbers are masked, and the serialiser escapes whatever JSON requires. An angle bracket, a
+     * quote, an ampersand or a SQL metacharacter that a caller put in its own request target therefore
+     * survives into the body as literal data -- correctly, because it is data, and because a JSON API
+     * that mangled the path a caller sent would make a 404 harder to diagnose than the path itself
+     * is.</p>
+     *
+     * <p>Trade-offs: the consequence is one obligation on the other side of the boundary and it is
+     * recorded here because that side cannot infer it. A client rendering this member into a document
+     * has to escape it at the point of insertion, exactly as it would any other server-supplied text,
+     * rather than treating it as pre-sanitised because it came from an error body. Escaping it here
+     * instead was rejected: HTML escaping in a JSON payload would double-escape for every non-document
+     * consumer, and the one consumer that needs it is the one that already owns an escaping step.</p>
      *
      * @param request the request to read, which may be {@code null} when this advice is exercised
      *     without a servlet request
